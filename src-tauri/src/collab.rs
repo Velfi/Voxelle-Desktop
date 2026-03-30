@@ -5,8 +5,8 @@ use crate::finish_voxel_edit_gpu;
 use crate::voxel_edit;
 use crate::voxelle::encode_payload_v4;
 use crate::ViewerState;
-use glam::Vec3;
 use futures_util::{SinkExt, StreamExt};
+use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -269,7 +269,11 @@ fn apply_delta_on_main(
     rx.recv().map_err(|_| "main thread closed".to_string())?
 }
 
-fn replace_file_on_main(app: &AppHandle, state: &Arc<ViewerState>, bytes: &[u8]) -> Result<(), String> {
+fn replace_file_on_main(
+    app: &AppHandle,
+    state: &Arc<ViewerState>,
+    bytes: &[u8],
+) -> Result<(), String> {
     let file = crate::voxelle::decode_payload(bytes).map_err(|e| e.to_string())?;
     let app = app.clone();
     let state = Arc::clone(state);
@@ -415,10 +419,7 @@ async fn handle_host_connection(
         r.color_rgb = color_rgb;
     }
     collab_mtx.lock().unwrap().roster = roster.clone();
-    let _ = app.emit(
-        "collab-roster",
-        serde_json::to_string(&roster).unwrap(),
-    );
+    let _ = app.emit("collab-roster", serde_json::to_string(&roster).unwrap());
 
     let snap = {
         let g = state.current_file.lock().unwrap();
@@ -632,7 +633,8 @@ pub fn start_host(
         let mut next_peer: u32 = 2;
         while !sd.load(Ordering::SeqCst) {
             let acc =
-                tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept()).await;
+                tokio::time::timeout(std::time::Duration::from_millis(400), listener.accept())
+                    .await;
             let Ok(Ok((stream, _))) = acc else {
                 continue;
             };
@@ -674,14 +676,7 @@ pub fn start_host(
                 .unwrap()
                 .subscribe();
             tokio::spawn(handle_host_connection(
-                ws,
-                sub,
-                app3,
-                st3,
-                cm3,
-                pid,
-                dname,
-                col,
+                ws, sub, app3, st3, cm3, pid, dname, col,
             ));
         }
     });

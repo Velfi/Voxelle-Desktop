@@ -142,7 +142,6 @@ impl GpuVoxelBrick {
             cells,
         })
     }
-
 }
 
 #[cfg(test)]

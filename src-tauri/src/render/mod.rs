@@ -33,7 +33,7 @@ mod gpu {
 use crate::camera::OrbitCamera;
 use crate::gpu_brick::{BrickCellWrite, GpuVoxelBrick};
 use crate::greedy_mesh::{self, ChunkKey, MeshBounds, MeshBuffers};
-use crate::render_constants::{SHADOW_MAP_SIZE, BLOOM_STRENGTH};
+use crate::render_constants::{BLOOM_STRENGTH, SHADOW_MAP_SIZE};
 use crate::voxel_edit::VoxelEditDelta;
 use crate::voxelle::Voxel;
 use glam::{IVec3, Mat4, Vec3};
@@ -221,13 +221,15 @@ impl Default for MeshGreedyPool {
 impl MeshGreedyPool {
     fn ensure_counters(&mut self, device: &wgpu::Device) {
         if self.counters.is_none() {
-            self.counters = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mesh_atomic_counts"),
-                contents: &[0u8; 8],
-                usage: wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST
-                    | wgpu::BufferUsages::COPY_SRC,
-            }));
+            self.counters = Some(
+                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mesh_atomic_counts"),
+                    contents: &[0u8; 8],
+                    usage: wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST
+                        | wgpu::BufferUsages::COPY_SRC,
+                }),
+            );
         }
     }
 
@@ -395,7 +397,11 @@ fn fullscreen_pipeline(
     })
 }
 
-fn create_shadow_tex(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+fn create_shadow_tex(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("shadow"),
         size: wgpu::Extent3d {
@@ -442,12 +448,10 @@ fn create_screen_targets(
         height: h,
         depth_or_array_layers: 1,
     };
-    let color_usage =
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let color_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
     let hdr_opaque_usage = color_usage | wgpu::TextureUsages::COPY_SRC;
     let hdr_final_usage = color_usage | wgpu::TextureUsages::COPY_DST;
-    let depth_usage =
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let depth_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
 
     let hdr_opaque_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("hdr_opaque"),
@@ -557,9 +561,7 @@ impl WgpuViewer {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        let surface = instance
-            .create_surface(window)
-            .map_err(|e| e.to_string())?;
+        let surface = instance.create_surface(window).map_err(|e| e.to_string())?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -782,47 +784,48 @@ impl WgpuViewer {
             ],
         });
 
-        let post_composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("post_composite"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+        let post_composite_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("post_composite"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
 
         let shader_scene = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
@@ -948,135 +951,139 @@ impl WgpuViewer {
                 write_mask: wgpu::ColorWrites::empty(),
             }),
         ];
-        let pipeline_preview_occluded = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("preview_occluded"),
-            layout: Some(&pl_opaque),
-            vertex: wgpu::VertexState {
-                module: &shader_scene,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_scene,
-                entry_point: Some("fs_preview_occluded_mrt"),
-                targets: preview_targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
+        let pipeline_preview_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout()],
+                    compilation_options: Default::default(),
                 },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let pipeline_preview_front = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("preview_front"),
-            layout: Some(&pl_opaque),
-            vertex: wgpu::VertexState {
-                module: &shader_scene,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_scene,
-                entry_point: Some("fs_preview_front_mrt"),
-                targets: preview_targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_occluded_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_preview_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_front_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
 
-        let pipeline_collab_lines_occluded = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("collab_lines_occluded"),
-            layout: Some(&pl_opaque),
-            vertex: wgpu::VertexState {
-                module: &shader_collab_lines,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout_collab_lines()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_collab_lines,
-                entry_point: Some("fs_collab_line_occluded"),
-                targets: preview_targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Greater,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.0,
-                    clamp: 0.0,
+        let pipeline_collab_lines_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("collab_lines_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
                 },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let pipeline_collab_lines_front = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("collab_lines_front"),
-            layout: Some(&pl_opaque),
-            vertex: wgpu::VertexState {
-                module: &shader_collab_lines,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout_collab_lines()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_collab_lines,
-                entry_point: Some("fs_collab_line_front"),
-                targets: preview_targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_collab_line_occluded"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_collab_lines_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("collab_lines_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_collab_line_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let pipeline_sky = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
@@ -1751,16 +1758,20 @@ impl WgpuViewer {
 
     fn opaque_draw_from_mesh(&self, mesh: &MeshBuffers) -> OpaqueChunkDraw {
         let interleaved = Self::interleaved_from_mesh(mesh);
-        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vtx_chunk"),
-            contents: bytemuck::cast_slice(&interleaved),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        });
-        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("idx_chunk"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-        });
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("vtx_chunk"),
+                contents: bytemuck::cast_slice(&interleaved),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("idx_chunk"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            });
         OpaqueChunkDraw {
             vertex_buffer,
             index_buffer,
@@ -1774,8 +1785,12 @@ impl WgpuViewer {
         let vtx_need = (n * 40) as u64;
         let idx_need = (mesh.indices.len() * 4) as u64;
         let can_reuse = self.opaque_chunks.get(&key).map(|d| {
-            d.vertex_buffer.usage().contains(wgpu::BufferUsages::COPY_DST)
-                && d.index_buffer.usage().contains(wgpu::BufferUsages::COPY_DST)
+            d.vertex_buffer
+                .usage()
+                .contains(wgpu::BufferUsages::COPY_DST)
+                && d.index_buffer
+                    .usage()
+                    .contains(wgpu::BufferUsages::COPY_DST)
                 && d.vertex_buffer.size() >= vtx_need
                 && d.index_buffer.size() >= idx_need
         }) == Some(true);
@@ -1788,7 +1803,8 @@ impl WgpuViewer {
                 .write_buffer(&draw.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
             draw.index_count = mesh.indices.len() as u32;
         } else {
-            self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(mesh));
+            self.opaque_chunks
+                .insert(key, self.opaque_draw_from_mesh(mesh));
         }
     }
 
@@ -1810,16 +1826,20 @@ impl WgpuViewer {
             interleaved.push(mesh.colors[i * 3 + 2]);
             interleaved.push(mesh.mat_kind[i]);
         }
-        self.vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("vtx"),
-            contents: bytemuck::cast_slice(&interleaved),
-            usage: wgpu::BufferUsages::VERTEX,
-        }));
-        self.index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("idx"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }));
+        self.vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("vtx"),
+                contents: bytemuck::cast_slice(&interleaved),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("idx"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
         self.index_count = mesh.indices.len() as u32;
     }
 
@@ -1844,7 +1864,8 @@ impl WgpuViewer {
         }
         self.opaque_chunked = true;
         for (key, mesh) in meshes {
-            self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(&mesh));
+            self.opaque_chunks
+                .insert(key, self.opaque_draw_from_mesh(&mesh));
         }
         self.spatial_mesh_cache =
             greedy_mesh::SpatialMeshCache::from_voxels(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE);
@@ -2001,38 +2022,50 @@ impl WgpuViewer {
         };
 
         self.mesh_greedy_pool.ensure_counters(&self.device);
-        self.mesh_greedy_pool.ensure_vtx_out(&self.device, vtx_storage_size);
-        self.mesh_greedy_pool.ensure_idx_out(&self.device, idx_storage_size);
+        self.mesh_greedy_pool
+            .ensure_vtx_out(&self.device, vtx_storage_size);
+        self.mesh_greedy_pool
+            .ensure_idx_out(&self.device, idx_storage_size);
         self.mesh_greedy_pool.ensure_readback(&self.device);
         let counters_buf = self.mesh_greedy_pool.counters.as_ref().unwrap();
         self.queue.write_buffer(counters_buf, 0, &[0u8; 8]);
-        let hdr_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh_slice_hdr"),
-            contents: bytemuck::cast_slice(&headers),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let bits_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh_slice_bits"),
-            contents: bytemuck::cast_slice(&bits),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let vtx_base_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh_vtx_base"),
-            contents: bytemuck::cast_slice(&vtx_prefix),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
-        let idx_base_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh_idx_base"),
-            contents: bytemuck::cast_slice(&idx_prefix),
-            usage: wgpu::BufferUsages::STORAGE,
-        });
+        let hdr_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_slice_hdr"),
+                contents: bytemuck::cast_slice(&headers),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let bits_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_slice_bits"),
+                contents: bytemuck::cast_slice(&bits),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let vtx_base_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_vtx_base"),
+                contents: bytemuck::cast_slice(&vtx_prefix),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
+        let idx_base_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_idx_base"),
+                contents: bytemuck::cast_slice(&idx_prefix),
+                usage: wgpu::BufferUsages::STORAGE,
+            });
         let vtx_out = self.mesh_greedy_pool.vtx_scratch.as_ref().unwrap();
         let idx_out = self.mesh_greedy_pool.idx_scratch.as_ref().unwrap();
-        let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh_greedy_params"),
-            contents: bytemuck::bytes_of(&params),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
+        let uniform_buf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_greedy_params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
 
         if self.mesh_greedy_bind_layout.is_none() {
             let layout = self
@@ -2247,8 +2280,20 @@ impl WgpuViewer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("mesh_copy_draw_bufs"),
             });
-        enc3.copy_buffer_to_buffer(&vtx_out, 0, &vb_final, 0, (v_total as u64).saturating_mul(VTX_STRIDE));
-        enc3.copy_buffer_to_buffer(&idx_out, 0, &ib_final, 0, (i_total as u64).saturating_mul(4));
+        enc3.copy_buffer_to_buffer(
+            &vtx_out,
+            0,
+            &vb_final,
+            0,
+            (v_total as u64).saturating_mul(VTX_STRIDE),
+        );
+        enc3.copy_buffer_to_buffer(
+            &idx_out,
+            0,
+            &ib_final,
+            0,
+            (i_total as u64).saturating_mul(4),
+        );
         self.queue.submit(std::iter::once(enc3.finish()));
         self.device.poll(wgpu::Maintain::Wait);
 
@@ -2282,27 +2327,35 @@ impl WgpuViewer {
         }
         let solid_v = interleave(solid);
         let wire_v = interleave(wire);
-        self.preview_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("preview_vtx"),
-            contents: bytemuck::cast_slice(&solid_v),
-            usage: wgpu::BufferUsages::VERTEX,
-        }));
-        self.preview_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("preview_idx"),
-            contents: bytemuck::cast_slice(&solid.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }));
+        self.preview_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("preview_vtx"),
+                contents: bytemuck::cast_slice(&solid_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.preview_index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("preview_idx"),
+                contents: bytemuck::cast_slice(&solid.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
         self.preview_index_count = solid.indices.len() as u32;
-        self.preview_wire_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("preview_wire_vtx"),
-            contents: bytemuck::cast_slice(&wire_v),
-            usage: wgpu::BufferUsages::VERTEX,
-        }));
-        self.preview_wire_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("preview_wire_idx"),
-            contents: bytemuck::cast_slice(&wire.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }));
+        self.preview_wire_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("preview_wire_vtx"),
+                contents: bytemuck::cast_slice(&wire_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.preview_wire_index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("preview_wire_idx"),
+                contents: bytemuck::cast_slice(&wire.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
         self.preview_wire_index_count = wire.indices.len() as u32;
     }
 
@@ -2332,11 +2385,13 @@ impl WgpuViewer {
                 return;
             }
         }
-        self.collab_line_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("collab_peer_lines_vtx"),
-            contents: bytemuck::cast_slice(verts),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        }));
+        self.collab_line_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("collab_peer_lines_vtx"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
         self.collab_line_vertex_count = n as u32;
     }
 
@@ -2365,27 +2420,35 @@ impl WgpuViewer {
         }
         let solid_v = interleave(solid);
         let wire_v = interleave(wire);
-        self.ping_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ping_vtx"),
-            contents: bytemuck::cast_slice(&solid_v),
-            usage: wgpu::BufferUsages::VERTEX,
-        }));
-        self.ping_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ping_idx"),
-            contents: bytemuck::cast_slice(&solid.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }));
+        self.ping_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("ping_vtx"),
+                contents: bytemuck::cast_slice(&solid_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.ping_index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("ping_idx"),
+                contents: bytemuck::cast_slice(&solid.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
         self.ping_index_count = solid.indices.len() as u32;
-        self.ping_wire_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ping_wire_vtx"),
-            contents: bytemuck::cast_slice(&wire_v),
-            usage: wgpu::BufferUsages::VERTEX,
-        }));
-        self.ping_wire_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("ping_wire_idx"),
-            contents: bytemuck::cast_slice(&wire.indices),
-            usage: wgpu::BufferUsages::INDEX,
-        }));
+        self.ping_wire_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("ping_wire_vtx"),
+                contents: bytemuck::cast_slice(&wire_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.ping_wire_index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("ping_wire_idx"),
+                contents: bytemuck::cast_slice(&wire.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
         self.ping_wire_index_count = wire.indices.len() as u32;
     }
 
@@ -2408,7 +2471,8 @@ impl WgpuViewer {
     ) {
         self.scene_bounds = bounds;
         const MAX_AXIS: u32 = 512;
-        if let (Some(layout), Some(p)) = (GpuVoxelBrick::layout_from_voxels(voxels, MAX_AXIS), patch)
+        if let (Some(layout), Some(p)) =
+            (GpuVoxelBrick::layout_from_voxels(voxels, MAX_AXIS), patch)
         {
             if layout.origin == self.brick_origin_iv && layout.dims == self.brick_dims_u {
                 if let Some(off) = layout.index_of_world(p.x, p.y, p.z) {
@@ -2430,11 +2494,13 @@ impl WgpuViewer {
         self.brick_origin_iv = brick.origin;
         self.brick_dims_u = brick.dims;
         self.brick_cell_count = brick.cells.len().max(1) as u32;
-        let new_brick = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("brick"),
-            contents: bytemuck::cast_slice(&brick.cells),
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        });
+        let new_brick = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("brick"),
+                contents: bytemuck::cast_slice(&brick.cells),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
         self.brick_buffer = new_brick;
         self.rebuild_bind_groups();
     }
@@ -2509,7 +2575,10 @@ impl WgpuViewer {
                 pass.draw_indexed(0..self.preview_index_count, 0, 0..1);
             }
         }
-        if let (Some(wvb), Some(wib)) = (&self.preview_wire_vertex_buffer, &self.preview_wire_index_buffer) {
+        if let (Some(wvb), Some(wib)) = (
+            &self.preview_wire_vertex_buffer,
+            &self.preview_wire_index_buffer,
+        ) {
             if self.preview_wire_index_count > 0 {
                 pass.set_vertex_buffer(0, wvb.slice(..));
                 pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
@@ -2537,7 +2606,9 @@ impl WgpuViewer {
                 pass.draw_indexed(0..self.ping_index_count, 0, 0..1);
             }
         }
-        if let (Some(wvb), Some(wib)) = (&self.ping_wire_vertex_buffer, &self.ping_wire_index_buffer) {
+        if let (Some(wvb), Some(wib)) =
+            (&self.ping_wire_vertex_buffer, &self.ping_wire_index_buffer)
+        {
             if self.ping_wire_index_count > 0 {
                 pass.set_vertex_buffer(0, wvb.slice(..));
                 pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
@@ -2568,7 +2639,10 @@ impl WgpuViewer {
     }
 
     pub fn render(&self) -> Result<(), String> {
-        let frame = self.surface.get_current_texture().map_err(|e| e.to_string())?;
+        let frame = self
+            .surface
+            .get_current_texture()
+            .map_err(|e| e.to_string())?;
         let swap_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());

@@ -4,7 +4,8 @@ use super::format::{decode_payload, encode_payload_v4, focal_length_to_fov_y_rad
 fn focal_matches_ts() {
     let mm = 29.0_f32;
     let rad = focal_length_to_fov_y_radians(mm);
-    let ts_deg = (2.0_f64 * (12.0_f64 / f64::from(mm)).atan() * 180.0 / std::f64::consts::PI) as f32;
+    let ts_deg =
+        (2.0_f64 * (12.0_f64 / f64::from(mm)).atan() * 180.0 / std::f64::consts::PI) as f32;
     let rust_deg = rad.to_degrees();
     assert!((ts_deg - rust_deg).abs() < 1e-3);
 }

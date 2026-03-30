@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check } from "@tauri-apps/plugin-updater";
 import "./App.css";
 
 /** Desktop viewer: cap new-project grid edge length (web allows larger). */
@@ -166,6 +168,25 @@ function App() {
     const unlistenCollabErr = listen<string>("collab-error", (e) => {
       setLoadError(e.payload);
     });
+    const unlistenCheckUpdates = listen("voxelle-check-updates", async () => {
+      try {
+        const update = await check();
+        if (!update) {
+          window.alert("You're on the latest version.");
+          return;
+        }
+        const ok = window.confirm(
+          `Download and install Voxelle Desktop ${update.version}?`,
+        );
+        if (!ok) return;
+        await update.downloadAndInstall();
+        await relaunch();
+      } catch (e) {
+        window.alert(
+          e instanceof Error ? e.message : `Update failed: ${String(e)}`,
+        );
+      }
+    });
     return () => {
       ro.disconnect();
       void unlistenStart.then((fn) => fn());
@@ -180,6 +201,7 @@ function App() {
       void unlistenCollabLocalPeer.then((fn) => fn());
       void unlistenCollabRoster.then((fn) => fn());
       void unlistenCollabErr.then((fn) => fn());
+      void unlistenCheckUpdates.then((fn) => fn());
     };
   }, [sendResize]);
 

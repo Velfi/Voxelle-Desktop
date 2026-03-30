@@ -258,7 +258,10 @@ fn raw_bson_to_i32(b: RawBsonRef<'_>) -> Option<i32> {
 }
 
 fn raw_doc_i32(doc: &RawDocument, key: &str) -> Result<i32, ParseError> {
-    let Some(v) = doc.get(key).map_err(|e| ParseError::RawBson(e.to_string()))? else {
+    let Some(v) = doc
+        .get(key)
+        .map_err(|e| ParseError::RawBson(e.to_string()))?
+    else {
         return Err(ParseError::InvalidDocument);
     };
     raw_bson_to_i32(v).ok_or(ParseError::InvalidDocument)
@@ -347,7 +350,11 @@ fn parse_bson_full_raw(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
 }
 
 fn is_v4_file(bytes: &[u8]) -> bool {
-    bytes.len() >= 4 && bytes[0] == V4_MAGIC[0] && bytes[1] == V4_MAGIC[1] && bytes[2] == V4_MAGIC[2] && bytes[3] == V4_MAGIC[3]
+    bytes.len() >= 4
+        && bytes[0] == V4_MAGIC[0]
+        && bytes[1] == V4_MAGIC[1]
+        && bytes[2] == V4_MAGIC[2]
+        && bytes[3] == V4_MAGIC[3]
 }
 
 fn parse_v4_container(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {

@@ -106,7 +106,11 @@ fn register_redo_on_main(
     let redo_block = RcBlock::new(move |_t: std::ptr::NonNull<AnyObject>| {
         match perform_solo_voxel_redo(&state_r, &app_r) {
             Ok(true) => {
-                register_undo_only_on_main(&um_shared, std::sync::Arc::clone(&state_r), app_r.clone());
+                register_undo_only_on_main(
+                    &um_shared,
+                    std::sync::Arc::clone(&state_r),
+                    app_r.clone(),
+                );
             }
             Ok(false) => {}
             Err(e) => eprintln!("voxelle: NSUndoManager solo redo failed: {e}"),

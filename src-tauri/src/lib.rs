@@ -1,13 +1,13 @@
 mod camera;
+mod collab;
 mod gpu_brick;
 /// Greedy CPU meshing (public for `cargo bench`).
 pub mod greedy_mesh;
+#[cfg(target_os = "macos")]
+mod macos_undo;
 mod render;
 mod render_constants;
 mod voxel_edit;
-mod collab;
-#[cfg(target_os = "macos")]
-mod macos_undo;
 /// Voxel format / types (public for `cargo bench` and tests).
 pub mod voxelle;
 
@@ -129,7 +129,11 @@ pub struct ViewerState {
 }
 
 #[tauri::command]
-fn viewer_resize(state: State<'_, Arc<ViewerState>>, width: u32, height: u32) -> Result<(), String> {
+fn viewer_resize(
+    state: State<'_, Arc<ViewerState>>,
+    width: u32,
+    height: u32,
+) -> Result<(), String> {
     let mut g = state.viewer.lock().map_err(|e| e.to_string())?;
     if let Some(v) = g.as_mut() {
         v.resize(width, height);
@@ -258,14 +262,12 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
             })();
 
             let app_emit = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                match mesh_result {
-                    Ok(()) => {
-                        let _ = app_emit.emit("voxelle-loaded", label);
-                    }
-                    Err(e) => {
-                        let _ = app_emit.emit("voxelle-load-error", e);
-                    }
+            let _ = app.run_on_main_thread(move || match mesh_result {
+                Ok(()) => {
+                    let _ = app_emit.emit("voxelle-loaded", label);
+                }
+                Err(e) => {
+                    let _ = app_emit.emit("voxelle-load-error", e);
                 }
             });
         })
@@ -279,7 +281,11 @@ enum DecodeMeshOutcome {
     Done,
 }
 
-fn run_v3_mesh_on_main(state: &Arc<ViewerState>, app: &AppHandle, file: &voxelle::VoxelleFile) -> Result<(), String> {
+fn run_v3_mesh_on_main(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    file: &voxelle::VoxelleFile,
+) -> Result<(), String> {
     let _ = app.emit("voxelle-load-progress", 0.55f32);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let app_c = app.clone();
@@ -323,21 +329,19 @@ fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: std::pat
             })();
 
             let app_emit = app.clone();
-            let _ = app.run_on_main_thread(move || {
-                match mesh_result {
-                    Ok(DecodeMeshOutcome::ApplyOnce { file }) => {
-                        if let Err(e) = apply_mesh_and_camera(&state, &app_emit, file) {
-                            let _ = app_emit.emit("voxelle-load-error", e);
-                        } else {
-                            let _ = app_emit.emit("voxelle-loaded", label);
-                        }
-                    }
-                    Ok(DecodeMeshOutcome::Done) => {
+            let _ = app.run_on_main_thread(move || match mesh_result {
+                Ok(DecodeMeshOutcome::ApplyOnce { file }) => {
+                    if let Err(e) = apply_mesh_and_camera(&state, &app_emit, file) {
+                        let _ = app_emit.emit("voxelle-load-error", e);
+                    } else {
                         let _ = app_emit.emit("voxelle-loaded", label);
                     }
-                    Err(e) => {
-                        let _ = app_emit.emit("voxelle-load-error", e);
-                    }
+                }
+                Ok(DecodeMeshOutcome::Done) => {
+                    let _ = app_emit.emit("voxelle-loaded", label);
+                }
+                Err(e) => {
+                    let _ = app_emit.emit("voxelle-load-error", e);
                 }
             });
         })
@@ -412,21 +416,20 @@ fn scene_bounds_for_edit(
         .map_err(|e| e.to_string())?
         .clone();
     let Some(prev) = last else {
-        return Ok(
-            greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
-                .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)),
-        );
+        return Ok(greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
+            .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)));
     };
     match delta {
-        voxel_edit::VoxelEditDelta::Added(v) => Ok(greedy_mesh::mesh_bounds_expand_with_voxel(&prev, v)),
+        voxel_edit::VoxelEditDelta::Added(v) => {
+            Ok(greedy_mesh::mesh_bounds_expand_with_voxel(&prev, v))
+        }
         voxel_edit::VoxelEditDelta::Removed { voxel } => {
-            if greedy_mesh::mesh_bounds_remove_is_strict_interior(&prev, voxel.x, voxel.y, voxel.z) {
+            if greedy_mesh::mesh_bounds_remove_is_strict_interior(&prev, voxel.x, voxel.y, voxel.z)
+            {
                 Ok(prev)
             } else {
-                Ok(
-                    greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
-                        .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)),
-                )
+                Ok(greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
+                    .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)))
             }
         }
     }
@@ -565,7 +568,10 @@ struct PickAtScreen {
 
 /// Whether the camera ray from this screen point hits solid geometry (voxel) — used to choose camera vs edit.
 #[tauri::command]
-fn voxel_pick_probe(state: State<'_, Arc<ViewerState>>, args: PickAtScreen) -> Result<bool, String> {
+fn voxel_pick_probe(
+    state: State<'_, Arc<ViewerState>>,
+    args: PickAtScreen,
+) -> Result<bool, String> {
     let (w, h) = {
         let v = state.viewer.lock().map_err(|e| e.to_string())?;
         let Some(viewer) = v.as_ref() else {
@@ -582,7 +588,9 @@ fn voxel_pick_probe(state: State<'_, Arc<ViewerState>>, args: PickAtScreen) -> R
         return Ok(false);
     };
     let cam = state.camera.lock().map_err(|e| e.to_string())?;
-    Ok(voxel_edit::probe_solid_hit(file, vmap, &cam, w, h, args.x, args.y))
+    Ok(voxel_edit::probe_solid_hit(
+        file, vmap, &cam, w, h, args.x, args.y,
+    ))
 }
 
 #[derive(serde::Deserialize)]
@@ -649,7 +657,11 @@ fn voxel_edit_at_screen(
         collab::host_emit_edit(&cm, &app, seq, collab::HOST_PEER_ID, delta);
     } else {
         drop(cb);
-        state.edit_undo.lock().map_err(|e| e.to_string())?.push(delta);
+        state
+            .edit_undo
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(delta);
         state.edit_redo.lock().map_err(|e| e.to_string())?.clear();
         #[cfg(target_os = "macos")]
         macos_undo::register_solo_edit_completed(&app, &state);
@@ -693,7 +705,11 @@ pub(crate) fn perform_solo_voxel_undo(
         }
     };
     finish_voxel_edit_gpu(state, &mesh_delta, 0.0, t_total)?;
-    state.edit_redo.lock().map_err(|e| e.to_string())?.push(original);
+    state
+        .edit_redo
+        .lock()
+        .map_err(|e| e.to_string())?
+        .push(original);
     Ok(true)
 }
 
@@ -732,7 +748,11 @@ pub(crate) fn perform_solo_voxel_redo(
         }
     };
     finish_voxel_edit_gpu(state, &mesh_delta, 0.0, t_total)?;
-    state.edit_undo.lock().map_err(|e| e.to_string())?.push(forward);
+    state
+        .edit_undo
+        .lock()
+        .map_err(|e| e.to_string())?
+        .push(forward);
     Ok(true)
 }
 
@@ -865,7 +885,10 @@ struct SyncPreviewInput {
 }
 
 #[tauri::command]
-fn sync_preview_input(state: State<'_, Arc<ViewerState>>, args: SyncPreviewInput) -> Result<(), String> {
+fn sync_preview_input(
+    state: State<'_, Arc<ViewerState>>,
+    args: SyncPreviewInput,
+) -> Result<(), String> {
     if args.x < 0.0 {
         *state.preview_cursor.lock().map_err(|e| e.to_string())? = None;
     } else {
@@ -898,8 +921,14 @@ fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
     let cy = f.y as f32 + 0.5;
     let cz = f.z as f32 + 0.5;
     let solid = greedy_mesh::preview_cube_mesh(cx, cy, cz, 0.52, [r, g, b], 1.0);
-    let wire =
-        greedy_mesh::preview_cube_wireframe_mesh(cx, cy, cz, 0.52, [r * 0.25, g * 0.25, b * 0.25], 2.0);
+    let wire = greedy_mesh::preview_cube_wireframe_mesh(
+        cx,
+        cy,
+        cz,
+        0.52,
+        [r * 0.25, g * 0.25, b * 0.25],
+        2.0,
+    );
     viewer.upload_ping_mesh(&solid, &wire);
 }
 
@@ -916,11 +945,7 @@ fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
             viewer.clear_collab_peer_lines();
             return;
         }
-        (
-            c.local_peer_id,
-            c.roster.clone(),
-            c.presence.clone(),
-        )
+        (c.local_peer_id, c.roster.clone(), c.presence.clone())
     };
     let mut verts: Vec<f32> = Vec::with_capacity(presence.len().saturating_mul(12));
     for (pid, pr) in presence {
@@ -980,12 +1005,10 @@ fn refresh_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, cam: &Orbi
 
     let (w, h) = (viewer.size.0 as f32, viewer.size.1 as f32);
     let key = match mode {
-        PreviewMode::Add => {
-            voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(x, y, z)| (x, y, z, 0u8))
-        }
-        PreviewMode::Remove => {
-            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy).map(|(x, y, z)| (x, y, z, 1u8))
-        }
+        PreviewMode::Add => voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy)
+            .map(|(x, y, z)| (x, y, z, 0u8)),
+        PreviewMode::Remove => voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy)
+            .map(|(x, y, z)| (x, y, z, 1u8)),
         PreviewMode::Navigate => None,
     };
 
@@ -1044,10 +1067,7 @@ fn refresh_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, cam: &Orbi
 fn open_voxelle_file_dialog(app: AppHandle, state: Arc<ViewerState>) {
     let state = Arc::clone(&state);
     let app_cb = app.clone();
-    let mut builder = app
-        .dialog()
-        .file()
-        .add_filter("Voxelle", &["voxelle"]);
+    let mut builder = app.dialog().file().add_filter("Voxelle", &["voxelle"]);
     if let Some(window) = app.get_webview_window("main") {
         builder = builder.set_parent(&window);
     }
@@ -1074,20 +1094,8 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
 
     let menu = Menu::default(app)?;
     let new_item = MenuItem::with_id(app, "new_project", "New Project…", true, None::<&str>)?;
-    let open_item = MenuItem::with_id(
-        app,
-        "open_voxelle",
-        "Open…",
-        true,
-        Some("CommandOrCtrl+O"),
-    )?;
-    let save_item = MenuItem::with_id(
-        app,
-        "menu_save",
-        "Save",
-        true,
-        Some("CommandOrCtrl+S"),
-    )?;
+    let open_item = MenuItem::with_id(app, "open_voxelle", "Open…", true, Some("CommandOrCtrl+O"))?;
+    let save_item = MenuItem::with_id(app, "menu_save", "Save", true, Some("CommandOrCtrl+S"))?;
     let save_as_item = MenuItem::with_id(
         app,
         "menu_save_as",
@@ -1095,13 +1103,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         true,
         Some("CommandOrCtrl+Shift+S"),
     )?;
-    let undo_item = MenuItem::with_id(
-        app,
-        "menu_undo",
-        "Undo",
-        true,
-        Some("CommandOrCtrl+Z"),
-    )?;
+    let undo_item = MenuItem::with_id(app, "menu_undo", "Undo", true, Some("CommandOrCtrl+Z"))?;
     let redo_item = MenuItem::with_id(
         app,
         "menu_redo",
@@ -1115,6 +1117,13 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         "Collaborate…",
         true,
         Some("CommandOrCtrl+Shift+L"),
+    )?;
+    let check_updates_item = MenuItem::with_id(
+        app,
+        "menu_check_updates",
+        "Check for Updates…",
+        true,
+        None::<&str>,
     )?;
     let debug_copy_perf = MenuItem::with_id(
         app,
@@ -1135,6 +1144,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
                 sub.prepend_items(&[&new_item, &open_item, &save_item, &save_as_item, &sep])?;
                 // Also under File so it works when OS menus are localized (no reliance on "View").
                 sub.append(&collab_panel_item)?;
+                sub.append(&check_updates_item)?;
                 file_inserted = true;
             } else if text == "Edit" {
                 // macOS (and many platforms) already ship Undo/Redo in Edit. Do not append ours — that
@@ -1157,6 +1167,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
                 &save_as_item,
                 &sep,
                 &collab_panel_item,
+                &check_updates_item,
                 &close,
             ],
         )?;
@@ -1175,11 +1186,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg(desktop)]
 fn performance_report_text(state: &ViewerState) -> String {
-    let fps = state
-        .fps
-        .lock()
-        .map(|c| c.last_fps)
-        .unwrap_or(0);
+    let fps = state.fps.lock().map(|c| c.last_fps).unwrap_or(0);
     let file_label = state
         .file_label
         .lock()
@@ -1204,10 +1211,7 @@ fn performance_report_text(state: &ViewerState) -> String {
         .current_file
         .lock()
         .ok()
-        .and_then(|g| {
-            g.as_ref()
-                .map(|f| (f.voxels.len(), f.grid_size))
-        })
+        .and_then(|g| g.as_ref().map(|f| (f.voxels.len(), f.grid_size)))
         .unwrap_or((0, 0));
     let unix_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1283,7 +1287,11 @@ fn open_voxelle_dialog(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Re
 }
 
 #[tauri::command]
-fn load_voxelle_path(state: State<'_, Arc<ViewerState>>, app: AppHandle, path: String) -> Result<(), String> {
+fn load_voxelle_path(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    path: String,
+) -> Result<(), String> {
     let p = std::path::PathBuf::from(&path);
     *state.file_label.lock().map_err(|e| e.to_string())? = path.clone();
     let _ = app.emit("voxelle-load-start", path.clone());
@@ -1301,7 +1309,11 @@ struct NewProjectArgs {
 }
 
 #[tauri::command]
-fn collab_host_start(state: State<'_, Arc<ViewerState>>, app: AppHandle, port: u16) -> Result<String, String> {
+fn collab_host_start(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    port: u16,
+) -> Result<String, String> {
     let vs = Arc::clone(&*state);
     collab::start_host(app, vs.clone(), Arc::clone(&vs.collab), port)
 }
@@ -1318,7 +1330,8 @@ fn collab_join(
     let cm = Arc::clone(&vs.collab);
     tauri::async_runtime::spawn(async move {
         if let Err(e) =
-            collab::client_connect_blocking(&url, app.clone(), vs, cm, display_name, color_rgb).await
+            collab::client_connect_blocking(&url, app.clone(), vs, cm, display_name, color_rgb)
+                .await
         {
             let _ = app.emit("collab-error", e);
         }
@@ -1335,11 +1348,7 @@ fn collab_leave(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
 
 #[tauri::command]
 fn collab_local_peer_id(state: State<'_, Arc<ViewerState>>) -> u32 {
-    state
-        .collab
-        .lock()
-        .map(|c| c.local_peer_id)
-        .unwrap_or(0)
+    state.collab.lock().map(|c| c.local_peer_id).unwrap_or(0)
 }
 
 #[tauri::command]
@@ -1419,7 +1428,11 @@ fn collab_snap_camera(state: State<'_, Arc<ViewerState>>, peer_id: u32) -> Resul
 }
 
 #[tauri::command]
-fn collab_send_chat(state: State<'_, Arc<ViewerState>>, app: AppHandle, text: String) -> Result<(), String> {
+fn collab_send_chat(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    text: String,
+) -> Result<(), String> {
     let c = state.collab.lock().map_err(|e| e.to_string())?;
     if c.is_host() {
         let ev = collab::HostToClient::Chat {
@@ -1483,17 +1496,27 @@ fn collab_send_ping(
 
 #[tauri::command]
 fn get_autosave_interval_secs(state: State<'_, Arc<ViewerState>>) -> Result<u64, String> {
-    Ok(*state.autosave_interval_secs.lock().map_err(|e| e.to_string())?)
+    Ok(*state
+        .autosave_interval_secs
+        .lock()
+        .map_err(|e| e.to_string())?)
 }
 
 #[tauri::command]
 fn set_autosave_interval_secs(state: State<'_, Arc<ViewerState>>, secs: u64) -> Result<(), String> {
-    *state.autosave_interval_secs.lock().map_err(|e| e.to_string())? = secs;
+    *state
+        .autosave_interval_secs
+        .lock()
+        .map_err(|e| e.to_string())? = secs;
     Ok(())
 }
 
 #[tauri::command]
-fn create_new_project(state: State<'_, Arc<ViewerState>>, app: AppHandle, args: NewProjectArgs) -> Result<(), String> {
+fn create_new_project(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: NewProjectArgs,
+) -> Result<(), String> {
     let grid_size = args.grid_size.clamp(1, MAX_GRID_SIZE);
     let shape_l = start_shape_label(args.shape);
     let label = format!("New project ({grid_size}³, {shape_l})");
@@ -1529,7 +1552,14 @@ pub fn run() {
     });
     let vs = viewer_state.clone();
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder
+            .plugin(tauri_plugin_process::init())
+            .plugin(tauri_plugin_updater::Builder::new().build());
+    }
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(viewer_state.clone())
@@ -1560,6 +1590,12 @@ pub fn run() {
                     "voxelle-toggle-collab",
                     true,
                 );
+            } else if event.id() == "menu_check_updates" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-check-updates",
+                    (),
+                );
             } else if event.id() == "debug_copy_performance" {
                 let state = app.state::<Arc<ViewerState>>();
                 if let Err(e) = copy_performance_data_to_clipboard(state.inner()) {
@@ -1573,8 +1609,9 @@ pub fn run() {
 
             let window = app.get_webview_window("main").expect("main window");
             let w = window.clone();
-            let mut viewer = tauri::async_runtime::block_on(async move { WgpuViewer::new(w).await })
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let mut viewer =
+                tauri::async_runtime::block_on(async move { WgpuViewer::new(w).await })
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             if let Ok(sz) = window.inner_size() {
                 viewer.resize(sz.width, sz.height);
             }

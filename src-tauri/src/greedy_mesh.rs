@@ -25,7 +25,13 @@ fn face_occluded(source: MaterialId, neighbor: MaterialId) -> bool {
     }
 }
 
-fn neighbor_occludes_face(map: &HashMap<IVec3, Voxel>, pos: IVec3, axis: usize, sign: i32, src: MaterialId) -> bool {
+fn neighbor_occludes_face(
+    map: &HashMap<IVec3, Voxel>,
+    pos: IVec3,
+    axis: usize,
+    sign: i32,
+    src: MaterialId,
+) -> bool {
     let (x, y, z) = pos;
     let (nx, ny, nz) = match axis {
         0 => (x + sign, y, z),
@@ -227,7 +233,10 @@ pub struct GpuSliceHeader {
 }
 
 /// Pack coplanar face cells into 2D bitmaps for GPU greedy meshing (each sub-slice ≤64×64).
-pub fn pack_gpu_greedy_slices(map: &HashMap<VoxelCoord, Voxel>, emit: &[Voxel]) -> Result<(Vec<GpuSliceHeader>, Vec<u32>), ()> {
+pub fn pack_gpu_greedy_slices(
+    map: &HashMap<VoxelCoord, Voxel>,
+    emit: &[Voxel],
+) -> Result<(Vec<GpuSliceHeader>, Vec<u32>), ()> {
     let mut buckets: HashMap<(u32, u8), Vec<IVec3>> = HashMap::new();
     for v in emit {
         buckets
@@ -272,10 +281,7 @@ pub fn pack_gpu_greedy_slices(map: &HashMap<VoxelCoord, Voxel>, emit: &[Voxel]) 
             };
             let u = if axis == 0 { y } else { x };
             let v = if axis == 2 { y } else { z };
-            slices
-                .entry((axis, sign, depth))
-                .or_default()
-                .push((u, v));
+            slices.entry((axis, sign, depth)).or_default().push((u, v));
         }
 
         for ((axis, sign, depth), cells) in slices {
@@ -447,7 +453,10 @@ pub fn dirty_chunk_keys_3x3(center: ChunkKey) -> Vec<ChunkKey> {
 }
 
 /// Bucket voxels by spatial chunk (same layout as [`voxels_by_spatial_chunks`]).
-pub fn voxel_buckets_by_chunk(voxels: &[Voxel], cs: i32) -> Option<((i32, i32, i32), HashMap<ChunkKey, Vec<Voxel>>)> {
+pub fn voxel_buckets_by_chunk(
+    voxels: &[Voxel],
+    cs: i32,
+) -> Option<((i32, i32, i32), HashMap<ChunkKey, Vec<Voxel>>)> {
     let origin = voxel_aabb_min_int(voxels)?;
     let cs = cs.max(1);
     let mut buckets: HashMap<ChunkKey, Vec<Voxel>> = HashMap::new();
@@ -621,9 +630,21 @@ mod chunk_tests {
             let i1 = chunk[1] as usize * 3;
             let i2 = chunk[2] as usize * 3;
             let mut verts = [
-                [pos[i0].to_bits(), pos[i0 + 1].to_bits(), pos[i0 + 2].to_bits()],
-                [pos[i1].to_bits(), pos[i1 + 1].to_bits(), pos[i1 + 2].to_bits()],
-                [pos[i2].to_bits(), pos[i2 + 1].to_bits(), pos[i2 + 2].to_bits()],
+                [
+                    pos[i0].to_bits(),
+                    pos[i0 + 1].to_bits(),
+                    pos[i0 + 2].to_bits(),
+                ],
+                [
+                    pos[i1].to_bits(),
+                    pos[i1 + 1].to_bits(),
+                    pos[i1 + 2].to_bits(),
+                ],
+                [
+                    pos[i2].to_bits(),
+                    pos[i2 + 1].to_bits(),
+                    pos[i2 + 2].to_bits(),
+                ],
             ];
             verts.sort();
             tris.push(verts);
@@ -658,14 +679,19 @@ mod chunk_tests {
             },
         ];
         let (full, _) = build_greedy_mesh(&voxels);
-        let Some((_origin, btree)) = build_all_chunk_meshes_btree(&voxels, SPATIAL_CHUNK_SIZE) else {
+        let Some((_origin, btree)) = build_all_chunk_meshes_btree(&voxels, SPATIAL_CHUNK_SIZE)
+        else {
             panic!("expected buckets");
         };
         let mut stitched = MeshBuffers::default();
         for (_, m) in btree {
             append_mesh_buffers(&mut stitched, m);
         }
-        assert_eq!(full.indices.len(), stitched.indices.len(), "index count parity");
+        assert_eq!(
+            full.indices.len(),
+            stitched.indices.len(),
+            "index count parity"
+        );
         assert_eq!(
             sorted_triangle_set(&full),
             sorted_triangle_set(&stitched),
@@ -797,10 +823,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
             };
             let u = if axis == 0 { y } else { x };
             let v = if axis == 2 { y } else { z };
-            slices
-                .entry((axis, sign, depth))
-                .or_default()
-                .push((u, v));
+            slices.entry((axis, sign, depth)).or_default().push((u, v));
         }
 
         for ((axis, sign, depth), cells) in slices {
@@ -829,9 +852,23 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
                     n.z > 0.0
                 };
                 if ccw {
-                    out.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                    out.indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
                 } else {
-                    out.indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+                    out.indices.extend_from_slice(&[
+                        base,
+                        base + 2,
+                        base + 1,
+                        base,
+                        base + 3,
+                        base + 2,
+                    ]);
                 }
             }
         }
@@ -841,7 +878,14 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
 }
 
 /// Single axis-aligned cube for add/remove hover preview. `half` is half-edge length (0.5 = unit voxel).
-pub fn preview_cube_mesh(cx: f32, cy: f32, cz: f32, half: f32, color: [f32; 3], mat_k: f32) -> MeshBuffers {
+pub fn preview_cube_mesh(
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    half: f32,
+    color: [f32; 3],
+    mat_k: f32,
+) -> MeshBuffers {
     let h = half;
     let mut positions: Vec<f32> = Vec::with_capacity(24 * 3);
     let mut normals: Vec<f32> = Vec::with_capacity(24 * 3);
@@ -943,7 +987,14 @@ pub fn preview_cube_mesh(cx: f32, cy: f32, cz: f32, half: f32, color: [f32; 3], 
 }
 
 /// 12 edges as thin axis-aligned boxes (triangles). `LineList` is ~1px on many GPUs and disappears on HiDPI.
-pub fn preview_cube_wireframe_mesh(cx: f32, cy: f32, cz: f32, half: f32, color: [f32; 3], mat_k: f32) -> MeshBuffers {
+pub fn preview_cube_wireframe_mesh(
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    half: f32,
+    color: [f32; 3],
+    mat_k: f32,
+) -> MeshBuffers {
     let h = half;
     // Thin beams — large `t` read as a second solid shell, not lines.
     let t = (half * 0.048).clamp(0.014, 0.036);
@@ -1035,22 +1086,106 @@ pub fn preview_cube_wireframe_mesh(cx: f32, cy: f32, cz: f32, half: f32, color: 
     };
 
     // Bottom face (z = cz - h): edges 0-1, 1-2, 2-3, 3-0
-    push_box(cx - h, cx + h, cy - h - t, cy - h + t, cz - h - t, cz - h + t);
-    push_box(cx + h - t, cx + h + t, cy - h, cy + h, cz - h - t, cz - h + t);
-    push_box(cx - h, cx + h, cy + h - t, cy + h + t, cz - h - t, cz - h + t);
-    push_box(cx - h - t, cx - h + t, cy - h, cy + h, cz - h - t, cz - h + t);
+    push_box(
+        cx - h,
+        cx + h,
+        cy - h - t,
+        cy - h + t,
+        cz - h - t,
+        cz - h + t,
+    );
+    push_box(
+        cx + h - t,
+        cx + h + t,
+        cy - h,
+        cy + h,
+        cz - h - t,
+        cz - h + t,
+    );
+    push_box(
+        cx - h,
+        cx + h,
+        cy + h - t,
+        cy + h + t,
+        cz - h - t,
+        cz - h + t,
+    );
+    push_box(
+        cx - h - t,
+        cx - h + t,
+        cy - h,
+        cy + h,
+        cz - h - t,
+        cz - h + t,
+    );
 
     // Top face (z = cz + h): 4-5, 5-6, 6-7, 7-4
-    push_box(cx - h, cx + h, cy - h - t, cy - h + t, cz + h - t, cz + h + t);
-    push_box(cx + h - t, cx + h + t, cy - h, cy + h, cz + h - t, cz + h + t);
-    push_box(cx - h, cx + h, cy + h - t, cy + h + t, cz + h - t, cz + h + t);
-    push_box(cx - h - t, cx - h + t, cy - h, cy + h, cz + h - t, cz + h + t);
+    push_box(
+        cx - h,
+        cx + h,
+        cy - h - t,
+        cy - h + t,
+        cz + h - t,
+        cz + h + t,
+    );
+    push_box(
+        cx + h - t,
+        cx + h + t,
+        cy - h,
+        cy + h,
+        cz + h - t,
+        cz + h + t,
+    );
+    push_box(
+        cx - h,
+        cx + h,
+        cy + h - t,
+        cy + h + t,
+        cz + h - t,
+        cz + h + t,
+    );
+    push_box(
+        cx - h - t,
+        cx - h + t,
+        cy - h,
+        cy + h,
+        cz + h - t,
+        cz + h + t,
+    );
 
     // Verticals: 0-4, 1-5, 2-6, 3-7
-    push_box(cx - h - t, cx - h + t, cy - h - t, cy - h + t, cz - h, cz + h);
-    push_box(cx + h - t, cx + h + t, cy - h - t, cy - h + t, cz - h, cz + h);
-    push_box(cx + h - t, cx + h + t, cy + h - t, cy + h + t, cz - h, cz + h);
-    push_box(cx - h - t, cx - h + t, cy + h - t, cy + h + t, cz - h, cz + h);
+    push_box(
+        cx - h - t,
+        cx - h + t,
+        cy - h - t,
+        cy - h + t,
+        cz - h,
+        cz + h,
+    );
+    push_box(
+        cx + h - t,
+        cx + h + t,
+        cy - h - t,
+        cy - h + t,
+        cz - h,
+        cz + h,
+    );
+    push_box(
+        cx + h - t,
+        cx + h + t,
+        cy + h - t,
+        cy + h + t,
+        cz - h,
+        cz + h,
+    );
+    push_box(
+        cx - h - t,
+        cx - h + t,
+        cy + h - t,
+        cy + h + t,
+        cz - h,
+        cz + h,
+    );
 
     MeshBuffers {
         positions,

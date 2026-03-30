@@ -6,7 +6,13 @@ use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use glam::{Vec3, Vec4};
 use std::collections::HashMap;
 
-pub fn screen_to_world_ray(camera: &OrbitCamera, width: f32, height: f32, sx: f32, sy: f32) -> (Vec3, Vec3) {
+pub fn screen_to_world_ray(
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+) -> (Vec3, Vec3) {
     let w = width.max(1.0);
     let h = height.max(1.0);
     // Pixel centers: map (sx,sy) through viewport so the ray matches fragment centers (GPU).

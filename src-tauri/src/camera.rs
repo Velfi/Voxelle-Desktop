@@ -89,9 +89,12 @@ impl OrbitCamera {
     /// Call each frame.
     pub fn update_damping(&mut self) {
         self.smooth_target = self.smooth_target.lerp(self.target, DAMPING);
-        let sr = self.smooth_spherical.radius + (self.spherical.radius - self.smooth_spherical.radius) * DAMPING;
-        let st = self.smooth_spherical.theta + (self.spherical.theta - self.smooth_spherical.theta) * DAMPING;
-        let sp = self.smooth_spherical.phi + (self.spherical.phi - self.smooth_spherical.phi) * DAMPING;
+        let sr = self.smooth_spherical.radius
+            + (self.spherical.radius - self.smooth_spherical.radius) * DAMPING;
+        let st = self.smooth_spherical.theta
+            + (self.spherical.theta - self.smooth_spherical.theta) * DAMPING;
+        let sp =
+            self.smooth_spherical.phi + (self.spherical.phi - self.smooth_spherical.phi) * DAMPING;
         self.smooth_spherical = Spherical {
             radius: sr.clamp(self.min_radius, self.max_radius),
             theta: st,
@@ -113,15 +116,18 @@ impl OrbitCamera {
         let k = std::f32::consts::TAU * ROTATE_SPEED / h;
         self.spherical.theta -= dx * k;
         self.spherical.phi -= dy * k;
-        self.spherical.phi = self
-            .spherical
-            .phi
-            .clamp(self.min_polar, self.max_polar);
+        self.spherical.phi = self.spherical.phi.clamp(self.min_polar, self.max_polar);
     }
 
     /// Pan in pixels, matching Three.js `OrbitControls` (`screenSpacePanning = true`): uses
     /// `2 * delta * R * tan(fov/2) / clientHeight` for perspective and frustum extents / client size for ortho.
-    pub fn pan_screen(&mut self, dx: f32, dy: f32, viewport_width_px: f32, viewport_height_px: f32) {
+    pub fn pan_screen(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        viewport_width_px: f32,
+        viewport_height_px: f32,
+    ) {
         let dx = dx * PAN_SPEED;
         let dy = dy * PAN_SPEED;
         let h_px = viewport_height_px.max(1.0);

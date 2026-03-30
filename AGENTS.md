@@ -1,6 +1,6 @@
 # Agent notes — Voxelle Desktop (VD)
 
-Guidance for humans and coding agents working in this repo.
+Guidance for humans and coding agents working in this repo. This app is desktop-only, no web, no android, no ios.
 
 ## Performance metrics
 

@@ -3,9 +3,7 @@
 //! Large cases can take noticeable time; Criterion will shorten iterations automatically.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use voxelle_desktop_lib::greedy_mesh::{
-    self, ChunkKey, SpatialMeshCache,
-};
+use voxelle_desktop_lib::greedy_mesh::{self, ChunkKey, SpatialMeshCache};
 use voxelle_desktop_lib::voxelle::{MaterialId, Voxel};
 
 fn solid_box(origin: (i32, i32, i32), edge: i32, color: u32) -> Vec<Voxel> {

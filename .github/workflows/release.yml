@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 jobs:
   publish-tauri:
@@ -13,14 +13,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: 'macos-latest'
-            args: '--target aarch64-apple-darwin'
-          - platform: 'macos-latest'
-            args: '--target x86_64-apple-darwin'
-          - platform: 'ubuntu-22.04'
-            args: ''
-          - platform: 'windows-latest'
-            args: ''
+          - platform: "macos-latest"
+            args: "--target aarch64-apple-darwin"
+          - platform: "macos-latest"
+            args: "--target x86_64-apple-darwin"
+          - platform: "ubuntu-22.04"
+            args: ""
+          - platform: "windows-latest"
+            args: ""
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -46,14 +46,21 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - uses: tauri-apps/tauri-action@action-v0.6.2
+      # Updater: requires repository secrets TAURI_SIGNING_PRIVATE_KEY and optionally
+      # TAURI_SIGNING_PRIVATE_KEY_PASSWORD (see https://v2.tauri.app/plugin/updater/).
+      # With uploadUpdaterJson: true, the action builds signed updater bundles, uploads
+      # release assets, and publishes/merges latest.json for the static updater endpoint.
+      - uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Voxelle Desktop ${{ github.ref_name }}'
-          releaseBody: 'See the release assets to download installers for your platform.'
+          releaseName: "Voxelle Desktop ${{ github.ref_name }}"
+          releaseBody: "Installers and `latest.json` (updater manifest) are in the release assets."
+          generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: false
+          uploadUpdaterJson: true
           args: ${{ matrix.args }}
