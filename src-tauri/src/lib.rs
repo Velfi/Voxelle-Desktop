@@ -5,6 +5,9 @@ pub mod greedy_mesh;
 mod render;
 mod render_constants;
 mod voxel_edit;
+mod collab;
+#[cfg(target_os = "macos")]
+mod macos_undo;
 /// Voxel format / types (public for `cargo bench` and tests).
 pub mod voxelle;
 
@@ -13,12 +16,14 @@ use gpu_brick::BrickCellWrite;
 use render::WgpuViewer;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, RunEvent, State};
 use tauri_plugin_dialog::DialogExt;
 
 use std::collections::HashMap;
 
-use voxelle::{decode_payload, focal_length_to_fov_y_radians, start_shape::StartShape};
+use voxelle::{
+    decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, start_shape::StartShape,
+};
 
 struct FpsCounter {
     period_start: Option<Instant>,
@@ -113,6 +118,14 @@ pub struct ViewerState {
     pub last_edit_perf: Mutex<Option<EditPerfBreakdown>>,
     /// Last scene AABB used for lighting/brick; drives incremental bounds on edit when possible.
     pub last_scene_bounds: Mutex<Option<greedy_mesh::MeshBounds>>,
+    pub edit_undo: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
+    pub edit_redo: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
+    pub collab: Arc<std::sync::Mutex<collab::CollabRuntime>>,
+    /// Short-lived voxel highlight when a peer sends a world ping (see [`collab::record_ping_flash`]).
+    pub ping_flash: Mutex<Option<collab::PingFlash>>,
+    /// `0` = disabled. Host-only autosave to the current `.voxelle` path.
+    pub autosave_interval_secs: Mutex<u64>,
+    pub last_autosave: Mutex<Option<Instant>>,
 }
 
 #[tauri::command]
@@ -218,6 +231,7 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
                     version: 3,
                     grid_size: size,
                     scene: Default::default(),
+                    scene_extra: None,
                     voxels,
                 };
 
@@ -225,10 +239,11 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
                     let _ = app.emit("voxelle-load-progress", 0.85f32);
                     let (done_tx, done_rx) = std::sync::mpsc::channel();
                     let app_c = app.clone();
+                    let app_mesh = app_c.clone();
                     let state_c = Arc::clone(&state);
                     let file_c = file.clone();
                     let _ = app_c.run_on_main_thread(move || {
-                        let res = apply_mesh_and_camera(&state_c, file_c);
+                        let res = apply_mesh_and_camera(&state_c, &app_mesh, file_c);
                         let _ = done_tx.send(res);
                     });
                     return match done_rx.recv() {
@@ -268,10 +283,11 @@ fn run_v3_mesh_on_main(state: &Arc<ViewerState>, app: &AppHandle, file: &voxelle
     let _ = app.emit("voxelle-load-progress", 0.55f32);
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let app_c = app.clone();
+    let app_mesh = app_c.clone();
     let state_c = Arc::clone(state);
     let file_c = file.clone();
     let _ = app_c.run_on_main_thread(move || {
-        let res = apply_mesh_and_camera(&state_c, file_c);
+        let res = apply_mesh_and_camera(&state_c, &app_mesh, file_c);
         let _ = done_tx.send(res);
     });
     match done_rx.recv() {
@@ -310,7 +326,7 @@ fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: std::pat
             let _ = app.run_on_main_thread(move || {
                 match mesh_result {
                     Ok(DecodeMeshOutcome::ApplyOnce { file }) => {
-                        if let Err(e) = apply_mesh_and_camera(&state, file) {
+                        if let Err(e) = apply_mesh_and_camera(&state, &app_emit, file) {
                             let _ = app_emit.emit("voxelle-load-error", e);
                         } else {
                             let _ = app_emit.emit("voxelle-loaded", label);
@@ -328,7 +344,11 @@ fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: std::pat
         .ok();
 }
 
-fn apply_mesh_and_camera(state: &Arc<ViewerState>, file: voxelle::VoxelleFile) -> Result<(), String> {
+pub(crate) fn apply_mesh_and_camera(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    file: voxelle::VoxelleFile,
+) -> Result<(), String> {
     let bounds = if file.voxels.is_empty() {
         greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)
     } else {
@@ -367,6 +387,14 @@ fn apply_mesh_and_camera(state: &Arc<ViewerState>, file: voxelle::VoxelleFile) -
     let (w, h) = viewer.size;
     cam.fit_sphere(center, r, w as f32, h as f32);
     *state.last_scene_bounds.lock().map_err(|e| e.to_string())? = Some(bounds);
+    if let Ok(mut u) = state.edit_undo.lock() {
+        u.clear();
+    }
+    if let Ok(mut r) = state.edit_redo.lock() {
+        r.clear();
+    }
+    #[cfg(target_os = "macos")]
+    macos_undo::clear_all(app);
     Ok(())
 }
 
@@ -391,8 +419,8 @@ fn scene_bounds_for_edit(
     };
     match delta {
         voxel_edit::VoxelEditDelta::Added(v) => Ok(greedy_mesh::mesh_bounds_expand_with_voxel(&prev, v)),
-        voxel_edit::VoxelEditDelta::Removed { x, y, z } => {
-            if greedy_mesh::mesh_bounds_remove_is_strict_interior(&prev, *x, *y, *z) {
+        voxel_edit::VoxelEditDelta::Removed { voxel } => {
+            if greedy_mesh::mesh_bounds_remove_is_strict_interior(&prev, voxel.x, voxel.y, voxel.z) {
                 Ok(prev)
             } else {
                 Ok(
@@ -404,81 +432,20 @@ fn scene_bounds_for_edit(
     }
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PickAtScreen {
-    x: f32,
-    y: f32,
-}
-
-/// Whether the camera ray from this screen point hits solid geometry (voxel) — used to choose camera vs edit.
-#[tauri::command]
-fn voxel_pick_probe(state: State<'_, Arc<ViewerState>>, args: PickAtScreen) -> Result<bool, String> {
-    let (w, h) = {
-        let v = state.viewer.lock().map_err(|e| e.to_string())?;
-        let Some(viewer) = v.as_ref() else {
-            return Ok(false);
-        };
-        (viewer.size.0 as f32, viewer.size.1 as f32)
-    };
-    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
-    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
-    let Some(file) = fg.as_ref() else {
-        return Ok(false);
-    };
-    let Some(vmap) = vm.as_ref() else {
-        return Ok(false);
-    };
-    let cam = state.camera.lock().map_err(|e| e.to_string())?;
-    Ok(voxel_edit::probe_solid_hit(file, vmap, &cam, w, h, args.x, args.y))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct VoxelEditAtScreen {
-    x: f32,
-    y: f32,
-    /// `true` = place voxel on face under cursor; `false` = remove hit voxel.
-    add: bool,
-}
-
-#[tauri::command]
-fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScreen) -> Result<bool, String> {
-    let t_total = Instant::now();
-    let (w, h) = {
-        let v = state.viewer.lock().map_err(|e| e.to_string())?;
-        let Some(viewer) = v.as_ref() else {
-            return Err("viewer not ready".into());
-        };
-        (viewer.size.0 as f32, viewer.size.1 as f32)
-    };
-
-    let t_apply_start = Instant::now();
-    let edit_delta = {
-        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
-        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
-        let Some(file) = fg.as_mut() else {
-            return Err("no model loaded".into());
-        };
-        let Some(vmap) = vm.as_mut() else {
-            return Err("voxel index not ready".into());
-        };
-        let cam = state.camera.lock().map_err(|e| e.to_string())?;
-        voxel_edit::apply_edit(file, vmap, &cam, w, h, args.x, args.y, args.add)?
-    };
-    let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
-
-    let Some(delta) = edit_delta else {
-        return Ok(false);
-    };
-
+/// GPU upload + mesh rebuild after a voxel change (shared by edit, undo, redo, collab).
+pub(crate) fn finish_voxel_edit_gpu(
+    state: &Arc<ViewerState>,
+    delta: &voxel_edit::VoxelEditDelta,
+    apply_edit_ms: f64,
+    t_total: Instant,
+) -> Result<(), String> {
     let t_prep_start = Instant::now();
     let fg = state.current_file.lock().map_err(|e| e.to_string())?;
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
 
-    let bounds = scene_bounds_for_edit(&**state, file, &delta)?;
+    let bounds = scene_bounds_for_edit(&**state, file, delta)?;
 
     let brick_patch = if file.voxels.is_empty() {
         None
@@ -490,10 +457,10 @@ fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScr
                 z: v.z,
                 packed: gpu_brick::pack_cell(v.color, v.material),
             },
-            voxel_edit::VoxelEditDelta::Removed { x, y, z } => BrickCellWrite {
-                x,
-                y,
-                z,
+            voxel_edit::VoxelEditDelta::Removed { voxel } => BrickCellWrite {
+                x: voxel.x,
+                y: voxel.y,
+                z: voxel.z,
                 packed: gpu_brick::pack_empty(),
             },
         })
@@ -531,11 +498,11 @@ fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScr
 
         if use_incremental {
             let t_cache = Instant::now();
-            viewer.apply_spatial_cache_edit(&delta);
+            viewer.apply_spatial_cache_edit(delta);
             mesh_voxel_map_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
             let cell = match delta {
                 voxel_edit::VoxelEditDelta::Added(v) => (v.x, v.y, v.z),
-                voxel_edit::VoxelEditDelta::Removed { x, y, z } => (x, y, z),
+                voxel_edit::VoxelEditDelta::Removed { voxel } => (voxel.x, voxel.y, voxel.z),
             };
             let center = greedy_mesh::chunk_key_from_world(
                 cell.0,
@@ -586,7 +553,306 @@ fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScr
 
     *state.last_scene_bounds.lock().map_err(|e| e.to_string())? = Some(bounds);
 
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PickAtScreen {
+    x: f32,
+    y: f32,
+}
+
+/// Whether the camera ray from this screen point hits solid geometry (voxel) — used to choose camera vs edit.
+#[tauri::command]
+fn voxel_pick_probe(state: State<'_, Arc<ViewerState>>, args: PickAtScreen) -> Result<bool, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Ok(false);
+        };
+        (viewer.size.0 as f32, viewer.size.1 as f32)
+    };
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Ok(false);
+    };
+    let Some(vmap) = vm.as_ref() else {
+        return Ok(false);
+    };
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    Ok(voxel_edit::probe_solid_hit(file, vmap, &cam, w, h, args.x, args.y))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VoxelEditAtScreen {
+    x: f32,
+    y: f32,
+    /// `true` = place voxel on face under cursor; `false` = remove hit voxel.
+    add: bool,
+}
+
+#[tauri::command]
+fn voxel_edit_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: VoxelEditAtScreen,
+) -> Result<bool, String> {
+    let t_total = Instant::now();
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        (viewer.size.0 as f32, viewer.size.1 as f32)
+    };
+
+    let t_apply_start = Instant::now();
+    let edit_delta = {
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        voxel_edit::apply_edit(file, vmap, &cam, w, h, args.x, args.y, args.add)?
+    };
+    let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
+
+    let Some(delta) = edit_delta else {
+        return Ok(false);
+    };
+
+    finish_voxel_edit_gpu(&state, &delta, apply_edit_ms, t_total)?;
+
+    let cm = Arc::clone(&state.collab);
+    let mut cb = cm.lock().map_err(|e| e.to_string())?;
+    if cb.is_client() {
+        if let Some(tx) = &cb.client_tx {
+            let msg = serde_json::to_string(&collab::ClientToHost::Edit { delta }).unwrap();
+            let _ = tx.send(msg);
+        }
+    } else if cb.is_host() {
+        cb.next_seq += 1;
+        let seq = cb.next_seq;
+        cb.host_undo
+            .entry(collab::HOST_PEER_ID)
+            .or_default()
+            .push(delta);
+        cb.host_redo.remove(&collab::HOST_PEER_ID);
+        drop(cb);
+        collab::host_emit_edit(&cm, &app, seq, collab::HOST_PEER_ID, delta);
+    } else {
+        drop(cb);
+        state.edit_undo.lock().map_err(|e| e.to_string())?.push(delta);
+        state.edit_redo.lock().map_err(|e| e.to_string())?.clear();
+        #[cfg(target_os = "macos")]
+        macos_undo::register_solo_edit_completed(&app, &state);
+    }
+
     Ok(true)
+}
+
+/// Solo (non-collab) undo: pop `edit_undo`, apply inverse, GPU refresh, push `edit_redo`.
+pub(crate) fn perform_solo_voxel_undo(
+    state: &Arc<ViewerState>,
+    _app: &AppHandle,
+) -> Result<bool, String> {
+    let t_total = Instant::now();
+    let original = {
+        let mut u = state.edit_undo.lock().map_err(|e| e.to_string())?;
+        u.pop()
+    };
+    let Some(original) = original else {
+        return Ok(false);
+    };
+    let mesh_delta = {
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        match original {
+            voxel_edit::VoxelEditDelta::Added(v) => {
+                voxel_edit::remove_voxel_at(file, vmap, (v.x, v.y, v.z))
+                    .ok_or_else(|| "undo: voxel missing".to_string())?;
+                voxel_edit::VoxelEditDelta::Removed { voxel: v }
+            }
+            voxel_edit::VoxelEditDelta::Removed { voxel } => {
+                voxel_edit::push_voxel_known(file, vmap, voxel);
+                voxel_edit::VoxelEditDelta::Added(voxel)
+            }
+        }
+    };
+    finish_voxel_edit_gpu(state, &mesh_delta, 0.0, t_total)?;
+    state.edit_redo.lock().map_err(|e| e.to_string())?.push(original);
+    Ok(true)
+}
+
+/// Solo redo: pop `edit_redo`, re-apply, GPU refresh, push `edit_undo`.
+pub(crate) fn perform_solo_voxel_redo(
+    state: &Arc<ViewerState>,
+    _app: &AppHandle,
+) -> Result<bool, String> {
+    let t_total = Instant::now();
+    let forward = {
+        let mut r = state.edit_redo.lock().map_err(|e| e.to_string())?;
+        r.pop()
+    };
+    let Some(forward) = forward else {
+        return Ok(false);
+    };
+    let mesh_delta = {
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        match forward {
+            voxel_edit::VoxelEditDelta::Added(v) => {
+                voxel_edit::push_voxel_known(file, vmap, v);
+                voxel_edit::VoxelEditDelta::Added(v)
+            }
+            voxel_edit::VoxelEditDelta::Removed { voxel } => {
+                voxel_edit::remove_voxel_at(file, vmap, (voxel.x, voxel.y, voxel.z))
+                    .ok_or_else(|| "redo: voxel missing".to_string())?;
+                voxel_edit::VoxelEditDelta::Removed { voxel }
+            }
+        }
+    };
+    finish_voxel_edit_gpu(state, &mesh_delta, 0.0, t_total)?;
+    state.edit_undo.lock().map_err(|e| e.to_string())?.push(forward);
+    Ok(true)
+}
+
+#[tauri::command]
+fn voxel_undo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool, String> {
+    let cm = Arc::clone(&state.collab);
+    {
+        let mut c = cm.lock().map_err(|e| e.to_string())?;
+        if c.is_client() {
+            if let Some(tx) = &c.client_tx {
+                let _ = tx.send(serde_json::to_string(&collab::ClientToHost::Undo).unwrap());
+            }
+            return Ok(true);
+        }
+        if c.is_host() {
+            let mesh = collab::host_undo_peer(&app, &state, &mut c, collab::HOST_PEER_ID)?;
+            let Some(d) = mesh else {
+                return Ok(false);
+            };
+            c.next_seq += 1;
+            let seq = c.next_seq;
+            drop(c);
+            collab::host_emit_edit(&cm, &app, seq, collab::HOST_PEER_ID, d);
+            return Ok(true);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if macos_undo::solo_undo_via_system(&app) {
+            return Ok(true);
+        }
+    }
+    perform_solo_voxel_undo(&state, &app)
+}
+
+#[tauri::command]
+fn voxel_redo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool, String> {
+    let cm = Arc::clone(&state.collab);
+    {
+        let mut c = cm.lock().map_err(|e| e.to_string())?;
+        if c.is_client() {
+            if let Some(tx) = &c.client_tx {
+                let _ = tx.send(serde_json::to_string(&collab::ClientToHost::Redo).unwrap());
+            }
+            return Ok(true);
+        }
+        if c.is_host() {
+            let mesh = collab::host_redo_peer(&app, &state, &mut c, collab::HOST_PEER_ID)?;
+            let Some(d) = mesh else {
+                return Ok(false);
+            };
+            c.next_seq += 1;
+            let seq = c.next_seq;
+            drop(c);
+            collab::host_emit_edit(&cm, &app, seq, collab::HOST_PEER_ID, d);
+            return Ok(true);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if macos_undo::solo_redo_via_system(&app) {
+            return Ok(true);
+        }
+    }
+    perform_solo_voxel_redo(&state, &app)
+}
+
+fn write_voxelle_file_to_path(state: &ViewerState, path: &std::path::Path) -> Result<(), String> {
+    let file = {
+        let g = state.current_file.lock().map_err(|e| e.to_string())?;
+        g.as_ref()
+            .ok_or_else(|| "no model loaded".to_string())?
+            .clone()
+    };
+    let bytes = encode_payload_v4(&file).map_err(|e| e.to_string())?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_voxelle(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    let label = state.file_label.lock().map_err(|e| e.to_string())?;
+    if label.starts_with("New project") || !label.ends_with(".voxelle") {
+        return Err("Use “Save As…” for new or unsaved projects.".into());
+    }
+    write_voxelle_file_to_path(&state, std::path::Path::new(label.as_str()))
+}
+
+#[tauri::command]
+fn save_voxelle_as(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+    let state_c = Arc::clone(&*state);
+    let app_c = app.clone();
+    let mut builder = app
+        .dialog()
+        .file()
+        .add_filter("Voxelle", &["voxelle"])
+        .set_file_name("untitled.voxelle");
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.set_parent(&window);
+    }
+    builder.save_file(move |file_path| {
+        let Some(file_path) = file_path else {
+            return;
+        };
+        let Ok(path) = file_path.into_path() else {
+            let _ = app_c.emit("voxelle-load-error", "could not resolve save path");
+            return;
+        };
+        if let Err(e) = write_voxelle_file_to_path(&state_c, &path) {
+            let _ = app_c.emit("voxelle-load-error", e);
+            return;
+        }
+        let s = path.to_string_lossy().to_string();
+        if let Ok(mut g) = state_c.file_label.lock() {
+            *g = s.clone();
+        }
+        let _ = app_c.emit("voxelle-loaded", s);
+    });
+    Ok(())
 }
 
 /// Lightweight: only stores cursor + mode for the next frame’s GPU preview (no mesh work on IPC thread).
@@ -607,6 +873,77 @@ fn sync_preview_input(state: State<'_, Arc<ViewerState>>, args: SyncPreviewInput
     }
     *state.preview_mode.lock().map_err(|e| e.to_string())? = PreviewMode::parse(&args.mode);
     Ok(())
+}
+
+fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
+    let snap = state.ping_flash.lock().ok().and_then(|g| *g);
+    let Some(f) = snap else {
+        viewer.clear_ping_mesh();
+        return;
+    };
+    if std::time::Instant::now() > f.until {
+        *state.ping_flash.lock().unwrap() = None;
+        viewer.clear_ping_mesh();
+        return;
+    }
+    let key = (f.x, f.y, f.z, f.color_rgb);
+    if viewer.ping_mesh_key == Some(key) {
+        return;
+    }
+    viewer.ping_mesh_key = Some(key);
+    let r = ((f.color_rgb >> 16) & 0xff) as f32 / 255.0;
+    let g = ((f.color_rgb >> 8) & 0xff) as f32 / 255.0;
+    let b = (f.color_rgb & 0xff) as f32 / 255.0;
+    let cx = f.x as f32 + 0.5;
+    let cy = f.y as f32 + 0.5;
+    let cz = f.z as f32 + 0.5;
+    let solid = greedy_mesh::preview_cube_mesh(cx, cy, cz, 0.52, [r, g, b], 1.0);
+    let wire =
+        greedy_mesh::preview_cube_wireframe_mesh(cx, cy, cz, 0.52, [r * 0.25, g * 0.25, b * 0.25], 2.0);
+    viewer.upload_ping_mesh(&solid, &wire);
+}
+
+fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
+    let (local_id, roster, presence) = {
+        let c = match state.collab.lock() {
+            Ok(g) => g,
+            Err(_) => {
+                viewer.clear_collab_peer_lines();
+                return;
+            }
+        };
+        if !c.is_active() {
+            viewer.clear_collab_peer_lines();
+            return;
+        }
+        (
+            c.local_peer_id,
+            c.roster.clone(),
+            c.presence.clone(),
+        )
+    };
+    let mut verts: Vec<f32> = Vec::with_capacity(presence.len().saturating_mul(12));
+    for (pid, pr) in presence {
+        if pid == local_id {
+            continue;
+        }
+        let color = roster
+            .iter()
+            .find(|r| r.peer_id == pid)
+            .map(|r| r.color_rgb)
+            .unwrap_or(0x888888);
+        let rf = ((color >> 16) & 0xff) as f32 / 255.0;
+        let gf = ((color >> 8) & 0xff) as f32 / 255.0;
+        let bf = (color & 0xff) as f32 / 255.0;
+        let eye = collab::presence_eye(&pr);
+        let target = glam::Vec3::new(pr.target[0], pr.target[1], pr.target[2]);
+        if (target - eye).length_squared() < 1e-8 {
+            continue;
+        }
+        verts.extend_from_slice(&[eye.x, eye.y, eye.z, rf, gf, bf]);
+        verts.extend_from_slice(&[target.x, target.y, target.z, rf, gf, bf]);
+    }
+    viewer.upload_collab_peer_lines(&verts);
 }
 
 fn refresh_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
@@ -744,6 +1081,41 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         true,
         Some("CommandOrCtrl+O"),
     )?;
+    let save_item = MenuItem::with_id(
+        app,
+        "menu_save",
+        "Save",
+        true,
+        Some("CommandOrCtrl+S"),
+    )?;
+    let save_as_item = MenuItem::with_id(
+        app,
+        "menu_save_as",
+        "Save As…",
+        true,
+        Some("CommandOrCtrl+Shift+S"),
+    )?;
+    let undo_item = MenuItem::with_id(
+        app,
+        "menu_undo",
+        "Undo",
+        true,
+        Some("CommandOrCtrl+Z"),
+    )?;
+    let redo_item = MenuItem::with_id(
+        app,
+        "menu_redo",
+        "Redo",
+        true,
+        Some("CommandOrCtrl+Shift+Z"),
+    )?;
+    let collab_panel_item = MenuItem::with_id(
+        app,
+        "menu_collab_panel",
+        "Collaborate…",
+        true,
+        Some("CommandOrCtrl+Shift+L"),
+    )?;
     let debug_copy_perf = MenuItem::with_id(
         app,
         "debug_copy_performance",
@@ -754,21 +1126,46 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     let debug_menu = Submenu::with_items(app, "Debug", true, &[&debug_copy_perf])?;
     let sep = PredefinedMenuItem::separator(app)?;
 
-    let mut inserted = false;
+    let mut file_inserted = false;
+    let mut edit_inserted = false;
     for item in menu.items()? {
         if let MenuItemKind::Submenu(sub) = item {
-            if sub.text()? == "File" {
-                sub.prepend_items(&[&new_item, &open_item, &sep])?;
-                inserted = true;
-                break;
+            let text = sub.text()?;
+            if text == "File" {
+                sub.prepend_items(&[&new_item, &open_item, &save_item, &save_as_item, &sep])?;
+                // Also under File so it works when OS menus are localized (no reliance on "View").
+                sub.append(&collab_panel_item)?;
+                file_inserted = true;
+            } else if text == "Edit" {
+                // macOS (and many platforms) already ship Undo/Redo in Edit. Do not append ours — that
+                // duplicates entries. Voxel undo/redo uses the same shortcuts via the webview (`App.tsx`).
+                edit_inserted = true;
             }
         }
     }
 
-    if !inserted {
+    if !file_inserted {
         let close = PredefinedMenuItem::close_window(app, None)?;
-        let file_menu = Submenu::with_items(app, "File", true, &[&new_item, &open_item, &sep, &close])?;
+        let file_menu = Submenu::with_items(
+            app,
+            "File",
+            true,
+            &[
+                &new_item,
+                &open_item,
+                &save_item,
+                &save_as_item,
+                &sep,
+                &collab_panel_item,
+                &close,
+            ],
+        )?;
         menu.prepend(&file_menu)?;
+    }
+
+    if !edit_inserted {
+        let edit_menu = Submenu::with_items(app, "Edit", true, &[&undo_item, &redo_item])?;
+        menu.append(&edit_menu)?;
     }
 
     menu.append(&debug_menu)?;
@@ -904,6 +1301,198 @@ struct NewProjectArgs {
 }
 
 #[tauri::command]
+fn collab_host_start(state: State<'_, Arc<ViewerState>>, app: AppHandle, port: u16) -> Result<String, String> {
+    let vs = Arc::clone(&*state);
+    collab::start_host(app, vs.clone(), Arc::clone(&vs.collab), port)
+}
+
+#[tauri::command]
+fn collab_join(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    url: String,
+    display_name: String,
+    color_rgb: u32,
+) -> Result<(), String> {
+    let vs = Arc::clone(&*state);
+    let cm = Arc::clone(&vs.collab);
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) =
+            collab::client_connect_blocking(&url, app.clone(), vs, cm, display_name, color_rgb).await
+        {
+            let _ = app.emit("collab-error", e);
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_leave(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    state.collab.lock().map_err(|e| e.to_string())?.leave();
+    *state.ping_flash.lock().map_err(|e| e.to_string())? = None;
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_local_peer_id(state: State<'_, Arc<ViewerState>>) -> u32 {
+    state
+        .collab
+        .lock()
+        .map(|c| c.local_peer_id)
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+fn collab_set_can_edit(
+    state: State<'_, Arc<ViewerState>>,
+    target_peer: u32,
+    can_edit: bool,
+) -> Result<(), String> {
+    let msg = serde_json::to_string(&collab::ClientToHost::SetCanEdit {
+        target_peer,
+        can_edit,
+    })
+    .unwrap();
+    let mut c = state.collab.lock().map_err(|e| e.to_string())?;
+    if c.is_client() {
+        if let Some(tx) = &c.client_tx {
+            let _ = tx.send(msg);
+        }
+    } else if c.is_host() {
+        for r in &mut c.roster {
+            if r.peer_id == target_peer {
+                r.can_edit = can_edit;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_push_camera(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    let vs = Arc::clone(&*state);
+    let mut c = vs.collab.lock().map_err(|e| e.to_string())?;
+    if !c.is_active() {
+        return Ok(());
+    }
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    let presence = collab::CameraPresence {
+        target: [cam.target.x, cam.target.y, cam.target.z],
+        radius: cam.smooth_spherical.radius,
+        theta: cam.smooth_spherical.theta,
+        phi: cam.smooth_spherical.phi,
+        perspective: cam.perspective,
+        fov_y: cam.fov_y,
+        ortho_half_height: cam.ortho_half_height,
+    };
+    let pid = c.local_peer_id;
+    c.presence.insert(pid, presence);
+    let msg = serde_json::to_string(&collab::ClientToHost::Camera { presence }).unwrap();
+    if c.is_client() {
+        if let Some(tx) = &c.client_tx {
+            let _ = tx.send(msg);
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_snap_camera(state: State<'_, Arc<ViewerState>>, peer_id: u32) -> Result<(), String> {
+    let pr = {
+        let c = state.collab.lock().map_err(|e| e.to_string())?;
+        c.presence.get(&peer_id).copied()
+    };
+    let Some(pr) = pr else {
+        return Err("no camera data for peer".into());
+    };
+    let mut cam = state.camera.lock().map_err(|e| e.to_string())?;
+    cam.target = glam::Vec3::new(pr.target[0], pr.target[1], pr.target[2]);
+    cam.spherical.radius = pr.radius;
+    cam.spherical.theta = pr.theta;
+    cam.spherical.phi = pr.phi;
+    cam.smooth_target = cam.target;
+    cam.smooth_spherical = cam.spherical;
+    cam.perspective = pr.perspective;
+    cam.fov_y = pr.fov_y;
+    cam.ortho_half_height = pr.ortho_half_height;
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_send_chat(state: State<'_, Arc<ViewerState>>, app: AppHandle, text: String) -> Result<(), String> {
+    let c = state.collab.lock().map_err(|e| e.to_string())?;
+    if c.is_host() {
+        let ev = collab::HostToClient::Chat {
+            peer_id: collab::HOST_PEER_ID,
+            display_name: "Host".into(),
+            text,
+            ts_ms: chrono::Utc::now().timestamp_millis(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let _ = app.emit("collab-chat", &json);
+        if let Some(tx) = &c.host_broadcast {
+            let _ = tx.send(json);
+        }
+        return Ok(());
+    }
+    if let Some(tx) = &c.client_tx {
+        let msg = serde_json::to_string(&collab::ClientToHost::Chat { text }).unwrap();
+        let _ = tx.send(msg);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn collab_send_ping(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    x: i32,
+    y: i32,
+    z: i32,
+) -> Result<(), String> {
+    let mut c = state.collab.lock().map_err(|e| e.to_string())?;
+    if c.is_host() {
+        let host_color = c
+            .roster
+            .iter()
+            .find(|r| r.peer_id == collab::HOST_PEER_ID)
+            .map(|r| r.color_rgb)
+            .unwrap_or(0xffff44);
+        drop(c);
+        collab::record_ping_flash_colored(Arc::as_ref(&*state), x, y, z, host_color);
+        c = state.collab.lock().map_err(|e| e.to_string())?;
+        let ping = collab::HostToClient::Ping {
+            peer_id: collab::HOST_PEER_ID,
+            x,
+            y,
+            z,
+        };
+        let json = serde_json::to_string(&ping).unwrap();
+        let _ = app.emit("collab-ping", &json);
+        if let Some(tx) = &c.host_broadcast {
+            let _ = tx.send(json);
+        }
+        return Ok(());
+    }
+    if let Some(tx) = &c.client_tx {
+        let msg = serde_json::to_string(&collab::ClientToHost::Ping { x, y, z }).unwrap();
+        let _ = tx.send(msg);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_autosave_interval_secs(state: State<'_, Arc<ViewerState>>) -> Result<u64, String> {
+    Ok(*state.autosave_interval_secs.lock().map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+fn set_autosave_interval_secs(state: State<'_, Arc<ViewerState>>, secs: u64) -> Result<(), String> {
+    *state.autosave_interval_secs.lock().map_err(|e| e.to_string())? = secs;
+    Ok(())
+}
+
+#[tauri::command]
 fn create_new_project(state: State<'_, Arc<ViewerState>>, app: AppHandle, args: NewProjectArgs) -> Result<(), String> {
     let grid_size = args.grid_size.clamp(1, MAX_GRID_SIZE);
     let shape_l = start_shape_label(args.shape);
@@ -931,6 +1520,12 @@ pub fn run() {
         }),
         last_edit_perf: Mutex::new(None),
         last_scene_bounds: Mutex::new(None),
+        edit_undo: Mutex::new(Vec::new()),
+        edit_redo: Mutex::new(Vec::new()),
+        collab: Arc::new(std::sync::Mutex::new(collab::CollabRuntime::default())),
+        ping_flash: Mutex::new(None),
+        autosave_interval_secs: Mutex::new(120),
+        last_autosave: Mutex::new(None),
     });
     let vs = viewer_state.clone();
 
@@ -944,6 +1539,27 @@ pub fn run() {
                 open_voxelle_file_dialog(app.clone(), state.inner().clone());
             } else if event.id() == "new_project" {
                 let _ = app.emit("voxelle-open-new-project", ());
+            } else if event.id() == "menu_undo" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = voxel_undo(state, app.clone());
+            } else if event.id() == "menu_redo" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = voxel_redo(state, app.clone());
+            } else if event.id() == "menu_save" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                if let Err(e) = save_voxelle(state) {
+                    let _ = app.emit("voxelle-load-error", e);
+                }
+            } else if event.id() == "menu_save_as" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = save_voxelle_as(state, app.clone());
+            } else if event.id() == "menu_collab_panel" {
+                // Target the main webview; a bare `emit` can miss the window listener in some builds.
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-toggle-collab",
+                    true,
+                );
             } else if event.id() == "debug_copy_performance" {
                 let state = app.state::<Arc<ViewerState>>();
                 if let Err(e) = copy_performance_data_to_clipboard(state.inner()) {
@@ -974,7 +1590,22 @@ pub fn run() {
             create_new_project,
             voxel_pick_probe,
             sync_preview_input,
-            voxel_edit_at_screen
+            voxel_edit_at_screen,
+            voxel_undo,
+            voxel_redo,
+            save_voxelle,
+            save_voxelle_as,
+            collab_host_start,
+            collab_join,
+            collab_leave,
+            collab_local_peer_id,
+            collab_set_can_edit,
+            collab_push_camera,
+            collab_snap_camera,
+            collab_send_chat,
+            collab_send_ping,
+            get_autosave_interval_secs,
+            set_autosave_interval_secs,
         ])
         .build(tauri::generate_context!())
         .expect("error building app")
@@ -991,8 +1622,34 @@ pub fn run() {
                     let cam = state.camera.lock().unwrap();
                     viewer.update_uniforms(&cam);
                     refresh_preview_mesh(viewer, Arc::as_ref(&state), &cam);
+                    sync_collab_peer_lines(viewer, Arc::as_ref(&state));
+                    sync_ping_flash(viewer, Arc::as_ref(&state));
                     let _ = viewer.render();
                     sample_fps_and_emit(app, &state.fps);
+
+                    let interval = *state.autosave_interval_secs.lock().unwrap();
+                    let (collab_on, is_host) = {
+                        let c = state.collab.lock().unwrap();
+                        (c.is_active(), c.is_host())
+                    };
+                    if interval > 0 && (!collab_on || is_host) {
+                        let label = state.file_label.lock().unwrap().clone();
+                        if label.ends_with(".voxelle") {
+                            let now = Instant::now();
+                            let last = state.last_autosave.lock().unwrap();
+                            let do_save = last
+                                .map(|t| now.duration_since(t).as_secs() >= interval)
+                                .unwrap_or(true);
+                            if do_save {
+                                drop(last);
+                                if write_voxelle_file_to_path(&state, std::path::Path::new(&label))
+                                    .is_ok()
+                                {
+                                    *state.last_autosave.lock().unwrap() = Some(now);
+                                }
+                            }
+                        }
+                    }
                 }
                 // While orbit damping runs, no pointer IPC wakes the Wry loop (`ControlFlow::Wait`).
                 // Queue a no-op on the main thread from a background context so the proxy wakes

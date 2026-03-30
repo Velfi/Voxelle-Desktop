@@ -7,6 +7,10 @@ import "./App.css";
 /** Desktop viewer: cap new-project grid edge length (web allows larger). */
 const MAX_GRID_SIZE = 256;
 
+const LS_NAME = "voxelleCollabDisplayName";
+const LS_COLOR = "voxelleCollabColor";
+const LS_AUTOSAVE = "voxelleAutosaveSecs";
+
 type StartShape =
   | "cube"
   | "orb"
@@ -15,6 +19,14 @@ type StartShape =
   | "plane"
   | "circle"
   | "empty";
+
+type RosterEntry = {
+  peerId: number;
+  displayName: string;
+  colorRgb: number;
+  isLeader: boolean;
+  canEdit: boolean;
+};
 
 function basename(path: string): string {
   const n = path.replace(/\\/g, "/");
@@ -48,6 +60,38 @@ function App() {
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newGridSize, setNewGridSize] = useState(32);
   const [newGridShape, setNewGridShape] = useState<StartShape>("circle");
+
+  const [collabOpen, setCollabOpen] = useState(false);
+  const [hostWsUrl, setHostWsUrl] = useState<string | null>(null);
+  const [joinUrl, setJoinUrl] = useState("ws://127.0.0.1:27300");
+  const [displayName, setDisplayName] = useState(() =>
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(LS_NAME) || "Artist"
+      : "Artist",
+  );
+  const [accentColor, setAccentColor] = useState(() =>
+    typeof localStorage !== "undefined"
+      ? localStorage.getItem(LS_COLOR) || "#6699cc"
+      : "#6699cc",
+  );
+  const [roster, setRoster] = useState<RosterEntry[]>([]);
+  const [chatLines, setChatLines] = useState<string[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [hostPort, setHostPort] = useState(27300);
+  const [autosaveSecs, setAutosaveSecs] = useState(() => {
+    if (typeof localStorage === "undefined") return 120;
+    const v = localStorage.getItem(LS_AUTOSAVE);
+    return v ? Number(v) || 120 : 120;
+  });
+  const [collabActive, setCollabActive] = useState(false);
+  /** Set when hosting or after welcome; 0 when solo. */
+  const [localPeerId, setLocalPeerId] = useState(0);
+
+  const hexToRgb = (hex: string): number => {
+    const h = hex.replace("#", "");
+    const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+    return n & 0xffffff;
+  };
 
   const sendResize = useCallback(() => {
     const el = viewportRef.current;
@@ -88,6 +132,40 @@ function App() {
     const unlistenNewProject = listen("voxelle-open-new-project", () => {
       setNewProjectOpen(true);
     });
+    const unlistenToggleCollab = listen("voxelle-toggle-collab", () => {
+      setCollabOpen((o) => !o);
+    });
+    const unlistenCollabChat = listen<string>("collab-chat", (e) => {
+      try {
+        const j = JSON.parse(e.payload) as {
+          displayName?: string;
+          display_name?: string;
+          text?: string;
+        };
+        const who = j.displayName ?? j.display_name ?? "?";
+        const line = `${who}: ${j.text ?? ""}`;
+        setChatLines((prev) => [...prev.slice(-80), line]);
+      } catch {
+        setChatLines((prev) => [...prev.slice(-80), e.payload]);
+      }
+    });
+    const unlistenCollabJoined = listen("collab-joined", () => {
+      setCollabActive(true);
+    });
+    const unlistenCollabLocalPeer = listen<number>("collab-local-peer", (e) => {
+      setLocalPeerId(typeof e.payload === "number" ? e.payload : 0);
+    });
+    const unlistenCollabRoster = listen<string>("collab-roster", (e) => {
+      try {
+        const arr = JSON.parse(e.payload) as RosterEntry[];
+        setRoster(arr);
+      } catch {
+        /* ignore */
+      }
+    });
+    const unlistenCollabErr = listen<string>("collab-error", (e) => {
+      setLoadError(e.payload);
+    });
     return () => {
       ro.disconnect();
       void unlistenStart.then((fn) => fn());
@@ -96,6 +174,12 @@ function App() {
       void unlistenErr.then((fn) => fn());
       void unlistenFps.then((fn) => fn());
       void unlistenNewProject.then((fn) => fn());
+      void unlistenToggleCollab.then((fn) => fn());
+      void unlistenCollabChat.then((fn) => fn());
+      void unlistenCollabJoined.then((fn) => fn());
+      void unlistenCollabLocalPeer.then((fn) => fn());
+      void unlistenCollabRoster.then((fn) => fn());
+      void unlistenCollabErr.then((fn) => fn());
     };
   }, [sendResize]);
 
@@ -106,6 +190,57 @@ function App() {
   useEffect(() => {
     loadingRef.current = loading;
   }, [loading]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_NAME, displayName);
+  }, [displayName]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_COLOR, accentColor);
+  }, [accentColor]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_AUTOSAVE, String(autosaveSecs));
+    void invoke("set_autosave_interval_secs", { secs: autosaveSecs }).catch(
+      () => {},
+    );
+  }, [autosaveSecs]);
+
+  useEffect(() => {
+    void invoke("get_autosave_interval_secs").then((s) => {
+      if (typeof s === "number" && s > 0) setAutosaveSecs(s);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!collabActive) return;
+    const id = window.setInterval(() => {
+      void invoke("collab_push_camera").catch(() => {});
+    }, 150);
+    return () => clearInterval(id);
+  }, [collabActive]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.metaKey || e.ctrlKey;
+      if (meta && e.key === "z") {
+        e.preventDefault();
+        if (e.shiftKey) {
+          void invoke("voxel_redo").catch(() => {});
+        } else {
+          void invoke("voxel_undo").catch(() => {});
+        }
+      }
+      if (meta && e.key === "s") {
+        e.preventDefault();
+        void invoke("save_voxelle").catch(() => {
+          void invoke("save_voxelle_as").catch(() => {});
+        });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
@@ -152,11 +287,6 @@ function App() {
       setLoading(false);
     });
   }, [loading, newGridSize, newGridShape]);
-
-  const openNewProjectModal = useCallback(() => {
-    if (loading) return;
-    setNewProjectOpen(true);
-  }, [loading]);
 
   useEffect(() => {
     const w = getCurrentWindow();
@@ -367,6 +497,52 @@ function App() {
     });
   };
 
+  const startHost = () => {
+    void invoke("collab_host_start", { port: hostPort }).then((url) => {
+      setHostWsUrl(url as string);
+      setCollabActive(true);
+    });
+  };
+
+  const joinSession = () => {
+    const rgb = hexToRgb(accentColor);
+    void invoke("collab_join", {
+      url: joinUrl,
+      displayName,
+      colorRgb: rgb,
+    }).then(() => setCollabActive(true));
+  };
+
+  const leaveSession = () => {
+    void invoke("collab_leave").then(() => {
+      setCollabActive(false);
+      setHostWsUrl(null);
+      setRoster([]);
+      setLocalPeerId(0);
+    });
+  };
+
+  const amLeader = roster.some(
+    (r) => r.peerId === localPeerId && r.isLeader,
+  );
+
+  const sendChat = () => {
+    const t = chatInput.trim();
+    if (!t) return;
+    void invoke("collab_send_chat", { text: t }).catch(() => {});
+    setChatInput("");
+  };
+
+  const onRosterDoubleClick = (peerId: number) => {
+    void invoke("collab_snap_camera", { peerId }).catch(() => {});
+  };
+
+  const setCanEdit = (peerId: number, canEdit: boolean) => {
+    void invoke("collab_set_can_edit", { targetPeer: peerId, canEdit }).catch(
+      () => {},
+    );
+  };
+
   return (
     <div className="app">
       <header className="app-chrome">
@@ -419,15 +595,6 @@ function App() {
               👊
             </button>
           </div>
-          <button
-            type="button"
-            className="toolbar-btn"
-            onClick={openNewProjectModal}
-            disabled={loading}
-            title="Create a new grid with a starting shape (same options as the web app)"
-          >
-            New project…
-          </button>
         </div>
       </header>
       <div className="viewport-wrap">
@@ -457,6 +624,135 @@ function App() {
           <div className="viewport-error" role="alert" title={loadError}>
             {loadError}
           </div>
+        ) : null}
+        {collabOpen ? (
+          <aside className="collab-panel" aria-label="Collaboration">
+            <h3 className="collab-panel-title">Session</h3>
+            <label className="modal-field">
+              Display name
+              <input
+                type="text"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                maxLength={32}
+              />
+            </label>
+            <label className="modal-field">
+              Accent color
+              <input
+                type="color"
+                value={accentColor}
+                onChange={(e) => setAccentColor(e.target.value)}
+              />
+            </label>
+            <label className="modal-field">
+              Autosave interval (seconds, 0 = off)
+              <input
+                type="number"
+                min={0}
+                max={3600}
+                value={autosaveSecs}
+                onChange={(e) =>
+                  setAutosaveSecs(Math.max(0, Number(e.target.value) || 0))
+                }
+              />
+            </label>
+            <div className="collab-row">
+              <label className="modal-field collab-grow">
+                Port
+                <input
+                  type="number"
+                  value={hostPort}
+                  onChange={(e) =>
+                    setHostPort(Math.max(1, Number(e.target.value) || 27300))
+                  }
+                />
+              </label>
+              <button type="button" onClick={startHost}>
+                Host
+              </button>
+            </div>
+            {hostWsUrl ? (
+              <p className="collab-hint">
+                Share: <code>{hostWsUrl}</code>
+              </p>
+            ) : null}
+            <div className="collab-row">
+              <label className="modal-field collab-grow">
+                Join URL
+                <input
+                  type="text"
+                  value={joinUrl}
+                  onChange={(e) => setJoinUrl(e.target.value)}
+                />
+              </label>
+              <button type="button" onClick={joinSession}>
+                Join
+              </button>
+            </div>
+            <button type="button" onClick={leaveSession}>
+              Leave session
+            </button>
+            <h4 className="collab-subtitle">Roster</h4>
+            <ul className="collab-roster">
+              {roster.map((r) => (
+                <li key={r.peerId}>
+                  <button
+                    type="button"
+                    className="collab-roster-name"
+                    onDoubleClick={() => onRosterDoubleClick(r.peerId)}
+                    title="Double-click to match camera"
+                  >
+                    <span
+                      className="collab-swatch"
+                      style={{
+                        background: `#${(r.colorRgb & 0xffffff).toString(16).padStart(6, "0")}`,
+                      }}
+                    />
+                    {r.displayName}
+                    {r.isLeader ? " (leader)" : ""}
+                  </button>
+                  {!r.isLeader && amLeader ? (
+                    <label className="collab-can-edit">
+                      <input
+                        type="checkbox"
+                        checked={r.canEdit}
+                        onChange={(e) =>
+                          setCanEdit(r.peerId, e.target.checked)
+                        }
+                      />
+                      edit
+                    </label>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+            <h4 className="collab-subtitle">Chat</h4>
+            <div className="collab-chat-log" role="log">
+              {chatLines.map((line, i) => (
+                <div key={i}>{line}</div>
+              ))}
+            </div>
+            <div className="collab-row">
+              <input
+                className="collab-grow"
+                type="text"
+                value={chatInput}
+                placeholder="Message…"
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+              />
+              <button type="button" onClick={sendChat}>
+                Send
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => void invoke("collab_send_ping", { x: 0, y: 0, z: 0 })}
+            >
+              Ping origin
+            </button>
+          </aside>
         ) : null}
       </div>
       {newProjectOpen ? (

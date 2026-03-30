@@ -199,10 +199,10 @@ pub fn preview_remove_cell(
 }
 
 /// Result of a successful add/remove for GPU incremental brick updates.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub enum VoxelEditDelta {
     Added(Voxel),
-    Removed { x: i32, y: i32, z: i32 },
+    Removed { voxel: Voxel },
 }
 
 pub fn apply_edit(
@@ -242,6 +242,7 @@ pub fn apply_edit(
             let Some(&remove_idx) = voxel_map.get(&hit) else {
                 return Ok(None);
             };
+            let removed_voxel = file.voxels[remove_idx];
             let last = file.voxels.len() - 1;
             if remove_idx != last {
                 file.voxels.swap(remove_idx, last);
@@ -251,13 +252,42 @@ pub fn apply_edit(
             file.voxels.pop();
             voxel_map.remove(&hit);
             return Ok(Some(VoxelEditDelta::Removed {
-                x: hit.0,
-                y: hit.1,
-                z: hit.2,
+                voxel: removed_voxel,
             }));
         }
         Ok(None)
     }
+}
+
+/// Swap-remove a voxel at `coord`. Returns the removed voxel if present.
+pub fn remove_voxel_at(
+    file: &mut VoxelleFile,
+    voxel_map: &mut HashMap<VoxelCoord, usize>,
+    coord: VoxelCoord,
+) -> Option<Voxel> {
+    let Some(&remove_idx) = voxel_map.get(&coord) else {
+        return None;
+    };
+    let removed_voxel = file.voxels[remove_idx];
+    let last = file.voxels.len() - 1;
+    if remove_idx != last {
+        file.voxels.swap(remove_idx, last);
+        let moved = file.voxels[remove_idx];
+        voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+    }
+    file.voxels.pop();
+    voxel_map.remove(&coord);
+    Some(removed_voxel)
+}
+
+pub fn push_voxel_known(
+    file: &mut VoxelleFile,
+    voxel_map: &mut HashMap<VoxelCoord, usize>,
+    v: Voxel,
+) {
+    let idx = file.voxels.len();
+    file.voxels.push(v);
+    voxel_map.insert((v.x, v.y, v.z), idx);
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ If clipboard copy fails, say so and manually note: approximate FPS (shown in the
 - **CPU mesh benchmarks** (Criterion): from `src-tauri/`, run `cargo bench --bench greedy_mesh` (see [`benches/greedy_mesh.rs`](src-tauri/benches/greedy_mesh.rs)).
 - **Edit perf**: scene bounds use incremental updates when possible ([`greedy_mesh::mesh_bounds_expand_with_voxel`](src-tauri/src/greedy_mesh.rs), strict-interior removes skip full scans); chunk GPU buffers may reuse via `COPY_DST` + `write_buffer` when the new mesh fits.
 - **Frontend**: [`src/App.tsx`](src/App.tsx) — viewport events, `invoke` to Rust.
+- **macOS Edit → Undo/Redo**: [`src-tauri/src/macos_undo.rs`](src-tauri/src/macos_undo.rs) registers each solo voxel edit with `NSUndoManager` so the system menu stays in sync with Rust stacks; collaboration does not use this path. If the webview has keyboard focus, `Cmd+Z` may still be handled by WebKit before AppKit—use the app menu or the in-viewport shortcut path if undo seems ignored.
 
 ## Format
 

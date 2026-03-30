@@ -209,6 +209,115 @@ body,
   color: rgba(255, 255, 255, 0.9);
 }
 
+.toolbar-btn.is-active {
+  background: rgba(120, 160, 255, 0.22);
+}
+
+.collab-panel {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: min(360px, 92vw);
+  max-height: min(520px, 86vh);
+  overflow: auto;
+  z-index: 4;
+  padding: 0.75rem;
+  background: rgba(12, 12, 14, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.collab-panel-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.collab-subtitle {
+  margin: 0.75rem 0 0.35rem;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.collab-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.collab-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.collab-hint {
+  margin: 0.25rem 0 0.5rem;
+  font-size: 0.75rem;
+  opacity: 0.85;
+  word-break: break-all;
+}
+
+.collab-hint code {
+  font-size: 0.72rem;
+}
+
+.collab-roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.collab-roster li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+  margin-bottom: 0.35rem;
+}
+
+.collab-roster-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  padding: 0.1rem 0;
+}
+
+.collab-roster-name:hover {
+  text-decoration: underline;
+}
+
+.collab-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.collab-can-edit {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  font-size: 0.75rem;
+  opacity: 0.85;
+}
+
+.collab-chat-log {
+  max-height: 120px;
+  overflow: auto;
+  padding: 0.35rem;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 4px;
+  margin-bottom: 0.35rem;
+  font-size: 0.75rem;
+}
+
 .toolbar-btn {
   margin: 0;
   padding: 0.35rem 0.65rem;

@@ -1,4 +1,4 @@
-use super::format::{decode_payload, focal_length_to_fov_y_radians, MaterialId};
+use super::format::{decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, MaterialId};
 
 #[test]
 fn focal_matches_ts() {
@@ -49,4 +49,25 @@ fn gzip_bson() {
     let compressed = gz.finish().unwrap();
     let file = decode_payload(&compressed).unwrap();
     assert_eq!(file.voxels.len(), 1);
+}
+
+#[test]
+fn v4_roundtrip_small() {
+    let file = super::format::VoxelleFile {
+        version: 4,
+        grid_size: 16,
+        scene: Default::default(),
+        scene_extra: None,
+        voxels: vec![super::format::Voxel {
+            x: 0,
+            y: 0,
+            z: 0,
+            color: 0x112233,
+            material: MaterialId::Metal,
+        }],
+    };
+    let bytes = encode_payload_v4(&file).unwrap();
+    let back = decode_payload(&bytes).unwrap();
+    assert_eq!(back.voxels.len(), 1);
+    assert_eq!(back.voxels[0].material, MaterialId::Metal);
 }

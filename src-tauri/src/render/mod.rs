@@ -25,6 +25,9 @@ mod gpu {
     pub mod mesh_greedy {
         pub const WGSL: &str = include_str!("gpu/mesh_greedy.wgsl");
     }
+    pub mod collab_peer_lines {
+        pub const WGSL: &str = include_str!("collab_peer_lines.wgsl");
+    }
 }
 
 use crate::camera::OrbitCamera;
@@ -132,6 +135,8 @@ pub struct WgpuViewer {
     /// Web-style ghost: occluded (Greater) then front (Always), unlit + alpha blend; no gbuffer writes.
     pipeline_preview_occluded: wgpu::RenderPipeline,
     pipeline_preview_front: wgpu::RenderPipeline,
+    pipeline_collab_lines_occluded: wgpu::RenderPipeline,
+    pipeline_collab_lines_front: wgpu::RenderPipeline,
     pipeline_sky: wgpu::RenderPipeline,
     pipeline_trans: wgpu::RenderPipeline,
     pipeline_shadow: wgpu::RenderPipeline,
@@ -158,6 +163,15 @@ pub struct WgpuViewer {
     preview_wire_vertex_buffer: Option<wgpu::Buffer>,
     preview_wire_index_buffer: Option<wgpu::Buffer>,
     preview_wire_index_count: u32,
+    collab_line_vertex_buffer: Option<wgpu::Buffer>,
+    collab_line_vertex_count: u32,
+    ping_vertex_buffer: Option<wgpu::Buffer>,
+    ping_index_buffer: Option<wgpu::Buffer>,
+    ping_index_count: u32,
+    ping_wire_vertex_buffer: Option<wgpu::Buffer>,
+    ping_wire_index_buffer: Option<wgpu::Buffer>,
+    ping_wire_index_count: u32,
+    pub(crate) ping_mesh_key: Option<(i32, i32, i32, u32)>,
     /// Dedup CPU mesh rebuild when hover cell unchanged.
     pub preview_cache_key: Option<(i32, i32, i32, u8)>,
 
@@ -326,6 +340,25 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
                 offset: 36,
                 shader_location: 3,
                 format: wgpu::VertexFormat::Float32,
+            },
+        ],
+    }
+}
+
+fn vertex_layout_collab_lines() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: (3 + 3) * 4,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x3,
             },
         ],
     }
@@ -819,6 +852,10 @@ impl WgpuViewer {
             label: Some("composite"),
             source: wgpu::ShaderSource::Wgsl(gpu::post_composite::WGSL.into()),
         });
+        let shader_collab_lines = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("collab_peer_lines"),
+            source: wgpu::ShaderSource::Wgsl(gpu::collab_peer_lines::WGSL.into()),
+        });
 
         let pl_opaque = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl_opaque"),
@@ -962,6 +999,71 @@ impl WgpuViewer {
             }),
             primitive: wgpu::PrimitiveState {
                 cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let pipeline_collab_lines_occluded = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("collab_lines_occluded"),
+            layout: Some(&pl_opaque),
+            vertex: wgpu::VertexState {
+                module: &shader_collab_lines,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout_collab_lines()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_collab_lines,
+                entry_point: Some("fs_collab_line_occluded"),
+                targets: preview_targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Greater,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 1,
+                    slope_scale: 1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        let pipeline_collab_lines_front = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("collab_lines_front"),
+            layout: Some(&pl_opaque),
+            vertex: wgpu::VertexState {
+                module: &shader_collab_lines,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_layout_collab_lines()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_collab_lines,
+                entry_point: Some("fs_collab_line_front"),
+                targets: preview_targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -1379,6 +1481,8 @@ impl WgpuViewer {
             pipeline_opaque,
             pipeline_preview_occluded,
             pipeline_preview_front,
+            pipeline_collab_lines_occluded,
+            pipeline_collab_lines_front,
             pipeline_sky,
             pipeline_trans,
             pipeline_shadow,
@@ -1399,6 +1503,15 @@ impl WgpuViewer {
             preview_wire_vertex_buffer: None,
             preview_wire_index_buffer: None,
             preview_wire_index_count: 0,
+            collab_line_vertex_buffer: None,
+            collab_line_vertex_count: 0,
+            ping_vertex_buffer: None,
+            ping_index_buffer: None,
+            ping_index_count: 0,
+            ping_wire_vertex_buffer: None,
+            ping_wire_index_buffer: None,
+            ping_wire_index_count: 0,
+            ping_mesh_key: None,
             preview_cache_key: None,
             sampler_linear,
             sampler_comparison,
@@ -1746,7 +1859,7 @@ impl WgpuViewer {
         let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;
         match delta {
             VoxelEditDelta::Added(v) => cache.apply_add(*v, cs),
-            VoxelEditDelta::Removed { x, y, z } => cache.apply_remove(*x, *y, *z, cs),
+            VoxelEditDelta::Removed { voxel } => cache.apply_remove(voxel.x, voxel.y, voxel.z, cs),
         }
     }
 
@@ -2203,6 +2316,89 @@ impl WgpuViewer {
         self.preview_cache_key = None;
     }
 
+    /// Line list: each vertex is `[x,y,z, r,g,b]` (6 floats); pairs form eye→target segments.
+    pub fn upload_collab_peer_lines(&mut self, verts: &[f32]) {
+        if verts.is_empty() || verts.len() % 6 != 0 {
+            self.collab_line_vertex_buffer = None;
+            self.collab_line_vertex_count = 0;
+            return;
+        }
+        let n = verts.len();
+        let nbytes = (n * std::mem::size_of::<f32>()) as u64;
+        if let Some(ref buf) = self.collab_line_vertex_buffer {
+            if buf.size() == nbytes {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
+                self.collab_line_vertex_count = n as u32;
+                return;
+            }
+        }
+        self.collab_line_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("collab_peer_lines_vtx"),
+            contents: bytemuck::cast_slice(verts),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        }));
+        self.collab_line_vertex_count = n as u32;
+    }
+
+    pub fn clear_collab_peer_lines(&mut self) {
+        self.collab_line_vertex_buffer = None;
+        self.collab_line_vertex_count = 0;
+    }
+
+    pub fn upload_ping_mesh(&mut self, solid: &MeshBuffers, wire: &MeshBuffers) {
+        fn interleave(mesh: &MeshBuffers) -> Vec<f32> {
+            let mut interleaved: Vec<f32> = Vec::with_capacity(mesh.positions.len() / 3 * 10);
+            let n = mesh.positions.len() / 3;
+            for i in 0..n {
+                interleaved.push(mesh.positions[i * 3]);
+                interleaved.push(mesh.positions[i * 3 + 1]);
+                interleaved.push(mesh.positions[i * 3 + 2]);
+                interleaved.push(mesh.normals[i * 3]);
+                interleaved.push(mesh.normals[i * 3 + 1]);
+                interleaved.push(mesh.normals[i * 3 + 2]);
+                interleaved.push(mesh.colors[i * 3]);
+                interleaved.push(mesh.colors[i * 3 + 1]);
+                interleaved.push(mesh.colors[i * 3 + 2]);
+                interleaved.push(mesh.mat_kind[i]);
+            }
+            interleaved
+        }
+        let solid_v = interleave(solid);
+        let wire_v = interleave(wire);
+        self.ping_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ping_vtx"),
+            contents: bytemuck::cast_slice(&solid_v),
+            usage: wgpu::BufferUsages::VERTEX,
+        }));
+        self.ping_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ping_idx"),
+            contents: bytemuck::cast_slice(&solid.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        }));
+        self.ping_index_count = solid.indices.len() as u32;
+        self.ping_wire_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ping_wire_vtx"),
+            contents: bytemuck::cast_slice(&wire_v),
+            usage: wgpu::BufferUsages::VERTEX,
+        }));
+        self.ping_wire_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ping_wire_idx"),
+            contents: bytemuck::cast_slice(&wire.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        }));
+        self.ping_wire_index_count = wire.indices.len() as u32;
+    }
+
+    pub fn clear_ping_mesh(&mut self) {
+        self.ping_vertex_buffer = None;
+        self.ping_index_buffer = None;
+        self.ping_index_count = 0;
+        self.ping_wire_vertex_buffer = None;
+        self.ping_wire_index_buffer = None;
+        self.ping_wire_index_count = 0;
+        self.ping_mesh_key = None;
+    }
+
     /// Updates GPU voxel brick. When `patch` is set and matches the existing brick layout, only one cell is written.
     pub fn upload_scene_data(
         &mut self,
@@ -2328,6 +2524,49 @@ impl WgpuViewer {
         }
     }
 
+    fn draw_indexed_ping(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if let (Some(vb), Some(ib)) = (&self.ping_vertex_buffer, &self.ping_index_buffer) {
+            if self.ping_index_count > 0 {
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_preview_occluded);
+                pass.draw_indexed(0..self.ping_index_count, 0, 0..1);
+                pass.set_pipeline(&self.pipeline_preview_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw_indexed(0..self.ping_index_count, 0, 0..1);
+            }
+        }
+        if let (Some(wvb), Some(wib)) = (&self.ping_wire_vertex_buffer, &self.ping_wire_index_buffer) {
+            if self.ping_wire_index_count > 0 {
+                pass.set_vertex_buffer(0, wvb.slice(..));
+                pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_preview_occluded);
+                pass.draw_indexed(0..self.ping_wire_index_count, 0, 0..1);
+                pass.set_pipeline(&self.pipeline_preview_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw_indexed(0..self.ping_wire_index_count, 0, 0..1);
+            }
+        }
+    }
+
+    fn draw_collab_peer_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(ref vb) = self.collab_line_vertex_buffer else {
+            return;
+        };
+        if self.collab_line_vertex_count < 2 {
+            return;
+        }
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.set_pipeline(&self.pipeline_collab_lines_occluded);
+        pass.draw(0..self.collab_line_vertex_count, 0..1);
+        pass.set_pipeline(&self.pipeline_collab_lines_front);
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.draw(0..self.collab_line_vertex_count, 0..1);
+    }
+
     pub fn render(&self) -> Result<(), String> {
         let frame = self.surface.get_current_texture().map_err(|e| e.to_string())?;
         let swap_view = frame
@@ -2404,6 +2643,8 @@ impl WgpuViewer {
             pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
             self.draw_indexed_mesh(&mut pass);
             self.draw_indexed_preview(&mut pass);
+            self.draw_collab_peer_lines(&mut pass);
+            self.draw_indexed_ping(&mut pass);
         }
 
         let ext = wgpu::Extent3d {

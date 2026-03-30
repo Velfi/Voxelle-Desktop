@@ -1,4 +1,12 @@
-# Tauri + React + Typescript
+# Voxelle Desktop
+
+Native voxel viewer and editor (Tauri + React + Vite).
+
+## Format
+
+- **[Voxelle v4 file layout (writers & readers)](docs/VOXELLE_FORMAT_V4.md)** — VX4 container, inner BSON vs dense wire, `fileMeta`, materials.
+
+## Tooling
 
 This template should help get you started developing with Tauri, React and Typescript in Vite.
 
