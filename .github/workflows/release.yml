@@ -7,6 +7,9 @@ on:
 
 jobs:
   publish-tauri:
+    # Use Node 24 for JS-based actions (checkout, setup-node) per GitHub deprecation of Node 20 runners.
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     permissions:
       contents: write
     strategy:
@@ -48,8 +51,7 @@ jobs:
 
       # Updater: requires repository secrets TAURI_SIGNING_PRIVATE_KEY and optionally
       # TAURI_SIGNING_PRIVATE_KEY_PASSWORD (see https://v2.tauri.app/plugin/updater/).
-      # With uploadUpdaterJson: true, the action builds signed updater bundles, uploads
-      # release assets, and publishes/merges latest.json for the static updater endpoint.
+      # includeUpdaterJson uploads/merges latest.json for the static updater endpoint (default: true).
       - uses: tauri-apps/tauri-action@v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -62,5 +64,5 @@ jobs:
           generateReleaseNotes: true
           releaseDraft: false
           prerelease: false
-          uploadUpdaterJson: true
+          includeUpdaterJson: true
           args: ${{ matrix.args }}
