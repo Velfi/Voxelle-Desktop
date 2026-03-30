@@ -709,6 +709,21 @@ impl SpatialMeshCache {
             }
         }
     }
+
+    /// In-place color/material change (same grid cell).
+    pub fn apply_paint(&mut self, after: Voxel, cs: i32) {
+        let cs = cs.max(1);
+        let coord = (after.x, after.y, after.z);
+        self.occupancy.insert(coord, after);
+        let k = chunk_key_from_world(after.x, after.y, after.z, self.origin, cs);
+        if let Some(vec) = self.buckets.get_mut(&k) {
+            if let Some(i) = vec.iter().position(|v| {
+                v.x == after.x && v.y == after.y && v.z == after.z
+            }) {
+                vec[i] = after;
+            }
+        }
+    }
 }
 
 /// Partitions arbitrary voxels into spatial chunks of edge length `cs` (world axes, aligned to the model AABB).
@@ -1509,7 +1524,12 @@ pub fn preview_cube_wireframe_mesh(
 }
 
 pub fn transform_mesh_buffers(mesh: &mut MeshBuffers, model: glam::Mat4) {
-    let inv_t = model.inverse().transpose();
+    let det = model.determinant();
+    let inv_t = if det.is_finite() && det.abs() > 1e-20 {
+        model.inverse().transpose()
+    } else {
+        glam::Mat4::IDENTITY
+    };
     for i in (0..mesh.positions.len()).step_by(3) {
         let p = glam::Vec3::new(mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2]);
         let pw = model.transform_point3(p);

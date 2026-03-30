@@ -181,6 +181,25 @@ impl OrbitCamera {
         self.spherical.radius = r.clamp(self.min_radius, self.max_radius);
     }
 
+    /// First-person style move on XZ + world Y (fly mode); `forward`/`right` are -1..1.
+    pub fn fly_move(&mut self, forward: f32, right: f32, up: f32, dt: f32, speed: f32) {
+        let dt = dt.max(0.0);
+        if dt == 0.0 {
+            return;
+        }
+        let eye = self.target + self.spherical.to_offset();
+        let mut flat = self.target - eye;
+        flat.y = 0.0;
+        if flat.length_squared() < 1e-8 {
+            flat = Vec3::new(0.0, 0.0, -1.0);
+        } else {
+            flat = flat.normalize();
+        }
+        let world_right = flat.cross(Vec3::Y).normalize();
+        let delta = (flat * forward + world_right * right + Vec3::Y * up) * (speed * dt);
+        self.target += delta;
+    }
+
     pub fn fit_sphere(&mut self, center: Vec3, radius: f32, width: f32, height: f32) {
         self.target = center;
         let aspect = (width / height.max(1.0)).max(1e-4);

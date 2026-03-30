@@ -1,7 +1,6 @@
 //! Multi-user editing: WebSocket host/client, host-authoritative voxel ops, per-peer undo on host.
 
 use crate::camera::Spherical;
-use crate::finish_voxel_edit_gpu;
 use crate::VoxelGpuRefreshReason;
 use crate::voxel_edit;
 use crate::voxelle::{empty_collab_placeholder, encode_payload_v4};
@@ -148,7 +147,7 @@ pub enum ClientToHost {
         color_rgb: u32,
     },
     Edit {
-        delta: voxel_edit::VoxelEditDelta,
+        deltas: Vec<voxel_edit::VoxelEditDelta>,
     },
     Undo,
     Redo,
@@ -193,7 +192,7 @@ pub enum HostToClient {
     Edit {
         seq: u64,
         peer_id: u32,
-        delta: voxel_edit::VoxelEditDelta,
+        deltas: Vec<voxel_edit::VoxelEditDelta>,
     },
     Chat {
         peer_id: u32,
@@ -234,8 +233,9 @@ pub struct CollabRuntime {
     pub presence: HashMap<u32, CameraPresence>,
     pub next_seq: u64,
     shutdown: Option<Arc<AtomicBool>>,
-    pub host_undo: HashMap<u32, Vec<voxel_edit::VoxelEditDelta>>,
-    pub host_redo: HashMap<u32, Vec<voxel_edit::VoxelEditDelta>>,
+    /// Each vec is one logical edit (stroke or click).
+    pub host_undo: HashMap<u32, Vec<Vec<voxel_edit::VoxelEditDelta>>>,
+    pub host_redo: HashMap<u32, Vec<Vec<voxel_edit::VoxelEditDelta>>>,
     /// Host → all connected guest websockets.
     pub host_broadcast: Option<broadcast::Sender<String>>,
     pub client_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
@@ -420,12 +420,15 @@ pub(crate) enum CollabPeerLeftKind {
     Disconnected,
 }
 
-fn apply_delta_on_main(
+fn apply_deltas_on_main(
     app: &AppHandle,
     state: &Arc<ViewerState>,
-    delta: &voxel_edit::VoxelEditDelta,
+    deltas: &[voxel_edit::VoxelEditDelta],
 ) -> Result<(), String> {
-    let delta = *delta;
+    if deltas.is_empty() {
+        return Ok(());
+    }
+    let owned: Vec<voxel_edit::VoxelEditDelta> = deltas.to_vec();
     let app_rt = app.clone();
     let app_progress = app.clone();
     let state = Arc::clone(state);
@@ -440,22 +443,16 @@ fn apply_delta_on_main(
             let Some(vmap) = vm.as_mut() else {
                 return Err("voxel index not ready".into());
             };
-            match delta {
-                voxel_edit::VoxelEditDelta::Added(v) => {
-                    voxel_edit::push_voxel_known(file, vmap, v);
-                }
-                voxel_edit::VoxelEditDelta::Removed { voxel } => {
-                    voxel_edit::remove_voxel_at(file, vmap, (voxel.x, voxel.y, voxel.z))
-                        .ok_or_else(|| "remote remove".to_string())?;
-                }
+            for d in &owned {
+                voxel_edit::apply_forward_delta(file, vmap, d)?;
             }
             Ok::<(), String>(())
         })();
         let r2 = r.and_then(|_| {
             let t = std::time::Instant::now();
-            finish_voxel_edit_gpu(
+            crate::finish_voxel_edit_gpu_deltas(
                 &state,
-                &delta,
+                &owned,
                 0.0,
                 t,
                 &app_progress,
@@ -507,15 +504,18 @@ fn replace_file_on_main(
 }
 
 pub fn host_apply_remote_edit(
-    _app: &AppHandle,
+    app: &AppHandle,
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
-    delta: voxel_edit::VoxelEditDelta,
+    deltas: Vec<voxel_edit::VoxelEditDelta>,
 ) -> Result<(), String> {
-    apply_delta_on_main(_app, state, &delta)?;
+    if deltas.is_empty() {
+        return Ok(());
+    }
+    apply_deltas_on_main(app, state, &deltas)?;
     collab.next_seq += 1;
-    collab.host_undo.entry(peer_id).or_default().push(delta);
+    collab.host_undo.entry(peer_id).or_default().push(deltas);
     collab.host_redo.remove(&peer_id);
     Ok(())
 }
@@ -525,12 +525,12 @@ pub fn host_undo_peer(
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
-) -> Result<Option<voxel_edit::VoxelEditDelta>, String> {
+) -> Result<Option<Vec<voxel_edit::VoxelEditDelta>>, String> {
     let original = collab.host_undo.entry(peer_id).or_default().pop();
     let Some(original) = original else {
         return Ok(None);
     };
-    let mesh_delta = {
+    let mesh_refresh: Vec<voxel_edit::VoxelEditDelta> = {
         let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
         let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
         let Some(file) = fg.as_mut() else {
@@ -539,29 +539,24 @@ pub fn host_undo_peer(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        match original {
-            voxel_edit::VoxelEditDelta::Added(v) => {
-                voxel_edit::remove_voxel_at(file, vmap, (v.x, v.y, v.z))
-                    .ok_or_else(|| "host undo".to_string())?;
-                voxel_edit::VoxelEditDelta::Removed { voxel: v }
-            }
-            voxel_edit::VoxelEditDelta::Removed { voxel } => {
-                voxel_edit::push_voxel_known(file, vmap, voxel);
-                voxel_edit::VoxelEditDelta::Added(voxel)
-            }
+        let mut mesh = Vec::with_capacity(original.len());
+        for d in original.iter().rev() {
+            voxel_edit::apply_inverse_delta(file, vmap, d)?;
+            mesh.push(voxel_edit::mesh_delta_after_inverse_of(d));
         }
+        mesh
     };
     let t = std::time::Instant::now();
-    finish_voxel_edit_gpu(
+    crate::finish_voxel_edit_gpu_deltas(
         state,
-        &mesh_delta,
+        &mesh_refresh,
         0.0,
         t,
         app,
         VoxelGpuRefreshReason::Undo,
     )?;
-    collab.host_redo.entry(peer_id).or_default().push(original);
-    Ok(Some(mesh_delta))
+    collab.host_redo.entry(peer_id).or_default().push(original.clone());
+    Ok(Some(mesh_refresh))
 }
 
 pub fn host_redo_peer(
@@ -569,12 +564,12 @@ pub fn host_redo_peer(
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
-) -> Result<Option<voxel_edit::VoxelEditDelta>, String> {
+) -> Result<Option<Vec<voxel_edit::VoxelEditDelta>>, String> {
     let forward = collab.host_redo.entry(peer_id).or_default().pop();
     let Some(forward) = forward else {
         return Ok(None);
     };
-    let mesh_delta = {
+    {
         let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
         let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
         let Some(file) = fg.as_mut() else {
@@ -583,29 +578,22 @@ pub fn host_redo_peer(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        match forward {
-            voxel_edit::VoxelEditDelta::Added(v) => {
-                voxel_edit::push_voxel_known(file, vmap, v);
-                voxel_edit::VoxelEditDelta::Added(v)
-            }
-            voxel_edit::VoxelEditDelta::Removed { voxel } => {
-                voxel_edit::remove_voxel_at(file, vmap, (voxel.x, voxel.y, voxel.z))
-                    .ok_or_else(|| "host redo".to_string())?;
-                voxel_edit::VoxelEditDelta::Removed { voxel }
-            }
+        for d in &forward {
+            voxel_edit::apply_forward_delta(file, vmap, d)?;
         }
-    };
+    }
     let t = std::time::Instant::now();
-    finish_voxel_edit_gpu(
+    crate::finish_voxel_edit_gpu_deltas(
         state,
-        &mesh_delta,
+        &forward,
         0.0,
         t,
         app,
         VoxelGpuRefreshReason::Redo,
     )?;
+    let out = forward.clone();
     collab.host_undo.entry(peer_id).or_default().push(forward);
-    Ok(Some(mesh_delta))
+    Ok(Some(out))
 }
 
 fn emit_and_broadcast(collab: &std::sync::Mutex<CollabRuntime>, _app: &AppHandle, json: &str) {
@@ -617,17 +605,17 @@ fn emit_and_broadcast(collab: &std::sync::Mutex<CollabRuntime>, _app: &AppHandle
 }
 
 /// Host local edit after GPU sync: notify guests + UI.
-pub fn host_emit_edit(
+pub fn host_emit_edit_batch(
     collab_mtx: &std::sync::Mutex<CollabRuntime>,
     app: &AppHandle,
     seq: u64,
     peer_id: u32,
-    delta: voxel_edit::VoxelEditDelta,
+    deltas: &[voxel_edit::VoxelEditDelta],
 ) {
     let br = HostToClient::Edit {
         seq,
         peer_id,
-        delta,
+        deltas: deltas.to_vec(),
     };
     if let Ok(json) = serde_json::to_string(&br) {
         emit_and_broadcast(collab_mtx, app, &json);
@@ -859,7 +847,7 @@ async fn handle_host_connection(
                 peer_already_removed = true;
                 break;
             }
-            ClientToHost::Edit { delta } => {
+            ClientToHost::Edit { deltas } => {
                 let allowed = roster
                     .iter()
                     .find(|r| r.peer_id == peer_id)
@@ -879,7 +867,7 @@ async fn handle_host_connection(
                 let seq = {
                     let mut c = collab_mtx.lock().unwrap();
                     if let Err(e) =
-                        host_apply_remote_edit(&app, &state, &mut c, peer_id, delta)
+                        host_apply_remote_edit(&app, &state, &mut c, peer_id, deltas.clone())
                     {
                         let _ = app.emit("collab-error", e);
                         continue;
@@ -889,7 +877,7 @@ async fn handle_host_connection(
                 let br = HostToClient::Edit {
                     seq,
                     peer_id,
-                    delta,
+                    deltas,
                 };
                 let json = serde_json::to_string(&br).unwrap();
                 emit_and_broadcast(&collab_mtx, &app, &json);
@@ -906,7 +894,7 @@ async fn handle_host_connection(
                 let json = serde_json::to_string(&HostToClient::Edit {
                     seq,
                     peer_id,
-                    delta: d,
+                    deltas: d,
                 })
                 .unwrap();
                 emit_and_broadcast(&collab_mtx, &app, &json);
@@ -923,7 +911,7 @@ async fn handle_host_connection(
                 let json = serde_json::to_string(&HostToClient::Edit {
                     seq,
                     peer_id,
-                    delta: d,
+                    deltas: d,
                 })
                 .unwrap();
                 emit_and_broadcast(&collab_mtx, &app, &json);
@@ -1394,12 +1382,12 @@ pub async fn client_connect_blocking(
                     if let Ok(ev) = serde_json::from_str::<HostToClient>(&t) {
                         match ev {
                             HostToClient::Keepalive => {}
-                            HostToClient::Edit { delta, peer_id, .. } => {
+                            HostToClient::Edit { deltas, peer_id, .. } => {
                                 let local = cm4.lock().unwrap().local_peer_id;
                                 if peer_id == local {
                                     continue;
                                 }
-                                let _ = apply_delta_on_main(&app4, &st4, &delta);
+                                let _ = apply_deltas_on_main(&app4, &st4, &deltas);
                                 let _ = app4.emit("collab-edit", t);
                             }
                             HostToClient::Roster { roster } => {

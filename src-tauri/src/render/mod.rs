@@ -34,7 +34,7 @@ use crate::render_constants::{BLOOM_STRENGTH, SHADOW_MAP_SIZE};
 use crate::voxel_edit::VoxelEditDelta;
 use crate::voxelle::{SceneObject, Voxel};
 use glam::{IVec3, Mat4, Vec3};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
@@ -71,6 +71,181 @@ pub(crate) enum PreparedOpaqueUpload {
     },
 }
 
+/// CPU-only phase of [`WgpuViewer::rebuild_mesh_gpu_greedy`] (safe to run off the main thread).
+pub(crate) enum PreparedGreedyRebuild {
+    /// Same as an empty voxel file: clear draw buffers.
+    NoVoxels,
+    /// Nothing visible after filtering.
+    AllHidden,
+    /// Upload via [`WgpuViewer::upload_prepared_opaque`].
+    Opaque {
+        opaque: PreparedOpaqueUpload,
+        bounds: MeshBounds,
+        last_route: String,
+    },
+    /// GPU slice pack done; main thread runs compute + buffer copy.
+    GpuGreedyPack {
+        bounds: MeshBounds,
+        headers: Vec<greedy_mesh::GpuSliceHeader>,
+        bits: Vec<u32>,
+        fallback_voxels: Vec<Voxel>,
+        fallback_objects: Vec<SceneObject>,
+    },
+}
+
+fn cpu_mesh_fallback_prepare(
+    voxels: &[Voxel],
+    objects: &[SceneObject],
+    grid_size: i32,
+) -> Result<(PreparedOpaqueUpload, MeshBounds, String), String> {
+    let default_objs = crate::voxelle::default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
+    let work = crate::voxelle::scene::visible_voxels_for_meshing(voxels, objs);
+    if work.is_empty() {
+        return Ok((
+            PreparedOpaqueUpload::Empty,
+            greedy_mesh::mesh_bounds_for_cube_side(grid_size),
+            "cpu_empty".to_string(),
+        ));
+    }
+    let bounds = greedy_mesh::mesh_bounds_from_voxels_world(&work, objs)
+        .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&work))
+        .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(grid_size));
+    let multi = work
+        .iter()
+        .map(|v| v.object_id)
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
+    if work.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS && !multi {
+        let Some((origin, meshes, spatial_cache)) =
+            greedy_mesh::build_chunk_meshes_and_spatial_cache(
+                &work,
+                greedy_mesh::SPATIAL_CHUNK_SIZE,
+                |_| {},
+            )
+        else {
+            return Ok((
+                PreparedOpaqueUpload::Empty,
+                bounds,
+                "cpu_chunked_none".to_string(),
+            ));
+        };
+        if meshes.is_empty() {
+            return Ok((
+                PreparedOpaqueUpload::Empty,
+                bounds,
+                "cpu_chunked_empty".to_string(),
+            ));
+        }
+        let chunk_origin = IVec3::new(origin.0, origin.1, origin.2);
+        Ok((
+            PreparedOpaqueUpload::Chunked {
+                chunk_origin,
+                meshes,
+                spatial_cache,
+            },
+            bounds,
+            "cpu_chunked".to_string(),
+        ))
+    } else {
+        let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
+        Ok((PreparedOpaqueUpload::Single(mesh), bounds, "cpu".to_string()))
+    }
+}
+
+/// CPU work for a full greedy mesh rebuild (background thread + [`WgpuViewer::rebuild_mesh_gpu_greedy`]).
+pub(crate) fn compute_greedy_rebuild_cpu(
+    voxels: &[Voxel],
+    objects: &[SceneObject],
+    grid_size: i32,
+) -> Result<PreparedGreedyRebuild, String> {
+    if voxels.is_empty() {
+        return Ok(PreparedGreedyRebuild::NoVoxels);
+    }
+    let default_objs = crate::voxelle::default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
+    let work = crate::voxelle::scene::visible_voxels_for_meshing(voxels, objs);
+    if work.is_empty() {
+        return Ok(PreparedGreedyRebuild::AllHidden);
+    }
+    let multi = work
+        .iter()
+        .map(|v| v.object_id)
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
+    let transformed = objs.iter().any(|o| {
+        o.visible
+            && (o.translation != [0.0, 0.0, 0.0]
+                || o.rotation[0].abs() + o.rotation[1].abs() + o.rotation[2].abs() > 1e-5
+                || o.rotation[3] < 0.9999
+                || o.scale != [1.0, 1.0, 1.0])
+    });
+    if multi || transformed {
+        let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
+        let bounds = greedy_mesh::mesh_bounds_from_voxels_world(voxels, objs)
+            .or_else(|| greedy_mesh::mesh_bounds_from_voxels(voxels))
+            .ok_or_else(|| "mesh bounds".to_string())?;
+        let last_route = if multi {
+            "cpu_multi_object"
+        } else {
+            "cpu_object_transform"
+        }
+        .to_string();
+        return Ok(PreparedGreedyRebuild::Opaque {
+            opaque: PreparedOpaqueUpload::Single(mesh),
+            bounds,
+            last_route,
+        });
+    }
+    let bounds = greedy_mesh::mesh_bounds_from_voxels_world(&work, objs)
+        .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&work))
+        .ok_or("mesh bounds")?;
+    if std::env::var("VOXELLE_CPU_MESH").is_ok() {
+        let (opaque, b, route) = cpu_mesh_fallback_prepare(voxels, objs, grid_size)?;
+        return Ok(PreparedGreedyRebuild::Opaque {
+            opaque,
+            bounds: b,
+            last_route: route,
+        });
+    }
+    let map = greedy_mesh::voxel_map(voxels);
+    let (headers, bits) = match greedy_mesh::pack_gpu_greedy_slices(&map, &work) {
+        Ok(x) => x,
+        Err(()) => {
+            let (opaque, b, route) = cpu_mesh_fallback_prepare(voxels, objs, grid_size)?;
+            return Ok(PreparedGreedyRebuild::Opaque {
+                opaque,
+                bounds: b,
+                last_route: route,
+            });
+        }
+    };
+    if headers.is_empty() {
+        return Ok(PreparedGreedyRebuild::Opaque {
+            opaque: PreparedOpaqueUpload::Empty,
+            bounds,
+            last_route: "gpu_no_headers".to_string(),
+        });
+    }
+    Ok(PreparedGreedyRebuild::GpuGreedyPack {
+        bounds,
+        headers,
+        bits,
+        fallback_voxels: voxels.to_vec(),
+        fallback_objects: objects.to_vec(),
+    })
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobalState {
@@ -97,7 +272,9 @@ struct PostBlurUniform {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PostCompositeOpts {
     tone_mode: u32,
-    _pad: [u32; 3],
+    grain_strength: f32,
+    vignette_strength: f32,
+    distance_tint_strength: f32,
 }
 
 pub struct WgpuViewer {
@@ -163,6 +340,7 @@ pub struct WgpuViewer {
 
     post_blur_buf: wgpu::Buffer,
     post_composite_opts_buf: wgpu::Buffer,
+    post_composite_opts: PostCompositeOpts,
 
     pipeline_opaque: wgpu::RenderPipeline,
     /// Web-style ghost: occluded (Greater) then front (Always), unlit + alpha blend; no gbuffer writes.
@@ -1261,12 +1439,15 @@ impl WgpuViewer {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let post_composite_opts = PostCompositeOpts {
+            tone_mode: 0,
+            grain_strength: 0.0,
+            vignette_strength: 0.0,
+            distance_tint_strength: 0.0,
+        };
         let post_composite_opts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("post_composite_opts"),
-            contents: bytemuck::bytes_of(&PostCompositeOpts {
-                tone_mode: 0,
-                _pad: [0, 0, 0],
-            }),
+            contents: bytemuck::bytes_of(&post_composite_opts),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
@@ -1489,6 +1670,7 @@ impl WgpuViewer {
             bind_trans,
             post_blur_buf,
             post_composite_opts_buf,
+            post_composite_opts,
             pipeline_opaque,
             pipeline_preview_occluded,
             pipeline_preview_front,
@@ -1626,17 +1808,31 @@ impl WgpuViewer {
         (self.viewport_width.max(1), self.viewport_height.max(1))
     }
 
+    /// Update world-space AABB used for lighting / shadow frusta (call when the opaque mesh changes without a voxel brick upload).
+    pub fn set_scene_bounds(&mut self, bounds: MeshBounds) {
+        self.scene_bounds = bounds;
+    }
+
     /// `mode`: 0 neutral … 5 reinhard (see `post_composite.wgsl` / Voxelle web tone mapping ids).
     pub fn set_tone_mapping_mode(&mut self, mode: u32) {
         let mode = mode.min(5);
-        let opts = PostCompositeOpts {
-            tone_mode: mode,
-            _pad: [0, 0, 0],
-        };
+        self.post_composite_opts.tone_mode = mode;
         self.queue.write_buffer(
             &self.post_composite_opts_buf,
             0,
-            bytemuck::bytes_of(&opts),
+            bytemuck::bytes_of(&self.post_composite_opts),
+        );
+    }
+
+    /// Film grain, edge vignette, and screen-space distance tint (0–1 each), after tone mapping.
+    pub fn set_mood_params(&mut self, grain: f32, vignette: f32, distance_tint: f32) {
+        self.post_composite_opts.grain_strength = grain.clamp(0.0, 1.0);
+        self.post_composite_opts.vignette_strength = vignette.clamp(0.0, 1.0);
+        self.post_composite_opts.distance_tint_strength = distance_tint.clamp(0.0, 1.0);
+        self.queue.write_buffer(
+            &self.post_composite_opts_buf,
+            0,
+            bytemuck::bytes_of(&self.post_composite_opts),
         );
     }
 
@@ -1895,6 +2091,7 @@ impl WgpuViewer {
         match delta {
             VoxelEditDelta::Added(v) => cache.apply_add(*v, cs),
             VoxelEditDelta::Removed { voxel } => cache.apply_remove(voxel.x, voxel.y, voxel.z, cs),
+            VoxelEditDelta::Painted { after, .. } => cache.apply_paint(*after, cs),
         }
     }
 
@@ -2050,14 +2247,20 @@ impl WgpuViewer {
         } else {
             objects
         };
-        let multi = voxels
+        let work = crate::voxelle::scene::visible_voxels_for_meshing(voxels, objs);
+        if work.is_empty() {
+            self.upload_mesh(&greedy_mesh::MeshBuffers::default());
+            self.last_mesh_route = "cpu_empty".to_string();
+            return;
+        }
+        let multi = work
             .iter()
             .map(|v| v.object_id)
             .collect::<std::collections::HashSet<_>>()
             .len()
             > 1;
-        if voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS && !multi {
-            self.upload_cpu_mesh_chunked_full(voxels);
+        if work.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS && !multi {
+            self.upload_cpu_mesh_chunked_full(&work);
         } else {
             let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
             self.upload_mesh(&mesh);
@@ -2418,90 +2621,70 @@ impl WgpuViewer {
         );
     }
 
-    /// GPU greedy mesh (WGSL) when slice bitmaps fit 64×64; otherwise CPU [`greedy_mesh::build_greedy_mesh`].
-    /// Set `VOXELLE_CPU_MESH=1` to force CPU meshing.
-    pub fn rebuild_mesh_gpu_greedy(
+    pub(crate) fn apply_prepared_greedy_rebuild(
         &mut self,
-        voxels: &[Voxel],
-        objects: &[SceneObject],
+        prepared: PreparedGreedyRebuild,
     ) -> Result<MeshBounds, String> {
-        if voxels.is_empty() {
-            self.vertex_buffer = None;
-            self.index_buffer = None;
-            self.index_count = 0;
-            self.opaque_chunked = false;
-            self.opaque_chunks.clear();
-            self.spatial_mesh_cache = None;
-            return Err("empty voxels".into());
+        match prepared {
+            PreparedGreedyRebuild::NoVoxels => {
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+                self.opaque_chunked = false;
+                self.opaque_chunks.clear();
+                self.spatial_mesh_cache = None;
+                Err("empty voxels".into())
+            }
+            PreparedGreedyRebuild::AllHidden { .. } => {
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+                self.opaque_chunked = false;
+                self.opaque_chunks.clear();
+                self.spatial_mesh_cache = None;
+                self.last_mesh_route = "all_hidden".to_string();
+                Err("empty voxels".into())
+            }
+            PreparedGreedyRebuild::Opaque {
+                opaque,
+                bounds,
+                last_route,
+            } => {
+                self.upload_prepared_opaque(opaque);
+                self.last_mesh_route = last_route;
+                Ok(bounds)
+            }
+            PreparedGreedyRebuild::GpuGreedyPack {
+                bounds,
+                headers,
+                bits,
+                fallback_voxels,
+                fallback_objects,
+            } => self.apply_gpu_greedy_pack(
+                bounds,
+                &headers,
+                &bits,
+                &fallback_voxels,
+                &fallback_objects,
+            ),
         }
+    }
 
+    fn apply_gpu_greedy_pack(
+        &mut self,
+        bounds: MeshBounds,
+        headers: &[greedy_mesh::GpuSliceHeader],
+        bits: &[u32],
+        fallback_voxels: &[Voxel],
+        fallback_objects: &[SceneObject],
+    ) -> Result<MeshBounds, String> {
         let default_objs = crate::voxelle::default_scene_objects();
-        let objs: &[SceneObject] = if objects.is_empty() {
+        let objs: &[SceneObject] = if fallback_objects.is_empty() {
             default_objs.as_slice()
         } else {
-            objects
+            fallback_objects
         };
-        let multi = voxels
-            .iter()
-            .map(|v| v.object_id)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            > 1;
-        let transformed = objs.iter().any(|o| {
-            o.translation != [0.0, 0.0, 0.0]
-                || o.rotation[0].abs() + o.rotation[1].abs() + o.rotation[2].abs() > 1e-5
-                || o.rotation[3] < 0.9999
-                || o.scale != [1.0, 1.0, 1.0]
-        });
-        if multi || transformed {
-            let (mesh, _bounds) = greedy_mesh::build_greedy_mesh(voxels, objs);
-            self.vertex_buffer = None;
-            self.index_buffer = None;
-            self.index_count = 0;
-            self.opaque_chunked = false;
-            self.opaque_chunks.clear();
-            self.spatial_mesh_cache = None;
-            self.upload_mesh(&mesh);
-            self.last_mesh_route = if multi {
-                "cpu_multi_object"
-            } else {
-                "cpu_object_transform"
-            }
-            .to_string();
-            return Ok(
-                greedy_mesh::mesh_bounds_from_voxels_world(voxels, objs)
-                    .or_else(|| greedy_mesh::mesh_bounds_from_voxels(voxels))
-                    .ok_or_else(|| "mesh bounds".to_string())?,
-            );
-        }
-
-        let bounds = greedy_mesh::mesh_bounds_from_voxels(voxels).ok_or("mesh bounds")?;
-
-        if std::env::var("VOXELLE_CPU_MESH").is_ok() {
-            self.cpu_mesh_fallback(voxels, objs);
-            return Ok(bounds);
-        }
-
-        let map = greedy_mesh::voxel_map(voxels);
-        let (headers, bits) = match greedy_mesh::pack_gpu_greedy_slices(&map, voxels) {
-            Ok(x) => x,
-            Err(()) => {
-                self.cpu_mesh_fallback(voxels, objs);
-                return Ok(bounds);
-            }
-        };
-
-        if headers.is_empty() {
-            self.vertex_buffer = None;
-            self.index_buffer = None;
-            self.index_count = 0;
-            self.opaque_chunked = false;
-            self.opaque_chunks.clear();
-            self.spatial_mesh_cache = None;
-            self.last_mesh_route = "gpu_no_headers".to_string();
-            return Ok(bounds);
-        }
-
+        let map = greedy_mesh::voxel_map(fallback_voxels);
         let packed_halo = greedy_mesh::pack_brick_halo_cells(
             &map,
             (
@@ -2539,20 +2722,20 @@ impl WgpuViewer {
             &mut self.mesh_greedy_pipeline,
             &mut self.mesh_greedy_pl_version,
             mesh_brick_ref,
-            &headers,
-            &bits,
+            headers,
+            bits,
             mesh_brick_origin,
             mesh_brick_dims,
         ) {
             Ok(v) => v,
             Err(_) => {
-                self.cpu_mesh_fallback(voxels, objs);
+                self.cpu_mesh_fallback(fallback_voxels, objs);
                 return Ok(bounds);
             }
         };
 
         if v_total == 0 || i_total == 0 {
-            self.cpu_mesh_fallback(voxels, objs);
+            self.cpu_mesh_fallback(fallback_voxels, objs);
             return Ok(bounds);
         }
 
@@ -2602,6 +2785,18 @@ impl WgpuViewer {
         self.index_count = i_total;
         self.last_mesh_route = "gpu_greedy".to_string();
         Ok(bounds)
+    }
+
+    /// GPU greedy mesh (WGSL) when slice bitmaps fit 64×64; otherwise CPU [`greedy_mesh::build_greedy_mesh`].
+    /// Set `VOXELLE_CPU_MESH=1` to force CPU meshing.
+    pub fn rebuild_mesh_gpu_greedy(
+        &mut self,
+        voxels: &[Voxel],
+        objects: &[SceneObject],
+        grid_size: i32,
+    ) -> Result<MeshBounds, String> {
+        let prepared = compute_greedy_rebuild_cpu(voxels, objects, grid_size)?;
+        self.apply_prepared_greedy_rebuild(prepared)
     }
 
     pub fn upload_preview_mesh(&mut self, solid: &MeshBuffers, wire: &MeshBuffers) {
@@ -2762,6 +2957,58 @@ impl WgpuViewer {
                         (off * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
                         &p.packed.to_le_bytes(),
                     );
+                    return;
+                }
+            }
+        }
+
+        let brick = GpuVoxelBrick::from_voxels(voxels, MAX_AXIS).unwrap_or(GpuVoxelBrick {
+            origin: IVec3::ZERO,
+            dims: (0, 0, 0),
+            cells: vec![0u32],
+        });
+        self.brick_origin_iv = brick.origin;
+        self.brick_dims_u = brick.dims;
+        self.brick_cell_count = brick.cells.len().max(1) as u32;
+        let new_brick = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("brick"),
+                contents: bytemuck::cast_slice(&brick.cells),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+        self.brick_buffer = new_brick;
+        self.rebuild_bind_groups();
+    }
+
+    /// Multiple single-cell brick writes; falls back to full brick rebuild if layout mismatches.
+    pub fn upload_scene_data_patches(
+        &mut self,
+        bounds: MeshBounds,
+        voxels: &[Voxel],
+        patches: &[crate::gpu_brick::BrickCellWrite],
+    ) {
+        self.scene_bounds = bounds;
+        const MAX_AXIS: u32 = 512;
+        if let Some(layout) = GpuVoxelBrick::layout_from_voxels(voxels, MAX_AXIS) {
+            if layout.origin == self.brick_origin_iv && layout.dims == self.brick_dims_u {
+                let mut ok = true;
+                for p in patches {
+                    if layout.index_of_world(p.x, p.y, p.z).is_none() {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    for p in patches {
+                        if let Some(off) = layout.index_of_world(p.x, p.y, p.z) {
+                            self.queue.write_buffer(
+                                &self.brick_buffer,
+                                (off * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
+                                &p.packed.to_le_bytes(),
+                            );
+                        }
+                    }
                     return;
                 }
             }

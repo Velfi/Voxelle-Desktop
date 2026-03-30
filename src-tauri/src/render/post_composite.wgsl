@@ -24,9 +24,9 @@ var samp_linear: sampler;
 
 struct PostCompositeOpts {
     tone_mode: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    grain_strength: f32,
+    vignette_strength: f32,
+    distance_tint_strength: f32,
 }
 
 @group(0) @binding(3)
@@ -92,13 +92,35 @@ fn apply_tone(mode: u32, rgb: vec3<f32>) -> vec3<f32> {
     }
 }
 
+fn hash12(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
 @fragment
 fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(t_hdr, samp_linear, i.uv).rgb;
     let blo = textureSample(t_bloom, samp_linear, i.uv).rgb;
     // Bloom is thresholded in extract; keep strength modest so mids stay punchy.
-    let rgb = hdr + blo * 0.42;
+    let rgb0 = hdr + blo * 0.42;
     // Scene + sky are linear scene-referred (Rgba16Float). Display-referred → sRGB swapchain.
-    let mapped = apply_tone(post_opts.tone_mode, rgb);
+    var mapped = apply_tone(post_opts.tone_mode, rgb0);
+    let g = post_opts.grain_strength;
+    if g > 0.001 {
+        let n = hash12(i.uv * vec2<f32>(1920.0, 1080.0) + mapped.xy);
+        mapped = mapped + (n - 0.5) * g * 0.35;
+    }
+    let vig = post_opts.vignette_strength;
+    if vig > 0.001 {
+        let d = distance(i.uv, vec2<f32>(0.5, 0.5)) * 1.414;
+        let factor = 1.0 - smoothstep(0.2, 0.95, d) * vig;
+        mapped = mapped * factor;
+    }
+    let dt = post_opts.distance_tint_strength;
+    if dt > 0.001 {
+        let radial = distance(i.uv, vec2<f32>(0.5, 0.5)) * 1.414;
+        let fog_amt = smoothstep(0.15, 1.0, radial) * dt;
+        let horizon = vec3<f32>(0.52, 0.58, 0.66);
+        mapped = mix(mapped, horizon, fog_amt);
+    }
     return vec4<f32>(mapped, 1.0);
 }

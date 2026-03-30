@@ -30,12 +30,10 @@ struct SliceHeader {
     bit_word_count: u32,
 }
 
+// Must match [`OPAQUE_VERTEX_STRIDE`] (44) / CPU interleaved layout: 3+3+3+1+1 floats.
+// WGSL `vec3` aligns to 16B in structs; do not use vec3 fields here or storage stride diverges from Rust.
 struct GpuVertex {
-    pos: vec3<f32>,
-    n: vec3<f32>,
-    col: vec3<f32>,
-    mk: f32,
-    ao: f32,
+    data: array<f32, 11>,
 }
 
 @group(0) @binding(0) var<uniform> mesh_params: MeshParams;
@@ -45,6 +43,20 @@ struct GpuVertex {
 @group(0) @binding(4) var<storage, read_write> idx_out: array<u32>;
 @group(0) @binding(5) var<storage, read_write> alloc: array<atomic<u32>>;
 @group(0) @binding(6) var<storage, read> brick_cells: array<u32>;
+
+fn write_opaque_vertex(slot: u32, pos: vec3<f32>, n: vec3<f32>, col: vec3<f32>, mk: f32, ao: f32) {
+    vtx_out[slot].data[0] = pos.x;
+    vtx_out[slot].data[1] = pos.y;
+    vtx_out[slot].data[2] = pos.z;
+    vtx_out[slot].data[3] = n.x;
+    vtx_out[slot].data[4] = n.y;
+    vtx_out[slot].data[5] = n.z;
+    vtx_out[slot].data[6] = col.x;
+    vtx_out[slot].data[7] = col.y;
+    vtx_out[slot].data[8] = col.z;
+    vtx_out[slot].data[9] = mk;
+    vtx_out[slot].data[10] = ao;
+}
 
 fn face_normal(axis: u32, sign: i32) -> vec3<f32> {
     if axis == 0u {
@@ -246,10 +258,10 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
                 return;
             }
 
-            vtx_out[vbase + 0u] = GpuVertex(p00, n, col, h.mat_kind, ao_face);
-            vtx_out[vbase + 1u] = GpuVertex(p10, n, col, h.mat_kind, ao_face);
-            vtx_out[vbase + 2u] = GpuVertex(p11, n, col, h.mat_kind, ao_face);
-            vtx_out[vbase + 3u] = GpuVertex(p01, n, col, h.mat_kind, ao_face);
+            write_opaque_vertex(vbase + 0u, p00, n, col, h.mat_kind, ao_face);
+            write_opaque_vertex(vbase + 1u, p10, n, col, h.mat_kind, ao_face);
+            write_opaque_vertex(vbase + 2u, p11, n, col, h.mat_kind, ao_face);
+            write_opaque_vertex(vbase + 3u, p01, n, col, h.mat_kind, ao_face);
 
             let g0 = vbase + 0u;
             let g1 = vbase + 1u;

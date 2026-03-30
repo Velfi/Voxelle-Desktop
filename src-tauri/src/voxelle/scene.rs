@@ -2,8 +2,27 @@
 
 use std::collections::HashMap;
 
-use super::format::SceneObject;
+use super::format::{default_scene_objects, SceneObject, Voxel};
 use glam::{Mat4, Quat, Vec3};
+
+/// Voxels that should contribute to the opaque mesh given scene visibility.
+///
+/// Uses the same [`SceneObject`] slice resolution as [`crate::greedy_mesh::build_greedy_mesh`]: when
+/// `objects` is empty, [`default_scene_objects`] applies. Visibility follows [`is_object_visible`]:
+/// unknown `object_id` values are treated as visible (legacy voxels that do not match any row yet).
+pub fn visible_voxels_for_meshing(voxels: &[Voxel], objects: &[SceneObject]) -> Vec<Voxel> {
+    let default_objs = default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
+    voxels
+        .iter()
+        .copied()
+        .filter(|v| is_object_visible(objs, v.object_id))
+        .collect()
+}
 
 /// Build `id → SceneObject` for O(1) parent-chain walks (avoids repeated linear scans).
 fn objects_by_id(objects: &[SceneObject]) -> HashMap<u32, &SceneObject> {
@@ -74,7 +93,69 @@ pub fn scene_objects_identity_for_bounds_fast_path(objects: &[SceneObject]) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::voxelle::MaterialId;
     use glam::Vec3;
+
+    #[test]
+    fn visible_voxels_for_meshing_respects_hidden_and_is_object_visible() {
+        let mut a = SceneObject::default();
+        a.id = 1;
+        a.visible = false;
+        let mut b = SceneObject::default();
+        b.id = 2;
+        b.visible = true;
+        let objects = vec![a, b];
+        let voxels = vec![
+            Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xff0000,
+                material: MaterialId::Plastic,
+                object_id: 1,
+            },
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                color: 0x00ff00,
+                material: MaterialId::Plastic,
+                object_id: 2,
+            },
+            Voxel {
+                x: 2,
+                y: 0,
+                z: 0,
+                color: 0x0000ff,
+                material: MaterialId::Plastic,
+                object_id: 99,
+            },
+        ];
+        let got = visible_voxels_for_meshing(&voxels, &objects);
+        // id 1 hidden; id 2 visible; id 99 unknown → is_object_visible defaults to true
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().any(|v| v.object_id == 2));
+        assert!(got.iter().any(|v| v.object_id == 99));
+    }
+
+    #[test]
+    fn visible_voxels_for_meshing_keeps_legacy_voxels_when_object_id_not_in_list() {
+        let mut o = SceneObject::default();
+        o.id = 1;
+        o.visible = true;
+        let objects = vec![o];
+        let voxels = vec![Voxel {
+            x: 0,
+            y: 0,
+            z: 0,
+            color: 0xff0000,
+            material: MaterialId::Plastic,
+            object_id: 0,
+        }];
+        let got = visible_voxels_for_meshing(&voxels, &objects);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].object_id, 0);
+    }
 
     #[test]
     fn matrices_by_id_matches_legacy_per_id() {
