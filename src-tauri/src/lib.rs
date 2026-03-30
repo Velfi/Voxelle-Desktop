@@ -1090,10 +1090,40 @@ fn open_voxelle_file_dialog(app: AppHandle, state: Arc<ViewerState>) {
 }
 
 #[cfg(desktop)]
+fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadata<'_>> {
+    use tauri::menu::AboutMetadata;
+    // Public repo (matches updater endpoint in `tauri.conf.json`).
+    const GITHUB_VD: &str = "https://github.com/Velfi/Voxelle-Desktop";
+    let pkg = app.package_info();
+    let mut m = AboutMetadata {
+        name: Some(pkg.name.clone()),
+        version: Some(pkg.version.to_string()),
+        website: Some(GITHUB_VD.into()),
+        website_label: Some("GitHub — source & issues".into()),
+        comments: Some("Collaborative voxel editing on the desktop.".into()),
+        copyright: app.config().bundle.copyright.clone(),
+        ..Default::default()
+    };
+    #[cfg(target_os = "macos")]
+    {
+        // NSAboutPanel only shows a subset of fields; `credits` is the scrollable body with the link.
+        m.website = None;
+        m.website_label = None;
+        m.comments = None;
+        m.credits = Some(format!(
+            "Collaborative voxel editing on the desktop.\n\nSource & issues:\n{GITHUB_VD}"
+        ));
+    }
+    Ok(m)
+}
+
+#[cfg(desktop)]
 fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 
     let menu = Menu::default(app)?;
+    let about_item = PredefinedMenuItem::about(app, None, Some(vd_about_metadata(app)?))?;
+    let app_menu_title = app.package_info().name.clone();
     let new_item = MenuItem::with_id(app, "new_project", "New Project…", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open_voxelle", "Open…", true, Some("CommandOrCtrl+O"))?;
     let save_item = MenuItem::with_id(app, "menu_save", "Save", true, Some("CommandOrCtrl+S"))?;
@@ -1141,10 +1171,22 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     for item in menu.items()? {
         if let MenuItemKind::Submenu(sub) = item {
             let text = sub.text()?;
+            #[cfg(target_os = "macos")]
+            if text == app_menu_title {
+                sub.remove_at(0)?;
+                sub.insert(&about_item, 0)?;
+                sub.insert(&check_updates_item, 1)?;
+            }
+            #[cfg(not(target_os = "macos"))]
+            if text == "Help" {
+                sub.remove_at(0)?;
+                sub.insert(&about_item, 0)?;
+            }
             if text == "File" {
                 sub.prepend_items(&[&new_item, &open_item, &save_item, &save_as_item, &sep])?;
                 // Also under File so it works when OS menus are localized (no reliance on "View").
                 sub.append(&collab_panel_item)?;
+                #[cfg(not(target_os = "macos"))]
                 sub.append(&check_updates_item)?;
                 file_inserted = true;
             } else if text == "Edit" {
@@ -1157,22 +1199,43 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
 
     if !file_inserted {
         let close = PredefinedMenuItem::close_window(app, None)?;
-        let file_menu = Submenu::with_items(
-            app,
-            "File",
-            true,
-            &[
-                &new_item,
-                &open_item,
-                &save_item,
-                &save_as_item,
-                &sep,
-                &collab_panel_item,
-                &check_updates_item,
-                &close,
-            ],
-        )?;
-        menu.prepend(&file_menu)?;
+        #[cfg(target_os = "macos")]
+        {
+            let file_menu = Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[
+                    &new_item,
+                    &open_item,
+                    &save_item,
+                    &save_as_item,
+                    &sep,
+                    &collab_panel_item,
+                    &close,
+                ],
+            )?;
+            menu.prepend(&file_menu)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let file_menu = Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[
+                    &new_item,
+                    &open_item,
+                    &save_item,
+                    &save_as_item,
+                    &sep,
+                    &collab_panel_item,
+                    &check_updates_item,
+                    &close,
+                ],
+            )?;
+            menu.prepend(&file_menu)?;
+        }
     }
 
     if !edit_inserted {
