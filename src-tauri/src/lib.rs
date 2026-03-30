@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, RunEvent, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
+use ahash::AHashMap;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -118,8 +119,12 @@ pub struct EditPerfBreakdown {
     pub mesh_voxel_map_ms: f64,
     /// `cpu_chunked_incremental`: cold [`greedy_mesh::SpatialMeshCache::from_voxels`] inside remesh (rare).
     pub mesh_buckets_ms: f64,
-    /// `cpu_chunked_incremental`: CPU greedy per dirty chunk.
+    /// `cpu_chunked_incremental`: wall time in greedy phase (GPU pack+compute + CPU fallback per chunk).
     pub mesh_greedy_ms: f64,
+    /// `cpu_chunked_incremental`: GPU [`WgpuViewer::run_mesh_greedy_compute_with_brick`] / internal dispatch (subset of `mesh_greedy_ms` when env allows).
+    pub mesh_greedy_gpu_ms: f64,
+    /// `cpu_chunked_incremental`: CPU [`greedy_mesh::mesh_buffers_for_chunk_key`] (subset of `mesh_greedy_ms`).
+    pub mesh_greedy_cpu_ms: f64,
     /// `cpu_chunked_incremental`: interleaved mesh → `wgpu` chunk buffers.
     pub mesh_chunk_buffers_ms: f64,
     /// Full [`WgpuViewer::upload_cpu_mesh_chunked_full`] inside remesh (origin drift).
@@ -201,7 +206,7 @@ pub struct ViewerState {
     /// Latest loaded model for CPU-side edits (add/remove voxels).
     pub current_file: Mutex<Option<voxelle::VoxelleFile>>,
     /// Spatial index: coord → index in `current_file.voxels` (kept in sync; used for raycasts + O(1) remove).
-    pub voxel_map: Mutex<Option<HashMap<greedy_mesh::VoxelCoord, usize>>>,
+    pub voxel_map: Mutex<Option<AHashMap<greedy_mesh::VoxelCoord, usize>>>,
     /// Latest pointer position in physical pixels (for hover preview; updated from UI, read each frame).
     pub preview_cursor: Mutex<Option<(f32, f32)>>,
     pub(crate) preview_mode: Mutex<PreviewMode>,
@@ -1072,6 +1077,8 @@ pub(crate) fn finish_voxel_edit_gpu(
     let mut mesh_voxel_map_ms = 0.0;
     let mut mesh_buckets_ms = 0.0;
     let mut mesh_greedy_ms = 0.0;
+    let mut mesh_greedy_gpu_ms = 0.0;
+    let mut mesh_greedy_cpu_ms = 0.0;
     let mut mesh_chunk_buffers_ms = 0.0;
     let mut mesh_full_chunked_rebuild_ms = 0.0;
     let mut mesh_pipeline_ms = 0.0;
@@ -1131,6 +1138,8 @@ pub(crate) fn finish_voxel_edit_gpu(
             let (ok, rperf) = viewer.remesh_opaque_chunks(&dirty, &file.voxels);
             mesh_buckets_ms = rperf.buckets_ms;
             mesh_greedy_ms = rperf.greedy_ms;
+            mesh_greedy_gpu_ms = rperf.greedy_gpu_ms;
+            mesh_greedy_cpu_ms = rperf.greedy_cpu_ms;
             mesh_chunk_buffers_ms = rperf.chunk_buffers_ms;
             mesh_full_chunked_rebuild_ms = rperf.full_chunked_rebuild_ms;
             if ok {
@@ -1164,6 +1173,8 @@ pub(crate) fn finish_voxel_edit_gpu(
         mesh_voxel_map_ms,
         mesh_buckets_ms,
         mesh_greedy_ms,
+        mesh_greedy_gpu_ms,
+        mesh_greedy_cpu_ms,
         mesh_chunk_buffers_ms,
         mesh_full_chunked_rebuild_ms,
         mesh_pipeline_ms,
@@ -1441,7 +1452,7 @@ fn voxel_pick_probe(
 fn pick_cell_for_ping(
     mode: PreviewMode,
     file: &voxelle::VoxelleFile,
-    vmap: &HashMap<greedy_mesh::VoxelCoord, usize>,
+    vmap: &AHashMap<greedy_mesh::VoxelCoord, usize>,
     cam: &OrbitCamera,
     w: f32,
     h: f32,
@@ -2663,6 +2674,8 @@ fn performance_report_text(state: &ViewerState) -> String {
                  \t  spatial cache delta: {:.2}\n\
                  \t  spatial cache cold init: {:.2}\n\
                  \t  greedy (dirty chunks): {:.2}\n\
+                 \t  greedy GPU (dirty chunks): {:.2}\n\
+                 \t  greedy CPU (dirty chunks): {:.2}\n\
                  \t  chunk GPU buffers: {:.2}\n\
                  \t  full chunked rebuild: {:.2}\n\
                  \t  pipeline (rebuild_mesh_gpu_greedy): {:.2}\n\
@@ -2677,6 +2690,8 @@ fn performance_report_text(state: &ViewerState) -> String {
                 e.mesh_voxel_map_ms,
                 e.mesh_buckets_ms,
                 e.mesh_greedy_ms,
+                e.mesh_greedy_gpu_ms,
+                e.mesh_greedy_cpu_ms,
                 e.mesh_chunk_buffers_ms,
                 e.mesh_full_chunked_rebuild_ms,
                 e.mesh_pipeline_ms,

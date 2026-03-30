@@ -3,8 +3,8 @@
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
+use ahash::AHashMap;
 use glam::{Vec3, Vec4};
-use std::collections::HashMap;
 
 pub fn screen_to_world_ray(
     camera: &OrbitCamera,
@@ -133,7 +133,7 @@ fn exit_t_axis(ox: f32, dx: f32, c: i32, t_min: f32) -> f32 {
 fn ray_first_solid(
     origin: Vec3,
     dir: Vec3,
-    occupied: &HashMap<VoxelCoord, usize>,
+    occupied: &AHashMap<VoxelCoord, usize>,
     grid_size: i32,
 ) -> Option<((i32, i32, i32), Option<(i32, i32, i32)>)> {
     let (lo, hi) = grid_valid_range(grid_size);
@@ -176,7 +176,7 @@ fn ray_first_solid(
 /// `true` if the ray from the screen point hits any solid voxel before exiting the grid (same test as edit/remove).
 pub fn probe_solid_hit(
     file: &VoxelleFile,
-    voxel_map: &HashMap<VoxelCoord, usize>,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -194,7 +194,7 @@ pub fn probe_solid_hit(
 /// Cell where an add would place (empty cell in front of first solid along the ray), if valid.
 pub fn preview_add_cell(
     file: &VoxelleFile,
-    voxel_map: &HashMap<VoxelCoord, usize>,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -218,7 +218,7 @@ pub fn preview_add_cell(
 /// Solid voxel the ray would remove, if any.
 pub fn preview_remove_cell(
     file: &VoxelleFile,
-    voxel_map: &HashMap<VoxelCoord, usize>,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -242,7 +242,7 @@ pub enum VoxelEditDelta {
 
 pub fn apply_edit(
     file: &mut VoxelleFile,
-    voxel_map: &mut HashMap<VoxelCoord, usize>,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -298,7 +298,7 @@ pub fn apply_edit(
 /// Swap-remove a voxel at `coord`. Returns the removed voxel if present.
 pub fn remove_voxel_at(
     file: &mut VoxelleFile,
-    voxel_map: &mut HashMap<VoxelCoord, usize>,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
     coord: VoxelCoord,
 ) -> Option<Voxel> {
     let Some(&remove_idx) = voxel_map.get(&coord) else {
@@ -318,7 +318,7 @@ pub fn remove_voxel_at(
 
 pub fn push_voxel_known(
     file: &mut VoxelleFile,
-    voxel_map: &mut HashMap<VoxelCoord, usize>,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
     v: Voxel,
 ) {
     let idx = file.voxels.len();
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn ray_hits_center_voxel() {
-        let mut m: HashMap<VoxelCoord, usize> = HashMap::new();
+        let mut m: AHashMap<VoxelCoord, usize> = AHashMap::new();
         m.insert((0, 0, 0), 0);
         let origin = Vec3::new(0.0, 0.0, 5.0);
         let dir = Vec3::new(0.0, 0.0, -1.0);

@@ -98,6 +98,35 @@ function basename(path: string): string {
   return i >= 0 ? n.slice(i + 1) : n;
 }
 
+/** Maps low-level Tauri updater errors to text users can act on. */
+function userFacingUpdaterError(err: unknown): string {
+  const raw =
+    err instanceof Error ? err.message : String(err ?? "unknown error");
+  if (
+    raw.includes("None of the fallback platforms") &&
+    raw.includes("were found in the response")
+  ) {
+    let platform = "your computer";
+    if (raw.includes("darwin-x86_64")) {
+      platform = "Intel Macs";
+    } else if (raw.includes("darwin-aarch64") || raw.includes("aarch64")) {
+      platform = "Apple Silicon Macs";
+    } else if (raw.includes("windows")) {
+      platform = "Windows";
+    } else if (raw.includes("linux")) {
+      platform = "Linux";
+    }
+    return [
+      `This release’s update file doesn’t include a build for ${platform}.`,
+      "That often happens when a release only ships some platforms, or the update manifest (latest.json) wasn’t merged correctly.",
+      "",
+      "What you can do: download the installer or archive that matches your system from the releases page and install it manually:",
+      "https://github.com/Velfi/Voxelle-Desktop/releases",
+    ].join("\n");
+  }
+  return raw.length > 0 ? raw : "Update failed (unknown error).";
+}
+
 /** Optional note when reopening (backup vs file). */
 function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
   if (!info.lastDocumentPath) return null;
@@ -559,9 +588,7 @@ function App() {
           await update.downloadAndInstall();
           await relaunch();
         } catch (e) {
-          window.alert(
-            e instanceof Error ? e.message : `Update failed: ${String(e)}`,
-          );
+          window.alert(userFacingUpdaterError(e));
         }
       }),
       listen<string>("voxelle-rendering-mode-changed", (e) => {

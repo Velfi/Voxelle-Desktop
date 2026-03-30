@@ -3,7 +3,7 @@
 use crate::greedy_mesh::{MeshBuffers, VoxelCoord};
 use crate::marching_tables::{EDGE_TABLE, TRI_TABLE};
 use crate::voxelle::{MaterialId, Voxel};
-use std::collections::HashMap;
+use ahash::AHashMap;
 use std::time::Instant;
 
 const ISO: f32 = 0.5;
@@ -48,8 +48,8 @@ fn sample_field(values: &[f32], x: i32, y: i32, z: i32, nx: usize, ny: usize, nz
 
 /// Web `buildMarchingLatticeField`: `occupancy` bounds the lattice; colors prefer `color` map, else occupancy RGB.
 fn build_lattice_field(
-    color_voxels: &HashMap<VoxelCoord, Voxel>,
-    occupancy_voxels: &HashMap<VoxelCoord, Voxel>,
+    color_voxels: &AHashMap<VoxelCoord, Voxel>,
+    occupancy_voxels: &AHashMap<VoxelCoord, Voxel>,
 ) -> Option<LatticeField> {
     if occupancy_voxels.is_empty() || color_voxels.is_empty() {
         return None;
@@ -223,7 +223,7 @@ fn mat_kind_for_material(m: MaterialId) -> f32 {
 }
 
 fn marching_cubes_bucket(
-    color_map: &HashMap<VoxelCoord, Voxel>,
+    color_map: &AHashMap<VoxelCoord, Voxel>,
     progress: Option<(usize, usize)>,
 ) -> Option<MeshBuffers> {
     let tag = progress
@@ -429,7 +429,7 @@ fn weld_vertices_to_mesh(
     mat_k: f32,
 ) -> Option<MeshBuffers> {
     let n_tri_v = raw_pos.len() / 3;
-    let mut vertex_map: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    let mut vertex_map: AHashMap<(i32, i32, i32), u32> = AHashMap::new();
     let mut positions: Vec<f32> = Vec::new();
     let mut acc_nx: Vec<f32> = Vec::new();
     let mut acc_ny: Vec<f32> = Vec::new();
@@ -586,8 +586,8 @@ fn solve3x3(
 }
 
 fn dual_contour_bucket(
-    color_map: &HashMap<VoxelCoord, Voxel>,
-    full_map: &HashMap<VoxelCoord, Voxel>,
+    color_map: &AHashMap<VoxelCoord, Voxel>,
+    full_map: &AHashMap<VoxelCoord, Voxel>,
 ) -> Option<MeshBuffers> {
     let field = build_lattice_field(color_map, full_map)?;
     let LatticeField {
@@ -609,7 +609,7 @@ fn dual_contour_bucket(
 
     let mat_k = mat_kind_for_material(bucket_material);
 
-    let mut cell_vertex: HashMap<(i32, i32, i32), u32> = HashMap::new();
+    let mut cell_vertex: AHashMap<(i32, i32, i32), u32> = AHashMap::new();
     let mut positions: Vec<f32> = Vec::new();
     let mut normals: Vec<f32> = Vec::new();
     let mut colors: Vec<f32> = Vec::new();
@@ -978,7 +978,7 @@ fn merge_mesh_buffers(parts: Vec<MeshBuffers>) -> MeshBuffers {
 /// Marching cubes per color|material bucket (matches web `computeMarchingCubes`).
 pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
     let t0 = Instant::now();
-    let mut buckets: HashMap<(u32, u8), HashMap<VoxelCoord, Voxel>> = HashMap::new();
+    let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
         let k = bucket_key_parts(v);
         buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
@@ -1024,7 +1024,7 @@ pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
 /// Dual contouring per bucket with full-scene occupancy (matches web `computeDualContour`).
 pub fn build_dual_contour_merged(voxels: &[Voxel]) -> MeshBuffers {
     let full = crate::greedy_mesh::voxel_map(voxels);
-    let mut buckets: HashMap<(u32, u8), HashMap<VoxelCoord, Voxel>> = HashMap::new();
+    let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
         let k = bucket_key_parts(v);
         buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);

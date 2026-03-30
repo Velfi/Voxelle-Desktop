@@ -2,9 +2,10 @@
 
 use crate::gpu_brick::{pack_cell, pack_empty};
 use crate::voxelle::{MaterialId, SceneObject, Voxel};
+use ahash::{AHashMap, AHashSet};
 use glam::Mat4;
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 
 /// Integer voxel coordinate key for maps and meshing.
 pub type VoxelCoord = (i32, i32, i32);
@@ -38,7 +39,7 @@ fn face_occluded(source: MaterialId, neighbor: MaterialId) -> bool {
 }
 
 fn neighbor_occludes_face(
-    map: &HashMap<IVec3, Voxel>,
+    map: &AHashMap<IVec3, Voxel>,
     pos: IVec3,
     axis: usize,
     sign: i32,
@@ -95,7 +96,7 @@ fn quad_corner(axis: usize, sign: i32, depth: i32, u: i32, v: i32) -> glam::Vec3
 }
 
 #[inline]
-fn cell_same_object(map: &HashMap<VoxelCoord, Voxel>, object_id: u32, pos: IVec3) -> bool {
+fn cell_same_object(map: &AHashMap<VoxelCoord, Voxel>, object_id: u32, pos: IVec3) -> bool {
     map.get(&pos)
         .map(|v| v.object_id == object_id)
         .unwrap_or(false)
@@ -103,7 +104,7 @@ fn cell_same_object(map: &HashMap<VoxelCoord, Voxel>, object_id: u32, pos: IVec3
 
 /// Minecraft-style corner AO: count solid neighbors among the three voxels meeting at this face corner.
 fn corner_ao_factor(
-    map: &HashMap<VoxelCoord, Voxel>,
+    map: &AHashMap<VoxelCoord, Voxel>,
     object_id: u32,
     axis: usize,
     depth: i32,
@@ -135,8 +136,8 @@ fn corner_ao_factor(
 
 fn greedy_merge(cells: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
     let n = cells.len().max(1);
-    let set: HashSet<(i32, i32)> = cells.iter().copied().collect();
-    let mut consumed = HashSet::with_capacity(n);
+    let set: AHashSet<(i32, i32)> = cells.iter().copied().collect();
+    let mut consumed = AHashSet::with_capacity(n);
     let mut quads = Vec::new();
     for &(u, v) in cells {
         if consumed.contains(&(u, v)) {
@@ -286,7 +287,7 @@ pub struct MeshBuffers {
 /// Padded brick (+1 voxel halo) for GPU mesh AO: same row-major layout as [`crate::gpu_brick::GpuVoxelBrick`],
 /// with origin shifted by −1 and dims +2, filled from `map` so in-plane neighbor checks see voxels outside the tight brick.
 pub fn pack_brick_halo_cells(
-    map: &HashMap<VoxelCoord, Voxel>,
+    map: &AHashMap<VoxelCoord, Voxel>,
     origin: (i32, i32, i32),
     dims: (u32, u32, u32),
 ) -> Option<((i32, i32, i32), (u32, u32, u32), Vec<u32>)> {
@@ -322,8 +323,8 @@ pub fn pack_brick_halo_cells(
     Some((ho, hd, cells))
 }
 
-pub fn voxel_map(voxels: &[Voxel]) -> HashMap<VoxelCoord, Voxel> {
-    let mut map = HashMap::with_capacity(voxels.len());
+pub fn voxel_map(voxels: &[Voxel]) -> AHashMap<VoxelCoord, Voxel> {
+    let mut map = AHashMap::with_capacity(voxels.len());
     for v in voxels {
         map.insert(coord_key(v.x, v.y, v.z), *v);
     }
@@ -331,8 +332,8 @@ pub fn voxel_map(voxels: &[Voxel]) -> HashMap<VoxelCoord, Voxel> {
 }
 
 /// Spatial index for raycasts / swap-remove: coord → index in `VoxelleFile::voxels`.
-pub fn voxel_map_indices(voxels: &[Voxel]) -> HashMap<VoxelCoord, usize> {
-    let mut map = HashMap::with_capacity(voxels.len());
+pub fn voxel_map_indices(voxels: &[Voxel]) -> AHashMap<VoxelCoord, usize> {
+    let mut map = AHashMap::with_capacity(voxels.len());
     for (i, v) in voxels.iter().enumerate() {
         map.insert(coord_key(v.x, v.y, v.z), i);
     }
@@ -358,10 +359,10 @@ pub struct GpuSliceHeader {
 
 /// Pack coplanar face cells into 2D bitmaps for GPU greedy meshing (each sub-slice ≤64×64).
 pub fn pack_gpu_greedy_slices(
-    map: &HashMap<VoxelCoord, Voxel>,
+    map: &AHashMap<VoxelCoord, Voxel>,
     emit: &[Voxel],
 ) -> Result<(Vec<GpuSliceHeader>, Vec<u32>), ()> {
-    let mut buckets: HashMap<(u32, u8), Vec<IVec3>> = HashMap::new();
+    let mut buckets: AHashMap<(u32, u8), Vec<IVec3>> = AHashMap::new();
     for v in emit {
         buckets
             .entry(bucket_key_parts(v))
@@ -402,7 +403,7 @@ pub fn pack_gpu_greedy_slices(
             }
         }
 
-        let mut slices: HashMap<GreedySliceKey, Vec<(i32, i32)>> = HashMap::new();
+        let mut slices: AHashMap<GreedySliceKey, Vec<(i32, i32)>> = AHashMap::new();
         for (pos, axis, sign) in faces {
             let (x, y, z) = pos;
             let depth = match axis {
@@ -588,10 +589,10 @@ pub fn dirty_chunk_keys_3x3(center: ChunkKey) -> Vec<ChunkKey> {
 pub fn voxel_buckets_by_chunk(
     voxels: &[Voxel],
     cs: i32,
-) -> Option<((i32, i32, i32), HashMap<ChunkKey, Vec<Voxel>>)> {
+) -> Option<((i32, i32, i32), AHashMap<ChunkKey, Vec<Voxel>>)> {
     let origin = voxel_aabb_min_int(voxels)?;
     let cs = cs.max(1);
-    let mut buckets: HashMap<ChunkKey, Vec<Voxel>> = HashMap::new();
+    let mut buckets: AHashMap<ChunkKey, Vec<Voxel>> = AHashMap::new();
     for v in voxels {
         let k = chunk_key_from_world(v.x, v.y, v.z, origin, cs);
         buckets.entry(k).or_default().push(*v);
@@ -601,15 +602,15 @@ pub fn voxel_buckets_by_chunk(
 
 /// Greedy mesh for one chunk’s **core** voxels, with neighbor occlusion from `map` (full scene).
 pub fn mesh_buffers_for_chunk_key(
-    buckets: &HashMap<ChunkKey, Vec<Voxel>>,
-    map: &HashMap<VoxelCoord, Voxel>,
+    buckets: &AHashMap<ChunkKey, Vec<Voxel>>,
+    map: &AHashMap<VoxelCoord, Voxel>,
     key: ChunkKey,
 ) -> MeshBuffers {
-    let core = buckets.get(&key).cloned().unwrap_or_default();
+    let core = buckets.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
     if core.is_empty() {
         return MeshBuffers::default();
     }
-    build_greedy_mesh_mapped(&core, map)
+    build_greedy_mesh_mapped(core, map)
 }
 
 /// Single pass: [`SpatialMeshCache`] plus per-chunk greedy meshes (one `voxel_map` + bucketing).
@@ -665,8 +666,8 @@ pub fn build_all_chunk_meshes_btree(
 #[derive(Clone, Debug)]
 pub struct SpatialMeshCache {
     pub origin: (i32, i32, i32),
-    pub occupancy: HashMap<VoxelCoord, Voxel>,
-    pub buckets: HashMap<ChunkKey, Vec<Voxel>>,
+    pub occupancy: AHashMap<VoxelCoord, Voxel>,
+    pub buckets: AHashMap<ChunkKey, Vec<Voxel>>,
 }
 
 impl SpatialMeshCache {
@@ -674,7 +675,7 @@ impl SpatialMeshCache {
         let origin = voxel_aabb_min_int(voxels)?;
         let cs = cs.max(1);
         let occupancy = voxel_map(voxels);
-        let mut buckets: HashMap<ChunkKey, Vec<Voxel>> = HashMap::new();
+        let mut buckets: AHashMap<ChunkKey, Vec<Voxel>> = AHashMap::new();
         for v in voxels {
             let k = chunk_key_from_world(v.x, v.y, v.z, origin, cs);
             buckets.entry(k).or_default().push(*v);
@@ -727,7 +728,7 @@ pub fn voxels_by_spatial_chunks(voxels: &[Voxel], cs: i32) -> Vec<(Vec<Voxel>, V
         min_z = min_z.min(v.z);
     }
 
-    let mut buckets: HashMap<(i32, i32, i32), Vec<Voxel>> = HashMap::new();
+    let mut buckets: AHashMap<(i32, i32, i32), Vec<Voxel>> = AHashMap::new();
     for v in voxels {
         let ix = (v.x - min_x).div_euclid(cs);
         let iy = (v.y - min_y).div_euclid(cs);
@@ -1053,8 +1054,8 @@ mod chunk_tests {
 
 /// Greedy mesh for `emit` voxels only, using `map` for neighbor occlusion (include a 1-voxel halo around each chunk).
 /// `mat_kind` per vertex: 0 solid, 1 glow, 2 glass/water (shader uses for emissive / spec).
-pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>) -> MeshBuffers {
-    let mut buckets: HashMap<(u32, u8), Vec<IVec3>> = HashMap::new();
+pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>) -> MeshBuffers {
+    let mut buckets: AHashMap<(u32, u8), Vec<IVec3>> = AHashMap::new();
     for v in emit {
         buckets
             .entry(bucket_key_parts(v))
@@ -1102,7 +1103,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
             }
         }
 
-        let mut slices: HashMap<GreedySliceKey, Vec<(i32, i32)>> = HashMap::new();
+        let mut slices: AHashMap<GreedySliceKey, Vec<(i32, i32)>> = AHashMap::new();
         for (pos, axis, sign) in faces {
             let (x, y, z) = pos;
             let depth = match axis {
@@ -1559,7 +1560,7 @@ pub fn mesh_bounds_from_voxels_world(voxels: &[Voxel], objects: &[SceneObject]) 
 
 fn append_object_meshes_sorted(
     voxels: &[Voxel],
-    map: &HashMap<VoxelCoord, Voxel>,
+    map: &AHashMap<VoxelCoord, Voxel>,
     objects: &[SceneObject],
     dst: &mut MeshBuffers,
 ) {
@@ -1701,5 +1702,41 @@ mod gpu_pack_tests {
         assert!(!bits.is_empty());
         let (cpu, _) = build_greedy_mesh(&voxels, &[]);
         assert!(!cpu.indices.is_empty());
+    }
+
+    /// CPU chunk mesh vs [`pack_gpu_greedy_slices`] on the same core slice: both see faces or both empty (single-object incremental path).
+    #[test]
+    fn incremental_chunk_pack_nonempty_matches_cpu_mesh() {
+        let voxels: Vec<Voxel> = (0..3)
+            .flat_map(|x| {
+                (0..3).flat_map(move |y| {
+                    (0..3).map(move |z| Voxel {
+                        x,
+                        y,
+                        z,
+                        color: 0x00_88_cc,
+                        material: MaterialId::Plastic,
+                        object_id: 0,
+                    })
+                })
+            })
+            .collect();
+        let cs = SPATIAL_CHUNK_SIZE;
+        let cache = SpatialMeshCache::from_voxels(&voxels, cs).expect("cache");
+        for &key in cache.buckets.keys() {
+            let core = cache
+                .buckets
+                .get(&key)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            let cpu = mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, key);
+            let (headers, _) = pack_gpu_greedy_slices(&cache.occupancy, core).expect("pack");
+            assert_eq!(
+                cpu.indices.is_empty(),
+                headers.is_empty(),
+                "chunk key {:?}",
+                key
+            );
+        }
     }
 }
