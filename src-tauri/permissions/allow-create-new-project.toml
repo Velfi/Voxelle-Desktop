@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-create-new-project"
+description = "Allows the create_new_project IPC command (new grid / starting shape)."
+commands.allow = ["create_new_project"]

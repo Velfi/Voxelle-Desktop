@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "voxelle-ipc"
+description = "Native viewer, file open, and new-project IPC used by the Voxelle Desktop webview."
+commands.allow = [
+  "viewer_resize",
+  "viewport_pointer",
+  "viewport_wheel",
+  "open_voxelle_dialog",
+  "load_voxelle_path",
+  "create_new_project",
+  "voxel_pick_probe",
+  "sync_preview_input",
+  "voxel_edit_at_screen",
+]

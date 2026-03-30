@@ -1,0 +1,236 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  font-family:
+    system-ui,
+    -apple-system,
+    Segoe UI,
+    Roboto,
+    sans-serif;
+}
+
+/* Solid bar so controls stay above the transparent WebView / native wgpu stack (clicks were passing through overlaid UI). */
+.app-chrome {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.35rem 0.6rem;
+  background: rgba(12, 12, 14, 0.92);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  z-index: 3;
+}
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.toolbar-mode-group {
+  display: inline-flex;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.toolbar-mode-btn {
+  margin: 0;
+  padding: 0.28rem 0.55rem;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.82);
+  background: rgba(255, 255, 255, 0.04);
+  border: none;
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+}
+
+.toolbar-mode-btn:last-child {
+  border-right: none;
+}
+
+.toolbar-mode-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.toolbar-mode-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.toolbar-mode-btn.is-active {
+  background: rgba(120, 160, 255, 0.22);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 1rem;
+}
+
+.modal {
+  min-width: min(100%, 22rem);
+  padding: 1rem 1.15rem;
+  background: rgba(22, 22, 26, 0.98);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.95);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
+}
+
+.modal h3 {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.modal-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.65rem;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.modal input[type="number"],
+.modal select {
+  width: 100%;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.9rem;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+  background: rgba(12, 12, 14, 0.95);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.modal-buttons button {
+  margin: 0;
+  padding: 0.35rem 0.75rem;
+  font: inherit;
+  font-size: 0.85rem;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.5);
+  color: rgba(255, 255, 255, 0.95);
+}
+
+.modal-buttons button:first-of-type {
+  background: rgba(59, 130, 246, 0.35);
+  border-color: rgba(96, 165, 250, 0.45);
+}
+
+.modal-buttons button:hover {
+  filter: brightness(1.08);
+}
+
+.load-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.load-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #60a5fa, #a78bfa);
+  transition: width 0.12s ease-out;
+}
+
+.viewport-error {
+  position: absolute;
+  bottom: 0.75rem;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  max-width: min(90vw, 42rem);
+  padding: 0.4rem 0.75rem;
+  background: rgba(60, 20, 24, 0.92);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.35;
+  color: #fecaca;
+  pointer-events: none;
+  text-align: center;
+}
+
+.viewport-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.viewport {
+  height: 100%;
+  touch-action: none;
+  background: transparent;
+  cursor: grab;
+}
+
+.fps-counter {
+  padding: 0.2rem 0.45rem;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: 4px;
+  font-size: 0.85rem;
+  font-family: ui-monospace, monospace;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.toolbar-btn {
+  margin: 0;
+  padding: 0.35rem 0.65rem;
+  font: inherit;
+  font-size: 0.8rem;
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(0, 0, 0, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.toolbar-btn:hover:not(:disabled) {
+  background: rgba(40, 40, 45, 0.9);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.toolbar-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.viewport:active {
+  cursor: grabbing;
+}
