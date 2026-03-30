@@ -28,4 +28,9 @@ commands.allow = [
   "collab_send_ping",
   "get_autosave_interval_secs",
   "set_autosave_interval_secs",
+  "get_rendering_mode",
+  "set_rendering_mode",
+  "get_orthographic",
+  "set_orthographic",
+  "set_tone_mapping",
 ]

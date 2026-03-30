@@ -5,6 +5,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { confirm } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
+import { PreferencesModal } from "./PreferencesModal";
+import { loadPreferences, toneMappingToGpuMode } from "./preferences";
 import "./App.css";
 
 /** Desktop viewer: cap new-project grid edge length (web allows larger). */
@@ -72,6 +74,10 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
   const [fpsDisplayed, setFpsDisplayed] = useState(0);
+  const [showFpsCounter, setShowFpsCounter] = useState(
+    () => loadPreferences().showFpsCounter,
+  );
+  const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newGridSize, setNewGridSize] = useState(32);
   const [newGridShape, setNewGridShape] = useState<StartShape>("circle");
@@ -109,10 +115,6 @@ function App() {
   /** Set when hosting or after welcome; 0 when solo. */
   const [localPeerId, setLocalPeerId] = useState(0);
 
-  const [renderingMode, setRenderingMode] =
-    useState<RenderingMode>("greedy");
-  const [orthographic, setOrthographic] = useState(false);
-
   const hexToRgb = (hex: string): number => {
     const h = hex.replace("#", "");
     const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
@@ -123,8 +125,9 @@ function App() {
     const el = viewportRef.current;
     if (!el) return;
     const dpr = window.devicePixelRatio || 1;
-    const width = Math.max(1, Math.floor(el.clientWidth * dpr));
-    const height = Math.max(1, Math.floor(el.clientHeight * dpr));
+    const rect = el.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width * dpr));
+    const height = Math.max(1, Math.round(rect.height * dpr));
     void invoke("viewer_resize", { width, height });
   }, []);
 
@@ -164,7 +167,6 @@ function App() {
         setPathLabel(e.payload);
         setLoading(false);
         setLoadProgress(1);
-        void invoke<boolean>("get_orthographic").then(setOrthographic).catch(() => {});
       }),
       listen<string>("voxelle-load-error", (e) => {
         setLoadError(e.payload);
@@ -181,6 +183,9 @@ function App() {
       }),
       listen("voxelle-show-chat-panel", () => {
         setChatPanelOpen(true);
+      }),
+      listen("voxelle-open-preferences", () => {
+        setPreferencesOpen(true);
       }),
       listen<string>("collab-chat", (e) => {
         try {
@@ -274,6 +279,17 @@ function App() {
           );
         }
       }),
+      listen<string>("voxelle-rendering-mode-changed", (e) => {
+        const m = e.payload;
+        if (
+          m === "greedy" ||
+          m === "marchingCubes" ||
+          m === "dualContour" ||
+          m === "ray"
+        ) {
+          localStorage.setItem(LS_RENDERING_MODE, m);
+        }
+      }),
     ]).then((unlisteners) => {
       if (!active) {
         unlisteners.forEach((u) => u());
@@ -331,21 +347,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const p = loadPreferences();
+    void invoke("set_tone_mapping", {
+      mode: toneMappingToGpuMode(p.toneMapping),
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const saved = localStorage.getItem(LS_RENDERING_MODE) as RenderingMode | null;
     const valid =
       saved &&
       ["greedy", "marchingCubes", "dualContour", "ray"].includes(saved);
     void invoke<RenderingMode>("get_rendering_mode")
       .then((m) => {
-        const mode = valid ? saved! : m;
-        setRenderingMode(mode);
         if (valid && saved !== m) {
           void invoke("set_rendering_mode", { mode: saved }).catch(() => {});
         }
       })
-      .catch(() => {});
-    void invoke<boolean>("get_orthographic")
-      .then(setOrthographic)
       .catch(() => {});
   }, []);
 
@@ -393,25 +411,6 @@ function App() {
       args: { x: -1, y: 0, mode: "navigate" },
     }).catch(() => {});
   }, []);
-
-  const onRenderingModeChange = useCallback(
-    (e: React.ChangeEvent<HTMLSelectElement>) => {
-      const mode = e.target.value as RenderingMode;
-      setRenderingMode(mode);
-      localStorage.setItem(LS_RENDERING_MODE, mode);
-      void invoke("set_rendering_mode", { mode }).catch(() => {});
-    },
-    [],
-  );
-
-  const onOrthographicChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const o = e.target.checked;
-      setOrthographic(o);
-      void invoke("set_orthographic", { orthographic: o }).catch(() => {});
-    },
-    [],
-  );
 
   useEffect(() => {
     void invoke("sync_preview_input", {
@@ -573,9 +572,13 @@ function App() {
         Math.hypot(dx, dy),
       );
     }
-    const dx = e.clientX - lastRef.current.x;
-    const dy = e.clientY - lastRef.current.y;
+    const dpr = window.devicePixelRatio || 1;
+    const dx = (e.clientX - lastRef.current.x) * dpr;
+    const dy = (e.clientY - lastRef.current.y) * dpr;
     lastRef.current = { x: e.clientX, y: e.clientY };
+    if (e.buttons === 0) {
+      return;
+    }
     const { x, y } = clientToViewportPhysical(e);
     void invoke("viewport_pointer", {
       ev: {
@@ -718,6 +721,20 @@ function App() {
       ? "Hosting — share the link below so others can join."
       : "Connected — you are in a session as a guest.";
 
+  const statusBarMessage = (() => {
+    if (loading && pathLabel) {
+      const pct = Math.round(Math.min(1, Math.max(0, loadProgress)) * 100);
+      return `Loading ${basename(pathLabel)}… ${pct}%`;
+    }
+    if (loading) return "Loading…";
+    if (pathLabel) {
+      const base = basename(pathLabel);
+      if (collabActive) return `${base} · Collaborating`;
+      return base;
+    }
+    return "No file open";
+  })();
+
   const sendChat = () => {
     const t = chatInput.trim();
     if (!t) return;
@@ -725,7 +742,7 @@ function App() {
     setChatInput("");
   };
 
-  const onRosterDoubleClick = (peerId: number) => {
+  const onRosterSnapCamera = (peerId: number) => {
     void invoke("collab_snap_camera", { peerId }).catch(() => {});
   };
 
@@ -737,13 +754,11 @@ function App() {
 
   return (
     <div className="app">
-      <header className="app-chrome">
-        <div className="fps-counter" role="status" aria-live="polite">
-          {fpsDisplayed} FPS
-        </div>
-        <div className="toolbar-actions">
+      <div className="app-main">
+        <aside className="app-sidebar" aria-label="Tools">
+          <div className="sidebar-section-label">Mode</div>
           <div
-            className="toolbar-mode-group"
+            className="sidebar-mode-group"
             role="group"
             aria-label="Interaction mode"
           >
@@ -751,8 +766,8 @@ function App() {
               type="button"
               className={
                 interactionMode === "navigate"
-                  ? "toolbar-mode-btn is-active"
-                  : "toolbar-mode-btn"
+                  ? "sidebar-mode-btn is-active"
+                  : "sidebar-mode-btn"
               }
               disabled={loading}
               onClick={() => setInteractionMode("navigate")}
@@ -764,8 +779,8 @@ function App() {
               type="button"
               className={
                 interactionMode === "add"
-                  ? "toolbar-mode-btn is-active"
-                  : "toolbar-mode-btn"
+                  ? "sidebar-mode-btn is-active"
+                  : "sidebar-mode-btn"
               }
               disabled={loading}
               onClick={() => setInteractionMode("add")}
@@ -777,8 +792,8 @@ function App() {
               type="button"
               className={
                 interactionMode === "remove"
-                  ? "toolbar-mode-btn is-active"
-                  : "toolbar-mode-btn"
+                  ? "sidebar-mode-btn is-active"
+                  : "sidebar-mode-btn"
               }
               disabled={loading}
               onClick={() => setInteractionMode("remove")}
@@ -787,59 +802,31 @@ function App() {
               👊
             </button>
           </div>
-          <div className="toolbar-view" aria-label="View">
-            <label>
-              <span>Rendering</span>
-              <select
-                value={renderingMode}
-                onChange={onRenderingModeChange}
-                disabled={loading}
-                title="Viewport meshing (Voxelle web View → Rendering)"
-              >
-                <option value="greedy">Blocky (greedy)</option>
-                <option value="marchingCubes">Smooth (marching cubes)</option>
-                <option value="dualContour">Smooth (dual contour)</option>
-                <option value="ray" disabled>
-                  Ray (web only)
-                </option>
-              </select>
-            </label>
-            <label title="Orthographic vs perspective (saved in .voxelle scene)">
-              <input
-                type="checkbox"
-                checked={orthographic}
-                onChange={onOrthographicChange}
-                disabled={loading}
+        </aside>
+        <div className="viewport-wrap">
+          {loading ? (
+            <div className="load-bar" aria-hidden>
+              <div
+                className="load-bar-fill"
+                style={{
+                  width: `${Math.round(Math.min(1, Math.max(0, loadProgress)) * 100)}%`,
+                }}
               />
-              Ortho
-            </label>
-          </div>
-        </div>
-      </header>
-      <div className="viewport-wrap">
-        {loading ? (
-          <div className="load-bar" aria-hidden>
-            <div
-              className="load-bar-fill"
-              style={{
-                width: `${Math.round(Math.min(1, Math.max(0, loadProgress)) * 100)}%`,
-              }}
-            />
-          </div>
-        ) : null}
-        <div
-          ref={viewportRef}
-          className="viewport"
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerLeave={onPointerLeave}
-          onContextMenu={(ev) => ev.preventDefault()}
-          onWheel={onWheel}
-          role="application"
-          aria-label="3D viewport"
-        />
-        {showEmptyOpenFile ? (
+            </div>
+          ) : null}
+          <div
+            ref={viewportRef}
+            className="viewport"
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
+            onPointerLeave={onPointerLeave}
+            onContextMenu={(ev) => ev.preventDefault()}
+            onWheel={onWheel}
+            role="application"
+            aria-label="3D viewport"
+          />
+          {showEmptyOpenFile ? (
           <div
             className="viewport-empty-open"
             role="region"
@@ -1008,9 +995,9 @@ function App() {
                   <button
                     type="button"
                     className="collab-roster-name"
-                    onDoubleClick={() => onRosterDoubleClick(r.peerId)}
+                    onClick={() => onRosterSnapCamera(r.peerId)}
                     disabled={!collabActive}
-                    title="Double-click to match camera"
+                    title="Click to match their camera"
                   >
                     <span
                       className="collab-swatch"
@@ -1103,7 +1090,28 @@ function App() {
             </div>
           </div>
         ) : null}
+        </div>
       </div>
+      <footer className="app-status-bar" role="contentinfo">
+        <div
+          className="status-bar-message"
+          role="status"
+          aria-live="polite"
+          title={pathLabel || statusBarMessage}
+        >
+          {statusBarMessage}
+        </div>
+        {showFpsCounter ? (
+          <div className="fps-counter" role="status" aria-live="polite">
+            {fpsDisplayed} FPS
+          </div>
+        ) : null}
+      </footer>
+      <PreferencesModal
+        open={preferencesOpen}
+        onClose={() => setPreferencesOpen(false)}
+        onFpsCounterChange={setShowFpsCounter}
+      />
       {newProjectOpen ? (
         <div
           className="modal-overlay"

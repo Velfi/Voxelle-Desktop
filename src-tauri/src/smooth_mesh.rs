@@ -4,6 +4,7 @@ use crate::greedy_mesh::{MeshBuffers, VoxelCoord};
 use crate::marching_tables::{EDGE_TABLE, TRI_TABLE};
 use crate::voxelle::{MaterialId, Voxel};
 use std::collections::HashMap;
+use std::time::Instant;
 
 const ISO: f32 = 0.5;
 const EPS: f32 = 1e-6;
@@ -221,7 +222,13 @@ fn mat_kind_for_material(m: MaterialId) -> f32 {
     }
 }
 
-fn marching_cubes_bucket(color_map: &HashMap<VoxelCoord, Voxel>) -> Option<MeshBuffers> {
+fn marching_cubes_bucket(
+    color_map: &HashMap<VoxelCoord, Voxel>,
+    progress: Option<(usize, usize)>,
+) -> Option<MeshBuffers> {
+    let tag = progress
+        .map(|(i, n)| format!("[bucket {i}/{n}] "))
+        .unwrap_or_default();
     let field = build_lattice_field(color_map, color_map)?;
     let LatticeField {
         node_min_x,
@@ -241,6 +248,34 @@ fn marching_cubes_bucket(color_map: &HashMap<VoxelCoord, Voxel>) -> Option<MeshB
     } = field;
 
     let mat_k = mat_kind_for_material(bucket_material);
+
+    let cells = nx.saturating_mul(ny).saturating_mul(nz);
+    let nv = color_map.len();
+    if cells > 1_000_000 {
+        log::warn!(
+            target: "voxelle_load",
+            "{}marching_cubes_bucket: large lattice {}×{}×{} ({} cells) for {} voxels — expect long CPU time",
+            tag,
+            nx,
+            ny,
+            nz,
+            cells,
+            nv
+        );
+    } else {
+        log::info!(
+            target: "voxelle_load",
+            "{}marching_cubes_bucket: lattice {}×{}×{} ({} cells), {} voxels",
+            tag,
+            nx,
+            ny,
+            nz,
+            cells,
+            nv
+        );
+    }
+
+    let t_mc = Instant::now();
 
     let mut raw_pos: Vec<f32> = Vec::new();
     let mut raw_norm: Vec<f32> = Vec::new();
@@ -369,7 +404,22 @@ fn marching_cubes_bucket(color_map: &HashMap<VoxelCoord, Voxel>) -> Option<MeshB
         return None;
     }
 
-    weld_vertices_to_mesh(&raw_pos, &raw_norm, &raw_col, mat_k)
+    log::info!(
+        target: "voxelle_load",
+        "{}marching_cubes_bucket: iso-surface pass {:?}",
+        tag,
+        t_mc.elapsed()
+    );
+
+    let t_weld = Instant::now();
+    let out = weld_vertices_to_mesh(&raw_pos, &raw_norm, &raw_col, mat_k);
+    log::info!(
+        target: "voxelle_load",
+        "{}marching_cubes_bucket: weld {:?}",
+        tag,
+        t_weld.elapsed()
+    );
+    out
 }
 
 fn weld_vertices_to_mesh(
@@ -927,17 +977,47 @@ fn merge_mesh_buffers(parts: Vec<MeshBuffers>) -> MeshBuffers {
 
 /// Marching cubes per color|material bucket (matches web `computeMarchingCubes`).
 pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
+    let t0 = Instant::now();
     let mut buckets: HashMap<(u32, u8), HashMap<VoxelCoord, Voxel>> = HashMap::new();
     for v in voxels {
         let k = bucket_key_parts(v);
         buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
     }
+    let n_buckets = buckets.len();
+    log::info!(
+        target: "voxelle_load",
+        "marching_cubes_merged: {} input voxels → {} color|material buckets (bucketing {:?}); processing each bucket once (sequential, not a loop)",
+        voxels.len(),
+        n_buckets,
+        t0.elapsed()
+    );
     let mut parts = Vec::new();
-    for b in buckets.values() {
-        if let Some(m) = marching_cubes_bucket(b) {
-            parts.push(m);
+    for (i, b) in buckets.values().enumerate() {
+        let t_bucket = Instant::now();
+        let idx = i + 1;
+        match marching_cubes_bucket(b, Some((idx, n_buckets))) {
+            Some(m) => {
+                log::info!(
+                    target: "voxelle_load",
+                    "marching_cubes_merged: finished bucket {idx}/{n_buckets} in {:?}",
+                    t_bucket.elapsed()
+                );
+                parts.push(m);
+            }
+            None => {
+                log::info!(
+                    target: "voxelle_load",
+                    "marching_cubes_merged: bucket {idx}/{n_buckets} empty mesh in {:?}",
+                    t_bucket.elapsed()
+                );
+            }
         }
     }
+    log::info!(
+        target: "voxelle_load",
+        "marching_cubes_merged: done {:?} total",
+        t0.elapsed()
+    );
     merge_mesh_buffers(parts)
 }
 

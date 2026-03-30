@@ -16,6 +16,7 @@ pub mod voxelle;
 use camera::OrbitCamera;
 use gpu_brick::{BrickCellWrite, GpuVoxelBrick};
 use render::{PreparedOpaqueUpload, WgpuViewer};
+use std::any::Any;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, EventTarget, Manager, RunEvent, State};
@@ -181,7 +182,11 @@ struct PointerEvent {
 }
 
 #[tauri::command]
-fn viewport_pointer(state: State<'_, Arc<ViewerState>>, ev: PointerEvent) -> Result<(), String> {
+fn viewport_pointer(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    ev: PointerEvent,
+) -> Result<(), String> {
     // Read size without holding `camera` — the run loop locks `viewer` then `camera`; taking
     // `camera` then `viewer` here deadlocks with the render tick and freezes orbit input.
     let (vw, vh) = {
@@ -214,6 +219,7 @@ fn viewport_pointer(state: State<'_, Arc<ViewerState>>, ev: PointerEvent) -> Res
         "up" => {}
         _ => {}
     }
+    wake_viewport_loop(&app);
     Ok(())
 }
 
@@ -225,10 +231,15 @@ struct WheelEvent {
 }
 
 #[tauri::command]
-fn viewport_wheel(state: State<'_, Arc<ViewerState>>, ev: WheelEvent) -> Result<(), String> {
+fn viewport_wheel(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    ev: WheelEvent,
+) -> Result<(), String> {
     let mut cam = state.camera.lock().map_err(|e| e.to_string())?;
     // Same `deltaY` semantics as the browser / Three.js `onMouseWheel`.
     cam.dolly_delta(ev.delta_y);
+    wake_viewport_loop(&app);
     Ok(())
 }
 
@@ -247,13 +258,27 @@ pub(crate) fn prepare_load_scene_cpu(
     voxels: &[voxelle::Voxel],
     mode: RenderingMode,
 ) -> Result<PreparedLoadScene, String> {
+    let t_prep = Instant::now();
+    let nv = voxels.len();
+    log::info!(
+        target: "voxelle_load",
+        "prepare_load_scene_cpu: start voxels={nv} grid_size={grid_size} mode={mode:?}"
+    );
+
+    let t = Instant::now();
     let bounds = if voxels.is_empty() {
         greedy_mesh::mesh_bounds_for_cube_side(grid_size)
     } else {
         greedy_mesh::mesh_bounds_from_voxels(voxels)
             .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(grid_size))
     };
+    log::info!(
+        target: "voxelle_load",
+        "prepare_load_scene_cpu: bounds {:?}",
+        t.elapsed()
+    );
 
+    let t = Instant::now();
     let brick = GpuVoxelBrick::from_voxels(voxels, LOAD_SCENE_BRICK_MAX_AXIS).unwrap_or(
         GpuVoxelBrick {
             origin: glam::IVec3::ZERO,
@@ -261,23 +286,54 @@ pub(crate) fn prepare_load_scene_cpu(
             cells: vec![0u32],
         },
     );
+    log::info!(
+        target: "voxelle_load",
+        "prepare_load_scene_cpu: gpu brick {:?}",
+        t.elapsed()
+    );
 
     let opaque = if voxels.is_empty() {
+        log::info!(target: "voxelle_load", "prepare_load_scene_cpu: mesh route = (no voxels)");
         PreparedOpaqueUpload::Empty
     } else if mode.uses_smooth_surface() {
+        log::info!(
+            target: "voxelle_load",
+            "prepare_load_scene_cpu: mesh route = smooth ({mode:?})"
+        );
+        let t = Instant::now();
         let mesh = match mode {
             RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(voxels),
             RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(voxels),
             _ => unreachable!(),
         };
+        log::info!(
+            target: "voxelle_load",
+            "prepare_load_scene_cpu: smooth surface {:?}",
+            t.elapsed()
+        );
         if mesh.indices.is_empty() {
             PreparedOpaqueUpload::Empty
         } else {
             PreparedOpaqueUpload::Single(mesh)
         }
     } else if voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS {
-        match greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE)
-        {
+        log::info!(
+            target: "voxelle_load",
+            "prepare_load_scene_cpu: mesh route = chunked greedy (>={} voxels, chunk {})",
+            greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS,
+            greedy_mesh::SPATIAL_CHUNK_SIZE
+        );
+        let t = Instant::now();
+        let chunked = greedy_mesh::build_chunk_meshes_and_spatial_cache(
+            voxels,
+            greedy_mesh::SPATIAL_CHUNK_SIZE,
+        );
+        log::info!(
+            target: "voxelle_load",
+            "prepare_load_scene_cpu: chunked build {:?}",
+            t.elapsed()
+        );
+        match chunked {
             Some((origin, meshes, spatial_cache)) if !meshes.is_empty() => {
                 let chunk_origin = glam::IVec3::new(origin.0, origin.1, origin.2);
                 PreparedOpaqueUpload::Chunked {
@@ -289,15 +345,38 @@ pub(crate) fn prepare_load_scene_cpu(
             _ => PreparedOpaqueUpload::Empty,
         }
     } else {
+        log::info!(target: "voxelle_load", "prepare_load_scene_cpu: mesh route = greedy (single pass)");
+        let t = Instant::now();
         let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels);
+        log::info!(
+            target: "voxelle_load",
+            "prepare_load_scene_cpu: greedy mesh {:?}",
+            t.elapsed()
+        );
         PreparedOpaqueUpload::Single(mesh)
     };
+
+    log::info!(
+        target: "voxelle_load",
+        "prepare_load_scene_cpu: total {:?}",
+        t_prep.elapsed()
+    );
 
     Ok(PreparedLoadScene {
         bounds,
         brick,
         opaque,
     })
+}
+
+fn load_thread_panic_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return (*s).to_string();
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return s.clone();
+    }
+    "load thread panicked (details on stderr)".to_string()
 }
 
 fn start_shape_label(shape: StartShape) -> &'static str {
@@ -315,49 +394,57 @@ fn start_shape_label(shape: StartShape) -> &'static str {
 fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, shape: StartShape) {
     let shape_l = start_shape_label(shape);
     let label = format!("New project ({grid_size}³, {shape_l})");
-    std::thread::Builder::new()
+    let app_spawn_err = app.clone();
+    match std::thread::Builder::new()
         .name("voxelle-new-project".into())
         .spawn(move || {
             let _ = app.emit("voxelle-load-progress", 0.05f32);
 
-            let mesh_result: Result<(), String> = (|| {
-                let size = grid_size as i32;
-                let voxels = voxelle::start_shape::voxels_for_start_shape(size, shape)?;
-                let file = voxelle::VoxelleFile {
-                    version: 3,
-                    grid_size: size,
-                    scene: Default::default(),
-                    scene_extra: None,
-                    voxels,
-                };
+            let mesh_result: Result<(), String> = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                || {
+                    (|| -> Result<(), String> {
+                        let size = grid_size as i32;
+                        let voxels = voxelle::start_shape::voxels_for_start_shape(size, shape)?;
+                        let file = voxelle::VoxelleFile {
+                            version: 3,
+                            grid_size: size,
+                            scene: Default::default(),
+                            scene_extra: None,
+                            voxels,
+                        };
 
-                let mode = *state
-                    .rendering_mode
-                    .lock()
-                    .map_err(|e| e.to_string())?;
-                let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
+                        let mode = *state
+                            .rendering_mode
+                            .lock()
+                            .map_err(|e| e.to_string())?;
+                        let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
 
-                if file.voxels.is_empty() {
-                    let _ = app.emit("voxelle-load-progress", 0.85f32);
-                    let (done_tx, done_rx) = std::sync::mpsc::channel();
-                    let app_c = app.clone();
-                    let app_mesh = app_c.clone();
-                    let state_c = Arc::clone(&state);
-                    let file_c = file;
-                    let _ = app_c.run_on_main_thread(move || {
-                        let res = apply_mesh_and_camera(&state_c, &app_mesh, file_c, prepared);
-                        let _ = done_tx.send(res);
-                    });
-                    return match done_rx.recv() {
-                        Ok(Ok(())) => Ok(()),
-                        Ok(Err(e)) => Err(e),
-                        Err(_) => Err("main thread disconnected".into()),
-                    };
-                }
+                        if file.voxels.is_empty() {
+                            let _ = app.emit("voxelle-load-progress", 0.85f32);
+                            let (done_tx, done_rx) = std::sync::mpsc::channel();
+                            let app_c = app.clone();
+                            let app_mesh = app_c.clone();
+                            let state_c = Arc::clone(&state);
+                            let file_c = file;
+                            let _ = app_c.run_on_main_thread(move || {
+                                let res = apply_mesh_and_camera(&state_c, &app_mesh, file_c, prepared);
+                                let _ = done_tx.send(res);
+                            });
+                            return match done_rx.recv() {
+                                Ok(Ok(())) => Ok(()),
+                                Ok(Err(e)) => Err(e),
+                                Err(_) => Err("main thread disconnected".into()),
+                            };
+                        }
 
-                run_v3_mesh_on_main(&state, &app, file, prepared)?;
-                Ok(())
-            })();
+                        run_v3_mesh_on_main(&state, &app, file, prepared)?;
+                        Ok(())
+                    })()
+                },
+            )) {
+                Ok(inner) => inner,
+                Err(payload) => Err(load_thread_panic_message(payload)),
+            };
 
             let app_emit = app.clone();
             let _ = app.run_on_main_thread(move || match mesh_result {
@@ -368,8 +455,15 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
                     let _ = app_emit.emit("voxelle-load-error", e);
                 }
             });
-        })
-        .ok();
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            let _ = app_spawn_err.emit(
+                "voxelle-load-error",
+                format!("could not start new-project thread: {e}"),
+            );
+        }
+    }
 }
 
 enum DecodeMeshOutcome {
@@ -389,10 +483,16 @@ fn run_v3_mesh_on_main(
     prepared: PreparedLoadScene,
 ) -> Result<(), String> {
     let _ = app.emit("voxelle-load-progress", 0.55f32);
+    log::info!(
+        target: "voxelle_load",
+        "run_v3_mesh_on_main: dispatch upload to main thread (voxels={})",
+        file.voxels.len()
+    );
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let app_c = app.clone();
     let app_mesh = app_c.clone();
     let state_c = Arc::clone(state);
+    let t_main = Instant::now();
     let _ = app_c.run_on_main_thread(move || {
         let res = apply_mesh_and_camera(&state_c, &app_mesh, file, prepared);
         let _ = done_tx.send(res);
@@ -402,42 +502,80 @@ fn run_v3_mesh_on_main(
         Ok(Err(e)) => return Err(e),
         Err(_) => return Err("main thread disconnected".into()),
     }
+    log::info!(
+        target: "voxelle_load",
+        "run_v3_mesh_on_main: main-thread apply_mesh_and_camera {:?}",
+        t_main.elapsed()
+    );
     let _ = app.emit("voxelle-load-progress", 0.85f32);
     Ok(())
 }
 
 fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: std::path::PathBuf) {
-    std::thread::Builder::new()
+    let app_spawn_err = app.clone();
+    match std::thread::Builder::new()
         .name("voxelle-load".into())
         .spawn(move || {
             let label = path.to_string_lossy().to_string();
             let _ = app.emit("voxelle-load-progress", 0.05f32);
 
-            let mesh_result: Result<DecodeMeshOutcome, String> = (|| {
-                let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                let _ = app.emit("voxelle-load-progress", 0.2f32);
-                let file = decode_payload(&bytes).map_err(|e| e.to_string())?;
-                let mode = *state
-                    .rendering_mode
-                    .lock()
-                    .map_err(|e| e.to_string())?;
-                let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
+            let mesh_result: Result<DecodeMeshOutcome, String> = match std::panic::catch_unwind(
+                std::panic::AssertUnwindSafe(|| {
+                    (|| -> Result<DecodeMeshOutcome, String> {
+                        let t = Instant::now();
+                        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                        log::info!(
+                            target: "voxelle_load",
+                            "load file: read {} bytes from disk {:?}",
+                            bytes.len(),
+                            t.elapsed()
+                        );
+                        let _ = app.emit("voxelle-load-progress", 0.2f32);
+                        let t = Instant::now();
+                        let file = decode_payload(&bytes).map_err(|e| e.to_string())?;
+                        log::info!(
+                            target: "voxelle_load",
+                            "load file: decoded v{} grid_size={} voxels={} {:?}",
+                            file.version,
+                            file.grid_size,
+                            file.voxels.len(),
+                            t.elapsed()
+                        );
+                        let _ = app.emit("voxelle-load-progress", 0.3f32);
+                        let mode = *state
+                            .rendering_mode
+                            .lock()
+                            .map_err(|e| e.to_string())?;
+                        let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
+                        let _ = app.emit("voxelle-load-progress", 0.4f32);
 
-                if file.version == 3 && !file.voxels.is_empty() {
-                    let _ = app.emit("voxelle-load-progress", 0.45f32);
-                    run_v3_mesh_on_main(&state, &app, file, prepared)?;
-                    return Ok(DecodeMeshOutcome::Done);
-                }
+                        if file.version == 3 && !file.voxels.is_empty() {
+                            let _ = app.emit("voxelle-load-progress", 0.45f32);
+                            run_v3_mesh_on_main(&state, &app, file, prepared)?;
+                            return Ok(DecodeMeshOutcome::Done);
+                        }
 
-                let _ = app.emit("voxelle-load-progress", 0.45f32);
-                let _ = app.emit("voxelle-load-progress", 0.85f32);
-                Ok(DecodeMeshOutcome::ApplyOnce { file, prepared })
-            })();
+                        let _ = app.emit("voxelle-load-progress", 0.45f32);
+                        let _ = app.emit("voxelle-load-progress", 0.85f32);
+                        Ok(DecodeMeshOutcome::ApplyOnce { file, prepared })
+                    })()
+                }),
+            ) {
+                Ok(inner) => inner,
+                Err(payload) => Err(load_thread_panic_message(payload)),
+            };
 
             let app_emit = app.clone();
             let _ = app.run_on_main_thread(move || match mesh_result {
                 Ok(DecodeMeshOutcome::ApplyOnce { file, prepared }) => {
-                    if let Err(e) = apply_mesh_and_camera(&state, &app_emit, file, prepared) {
+                    let t = Instant::now();
+                    let res = apply_mesh_and_camera(&state, &app_emit, file, prepared);
+                    log::info!(
+                        target: "voxelle_load",
+                        "load file: ApplyOnce apply_mesh_and_camera {:?}",
+                        t.elapsed()
+                    );
+                    if let Err(e) = res {
                         let _ = app_emit.emit("voxelle-load-error", e);
                     } else {
                         let _ = app_emit.emit("voxelle-loaded", label);
@@ -450,8 +588,15 @@ fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: std::pat
                     let _ = app_emit.emit("voxelle-load-error", e);
                 }
             });
-        })
-        .ok();
+        }) {
+        Ok(_) => {}
+        Err(e) => {
+            let _ = app_spawn_err.emit(
+                "voxelle-load-error",
+                format!("could not start load thread: {e}"),
+            );
+        }
+    }
 }
 
 pub(crate) fn apply_mesh_and_camera(
@@ -712,24 +857,12 @@ pub(crate) fn refresh_opaque_mesh(state: &Arc<ViewerState>) -> Result<(), String
     Ok(())
 }
 
-#[tauri::command]
-fn get_rendering_mode(state: State<'_, Arc<ViewerState>>) -> Result<RenderingMode, String> {
-    Ok(*state.rendering_mode.lock().map_err(|e| e.to_string())?)
-}
-
-#[tauri::command]
-fn set_rendering_mode(state: State<'_, Arc<ViewerState>>, mode: RenderingMode) -> Result<(), String> {
+fn apply_rendering_mode(state: &Arc<ViewerState>, mode: RenderingMode) -> Result<(), String> {
     *state.rendering_mode.lock().map_err(|e| e.to_string())? = mode;
-    refresh_opaque_mesh(state.inner())
+    refresh_opaque_mesh(state)
 }
 
-#[tauri::command]
-fn get_orthographic(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
-    Ok(!state.camera.lock().map_err(|e| e.to_string())?.perspective)
-}
-
-#[tauri::command]
-fn set_orthographic(state: State<'_, Arc<ViewerState>>, orthographic: bool) -> Result<(), String> {
+fn apply_orthographic(state: &Arc<ViewerState>, orthographic: bool) -> Result<(), String> {
     {
         let mut cam = state.camera.lock().map_err(|e| e.to_string())?;
         cam.perspective = !orthographic;
@@ -747,6 +880,56 @@ fn set_orthographic(state: State<'_, Arc<ViewerState>>, orthographic: bool) -> R
             file.scene.orthographic = orthographic;
         }
     }
+    Ok(())
+}
+
+/// Wake the winit/tauri main loop so the next `MainEventsCleared` runs (projection / mesh / preview refresh).
+fn wake_viewport_loop(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let _ = app.run_on_main_thread(|| {});
+    });
+}
+
+#[tauri::command]
+fn get_rendering_mode(state: State<'_, Arc<ViewerState>>) -> Result<RenderingMode, String> {
+    Ok(*state.rendering_mode.lock().map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+fn set_rendering_mode(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    mode: RenderingMode,
+) -> Result<(), String> {
+    apply_rendering_mode(state.inner(), mode)?;
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn get_orthographic(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
+    Ok(!state.camera.lock().map_err(|e| e.to_string())?.perspective)
+}
+
+#[tauri::command]
+fn set_orthographic(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    orthographic: bool,
+) -> Result<(), String> {
+    apply_orthographic(state.inner(), orthographic)?;
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_tone_mapping(state: State<'_, Arc<ViewerState>>, mode: u32) -> Result<(), String> {
+    let mut v = state.viewer.lock().map_err(|e| e.to_string())?;
+    let Some(viewer) = v.as_mut() else {
+        return Err("viewer not ready".into());
+    };
+    viewer.set_tone_mapping_mode(mode);
     Ok(())
 }
 
@@ -1077,15 +1260,24 @@ struct SyncPreviewInput {
 
 #[tauri::command]
 fn sync_preview_input(
+    app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     args: SyncPreviewInput,
 ) -> Result<(), String> {
+    let new_mode = PreviewMode::parse(&args.mode);
+    {
+        let mut pm = state.preview_mode.lock().map_err(|e| e.to_string())?;
+        let changed = *pm != new_mode;
+        *pm = new_mode;
+        if changed {
+            wake_viewport_loop(&app);
+        }
+    }
     if args.x < 0.0 {
         *state.preview_cursor.lock().map_err(|e| e.to_string())? = None;
     } else {
         *state.preview_cursor.lock().map_err(|e| e.to_string())? = Some((args.x, args.y));
     }
-    *state.preview_mode.lock().map_err(|e| e.to_string())? = PreviewMode::parse(&args.mode);
     Ok(())
 }
 
@@ -1347,6 +1539,13 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         true,
         None::<&str>,
     )?;
+    let preferences_item = MenuItem::with_id(
+        app,
+        "menu_preferences",
+        "Preferences…",
+        true,
+        Some("CommandOrCtrl+,"),
+    )?;
     let debug_copy_perf = MenuItem::with_id(
         app,
         "debug_copy_performance",
@@ -1356,6 +1555,29 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     )?;
     let debug_menu = Submenu::with_items(app, "Debug", true, &[&debug_copy_perf])?;
     let sep = PredefinedMenuItem::separator(app)?;
+    let view_render_greedy = MenuItem::with_id(app, "view_render_greedy", "Blocky (Greedy)", true, None::<&str>)?;
+    let view_render_marching = MenuItem::with_id(
+        app,
+        "view_render_marching",
+        "Smooth (Marching Cubes)",
+        true,
+        None::<&str>,
+    )?;
+    let view_render_dual = MenuItem::with_id(
+        app,
+        "view_render_dual",
+        "Smooth (Dual Contour)",
+        true,
+        None::<&str>,
+    )?;
+    let rendering_submenu = Submenu::with_items(
+        app,
+        "Rendering",
+        true,
+        &[&view_render_greedy, &view_render_marching, &view_render_dual],
+    )?;
+    let ortho_view_item = MenuItem::with_id(app, "menu_view_ortho", "Orthographic", true, None::<&str>)?;
+    let sep_before_chat = PredefinedMenuItem::separator(app)?;
 
     let mut file_inserted = false;
     let mut edit_inserted = false;
@@ -1367,7 +1589,8 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
             if text == app_menu_title {
                 sub.remove_at(0)?;
                 sub.insert(&about_item, 0)?;
-                sub.insert(&check_updates_item, 1)?;
+                sub.insert(&preferences_item, 1)?;
+                sub.insert(&check_updates_item, 2)?;
             }
             #[cfg(not(target_os = "macos"))]
             if text == "Help" {
@@ -1382,10 +1605,19 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
                 sub.append(&check_updates_item)?;
                 file_inserted = true;
             } else if text == "Edit" {
+                #[cfg(not(target_os = "macos"))]
+                {
+                    let sep_edit = PredefinedMenuItem::separator(app)?;
+                    sub.append(&sep_edit)?;
+                    sub.append(&preferences_item)?;
+                }
                 // macOS (and many platforms) already ship Undo/Redo in Edit. Do not append ours — that
                 // duplicates entries. Voxel undo/redo uses the same shortcuts via the webview (`App.tsx`).
                 edit_inserted = true;
             } else if text == "View" {
+                sub.append(&rendering_submenu)?;
+                sub.append(&ortho_view_item)?;
+                sub.append(&sep_before_chat)?;
                 sub.append(&chat_panel_item)?;
                 view_inserted = true;
             }
@@ -1393,7 +1625,12 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     }
 
     if !view_inserted {
-        let view_menu = Submenu::with_items(app, "View", true, &[&chat_panel_item])?;
+        let view_menu = Submenu::with_items(
+            app,
+            "View",
+            true,
+            &[&rendering_submenu, &ortho_view_item, &sep_before_chat, &chat_panel_item],
+        )?;
         menu.append(&view_menu)?;
     }
 
@@ -1439,8 +1676,22 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     }
 
     if !edit_inserted {
-        let edit_menu = Submenu::with_items(app, "Edit", true, &[&undo_item, &redo_item])?;
-        menu.append(&edit_menu)?;
+        #[cfg(target_os = "macos")]
+        {
+            let edit_menu = Submenu::with_items(app, "Edit", true, &[&undo_item, &redo_item])?;
+            menu.append(&edit_menu)?;
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let sep_edit = PredefinedMenuItem::separator(app)?;
+            let edit_menu = Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[&undo_item, &redo_item, &sep_edit, &preferences_item],
+            )?;
+            menu.append(&edit_menu)?;
+        }
     }
 
     menu.append(&debug_menu)?;
@@ -1713,7 +1964,7 @@ fn collab_set_can_edit(
 }
 
 #[tauri::command]
-fn collab_push_camera(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+fn collab_push_camera(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
     let vs = Arc::clone(&*state);
     let mut c = vs.collab.lock().map_err(|e| e.to_string())?;
     if !c.is_active() {
@@ -1731,10 +1982,19 @@ fn collab_push_camera(state: State<'_, Arc<ViewerState>>) -> Result<(), String> 
     };
     let pid = c.local_peer_id;
     c.presence.insert(pid, presence);
-    let msg = serde_json::to_string(&collab::ClientToHost::Camera { presence }).unwrap();
     if c.is_client() {
+        let msg = serde_json::to_string(&collab::ClientToHost::Camera { presence }).unwrap();
         if let Some(tx) = &c.client_tx {
             let _ = tx.send(msg);
+        }
+    } else if c.is_host() {
+        // Guests only receive camera updates via WebSocket; without this broadcast the host's
+        // peer id never appears in guests' `presence`, so "snap to host" always failed.
+        let cam_ev = collab::HostToClient::Camera { peer_id: pid, presence };
+        let json = serde_json::to_string(&cam_ev).unwrap();
+        let _ = app.emit("collab-camera", &json);
+        if let Some(tx) = &c.host_broadcast {
+            let _ = tx.send(json);
         }
     }
     Ok(())
@@ -1867,8 +2127,23 @@ fn create_new_project(
     Ok(())
 }
 
+/// stderr logger: debug builds default to `warn` + `voxelle_load=info`. Override with `RUST_LOG`, e.g. `RUST_LOG=voxelle_load=debug`.
+fn init_load_logging() {
+    let default_filter = if cfg!(debug_assertions) {
+        "warn,voxelle_load=info"
+    } else {
+        "warn"
+    };
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(default_filter),
+    )
+    .format_timestamp_millis()
+    .try_init();
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    init_load_logging();
     let viewer_state = Arc::new(ViewerState {
         viewer: Mutex::new(None),
         camera: Mutex::new(OrbitCamera::new()),
@@ -1944,11 +2219,53 @@ pub fn run() {
                     "voxelle-check-updates",
                     (),
                 );
+            } else if event.id() == "menu_preferences" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-open-preferences",
+                    (),
+                );
             } else if event.id() == "debug_copy_performance" {
                 let state = app.state::<Arc<ViewerState>>();
                 if let Err(e) = copy_performance_data_to_clipboard(state.inner()) {
                     eprintln!("copy performance data: {e}");
                 }
+            } else if event.id() == "view_render_greedy" {
+                let state = app.state::<Arc<ViewerState>>();
+                let _ = apply_rendering_mode(&state, RenderingMode::Greedy);
+                wake_viewport_loop(&app);
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-rendering-mode-changed",
+                    "greedy",
+                );
+            } else if event.id() == "view_render_marching" {
+                let state = app.state::<Arc<ViewerState>>();
+                let _ = apply_rendering_mode(&state, RenderingMode::MarchingCubes);
+                wake_viewport_loop(&app);
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-rendering-mode-changed",
+                    "marchingCubes",
+                );
+            } else if event.id() == "view_render_dual" {
+                let state = app.state::<Arc<ViewerState>>();
+                let _ = apply_rendering_mode(&state, RenderingMode::DualContour);
+                wake_viewport_loop(&app);
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-rendering-mode-changed",
+                    "dualContour",
+                );
+            } else if event.id() == "menu_view_ortho" {
+                let state = app.state::<Arc<ViewerState>>();
+                let new_o = state
+                    .camera
+                    .lock()
+                    .map(|c| c.perspective)
+                    .unwrap_or(true);
+                let _ = apply_orthographic(&state, new_o);
+                wake_viewport_loop(&app);
             }
         })
         .setup(move |app| {
@@ -1957,12 +2274,12 @@ pub fn run() {
 
             let window = app.get_webview_window("main").expect("main window");
             let w = window.clone();
-            let mut viewer =
+            let viewer =
                 tauri::async_runtime::block_on(async move { WgpuViewer::new(w).await })
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            if let Ok(sz) = window.inner_size() {
-                viewer.resize(sz.width, sz.height);
-            }
+            // Do not resize to `inner_size()` here: the 3D view matches the `.viewport` div (below
+            // toolbar / beside sidebar), not the full window. Wrong dimensions break screen→world
+            // raycasts until the frontend sends `viewer_resize`.
             *vs.viewer.lock().unwrap() = Some(viewer);
             Ok(())
         })
@@ -1997,6 +2314,7 @@ pub fn run() {
             set_rendering_mode,
             get_orthographic,
             set_orthographic,
+            set_tone_mapping,
         ])
         .build(tauri::generate_context!())
         .expect("error building app")

@@ -88,6 +88,14 @@ struct PostBlurUniform {
     blur_dir: [f32; 4],
 }
 
+/// Matches `post_composite.wgsl` `PostCompositeOpts` and Voxelle web tone mapping ids (neutral…reinhard).
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PostCompositeOpts {
+    tone_mode: u32,
+    _pad: [u32; 3],
+}
+
 pub struct WgpuViewer {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
@@ -141,6 +149,7 @@ pub struct WgpuViewer {
     bind_trans: Option<wgpu::BindGroup>,
 
     post_blur_buf: wgpu::Buffer,
+    post_composite_opts_buf: wgpu::Buffer,
 
     pipeline_opaque: wgpu::RenderPipeline,
     /// Web-style ghost: occluded (Greater) then front (Always), unlit + alpha blend; no gbuffer writes.
@@ -795,6 +804,16 @@ impl WgpuViewer {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
                 ],
             });
 
@@ -1201,6 +1220,14 @@ impl WgpuViewer {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
+        let post_composite_opts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("post_composite_opts"),
+            contents: bytemuck::bytes_of(&PostCompositeOpts {
+                tone_mode: 0,
+                _pad: [0, 0, 0],
+            }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
 
         let sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
@@ -1347,6 +1374,10 @@ impl WgpuViewer {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler_linear),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: post_composite_opts_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -1407,6 +1438,7 @@ impl WgpuViewer {
             bind_composite,
             bind_trans,
             post_blur_buf,
+            post_composite_opts_buf,
             pipeline_opaque,
             pipeline_preview_occluded,
             pipeline_preview_front,
@@ -1513,6 +1545,20 @@ impl WgpuViewer {
         self.rebuild_bind_groups();
     }
 
+    /// `mode`: 0 neutral … 5 reinhard (see `post_composite.wgsl` / Voxelle web tone mapping ids).
+    pub fn set_tone_mapping_mode(&mut self, mode: u32) {
+        let mode = mode.min(5);
+        let opts = PostCompositeOpts {
+            tone_mode: mode,
+            _pad: [0, 0, 0],
+        };
+        self.queue.write_buffer(
+            &self.post_composite_opts_buf,
+            0,
+            bytemuck::bytes_of(&opts),
+        );
+    }
+
     fn rebuild_bind_groups(&mut self) {
         self.bind_scene_opaque = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_op"),
@@ -1615,6 +1661,10 @@ impl WgpuViewer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.post_composite_opts_buf.as_entire_binding(),
                 },
             ],
         });
