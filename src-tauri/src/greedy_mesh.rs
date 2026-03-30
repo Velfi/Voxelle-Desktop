@@ -2,6 +2,7 @@
 
 use crate::gpu_brick::{pack_cell, pack_empty};
 use crate::voxelle::{MaterialId, SceneObject, Voxel};
+use glam::Mat4;
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -241,6 +242,33 @@ mod bounds_edit_tests {
         assert!(mesh_bounds_remove_is_strict_interior(&b, 5, 5, 5));
         assert!(!mesh_bounds_remove_is_strict_interior(&b, 0, 5, 5));
         assert!(!mesh_bounds_remove_is_strict_interior(&b, 10, 5, 5));
+    }
+
+    #[test]
+    fn mesh_bounds_world_matches_local_for_identity_objects() {
+        let voxels = vec![
+            Voxel {
+                x: 1,
+                y: 2,
+                z: 3,
+                color: 4,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            Voxel {
+                x: 10,
+                y: 0,
+                z: 0,
+                color: 1,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+        ];
+        let objs = crate::voxelle::default_scene_objects();
+        let w = mesh_bounds_from_voxels_world(&voxels, &objs).expect("world");
+        let l = mesh_bounds_from_voxels(&voxels).expect("local");
+        assert!((w.min - l.min).length() < 1e-4);
+        assert!((w.max - l.max).length() < 1e-4);
     }
 }
 
@@ -1502,15 +1530,23 @@ pub fn mesh_bounds_from_voxels_world(voxels: &[Voxel], objects: &[SceneObject]) 
     if voxels.is_empty() {
         return None;
     }
+    let default_objs = crate::voxelle::default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
+    let mats = crate::voxelle::scene::object_world_matrices_by_id(objs);
+    let vis = crate::voxelle::scene::object_visibility_by_id(objs);
     let mut min = glam::Vec3::splat(f32::INFINITY);
     let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
     let mut any = false;
     for v in voxels {
-        if !crate::voxelle::scene::is_object_visible(objects, v.object_id) {
+        if !vis.get(&v.object_id).copied().unwrap_or(true) {
             continue;
         }
         any = true;
-        let m = crate::voxelle::object_world_matrix(objects, v.object_id);
+        let m = mats.get(&v.object_id).copied().unwrap_or(Mat4::IDENTITY);
         let pf = m.transform_point3(glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32));
         min = min.min(pf);
         max = max.max(pf);
@@ -1599,6 +1635,49 @@ pub fn build_greedy_mesh_chunked(
         append_object_meshes_sorted(&core, &map, objs, &mut acc);
     }
     (acc, bounds)
+}
+
+/// Line-list vertices for collab line shader (`position` + `color` per vertex): expanding ripples in XZ at voxel center Y.
+pub fn ping_ripple_line_vertices(
+    vx: i32,
+    vy: i32,
+    vz: i32,
+    elapsed: f32,
+    color: [f32; 3],
+) -> Vec<f32> {
+    const SEGMENTS: usize = 44;
+    const WAVE_SPEED: f32 = 2.5;
+    const WAVE_GAP: f32 = 0.55;
+    const MAX_R: f32 = 3.6;
+    let cx = vx as f32 + 0.5;
+    let cy = vy as f32 + 0.5;
+    let cz = vz as f32 + 0.5;
+    let mut out: Vec<f32> = Vec::with_capacity(SEGMENTS * 6 * 6 * 24);
+    let tau = std::f32::consts::TAU;
+    for wave_idx in 0..5 {
+        let t = elapsed * WAVE_SPEED - (wave_idx as f32) * WAVE_GAP;
+        let r = t.rem_euclid(MAX_R);
+        if r < 0.05 || r > MAX_R - 0.03 {
+            continue;
+        }
+        let fade = (1.0 - r / MAX_R).clamp(0.2, 1.0);
+        let c = [
+            color[0] * fade,
+            color[1] * fade,
+            color[2] * fade,
+        ];
+        for i in 0..SEGMENTS {
+            let a0 = (i as f32) / (SEGMENTS as f32) * tau;
+            let a1 = ((i + 1) as f32) / (SEGMENTS as f32) * tau;
+            let x0 = cx + r * a0.cos();
+            let z0 = cz + r * a0.sin();
+            let x1 = cx + r * a1.cos();
+            let z1 = cz + r * a1.sin();
+            out.extend_from_slice(&[x0, cy, z0, c[0], c[1], c[2]]);
+            out.extend_from_slice(&[x1, cy, z1, c[0], c[1], c[2]]);
+        }
+    }
+    out
 }
 
 #[cfg(test)]

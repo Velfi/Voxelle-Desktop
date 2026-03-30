@@ -31,6 +31,35 @@ pub fn screen_to_world_ray(
     (o, d)
 }
 
+/// World-space point → physical viewport pixels `(sx, sy)` with top-left origin (+Y down), matching [`screen_to_world_ray`].
+pub fn world_to_viewport_pixels(
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    wx: f32,
+    wy: f32,
+    wz: f32,
+) -> Option<(f32, f32)> {
+    let w = width.max(1.0);
+    let h = height.max(1.0);
+    let view = camera.view_matrix();
+    let proj = camera.proj_matrix(w, h);
+    let vp = proj * view;
+    let p = Vec4::new(wx, wy, wz, 1.0);
+    let clip = vp * p;
+    if clip.w.abs() < 1e-5 {
+        return None;
+    }
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    if ndc_x.abs() > 1.55 || ndc_y.abs() > 1.55 {
+        return None;
+    }
+    let sx = (ndc_x + 1.0) * 0.5 * w - 0.5;
+    let sy = (1.0 - ndc_y) * 0.5 * h - 0.5;
+    Some((sx, sy))
+}
+
 #[inline]
 fn world_to_voxel(p: Vec3) -> (i32, i32, i32) {
     (

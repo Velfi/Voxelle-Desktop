@@ -85,41 +85,59 @@ pub fn presence_eye(p: &CameraPresence) -> Vec3 {
 }
 
 /// Ephemeral world highlight when a peer pings a voxel cell (`collab-ping`).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct PingFlash {
     pub x: i32,
     pub y: i32,
     pub z: i32,
     pub color_rgb: u32,
     pub until: std::time::Instant,
+    pub started: std::time::Instant,
+    pub display_name: String,
 }
 
-pub fn record_ping_flash_colored(state: &ViewerState, x: i32, y: i32, z: i32, color_rgb: u32) {
+pub fn record_ping_flash_colored(
+    state: &ViewerState,
+    x: i32,
+    y: i32,
+    z: i32,
+    color_rgb: u32,
+    display_name: String,
+) {
+    let now = std::time::Instant::now();
     if let Ok(mut g) = state.ping_flash.lock() {
         *g = Some(PingFlash {
             x,
             y,
             z,
             color_rgb,
-            until: std::time::Instant::now() + std::time::Duration::from_secs_f32(2.8),
+            until: now + std::time::Duration::from_secs_f32(2.8),
+            started: now,
+            display_name,
         });
     }
 }
 
-/// Resolves accent color from the roster. Do **not** call while holding [`ViewerState::collab`].
+/// Resolves accent color and display name from the roster. Do **not** call while holding [`ViewerState::collab`].
 pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i32) {
-    let color_rgb = state
+    let (color_rgb, display_name) = state
         .collab
         .lock()
         .ok()
         .and_then(|c| {
-            c.roster
-                .iter()
-                .find(|r| r.peer_id == peer_id)
-                .map(|r| r.color_rgb)
+            c.roster.iter().find(|r| r.peer_id == peer_id).map(|r| {
+                (
+                    r.color_rgb,
+                    if r.display_name.is_empty() {
+                        "Guest".to_string()
+                    } else {
+                        r.display_name.clone()
+                    },
+                )
+            })
         })
-        .unwrap_or(0xffff44);
-    record_ping_flash_colored(state, x, y, z, color_rgb);
+        .unwrap_or((0xffff44, "Guest".to_string()));
+    record_ping_flash_colored(state, x, y, z, color_rgb, display_name);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -156,6 +174,8 @@ pub enum ClientToHost {
     },
     /// Periodic liveness; host also treats any other inbound message as activity.
     Heartbeat,
+    /// Guest is leaving the session (best-effort before the socket closes).
+    Leave,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -186,6 +206,8 @@ pub enum HostToClient {
         x: i32,
         y: i32,
         z: i32,
+        #[serde(default)]
+        display_name: String,
     },
     Camera {
         peer_id: u32,
@@ -389,6 +411,14 @@ async fn try_upnp_internet_share(
 }
 
 pub const HOST_PEER_ID: u32 = 1;
+
+#[derive(Clone, Copy)]
+pub(crate) enum CollabPeerLeftKind {
+    /// Client sent [`ClientToHost::Leave`] before disconnecting.
+    Left,
+    /// Socket closed or failed without an explicit leave message.
+    Disconnected,
+}
 
 fn apply_delta_on_main(
     app: &AppHandle,
@@ -676,11 +706,20 @@ fn host_remove_peer_from_session(
     app: &AppHandle,
     collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
     peer_id: u32,
+    notify: Option<CollabPeerLeftKind>,
 ) {
-    let roster = {
+    let roster_vec = {
         let mut g = match collab_mtx.lock() {
             Ok(g) => g,
             Err(_) => return,
+        };
+        let Some(display_name) = g
+            .roster
+            .iter()
+            .find(|r| r.peer_id == peer_id)
+            .map(|r| r.display_name.clone())
+        else {
+            return;
         };
         g.roster.retain(|r| r.peer_id != peer_id);
         g.host_peer_kick_tx.remove(&peer_id);
@@ -688,9 +727,22 @@ fn host_remove_peer_from_session(
         g.presence.remove(&peer_id);
         g.host_undo.remove(&peer_id);
         g.host_redo.remove(&peer_id);
-        g.roster.clone()
+        (g.roster.clone(), display_name)
     };
-    broadcast_roster_to_guests(app, collab_mtx, &roster);
+    if let Some(kind) = notify {
+        let reason = match kind {
+            CollabPeerLeftKind::Left => "left",
+            CollabPeerLeftKind::Disconnected => "disconnected",
+        };
+        let payload = serde_json::json!({
+            "peerId": peer_id,
+            "displayName": roster_vec.1,
+            "reason": reason,
+        })
+        .to_string();
+        let _ = app.emit("collab-peer-left", payload);
+    }
+    broadcast_roster_to_guests(app, collab_mtx, &roster_vec.0);
 }
 
 fn touch_guest_activity(collab_mtx: &std::sync::Mutex<CollabRuntime>, peer_id: u32) {
@@ -740,7 +792,7 @@ async fn handle_host_connection(
                     serde_json::to_string(&HostToClient::Deny { reason }).unwrap(),
                 ))
                 .await;
-            host_remove_peer_from_session(&app, &collab_mtx, peer_id);
+            host_remove_peer_from_session(&app, &collab_mtx, peer_id, None);
             return;
         }
     };
@@ -754,6 +806,8 @@ async fn handle_host_connection(
         .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
         .await;
 
+    let mut peer_already_removed = false;
+    let mut kicked = false;
     loop {
         tokio::select! {
             biased;
@@ -768,6 +822,7 @@ async fn handle_host_connection(
                             serde_json::to_string(&HostToClient::Kicked { reason }).unwrap(),
                         ))
                         .await;
+                    kicked = true;
                     break;
                 }
             }
@@ -777,9 +832,15 @@ async fn handle_host_connection(
                 }
             }
             incoming = ws.next() => {
-                let Some(msg) = incoming else { break; };
-                let Ok(Message::Text(t)) = msg else {
-                    continue;
+                let Some(msg_result) = incoming else { break; };
+                let msg = match msg_result {
+                    Ok(m) => m,
+                    Err(_) => break,
+                };
+                let t = match msg {
+                    Message::Text(t) => t,
+                    Message::Ping(_) | Message::Pong(_) => continue,
+                    Message::Close(_) | Message::Binary(_) | Message::Frame(_) => break,
                 };
                 let Ok(cmd) = serde_json::from_str::<ClientToHost>(&t) else {
                     continue;
@@ -788,6 +849,16 @@ async fn handle_host_connection(
                 match cmd {
             ClientToHost::Join { .. } => {}
             ClientToHost::Heartbeat => {}
+            ClientToHost::Leave => {
+                host_remove_peer_from_session(
+                    &app,
+                    &collab_mtx,
+                    peer_id,
+                    Some(CollabPeerLeftKind::Left),
+                );
+                peer_already_removed = true;
+                break;
+            }
             ClientToHost::Edit { delta } => {
                 let allowed = roster
                     .iter()
@@ -892,7 +963,19 @@ async fn handle_host_connection(
             }
             ClientToHost::Ping { x, y, z } => {
                 record_ping_flash(state.as_ref(), peer_id, x, y, z);
-                let ping = HostToClient::Ping { peer_id, x, y, z };
+                let display_name = roster
+                    .iter()
+                    .find(|r| r.peer_id == peer_id)
+                    .map(|r| r.display_name.clone())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "Guest".to_string());
+                let ping = HostToClient::Ping {
+                    peer_id,
+                    x,
+                    y,
+                    z,
+                    display_name,
+                };
                 let json = serde_json::to_string(&ping).unwrap();
                 let _ = app.emit("collab-ping", &json);
                 if let Ok(g) = collab_mtx.lock() {
@@ -935,7 +1018,18 @@ async fn handle_host_connection(
             }
         }
     }
-    host_remove_peer_from_session(&app, &collab_mtx, peer_id);
+    if !peer_already_removed {
+        host_remove_peer_from_session(
+            &app,
+            &collab_mtx,
+            peer_id,
+            if kicked {
+                None
+            } else {
+                Some(CollabPeerLeftKind::Disconnected)
+            },
+        );
+    }
 }
 
 pub fn start_host(
@@ -1337,6 +1431,7 @@ pub async fn client_connect_blocking(
                                 x,
                                 y,
                                 z,
+                                display_name: _,
                             } => {
                                 record_ping_flash(st4.as_ref(), pid, x, y, z);
                                 let _ = app4.emit("collab-ping", t);

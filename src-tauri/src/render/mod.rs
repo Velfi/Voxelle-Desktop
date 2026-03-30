@@ -193,13 +193,14 @@ pub struct WgpuViewer {
     preview_wire_index_count: u32,
     collab_line_vertex_buffer: Option<wgpu::Buffer>,
     collab_line_vertex_count: u32,
+    ping_wave_line_vertex_buffer: Option<wgpu::Buffer>,
+    ping_wave_line_vertex_count: u32,
     ping_vertex_buffer: Option<wgpu::Buffer>,
     ping_index_buffer: Option<wgpu::Buffer>,
     ping_index_count: u32,
     ping_wire_vertex_buffer: Option<wgpu::Buffer>,
     ping_wire_index_buffer: Option<wgpu::Buffer>,
     ping_wire_index_count: u32,
-    pub(crate) ping_mesh_key: Option<(i32, i32, i32, u32)>,
     /// Dedup CPU mesh rebuild when hover cell unchanged.
     pub preview_cache_key: Option<(i32, i32, i32, u8)>,
 
@@ -1510,13 +1511,14 @@ impl WgpuViewer {
             preview_wire_index_count: 0,
             collab_line_vertex_buffer: None,
             collab_line_vertex_count: 0,
+            ping_wave_line_vertex_buffer: None,
+            ping_wave_line_vertex_count: 0,
             ping_vertex_buffer: None,
             ping_index_buffer: None,
             ping_index_count: 0,
             ping_wire_vertex_buffer: None,
             ping_wire_index_buffer: None,
             ping_wire_index_count: 0,
-            ping_mesh_key: None,
             preview_cache_key: None,
             sampler_linear,
             sampler_comparison,
@@ -2509,7 +2511,24 @@ impl WgpuViewer {
         self.ping_wire_vertex_buffer = None;
         self.ping_wire_index_buffer = None;
         self.ping_wire_index_count = 0;
-        self.ping_mesh_key = None;
+        self.ping_wave_line_vertex_buffer = None;
+        self.ping_wave_line_vertex_count = 0;
+    }
+
+    pub fn upload_ping_wave_lines(&mut self, verts: &[f32]) {
+        if verts.len() < 6 {
+            self.ping_wave_line_vertex_buffer = None;
+            self.ping_wave_line_vertex_count = 0;
+            return;
+        }
+        self.ping_wave_line_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("ping_wave_lines"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.ping_wave_line_vertex_count = verts.len() as u32 / 6;
     }
 
     /// Updates GPU voxel brick. When `patch` is set and matches the existing brick layout, only one cell is written.
@@ -2745,6 +2764,22 @@ impl WgpuViewer {
         pass.draw(0..self.collab_line_vertex_count, 0..1);
     }
 
+    fn draw_ping_wave_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(ref vb) = self.ping_wave_line_vertex_buffer else {
+            return;
+        };
+        if self.ping_wave_line_vertex_count < 2 {
+            return;
+        }
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.set_pipeline(&self.pipeline_collab_lines_occluded);
+        pass.draw(0..self.ping_wave_line_vertex_count, 0..1);
+        pass.set_pipeline(&self.pipeline_collab_lines_front);
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.draw(0..self.ping_wave_line_vertex_count, 0..1);
+    }
+
     pub fn render(&mut self) -> Result<(), String> {
         let frame = self
             .surface
@@ -2828,6 +2863,7 @@ impl WgpuViewer {
             self.draw_indexed_mesh(&mut pass);
             self.draw_indexed_preview(&mut pass);
             self.draw_collab_peer_lines(&mut pass);
+            self.draw_ping_wave_lines(&mut pass);
             self.draw_indexed_ping(&mut pass);
         }
 

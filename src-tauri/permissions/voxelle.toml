@@ -13,6 +13,8 @@ commands.allow = [
   "get_last_session_info",
   "create_new_project",
   "voxel_pick_probe",
+  "ping_cursor_pick",
+  "world_to_viewport_pixels",
   "sync_preview_input",
   "voxel_edit_at_screen",
   "voxel_undo",

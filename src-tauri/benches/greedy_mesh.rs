@@ -5,7 +5,10 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::collections::BTreeMap;
 use voxelle_desktop_lib::greedy_mesh::{self, ChunkKey, MeshBuffers, SpatialMeshCache};
-use voxelle_desktop_lib::voxelle::{MaterialId, Voxel};
+use voxelle_desktop_lib::voxelle::{default_scene_objects, MaterialId, SceneObject, Voxel};
+
+/// Empty slice: [`greedy_mesh::build_greedy_mesh`] uses default scene objects when `objects` is empty.
+const NO_OBJECTS: &[SceneObject] = &[];
 
 /// Same spatial cache as the fused loader, then **sequential** per-chunk greedy mesh (baseline before rayon).
 fn sequential_chunk_meshes_after_cache(
@@ -54,10 +57,10 @@ fn bench_full_mesh(c: &mut Criterion) {
     let v24 = solid_box((0, 0, 0), 24, 0x8899aa);
 
     c.bench_function("build_greedy_mesh solid 16³", |b| {
-        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v16)))
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v16), black_box(NO_OBJECTS)))
     });
     c.bench_function("build_greedy_mesh solid 24³", |b| {
-        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v24)))
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v24), black_box(NO_OBJECTS)))
     });
 }
 
@@ -71,7 +74,7 @@ fn bench_mapped_and_chunked(c: &mut Criterion) {
     });
 
     c.bench_function("build_greedy_mesh_chunked solid 20³", |b| {
-        b.iter(|| greedy_mesh::build_greedy_mesh_chunked(black_box(&voxels), cs))
+        b.iter(|| greedy_mesh::build_greedy_mesh_chunked(black_box(&voxels), cs, black_box(NO_OBJECTS)))
     });
 }
 
@@ -155,6 +158,17 @@ fn bench_dirty_chunk_remesh(c: &mut Criterion) {
     });
 }
 
+fn bench_mesh_bounds(c: &mut Criterion) {
+    let voxels = solid_box((0, 0, 0), 64, 0x8899aa);
+    let objs = default_scene_objects();
+    c.bench_function("mesh_bounds_from_voxels 64³ solid", |b| {
+        b.iter(|| greedy_mesh::mesh_bounds_from_voxels(black_box(&voxels)))
+    });
+    c.bench_function("mesh_bounds_from_voxels_world 64³ solid (identity objects)", |b| {
+        b.iter(|| greedy_mesh::mesh_bounds_from_voxels_world(black_box(&voxels), black_box(objs.as_slice())))
+    });
+}
+
 criterion_group!(
     benches,
     bench_full_mesh,
@@ -163,5 +177,6 @@ criterion_group!(
     bench_bucket_scans,
     bench_load_chunk_meshes_fused_vs_sequential,
     bench_dirty_chunk_remesh,
+    bench_mesh_bounds,
 );
 criterion_main!(benches);

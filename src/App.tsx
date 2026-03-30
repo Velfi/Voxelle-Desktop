@@ -79,6 +79,19 @@ type ChatToast = { id: number; text: string };
 
 const CHAT_TOAST_CAP = 5;
 
+const PING_HUD_MS = 2800;
+const PING_MP3_URL = `${import.meta.env.BASE_URL}ping.mp3`;
+
+function playPingSound() {
+  try {
+    const a = new Audio(PING_MP3_URL);
+    a.volume = 0.85;
+    void a.play().catch(() => {});
+  } catch {
+    /* ignore */
+  }
+}
+
 function basename(path: string): string {
   const n = path.replace(/\\/g, "/");
   const i = n.lastIndexOf("/");
@@ -115,6 +128,8 @@ function App() {
   /** Physical pixel size of the GPU surface; kept in sync with Rust (may differ slightly from CSS×dpr). */
   const viewportPhysRef = useRef({ w: 0, h: 0 });
   const lastRef = useRef({ x: 0, y: 0 });
+  /** Last pointer position over `.viewport` in physical pixels (for Z = ping pick). */
+  const lastViewportPickPhysRef = useRef<{ x: number; y: number } | null>(null);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const maxPointerMoveRef = useRef(0);
   /** After pick probe: camera orbit/pan/dolly vs voxel click-to-edit (matches web: no hit → camera). */
@@ -184,6 +199,19 @@ function App() {
   const [chatToasts, setChatToasts] = useState<ChatToast[]>([]);
   const chatToastIdRef = useRef(0);
   const chatPanelOpenRef = useRef(false);
+  const pingHudRef = useRef<{
+    name: string;
+    wx: number;
+    wy: number;
+    wz: number;
+    until: number;
+  } | null>(null);
+  const [pingHudTick, setPingHudTick] = useState(0);
+  const [pingLabelCss, setPingLabelCss] = useState<{
+    name: string;
+    leftPct: number;
+    topPct: number;
+  } | null>(null);
   const collabActiveRef = useRef(false);
   const localPeerIdRef = useRef(0);
   const [hostPort, setHostPort] = useState(
@@ -371,6 +399,32 @@ function App() {
       listen("voxelle-open-preferences", () => {
         setPreferencesOpen(true);
       }),
+      listen<string>("collab-ping", (e) => {
+        try {
+          const j = JSON.parse(e.payload) as {
+            displayName?: string;
+            display_name?: string;
+            x?: number;
+            y?: number;
+            z?: number;
+          };
+          const name = j.displayName ?? j.display_name ?? "?";
+          const vx = j.x ?? 0;
+          const vy = j.y ?? 0;
+          const vz = j.z ?? 0;
+          pingHudRef.current = {
+            name,
+            wx: vx + 0.5,
+            wy: vy + 0.5,
+            wz: vz + 0.5,
+            until: Date.now() + PING_HUD_MS,
+          };
+          setPingHudTick((n) => n + 1);
+          playPingSound();
+        } catch {
+          /* ignore */
+        }
+      }),
       listen<string>("collab-chat", (e) => {
         let line: string;
         let fromPeerId: number | undefined;
@@ -422,6 +476,26 @@ function App() {
         try {
           const arr = JSON.parse(e.payload) as RosterEntry[];
           setRoster(arr);
+        } catch {
+          /* ignore */
+        }
+      }),
+      listen<string>("collab-peer-left", (e) => {
+        if (localPeerIdRef.current !== 1) return;
+        try {
+          const j = JSON.parse(e.payload) as {
+            displayName?: string;
+            reason?: string;
+          };
+          const name =
+            typeof j.displayName === "string" && j.displayName.length > 0
+              ? j.displayName
+              : "Guest";
+          const text =
+            j.reason === "left"
+              ? `${name} left the session.`
+              : `${name} disconnected.`;
+          setCollabBanner({ text, tone: "info" });
         } catch {
           /* ignore */
         }
@@ -526,6 +600,44 @@ function App() {
     });
     return () => cancelAnimationFrame(id);
   }, [sendResize, sidebarExpanded, rightSidebarExpanded]);
+
+  useEffect(() => {
+    if (pingHudTick === 0 && !pingHudRef.current) return;
+    let cancelled = false;
+    let raf = 0;
+    const tick = () => {
+      if (cancelled) return;
+      const p = pingHudRef.current;
+      if (!p || Date.now() > p.until) {
+        setPingLabelCss(null);
+        if (p && Date.now() > p.until) pingHudRef.current = null;
+        return;
+      }
+      void invoke<[number, number] | null>("world_to_viewport_pixels", {
+        args: { x: p.wx, y: p.wy, z: p.wz },
+      })
+        .then((opt) => {
+          if (cancelled || opt == null || !pingHudRef.current) return;
+          const [sx, sy] = opt;
+          const { w, h } = viewportPhysRef.current;
+          if (w <= 0 || h <= 0) return;
+          const cur = pingHudRef.current;
+          if (!cur) return;
+          setPingLabelCss({
+            name: cur.name,
+            leftPct: (sx / w) * 100,
+            topPct: (sy / h) * 100,
+          });
+        })
+        .catch(() => {});
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [pingHudTick]);
 
   useEffect(() => {
     interactionModeRef.current = interactionMode;
@@ -637,17 +749,58 @@ function App() {
         } else {
           void invoke("voxel_undo").catch(() => {});
         }
+        return;
       }
       if (meta && e.key === "s") {
         e.preventDefault();
         void invoke("save_voxelle").catch(() => {
           void invoke("save_voxelle_as").catch(() => {});
         });
+        return;
       }
+      if (e.key !== "z" && e.key !== "Z") return;
+      if (meta) return;
+      if (e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (preferencesOpen || joinModalOpen || newProjectOpen) return;
+      const p = lastViewportPickPhysRef.current;
+      if (!p) return;
+      e.preventDefault();
+      const dn = loadPreferences().collabDisplayName.trim();
+      void invoke<{
+        ok: boolean;
+        x?: number;
+        y?: number;
+        z?: number;
+      }>("ping_cursor_pick", {
+        args: { x: p.x, y: p.y, displayName: dn },
+      })
+        .then((r) => {
+          if (!r?.ok || r.x == null || r.y == null || r.z == null) return;
+          const name = dn.length > 0 ? dn : "You";
+          pingHudRef.current = {
+            name,
+            wx: r.x + 0.5,
+            wy: r.y + 0.5,
+            wz: r.z + 0.5,
+            until: Date.now() + PING_HUD_MS,
+          };
+          setPingHudTick((n) => n + 1);
+          playPingSound();
+        })
+        .catch(() => {});
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [preferencesOpen, joinModalOpen, newProjectOpen]);
 
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
@@ -792,6 +945,7 @@ function App() {
 
   const onPointerMove = (e: React.PointerEvent) => {
     const { x: px, y: py } = clientToViewportPhysical(e);
+    lastViewportPickPhysRef.current = { x: px, y: py };
     if (
       !probingRef.current &&
       (interactionModeRef.current === "add" ||
@@ -1202,6 +1356,19 @@ function App() {
             role="application"
             aria-label="3D viewport"
           />
+          <div className="viewport-ping-overlay" aria-hidden>
+            {pingLabelCss ? (
+              <div
+                className="viewport-ping-label"
+                style={{
+                  left: `${pingLabelCss.leftPct}%`,
+                  top: `${pingLabelCss.topPct}%`,
+                }}
+              >
+                {pingLabelCss.name}
+              </div>
+            ) : null}
+          </div>
           {showEmptyOpenFile ? (
           <div
             className="viewport-empty-open"
@@ -1335,15 +1502,21 @@ function App() {
             aria-label="New chat messages"
           >
             {chatToasts.map((t) => (
-              <div key={t.id} className="chat-toast" role="status">
+              <div
+                key={t.id}
+                className="chat-toast"
+                role="status"
+                onClick={() => setChatPanelOpen(true)}
+              >
                 <span className="chat-toast-text">{t.text}</span>
                 <button
                   type="button"
                   className="chat-toast-dismiss"
                   aria-label="Dismiss notification"
-                  onClick={() =>
-                    setChatToasts((prev) => prev.filter((x) => x.id !== t.id))
-                  }
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
+                  }}
                 >
                   ×
                 </button>

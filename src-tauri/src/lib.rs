@@ -102,7 +102,7 @@ impl RenderingMode {
 #[derive(Clone, Debug)]
 pub struct EditPerfBreakdown {
     pub apply_edit_ms: f64,
-    /// Bounds scan + brick patch args (second `current_file` read, `mesh_bounds_from_voxels`, etc.).
+    /// Scene AABB in world space (`scene_bounds_for_edit`) + brick patch args; excludes viewer lock and GPU brick upload.
     pub prepare_ms: f64,
     /// Time blocked acquiring `viewer` mutex (often competes with the render loop).
     pub viewer_lock_wait_ms: f64,
@@ -129,6 +129,71 @@ pub struct EditPerfBreakdown {
     pub preview_clear_ms: f64,
 }
 
+/// Cached global voxel AABB min and single-object id (see [`resolve_voxel_edit_stats`]).
+#[derive(Clone, Copy)]
+struct VoxelEditStatsCache {
+    aabb_min: (i32, i32, i32),
+    /// `Some(id)` iff every voxel has `object_id == id`.
+    common_object_id: Option<u32>,
+}
+
+fn voxel_aabb_min_and_single_object_one_pass(voxels: &[voxelle::Voxel]) -> VoxelEditStatsCache {
+    if voxels.is_empty() {
+        return VoxelEditStatsCache {
+            aabb_min: (0, 0, 0),
+            common_object_id: Some(0),
+        };
+    }
+    let mut min_x = i32::MAX;
+    let mut min_y = i32::MAX;
+    let mut min_z = i32::MAX;
+    let first = voxels[0].object_id;
+    let mut single = true;
+    for v in voxels {
+        min_x = min_x.min(v.x);
+        min_y = min_y.min(v.y);
+        min_z = min_z.min(v.z);
+        if v.object_id != first {
+            single = false;
+        }
+    }
+    VoxelEditStatsCache {
+        aabb_min: (min_x, min_y, min_z),
+        common_object_id: if single { Some(first) } else { None },
+    }
+}
+
+fn resolve_voxel_edit_stats(
+    voxels: &[voxelle::Voxel],
+    delta: &voxel_edit::VoxelEditDelta,
+    cached: Option<VoxelEditStatsCache>,
+) -> VoxelEditStatsCache {
+    let Some(cached) = cached else {
+        return voxel_aabb_min_and_single_object_one_pass(voxels);
+    };
+    match delta {
+        voxel_edit::VoxelEditDelta::Added(v) => {
+            let (ox, oy, oz) = cached.aabb_min;
+            let new_min = (ox.min(v.x), oy.min(v.y), oz.min(v.z));
+            let common_object_id = match cached.common_object_id {
+                Some(oid) if v.object_id == oid => Some(oid),
+                _ => None,
+            };
+            VoxelEditStatsCache {
+                aabb_min: new_min,
+                common_object_id,
+            }
+        }
+        voxel_edit::VoxelEditDelta::Removed { voxel } => {
+            let (ox, oy, oz) = cached.aabb_min;
+            if voxel.x == ox || voxel.y == oy || voxel.z == oz {
+                return voxel_aabb_min_and_single_object_one_pass(voxels);
+            }
+            cached
+        }
+    }
+}
+
 pub struct ViewerState {
     pub viewer: Mutex<Option<WgpuViewer>>,
     pub camera: Mutex<OrbitCamera>,
@@ -146,6 +211,8 @@ pub struct ViewerState {
     pub last_edit_perf: Mutex<Option<EditPerfBreakdown>>,
     /// Last scene AABB used for lighting/brick; drives incremental bounds on edit when possible.
     pub last_scene_bounds: Mutex<Option<greedy_mesh::MeshBounds>>,
+    /// Incremental [`greedy_mesh::voxel_aabb_min_int`] + single-object detection for chunked mesh path.
+    voxel_edit_stats_cache: Mutex<Option<VoxelEditStatsCache>>,
     pub edit_undo: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
     pub edit_redo: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
     pub collab: Arc<std::sync::Mutex<collab::CollabRuntime>>,
@@ -851,6 +918,11 @@ pub(crate) fn apply_mesh_and_camera(
     } = prepared;
     let fl = file.scene.focal_length_mm.unwrap_or(29.0);
     let orthographic = file.scene.orthographic;
+    let voxel_edit_stats_cache = if file.voxels.is_empty() {
+        None
+    } else {
+        Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels))
+    };
     let voxel_map = greedy_mesh::voxel_map_indices(&file.voxels);
     {
         let mut cf = state.current_file.lock().map_err(|e| e.to_string())?;
@@ -879,6 +951,7 @@ pub(crate) fn apply_mesh_and_camera(
     let (w, h) = viewer.viewport_size();
     cam.fit_sphere(center, r, w as f32, h as f32);
     *state.last_scene_bounds.lock().map_err(|e| e.to_string())? = Some(bounds);
+    *state.voxel_edit_stats_cache.lock().map_err(|e| e.to_string())? = voxel_edit_stats_cache;
     if let Ok(mut u) = state.edit_undo.lock() {
         u.clear();
     }
@@ -894,12 +967,39 @@ pub(crate) fn apply_mesh_and_camera(
 }
 
 fn scene_bounds_for_edit(
-    _state: &ViewerState,
+    state: &ViewerState,
     file: &voxelle::VoxelleFile,
-    _delta: &voxel_edit::VoxelEditDelta,
+    delta: &voxel_edit::VoxelEditDelta,
 ) -> Result<greedy_mesh::MeshBounds, String> {
     if file.voxels.is_empty() {
         return Ok(greedy_mesh::mesh_bounds_for_cube_side(file.grid_size));
+    }
+    let default_objs = voxelle::default_scene_objects();
+    let objs: &[voxelle::SceneObject] = if file.objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        &file.objects
+    };
+    if voxelle::scene::scene_objects_identity_for_bounds_fast_path(objs) {
+        if let Ok(guard) = state.last_scene_bounds.lock() {
+            if let Some(prev) = guard.as_ref() {
+                match delta {
+                    voxel_edit::VoxelEditDelta::Added(v) => {
+                        return Ok(greedy_mesh::mesh_bounds_expand_with_voxel(prev, v));
+                    }
+                    voxel_edit::VoxelEditDelta::Removed { voxel } => {
+                        if greedy_mesh::mesh_bounds_remove_is_strict_interior(
+                            prev,
+                            voxel.x,
+                            voxel.y,
+                            voxel.z,
+                        ) {
+                            return Ok(*prev);
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(
         greedy_mesh::mesh_bounds_from_voxels_world(&file.voxels, &file.objects)
@@ -923,7 +1023,7 @@ pub(crate) fn finish_voxel_edit_gpu(
         return Err("no model loaded".into());
     };
 
-    let bounds = scene_bounds_for_edit(&**state, file, delta)?;
+    let bounds = scene_bounds_for_edit(state.as_ref(), file, delta)?;
 
     let brick_patch = if file.voxels.is_empty() {
         None
@@ -979,6 +1079,9 @@ pub(crate) fn finish_voxel_edit_gpu(
     if file.voxels.is_empty() {
         viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
         viewer.last_mesh_route = "clear".to_string();
+        if let Ok(mut g) = state.voxel_edit_stats_cache.lock() {
+            *g = None;
+        }
     } else if rm.uses_smooth_surface() {
         let mesh = match rm {
             RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
@@ -991,16 +1094,19 @@ pub(crate) fn finish_voxel_edit_gpu(
             RenderingMode::DualContour => "dual_contour".to_string(),
             _ => unreachable!(),
         };
+        if let Ok(mut g) = state.voxel_edit_stats_cache.lock() {
+            *g = Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
+        }
     } else {
-        let origin_new = greedy_mesh::voxel_aabb_min_int(&file.voxels).unwrap();
+        let cached_stats = state
+            .voxel_edit_stats_cache
+            .lock()
+            .ok()
+            .and_then(|g| *g);
+        let voxel_stats = resolve_voxel_edit_stats(&file.voxels, delta, cached_stats);
+        let origin_new = voxel_stats.aabb_min;
+        let single_object = voxel_stats.common_object_id.is_some();
         let origin_iv = glam::IVec3::new(origin_new.0, origin_new.1, origin_new.2);
-        let single_object = file
-            .voxels
-            .iter()
-            .map(|v| v.object_id)
-            .collect::<std::collections::HashSet<_>>()
-            .len()
-            <= 1;
         let use_incremental = viewer.opaque_chunked
             && single_object
             && file.voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS
@@ -1034,6 +1140,9 @@ pub(crate) fn finish_voxel_edit_gpu(
             let t_pipe = Instant::now();
             let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects);
             mesh_pipeline_ms = t_pipe.elapsed().as_secs_f64() * 1000.0;
+        }
+        if let Ok(mut g) = state.voxel_edit_stats_cache.lock() {
+            *g = Some(voxel_stats);
         }
     }
     let mesh_ms = t_mesh.elapsed().as_secs_f64() * 1000.0;
@@ -1092,6 +1201,9 @@ pub(crate) fn refresh_opaque_mesh(
     if file.voxels.is_empty() {
         viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
         viewer.last_mesh_route = "clear".to_string();
+        if let Ok(mut g) = state.voxel_edit_stats_cache.lock() {
+            *g = None;
+        }
         drop(wp);
         return Ok(());
     }
@@ -1109,6 +1221,9 @@ pub(crate) fn refresh_opaque_mesh(
         };
     } else {
         let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects);
+    }
+    if let Ok(mut g) = state.voxel_edit_stats_cache.lock() {
+        *g = Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
     }
     drop(wp);
     Ok(())
@@ -1320,6 +1435,175 @@ fn voxel_pick_probe(
     let cam = state.camera.lock().map_err(|e| e.to_string())?;
     Ok(voxel_edit::probe_solid_hit(
         file, vmap, &cam, w, h, args.x, args.y,
+    ))
+}
+
+fn pick_cell_for_ping(
+    mode: PreviewMode,
+    file: &voxelle::VoxelleFile,
+    vmap: &HashMap<greedy_mesh::VoxelCoord, usize>,
+    cam: &OrbitCamera,
+    w: f32,
+    h: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<(i32, i32, i32)> {
+    match mode {
+        PreviewMode::Add => voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy),
+        PreviewMode::Remove => voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy),
+        PreviewMode::Navigate => voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy)
+            .or_else(|| voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy)),
+    }
+}
+
+fn local_accent_ping_color(state: &ViewerState) -> u32 {
+    state
+        .collab
+        .lock()
+        .ok()
+        .and_then(|c| {
+            c.roster
+                .iter()
+                .find(|r| r.peer_id == c.local_peer_id)
+                .map(|r| r.color_rgb)
+        })
+        .unwrap_or(0x66ccff)
+}
+
+fn local_accent_ping_display_name(state: &ViewerState) -> String {
+    state
+        .collab
+        .lock()
+        .ok()
+        .and_then(|c| {
+            c.roster.iter().find(|r| r.peer_id == c.local_peer_id).map(|r| {
+                if r.display_name.trim().is_empty() {
+                    "You".to_string()
+                } else {
+                    r.display_name.clone()
+                }
+            })
+        })
+        .unwrap_or_else(|| "You".to_string())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PingCursorPickArgs {
+    x: f32,
+    y: f32,
+    #[serde(default)]
+    display_name: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PingCursorPickResult {
+    ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    y: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    z: Option<i32>,
+}
+
+/// Brief highlight at the voxel cell under the cursor ray (add / remove / navigate semantics).
+#[tauri::command]
+fn ping_cursor_pick(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: PingCursorPickArgs,
+) -> Result<PingCursorPickResult, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Ok(PingCursorPickResult {
+                ok: false,
+                x: None,
+                y: None,
+                z: None,
+            });
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let mode = *state.preview_mode.lock().map_err(|e| e.to_string())?;
+    let coords = {
+        let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_ref() else {
+            return Ok(PingCursorPickResult {
+                ok: false,
+                x: None,
+                y: None,
+                z: None,
+            });
+        };
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(PingCursorPickResult {
+                ok: false,
+                x: None,
+                y: None,
+                z: None,
+            });
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        pick_cell_for_ping(mode, file, vmap, &cam, w, h, args.x, args.y)
+    };
+    let Some((x, y, z)) = coords else {
+        return Ok(PingCursorPickResult {
+            ok: false,
+            x: None,
+            y: None,
+            z: None,
+        });
+    };
+    let color = local_accent_ping_color(&state);
+    let label = if !args.display_name.trim().is_empty() {
+        args.display_name.trim().to_string()
+    } else {
+        local_accent_ping_display_name(&state)
+    };
+    collab::record_ping_flash_colored(Arc::as_ref(&*state), x, y, z, color, label);
+    wake_viewport_loop(&app);
+    Ok(PingCursorPickResult {
+        ok: true,
+        x: Some(x),
+        y: Some(y),
+        z: Some(z),
+    })
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorldPointArgs {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[tauri::command]
+fn world_to_viewport_pixels(
+    state: State<'_, Arc<ViewerState>>,
+    args: WorldPointArgs,
+) -> Result<Option<(f32, f32)>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Ok(None);
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    Ok(voxel_edit::world_to_viewport_pixels(
+        &cam,
+        w,
+        h,
+        args.x,
+        args.y,
+        args.z,
     ))
 }
 
@@ -1892,7 +2176,7 @@ fn sync_preview_input(
 }
 
 fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
-    let snap = state.ping_flash.lock().ok().and_then(|g| *g);
+    let snap = state.ping_flash.lock().ok().and_then(|g| g.clone());
     let Some(f) = snap else {
         viewer.clear_ping_mesh();
         return;
@@ -1902,11 +2186,6 @@ fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
         viewer.clear_ping_mesh();
         return;
     }
-    let key = (f.x, f.y, f.z, f.color_rgb);
-    if viewer.ping_mesh_key == Some(key) {
-        return;
-    }
-    viewer.ping_mesh_key = Some(key);
     let r = ((f.color_rgb >> 16) & 0xff) as f32 / 255.0;
     let g = ((f.color_rgb >> 8) & 0xff) as f32 / 255.0;
     let b = (f.color_rgb & 0xff) as f32 / 255.0;
@@ -1923,6 +2202,9 @@ fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
         2.0,
     );
     viewer.upload_ping_mesh(&solid, &wire);
+    let elapsed = f.started.elapsed().as_secs_f32();
+    let wave_verts = greedy_mesh::ping_ripple_line_vertices(f.x, f.y, f.z, elapsed, [r, g, b]);
+    viewer.upload_ping_wave_lines(&wave_verts);
 }
 
 fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
@@ -2374,7 +2656,7 @@ fn performance_report_text(state: &ViewerState) -> String {
             format!(
                 "\nLast voxel edit (ms):\n\
                  \tapply_edit (ray + data): {:.2}\n\
-                 \tprepare (bounds + brick patch): {:.2}\n\
+                 \tprepare (scene bounds world + brick patch args): {:.2}\n\
                  \tviewer lock wait: {:.2}\n\
                  \tbrick (upload_scene_data): {:.2}\n\
                  \tmesh (total): {:.2}\n\
@@ -2518,6 +2800,12 @@ fn collab_leave(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<()
         let wh = c.is_host();
         let wc = c.is_client();
         let upnp = c.upnp_external_tcp_port;
+        if wc {
+            if let Some(tx) = &c.client_tx {
+                let msg = serde_json::to_string(&collab::ClientToHost::Leave).unwrap();
+                let _ = tx.send(msg);
+            }
+        }
         c.leave();
         (wh, wc, upnp)
     };
@@ -2718,14 +3006,29 @@ fn collab_send_ping(
             .find(|r| r.peer_id == collab::HOST_PEER_ID)
             .map(|r| r.color_rgb)
             .unwrap_or(0xffff44);
+        let host_name = c
+            .roster
+            .iter()
+            .find(|r| r.peer_id == collab::HOST_PEER_ID)
+            .map(|r| r.display_name.clone())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "Host".to_string());
         drop(c);
-        collab::record_ping_flash_colored(Arc::as_ref(&*state), x, y, z, host_color);
+        collab::record_ping_flash_colored(
+            Arc::as_ref(&*state),
+            x,
+            y,
+            z,
+            host_color,
+            host_name.clone(),
+        );
         c = state.collab.lock().map_err(|e| e.to_string())?;
         let ping = collab::HostToClient::Ping {
             peer_id: collab::HOST_PEER_ID,
             x,
             y,
             z,
+            display_name: host_name,
         };
         let json = serde_json::to_string(&ping).unwrap();
         let _ = app.emit("collab-ping", &json);
@@ -2840,6 +3143,7 @@ pub fn run() {
         }),
         last_edit_perf: Mutex::new(None),
         last_scene_bounds: Mutex::new(None),
+        voxel_edit_stats_cache: Mutex::new(None),
         edit_undo: Mutex::new(Vec::new()),
         edit_redo: Mutex::new(Vec::new()),
         collab: Arc::new(std::sync::Mutex::new(collab::CollabRuntime::default())),
@@ -3002,6 +3306,8 @@ pub fn run() {
             get_last_session_info,
             create_new_project,
             voxel_pick_probe,
+            ping_cursor_pick,
+            world_to_viewport_pixels,
             sync_preview_input,
             voxel_edit_at_screen,
             voxel_undo,
@@ -3102,4 +3408,78 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod edit_perf_tests {
+    use super::*;
+    use voxelle::{MaterialId, Voxel};
+
+    fn voxel_at(x: i32, y: i32, z: i32, object_id: u32) -> Voxel {
+        Voxel {
+            x,
+            y,
+            z,
+            color: 1,
+            material: MaterialId::Plastic,
+            object_id,
+        }
+    }
+
+    #[test]
+    fn resolve_stats_incremental_add_shrinks_aabb_min() {
+        let cache = Some(VoxelEditStatsCache {
+            aabb_min: (5, 5, 5),
+            common_object_id: Some(0),
+        });
+        let added = voxel_at(2, 5, 5, 0);
+        let delta = voxel_edit::VoxelEditDelta::Added(added);
+        let voxels = vec![voxel_at(5, 5, 5, 0), added];
+        let s = resolve_voxel_edit_stats(&voxels, &delta, cache);
+        assert_eq!(s.aabb_min, (2, 5, 5));
+        assert_eq!(s.common_object_id, Some(0));
+    }
+
+    #[test]
+    fn resolve_stats_remove_interior_preserves_cache() {
+        let cache = Some(VoxelEditStatsCache {
+            aabb_min: (0, 0, 0),
+            common_object_id: Some(0),
+        });
+        let voxels = vec![voxel_at(0, 0, 0, 0), voxel_at(5, 5, 5, 0)];
+        let delta = voxel_edit::VoxelEditDelta::Removed {
+            voxel: voxel_at(5, 5, 5, 0),
+        };
+        let s = resolve_voxel_edit_stats(&voxels, &delta, cache);
+        assert_eq!(s.aabb_min, (0, 0, 0));
+        assert_eq!(s.common_object_id, Some(0));
+    }
+
+    #[test]
+    fn resolve_stats_remove_on_min_face_rescans() {
+        let cache = Some(VoxelEditStatsCache {
+            aabb_min: (0, 0, 0),
+            common_object_id: Some(0),
+        });
+        let voxels = vec![voxel_at(5, 5, 5, 0)];
+        let delta = voxel_edit::VoxelEditDelta::Removed {
+            voxel: voxel_at(0, 0, 0, 0),
+        };
+        let s = resolve_voxel_edit_stats(&voxels, &delta, cache);
+        assert_eq!(s.aabb_min, (5, 5, 5));
+        assert_eq!(s.common_object_id, Some(0));
+    }
+
+    #[test]
+    fn resolve_stats_add_second_object_id_clears_common() {
+        let cache = Some(VoxelEditStatsCache {
+            aabb_min: (0, 0, 0),
+            common_object_id: Some(0),
+        });
+        let added = voxel_at(1, 1, 1, 1);
+        let delta = voxel_edit::VoxelEditDelta::Added(added);
+        let voxels = vec![voxel_at(0, 0, 0, 0), added];
+        let s = resolve_voxel_edit_stats(&voxels, &delta, cache);
+        assert_eq!(s.common_object_id, None);
+    }
 }
