@@ -7,8 +7,11 @@ use crate::voxelle::{empty_collab_placeholder, encode_payload_v4};
 use crate::ViewerState;
 use futures_util::{SinkExt, StreamExt};
 use glam::Vec3;
+use igd_next::aio::tokio::search_gateway;
+use igd_next::{PortMappingProtocol, SearchOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,6 +34,22 @@ const HOST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const CLIENT_HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
 
 const GUEST_TIMEOUT_KICK_REASON: &str = "timed out (no activity)";
+
+/// Response from [`start_host`]: LAN link is always available; UPnP completes asynchronously via [`CollabNatResult`] (`collab-nat-result`).
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabHostStartResponse {
+    pub lan_url: String,
+    /// `"none"` if UPnP was not requested, or `"pending"` while the router is contacted.
+    pub nat: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollabNatResult {
+    pub wan_url: Option<String>,
+    pub error: Option<String>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -201,6 +220,8 @@ pub struct CollabRuntime {
     pub host_peer_kick_tx: HashMap<u32, watch::Sender<Option<String>>>,
     /// Last inbound activity from each guest (any message or heartbeat). Host only.
     pub guest_last_activity: HashMap<u32, Instant>,
+    /// TCP port we opened on the IGD via UPnP (usually same as listen port); cleared when mapping is removed.
+    pub upnp_external_tcp_port: Option<u16>,
 }
 
 impl Default for CollabRuntime {
@@ -219,6 +240,7 @@ impl Default for CollabRuntime {
             client_tx: None,
             host_peer_kick_tx: HashMap::new(),
             guest_last_activity: HashMap::new(),
+            upnp_external_tcp_port: None,
         }
     }
 }
@@ -259,7 +281,110 @@ impl CollabRuntime {
         self.client_tx = None;
         self.host_peer_kick_tx.clear();
         self.guest_last_activity.clear();
+        self.upnp_external_tcp_port = None;
     }
+}
+
+/// Best-effort: delete a TCP mapping we added on the default gateway.
+pub fn schedule_remove_upnp_mapping(external_tcp_port: u16) {
+    tauri::async_runtime::spawn(async move {
+        let Ok(gw) = search_gateway(SearchOptions::default()).await else {
+            return;
+        };
+        let _ = gw
+            .remove_port(PortMappingProtocol::TCP, external_tcp_port)
+            .await;
+    });
+}
+
+async fn try_upnp_internet_share(
+    app: AppHandle,
+    collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
+    lan_ip: IpAddr,
+    port: u16,
+) {
+    let emit = |result: CollabNatResult| {
+        let _ = app.emit("collab-nat-result", result);
+    };
+    if lan_ip.is_loopback() {
+        emit(CollabNatResult {
+            wan_url: None,
+            error: Some(
+                "Internet sharing needs a LAN address; this machine only reported loopback."
+                    .into(),
+            ),
+        });
+        return;
+    }
+    if !matches!(lan_ip, IpAddr::V4(_)) {
+        emit(CollabNatResult {
+            wan_url: None,
+            error: Some(
+                "UPnP port mapping needs an IPv4 LAN address. Disable internet sharing or use manual port forwarding."
+                    .into(),
+            ),
+        });
+        return;
+    }
+    let gw = match search_gateway(SearchOptions::default()).await {
+        Ok(g) => g,
+        Err(e) => {
+            emit(CollabNatResult {
+                wan_url: None,
+                error: Some(format!(
+                    "No UPnP gateway found ({e}). Enable UPnP on your router or set up manual TCP port forwarding to this machine."
+                )),
+            });
+            return;
+        }
+    };
+    let local = SocketAddr::new(lan_ip, port);
+    if let Err(e) = gw
+        .add_port(
+            PortMappingProtocol::TCP,
+            port,
+            local,
+            0,
+            "Voxelle collaboration",
+        )
+        .await
+    {
+        emit(CollabNatResult {
+            wan_url: None,
+            error: Some(format!(
+                "Router refused port mapping ({e}). The port may be in use or blocked by policy."
+            )),
+        });
+        return;
+    }
+    // Record immediately so `collab_leave` can remove the mapping even if we fail below or the user leaves early.
+    if let Ok(mut g) = collab_mtx.lock() {
+        if g.is_host() {
+            g.upnp_external_tcp_port = Some(port);
+        }
+    }
+    let ext_ip = match gw.get_external_ip().await {
+        Ok(ip) => ip,
+        Err(e) => {
+            let _ = gw.remove_port(PortMappingProtocol::TCP, port).await;
+            if let Ok(mut g) = collab_mtx.lock() {
+                if g.is_host() {
+                    g.upnp_external_tcp_port = None;
+                }
+            }
+            emit(CollabNatResult {
+                wan_url: None,
+                error: Some(format!(
+                    "Mapped the port but could not read the public address ({e}). Try manual forwarding."
+                )),
+            });
+            return;
+        }
+    };
+    emit(CollabNatResult {
+        wan_url: Some(format!("ws://{ext_ip}:{port}")),
+        error: None,
+    });
 }
 
 pub const HOST_PEER_ID: u32 = 1;
@@ -309,6 +434,7 @@ fn replace_file_on_main(
     bytes: &[u8],
 ) -> Result<(), String> {
     let file = crate::voxelle::decode_payload(bytes).map_err(|e| e.to_string())?;
+    let prepared = crate::prepare_load_scene_cpu(file.grid_size, &file.voxels)?;
     let _ = app.emit("voxelle-load-start", "Project from host");
     let _ = app.emit("voxelle-load-progress", 0.35f32);
     let app = app.clone();
@@ -316,7 +442,7 @@ fn replace_file_on_main(
     let app_mesh = app.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = app.run_on_main_thread(move || {
-        let r = crate::apply_mesh_and_camera(&state, &app_mesh, file);
+        let r = crate::apply_mesh_and_camera(&state, &app_mesh, file, prepared);
         let _ = tx.send(r);
     });
     let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
@@ -789,7 +915,8 @@ pub fn start_host(
     port: u16,
     display_name: String,
     color_rgb: u32,
-) -> Result<String, String> {
+    enable_upnp: bool,
+) -> Result<CollabHostStartResponse, String> {
     let mut c = collab_mtx.lock().map_err(|e| e.to_string())?;
     if c.is_active() {
         return Err("already in a session".into());
@@ -881,17 +1008,36 @@ pub fn start_host(
         }
     });
 
+    let lan_ip = local_ip_address::local_ip().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+
     let app2 = app.clone();
     let state2 = Arc::clone(&state);
     let cm2 = Arc::clone(&collab_mtx);
+    let enable_upnp_task = enable_upnp;
     tauri::async_runtime::spawn(async move {
         let listener = match TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
             Err(e) => {
-                let _ = app2.emit("collab-error", format!("bind: {e}"));
+                if let Ok(mut g) = cm2.lock() {
+                    g.leave();
+                }
+                let msg = format!(
+                    "Could not listen for collaboration connections on port {port}.\n\n{e}\n\nAnother program may be using this port, or another Voxelle window may already be hosting on it. Try a different port or close the other session."
+                );
+                let _ = app2.emit("collab-error", msg);
+                let _ = app2.emit("collab-ended", "");
                 return;
             }
         };
+        if enable_upnp_task {
+            let app_u = app2.clone();
+            let cm_u = Arc::clone(&cm2);
+            let lip = lan_ip;
+            let p = port;
+            tokio::spawn(async move {
+                try_upnp_internet_share(app_u, cm_u, lip, p).await;
+            });
+        }
         let mut next_peer: u32 = 2;
         while !sd.load(Ordering::SeqCst) {
             let acc =
@@ -946,10 +1092,43 @@ pub fn start_host(
         }
     });
 
-    let ip = local_ip_address::local_ip()
-        .map(|i| i.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".into());
-    Ok(format!("ws://{ip}:{port}"))
+    Ok(CollabHostStartResponse {
+        lan_url: format!("ws://{}:{port}", lan_ip),
+        nat: if enable_upnp {
+            "pending".into()
+        } else {
+            "none".into()
+        },
+    })
+}
+
+fn hint_for_ws_connect_error(detail_lower: &str) -> &'static str {
+    if detail_lower.contains("connection refused") {
+        "Nothing is listening on that address and port, or the host app is not running."
+    } else if detail_lower.contains("timed out") || detail_lower.contains("timeout") {
+        "The connection timed out. Check the IP address, VPN, and firewall settings."
+    } else if detail_lower.contains("no route to host")
+        || detail_lower.contains("host unreachable")
+        || detail_lower.contains("network is unreachable")
+    {
+        "The network could not reach that host."
+    } else if detail_lower.contains("dns")
+        || detail_lower.contains("failed to resolve")
+        || detail_lower.contains("name or service not known")
+    {
+        "Could not resolve the hostname. Check the spelling."
+    } else if detail_lower.contains("invalid") && detail_lower.contains("url") {
+        "Use a URL that starts with ws:// and includes the host and port (for example ws://192.168.1.5:7733)."
+    } else {
+        "Verify the WebSocket URL (ws://host:port), that the host is reachable on your network, and that firewalls allow this traffic."
+    }
+}
+
+fn format_ws_connect_failure(url: &str, err: tokio_tungstenite::tungstenite::Error) -> String {
+    let detail = err.to_string();
+    let detail_lower = detail.to_lowercase();
+    let hint = hint_for_ws_connect_error(&detail_lower);
+    format!("Could not open a WebSocket to:\n{url}\n\n{detail}\n\n{hint}")
 }
 
 pub async fn client_connect_blocking(
@@ -962,7 +1141,7 @@ pub async fn client_connect_blocking(
 ) -> Result<(), String> {
     let (ws, _) = connect_async(url)
         .await
-        .map_err(|e| format!("connect: {e}"))?;
+        .map_err(|e| format_ws_connect_failure(url, e))?;
     let (mut write, mut read) = ws.split();
     let join = serde_json::to_string(&ClientToHost::Join {
         display_name: display_name.clone(),
@@ -972,20 +1151,40 @@ pub async fn client_connect_blocking(
     write
         .send(Message::Text(join))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            format!(
+                "Could not send the join request to:\n{url}\n\n{e}\n\nThe connection may have dropped; try again."
+            )
+        })?;
 
     let first = read
         .next()
         .await
-        .ok_or_else(|| "closed".to_string())?
-        .map_err(|e| e.to_string())?;
+        .ok_or_else(|| {
+            format!(
+                "The host at\n{url}\nclosed the connection before replying.\n\nCheck that the URL is a Voxelle collaboration link (ws://…) and that the host is still running."
+            )
+        })?
+        .map_err(|e| {
+            format!(
+                "Error while waiting for the host at\n{url}\n\n{e}\n\nThe connection may have been reset."
+            )
+        })?;
     let Message::Text(t) = first else {
-        return Err("unexpected frame".into());
+        return Err(format!(
+            "The server at\n{url}\nsent a non-text WebSocket frame.\n\nUse a Voxelle collaboration URL (ws://host:port)."
+        ));
     };
-    let welcome: HostToClient = serde_json::from_str(&t).map_err(|e| e.to_string())?;
+    let welcome: HostToClient = serde_json::from_str(&t).map_err(|e| {
+        format!(
+            "Could not parse the host's first message (expected JSON welcome).\n{url}\n\n{e}\n\nCheck that you are connecting to a Voxelle host, not another WebSocket server."
+        )
+    })?;
     match welcome {
         HostToClient::Deny { reason } => {
-            return Err(reason);
+            return Err(format!(
+                "The host refused the connection:\n{reason}"
+            ));
         }
         HostToClient::Welcome {
             peer_id,
@@ -1000,7 +1199,14 @@ pub async fn client_connect_blocking(
                 c.leader_id = leader_id;
                 c.roster = roster;
             }
-            replace_file_on_main(&app, &state, &snapshot)?;
+            if let Err(e) = replace_file_on_main(&app, &state, &snapshot) {
+                if let Ok(mut c) = collab_mtx.lock() {
+                    c.leave();
+                }
+                return Err(format!(
+                    "Connected to the host, but your scene could not be replaced with theirs:\n{e}"
+                ));
+            }
             let _ = app.emit("collab-joined", ());
             let _ = app.emit("collab-local-peer", peer_id);
             let _ = app.emit(
@@ -1008,7 +1214,12 @@ pub async fn client_connect_blocking(
                 serde_json::to_string(&collab_mtx.lock().unwrap().roster).unwrap(),
             );
         }
-        _ => return Err("expected welcome".into()),
+        _ => {
+            return Err(
+                "The server sent an unexpected message instead of a welcome.\n\nCheck that this URL is a Voxelle collaboration host (ws://…)."
+                    .into(),
+            );
+        }
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();

@@ -1,4 +1,5 @@
-// Per-slice greedy mesh (bitmap ≤ 64×64). No cross-slice atomics — disjoint output ranges via slice_vtx_base / slice_idx_base.
+// Per-slice greedy mesh (bitmap ≤ 64×64). Outputs are packed densely via atomics
+// so CPU copy [0..v_total) / [0..i_total) matches the mesh (no holes from per-slice reservation).
 
 struct MeshParams {
     max_vertices: u32,
@@ -31,11 +32,9 @@ struct GpuVertex {
 @group(0) @binding(0) var<uniform> mesh_params: MeshParams;
 @group(0) @binding(1) var<storage, read> slice_headers: array<SliceHeader>;
 @group(0) @binding(2) var<storage, read> slice_bits: array<u32>;
-@group(0) @binding(3) var<storage, read> slice_vtx_base: array<u32>;
-@group(0) @binding(4) var<storage, read> slice_idx_base: array<u32>;
-@group(0) @binding(5) var<storage, read_write> vtx_out: array<GpuVertex>;
-@group(0) @binding(6) var<storage, read_write> idx_out: array<u32>;
-@group(0) @binding(7) var<storage, read_write> total_counts: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> vtx_out: array<GpuVertex>;
+@group(0) @binding(4) var<storage, read_write> idx_out: array<u32>;
+@group(0) @binding(5) var<storage, read_write> alloc: array<atomic<u32>>;
 
 fn face_normal(axis: u32, sign: i32) -> vec3<f32> {
     if axis == 0u {
@@ -95,14 +94,9 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
         n.x != 0.0,
     );
 
-    let g_v_base = slice_vtx_base[si];
-    let g_i_base = slice_idx_base[si];
-    var v_off = 0u;
-    var i_off = 0u;
-
-    for (var v = 0u; v < hgt; v++) {
+    for (var vv = 0u; vv < hgt; vv++) {
         for (var u = 0u; u < w; u++) {
-            let cidx = u + v * w;
+            let cidx = u + vv * w;
             let wi = cidx / 32u;
             let bi = cidx % 32u;
             if ((bits[wi] >> bi) & 1u) == 0u {
@@ -117,7 +111,7 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
                 if u + rw >= w {
                     break;
                 }
-                let ni = (u + rw) + v * w;
+                let ni = (u + rw) + vv * w;
                 let nwi = ni / 32u;
                 let nbi = ni % 32u;
                 if ((bits[nwi] >> nbi) & 1u) == 0u {
@@ -131,12 +125,12 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             var rh = 1u;
             loop {
-                if v + rh >= hgt {
+                if vv + rh >= hgt {
                     break;
                 }
                 var row_ok = true;
                 for (var du = 0u; du < rw; du++) {
-                    let ni = (u + du) + (v + rh) * w;
+                    let ni = (u + du) + (vv + rh) * w;
                     let nwi = ni / 32u;
                     let nbi = ni % 32u;
                     if ((bits[nwi] >> nbi) & 1u) == 0u {
@@ -156,7 +150,7 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
 
             for (var dv = 0u; dv < rh; dv++) {
                 for (var du = 0u; du < rw; du++) {
-                    let ni = (u + du) + (v + dv) * w;
+                    let ni = (u + du) + (vv + dv) * w;
                     let nwi = ni / 32u;
                     let nbi = ni % 32u;
                     consumed[nwi] = consumed[nwi] | (1u << nbi);
@@ -164,15 +158,21 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             let u0 = i32(u) + h.u0;
-            let v0 = i32(v) + h.v0;
+            let v0 = i32(vv) + h.v0;
             let p00 = quad_corner(h.axis, h.sign_i, h.depth, u0, v0);
             let p10 = quad_corner(h.axis, h.sign_i, h.depth, u0 + i32(rw), v0);
             let p11 = quad_corner(h.axis, h.sign_i, h.depth, u0 + i32(rw), v0 + i32(rh));
             let p01 = quad_corner(h.axis, h.sign_i, h.depth, u0, v0 + i32(rh));
 
-            let vbase = g_v_base + v_off;
-            let ibase = g_i_base + i_off;
-            if vbase + 4u > mesh_params.max_vertices || ibase + 6u > mesh_params.max_indices {
+            let vbase = atomicAdd(&alloc[0], 4u);
+            if vbase + 4u > mesh_params.max_vertices {
+                atomicSub(&alloc[0], 4u);
+                return;
+            }
+            let ibase = atomicAdd(&alloc[1], 6u);
+            if ibase + 6u > mesh_params.max_indices {
+                atomicSub(&alloc[1], 6u);
+                atomicSub(&alloc[0], 4u);
                 return;
             }
 
@@ -201,12 +201,6 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
                 idx_out[ibase + 4u] = g3;
                 idx_out[ibase + 5u] = g2;
             }
-
-            v_off = v_off + 4u;
-            i_off = i_off + 6u;
         }
     }
-
-    atomicAdd(&total_counts[0], v_off);
-    atomicAdd(&total_counts[1], i_off);
 }

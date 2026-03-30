@@ -16,6 +16,9 @@ mod gpu {
     pub mod post_blur {
         pub const WGSL: &str = include_str!("post_blur.wgsl");
     }
+    pub mod post_ao_blur {
+        pub const WGSL: &str = include_str!("post_ao_blur.wgsl");
+    }
     pub mod post_composite {
         pub const WGSL: &str = include_str!("post_composite.wgsl");
     }
@@ -41,6 +44,9 @@ use std::collections::BTreeMap;
 use std::time::Instant;
 use wgpu::util::DeviceExt;
 
+/// Bump when [`gpu::mesh_greedy::WGSL`] bind group layout changes.
+const MESH_GREEDY_PIPELINE_LAYOUT_VERSION: u32 = 1;
+
 /// Timings from [`WgpuViewer::remesh_opaque_chunks`] (incremental CPU chunked path).
 #[derive(Clone, Debug, Default)]
 pub struct RemeshOpaquePerf {
@@ -50,6 +56,17 @@ pub struct RemeshOpaquePerf {
     pub chunk_buffers_ms: f64,
     /// Full [`WgpuViewer::upload_cpu_mesh_chunked_full`] when chunk origin drifted or equivalent.
     pub full_chunked_rebuild_ms: f64,
+}
+
+/// CPU-built opaque mesh for [`WgpuViewer::upload_prepared_opaque`] (main thread uploads buffers only).
+pub(crate) enum PreparedOpaqueUpload {
+    Empty,
+    Single(MeshBuffers),
+    Chunked {
+        chunk_origin: IVec3,
+        meshes: BTreeMap<ChunkKey, MeshBuffers>,
+        spatial_cache: greedy_mesh::SpatialMeshCache,
+    },
 }
 
 #[repr(C, align(16))]
@@ -107,6 +124,8 @@ pub struct WgpuViewer {
 
     ao_texture: wgpu::Texture,
     ao_view: wgpu::TextureView,
+    ao_texture_b: wgpu::Texture,
+    ao_view_b: wgpu::TextureView,
     bloom_a: wgpu::Texture,
     bloom_a_view: wgpu::TextureView,
     bloom_b: wgpu::Texture,
@@ -118,6 +137,7 @@ pub struct WgpuViewer {
     post_ssao_layout: wgpu::BindGroupLayout,
     post_bloom_layout: wgpu::BindGroupLayout,
     post_blur_layout: wgpu::BindGroupLayout,
+    post_ao_blur_layout: wgpu::BindGroupLayout,
     post_composite_layout: wgpu::BindGroupLayout,
 
     bind_scene_opaque: wgpu::BindGroup,
@@ -126,6 +146,8 @@ pub struct WgpuViewer {
     bind_bloom_extract: wgpu::BindGroup,
     bind_blur_h: wgpu::BindGroup,
     bind_blur_v: wgpu::BindGroup,
+    bind_ao_blur_h: wgpu::BindGroup,
+    bind_ao_blur_v: wgpu::BindGroup,
     bind_composite: wgpu::BindGroup,
     bind_trans: Option<wgpu::BindGroup>,
 
@@ -143,6 +165,7 @@ pub struct WgpuViewer {
     pipeline_ssao: wgpu::RenderPipeline,
     pipeline_bloom_extract: wgpu::RenderPipeline,
     pipeline_blur: wgpu::RenderPipeline,
+    pipeline_ao_blur: wgpu::RenderPipeline,
     pipeline_composite: wgpu::RenderPipeline,
 
     vertex_buffer: Option<wgpu::Buffer>,
@@ -182,6 +205,8 @@ pub struct WgpuViewer {
 
     mesh_greedy_pipeline: Option<wgpu::ComputePipeline>,
     mesh_greedy_bind_layout: Option<wgpu::BindGroupLayout>,
+    /// Must match [`MESH_GREEDY_PIPELINE_LAYOUT_VERSION`]; clears cached compute pipeline when bumped.
+    mesh_greedy_pl_version: u32,
     mesh_greedy_pool: MeshGreedyPool,
 
     /// Last opaque mesh rebuild path (for perf): `gpu_greedy`, `cpu`, `cpu_chunked`, `clear`, `gpu_no_headers`, etc.
@@ -440,6 +465,8 @@ fn create_screen_targets(
     wgpu::TextureView,
     wgpu::Texture,
     wgpu::TextureView,
+    wgpu::Texture,
+    wgpu::TextureView,
 ) {
     let w = width.max(1);
     let h = height.max(1);
@@ -513,6 +540,18 @@ fn create_screen_targets(
     });
     let ao_view = ao_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
+    let ao_tex_b = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("ao_b"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R16Float,
+        usage: color_usage,
+        view_formats: &[],
+    });
+    let ao_view_b = ao_tex_b.create_view(&wgpu::TextureViewDescriptor::default());
+
     let bloom_a_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("bloom_a"),
         size: extent,
@@ -548,6 +587,8 @@ fn create_screen_targets(
         depth_view,
         ao_tex,
         ao_view,
+        ao_tex_b,
+        ao_view_b,
         bloom_a_tex,
         bloom_a_view,
         bloom_b_tex,
@@ -578,12 +619,20 @@ impl WgpuViewer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // WebGPU defaults cap a single storage buffer at 128 MiB; GPU greedy mesh scratch can exceed that.
+        // Ask for the adapter maximum so large scenes can still use the compute path when hardware allows.
+        let adapter_limits = adapter.limits();
+        let mut required_limits = wgpu::Limits::default();
+        required_limits.max_storage_buffer_binding_size =
+            adapter_limits.max_storage_buffer_binding_size;
+        required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("voxelle-desktop"),
                     required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_limits,
                     memory_hints: wgpu::MemoryHints::MemoryUsage,
                 },
                 None,
@@ -784,6 +833,58 @@ impl WgpuViewer {
             ],
         });
 
+        let post_ao_blur_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post_ao_blur"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
         let post_composite_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("post_composite"),
@@ -851,6 +952,10 @@ impl WgpuViewer {
             label: Some("blur"),
             source: wgpu::ShaderSource::Wgsl(gpu::post_blur::WGSL.into()),
         });
+        let shader_ao_blur = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ao_blur"),
+            source: wgpu::ShaderSource::Wgsl(gpu::post_ao_blur::WGSL.into()),
+        });
         let shader_composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite"),
             source: wgpu::ShaderSource::Wgsl(gpu::post_composite::WGSL.into()),
@@ -888,6 +993,11 @@ impl WgpuViewer {
         let pl_blur = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pl_blur"),
             bind_group_layouts: &[&post_blur_layout],
+            push_constant_ranges: &[],
+        });
+        let pl_ao_blur = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pl_ao_blur"),
+            bind_group_layouts: &[&post_ao_blur_layout],
             push_constant_ranges: &[],
         });
         let pl_comp = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1221,6 +1331,18 @@ impl WgpuViewer {
             })],
             None,
         );
+        let pipeline_ao_blur = fullscreen_pipeline(
+            &device,
+            &pl_ao_blur,
+            &shader_ao_blur,
+            "fs_ao_blur",
+            &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            None,
+        );
         let pipeline_composite = fullscreen_pipeline(
             &device,
             &pl_comp,
@@ -1289,6 +1411,8 @@ impl WgpuViewer {
             depth_view,
             ao_texture,
             ao_view,
+            ao_texture_b,
+            ao_view_b,
             bloom_a,
             bloom_a_view,
             bloom_b,
@@ -1401,6 +1525,58 @@ impl WgpuViewer {
                 },
             ],
         });
+        let bind_ao_blur_h = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ao_blur_h"),
+            layout: &post_ao_blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: global_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ao_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: post_blur_buf.as_entire_binding(),
+                },
+            ],
+        });
+        let bind_ao_blur_v = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ao_blur_v"),
+            layout: &post_ao_blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: global_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ao_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: post_blur_buf.as_entire_binding(),
+                },
+            ],
+        });
         let bind_composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("comp"),
             layout: &post_composite_layout,
@@ -1465,6 +1641,8 @@ impl WgpuViewer {
             depth_view,
             ao_texture,
             ao_view,
+            ao_texture_b,
+            ao_view_b,
             bloom_a,
             bloom_a_view,
             bloom_b,
@@ -1475,6 +1653,7 @@ impl WgpuViewer {
             post_ssao_layout,
             post_bloom_layout,
             post_blur_layout,
+            post_ao_blur_layout,
             post_composite_layout,
             bind_scene_opaque,
             bind_shadow_pass,
@@ -1482,6 +1661,8 @@ impl WgpuViewer {
             bind_bloom_extract,
             bind_blur_h,
             bind_blur_v,
+            bind_ao_blur_h,
+            bind_ao_blur_v,
             bind_composite,
             bind_trans,
             post_blur_buf,
@@ -1496,6 +1677,7 @@ impl WgpuViewer {
             pipeline_ssao,
             pipeline_bloom_extract,
             pipeline_blur,
+            pipeline_ao_blur,
             pipeline_composite,
             vertex_buffer: None,
             index_buffer: None,
@@ -1525,6 +1707,7 @@ impl WgpuViewer {
             sampler_nearest,
             mesh_greedy_pipeline: None,
             mesh_greedy_bind_layout: None,
+            mesh_greedy_pl_version: 0,
             mesh_greedy_pool: MeshGreedyPool::default(),
             last_mesh_route: String::new(),
         })
@@ -1573,6 +1756,8 @@ impl WgpuViewer {
             depth_view,
             ao_texture,
             ao_view,
+            ao_texture_b,
+            ao_view_b,
             bloom_a,
             bloom_a_view,
             bloom_b,
@@ -1588,6 +1773,8 @@ impl WgpuViewer {
         self.depth_view = depth_view;
         self.ao_texture = ao_texture;
         self.ao_view = ao_view;
+        self.ao_texture_b = ao_texture_b;
+        self.ao_view_b = ao_view_b;
         self.bloom_a = bloom_a;
         self.bloom_a_view = bloom_a_view;
         self.bloom_b = bloom_b;
@@ -1696,6 +1883,58 @@ impl WgpuViewer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
+                    resource: self.post_blur_buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.bind_ao_blur_h = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ao_blur_h"),
+            layout: &self.post_ao_blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.global_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.ao_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.post_blur_buf.as_entire_binding(),
+                },
+            ],
+        });
+        self.bind_ao_blur_v = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("ao_blur_v"),
+            layout: &self.post_ao_blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.global_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.ao_view_b),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
                     resource: self.post_blur_buf.as_entire_binding(),
                 },
             ],
@@ -1985,13 +2224,9 @@ impl WgpuViewer {
             return Ok(bounds);
         }
 
-        let mut vtx_prefix = Vec::with_capacity(headers.len());
-        let mut idx_prefix = Vec::with_capacity(headers.len());
         let mut acc_v: u32 = 0;
         let mut acc_i: u32 = 0;
         for h in &headers {
-            vtx_prefix.push(acc_v);
-            idx_prefix.push(acc_i);
             acc_v = acc_v.saturating_add(4u32.saturating_mul(h.width.saturating_mul(h.height)));
             acc_i = acc_i.saturating_add(6u32.saturating_mul(h.width.saturating_mul(h.height)));
         }
@@ -2003,11 +2238,15 @@ impl WgpuViewer {
         let idx_storage_size = (max_indices as u64).saturating_mul(4);
 
         // Worst-case scratch scales with slice count × 64×64 per tile; huge scenes exceed max_buffer_size.
+        // Default WebGPU `max_storage_buffer_binding_size` is 128 MiB — bind group creation fails if exceeded.
         // `dispatch_workgroups` also has a per-dimension cap (typically 65535).
         let lim = self.device.limits();
         let max_wg = lim.max_compute_workgroups_per_dimension as usize;
+        let max_bind = lim.max_storage_buffer_binding_size as u64;
         if vtx_storage_size > lim.max_buffer_size
             || idx_storage_size > lim.max_buffer_size
+            || vtx_storage_size > max_bind
+            || idx_storage_size > max_bind
             || headers.len() > max_wg
         {
             self.cpu_mesh_fallback(voxels);
@@ -2043,20 +2282,6 @@ impl WgpuViewer {
                 contents: bytemuck::cast_slice(&bits),
                 usage: wgpu::BufferUsages::STORAGE,
             });
-        let vtx_base_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mesh_vtx_base"),
-                contents: bytemuck::cast_slice(&vtx_prefix),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
-        let idx_base_buf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("mesh_idx_base"),
-                contents: bytemuck::cast_slice(&idx_prefix),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
         let vtx_out = self.mesh_greedy_pool.vtx_scratch.as_ref().unwrap();
         let idx_out = self.mesh_greedy_pool.idx_scratch.as_ref().unwrap();
         let uniform_buf = self
@@ -2066,6 +2291,12 @@ impl WgpuViewer {
                 contents: bytemuck::bytes_of(&params),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
+
+        if self.mesh_greedy_pl_version != MESH_GREEDY_PIPELINE_LAYOUT_VERSION {
+            self.mesh_greedy_bind_layout = None;
+            self.mesh_greedy_pipeline = None;
+            self.mesh_greedy_pl_version = MESH_GREEDY_PIPELINE_LAYOUT_VERSION;
+        }
 
         if self.mesh_greedy_bind_layout.is_none() {
             let layout = self
@@ -2107,7 +2338,7 @@ impl WgpuViewer {
                             binding: 3,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
                             },
@@ -2117,7 +2348,7 @@ impl WgpuViewer {
                             binding: 4,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                ty: wgpu::BufferBindingType::Storage { read_only: false },
                                 has_dynamic_offset: false,
                                 min_binding_size: None,
                             },
@@ -2125,26 +2356,6 @@ impl WgpuViewer {
                         },
                         wgpu::BindGroupLayoutEntry {
                             binding: 5,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 6,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 7,
                             visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::Buffer {
                                 ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -2203,22 +2414,14 @@ impl WgpuViewer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: vtx_base_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: idx_base_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
                     resource: vtx_out.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 6,
+                    binding: 4,
                     resource: idx_out.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
-                    binding: 7,
+                    binding: 5,
                     resource: counters_buf.as_entire_binding(),
                 },
             ],
@@ -2506,6 +2709,63 @@ impl WgpuViewer {
         self.rebuild_bind_groups();
     }
 
+    /// Same as [`Self::upload_scene_data`] with `patch == None`, but uses a pre-built brick (CPU work done off-thread).
+    pub fn upload_scene_data_from_brick(&mut self, bounds: MeshBounds, brick: GpuVoxelBrick) {
+        self.scene_bounds = bounds;
+        self.brick_origin_iv = brick.origin;
+        self.brick_dims_u = brick.dims;
+        self.brick_cell_count = brick.cells.len().max(1) as u32;
+        let new_brick = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("brick"),
+                contents: bytemuck::cast_slice(&brick.cells),
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            });
+        self.brick_buffer = new_brick;
+        self.rebuild_bind_groups();
+    }
+
+    pub(crate) fn upload_prepared_opaque(&mut self, opaque: PreparedOpaqueUpload) {
+        match opaque {
+            PreparedOpaqueUpload::Empty => {
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+                self.opaque_chunked = false;
+                self.opaque_chunks.clear();
+                self.spatial_mesh_cache = None;
+                self.last_mesh_route = "cpu".to_string();
+            }
+            PreparedOpaqueUpload::Single(mesh) => {
+                self.upload_mesh(&mesh);
+                self.last_mesh_route = "cpu".to_string();
+            }
+            PreparedOpaqueUpload::Chunked {
+                chunk_origin,
+                meshes,
+                spatial_cache,
+            } => {
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+                self.opaque_chunks.clear();
+                self.chunk_grid_origin = chunk_origin;
+                if meshes.is_empty() {
+                    self.opaque_chunked = false;
+                    self.spatial_mesh_cache = None;
+                } else {
+                    self.opaque_chunked = true;
+                    for (key, mesh) in meshes {
+                        self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(&mesh));
+                    }
+                    self.spatial_mesh_cache = Some(spatial_cache);
+                    self.last_mesh_route = "cpu_chunked".to_string();
+                }
+            }
+        }
+    }
+
     pub fn update_uniforms(&self, camera: &OrbitCamera) {
         let w = self.size.0 as f32;
         let h = self.size.1 as f32;
@@ -2788,6 +3048,56 @@ impl WgpuViewer {
             });
             pass.set_pipeline(&self.pipeline_ssao);
             pass.set_bind_group(0, &self.bind_post_ssao, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        let ao_blur_h_u = PostBlurUniform {
+            blur_dir: [1.0, 0.0, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&ao_blur_h_u));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ao_blur_h"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ao_view_b,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_ao_blur);
+            pass.set_bind_group(0, &self.bind_ao_blur_h, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        let ao_blur_v_u = PostBlurUniform {
+            blur_dir: [0.0, 1.0, 0.0, 0.0],
+        };
+        self.queue
+            .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&ao_blur_v_u));
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("ao_blur_v"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.ao_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_ao_blur);
+            pass.set_bind_group(0, &self.bind_ao_blur_v, &[]);
             pass.draw(0..3, 0..1);
         }
 

@@ -83,12 +83,22 @@ fn march_slab_thickness(world: vec3<f32>, outward_normal: vec3<f32>) -> f32 {
     return max(acc, 1.0);
 }
 
-fn shadow_visibility(world: vec3<f32>) -> f32 {
-    let lp = g.light_view_proj * vec4<f32>(world, 1.0);
+/// Parity: `render_constants` (`SHADOW_DEPTH_BIAS_*`, `SHADOW_NORMAL_BIAS`).
+const SHADOW_DEPTH_BIAS_BASE: f32 = 0.0015;
+const SHADOW_DEPTH_BIAS_SLOPE: f32 = 0.003;
+const SHADOW_NORMAL_BIAS_WORLD: f32 = 0.012;
+
+fn shadow_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
+    let l = normalize(g.light_dir.xyz);
+    let nn = normalize(n);
+    let ndl = max(dot(nn, l), 0.0);
+    let biased_world = world + nn * (SHADOW_NORMAL_BIAS_WORLD * ndl);
+    let lp = g.light_view_proj * vec4<f32>(biased_world, 1.0);
     let ndc = lp.xyz / max(lp.w, 1e-6);
     let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
-    return textureSampleCompare(shadow_map, shadow_cmp, uv, ndc.z - 0.0002);
+    let depth_bias = SHADOW_DEPTH_BIAS_BASE + SHADOW_DEPTH_BIAS_SLOPE * (1.0 - ndl);
+    return textureSampleCompare(shadow_map, shadow_cmp, uv, ndc.z - depth_bias);
 }
 
 fn schlick_f0(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>) -> vec3<f32> {
@@ -116,7 +126,7 @@ fn transmission_shade(
     let l = normalize(g.light_dir.xyz);
     let ndl = max(dot(n, l), 0.0);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
-    let lit = base * (hemi * 0.28 + 0.55 * ndl * shadow_visibility(world));
+    let lit = base * (hemi * 0.28 + 0.55 * ndl * shadow_visibility(world, n));
     let refr = bg * base * net_t * (vec3<f32>(1.0) - fresnel);
     let spec = pow(max(dot(normalize(l + v), n), 0.0), 48.0) * 0.2;
     return mix(refr, lit + vec3<f32>(spec), 0.15);
@@ -158,7 +168,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     }
     let h = normalize(l + v);
     let ndl = max(dot(n, l), 0.0);
-    let sh = shadow_visibility(in.world_pos);
+    let sh = shadow_visibility(in.world_pos, n);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
     var rgb = base * (hemi * 0.38 + 0.72 * ndl * sh) + vec3<f32>(pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh);
     rgb = rgb + base * glow;

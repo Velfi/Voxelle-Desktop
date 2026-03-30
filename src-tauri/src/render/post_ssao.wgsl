@@ -41,26 +41,86 @@ fn linearize_depth(d: f32) -> f32 {
     return (2.0 * n) / (f + n - d * (f - n));
 }
 
+fn hash2(p: vec2<f32>) -> f32 {
+    let h = dot(p, vec2<f32>(127.1, 311.7));
+    return fract(sin(h) * 43758.5453);
+}
+
+/// View-space position from UV and hardware depth [0,1] (matches scene projection + inv_proj).
+fn view_position(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc_x = uv.x * 2.0 - 1.0;
+    let ndc_y = 1.0 - uv.y * 2.0;
+    let ndc_z = depth * 2.0 - 1.0;
+    let clip = vec4<f32>(ndc_x, ndc_y, ndc_z, 1.0);
+    let inv = g.inv_proj;
+    var v = inv * clip;
+    return v.xyz / max(v.w, 1e-6);
+}
+
 @fragment
 fn fs_ssao(i: FullscreenOut) -> @location(0) f32 {
     let dims = textureDimensions(t_depth);
     let uv = i.uv;
-    let coord = vec2<i32>(i32(uv.x * f32(dims.x)), i32(uv.y * f32(dims.y)));
-    let c0 = vec2<i32>(clamp(coord, vec2<i32>(0), vec2<i32>(i32(dims.x) - 1, i32(dims.y) - 1)));
-    let d = textureLoad(t_depth, c0, 0);
-    let lin = linearize_depth(d);
+    let px = vec2<f32>(uv.x * f32(dims.x) - 0.5, uv.y * f32(dims.y) - 0.5);
+    let c0 = vec2<i32>(
+        clamp(i32(floor(px.x + 0.5)), 0, i32(dims.x) - 1),
+        clamp(i32(floor(px.y + 0.5)), 0, i32(dims.y) - 1),
+    );
+    let d_c = textureLoad(t_depth, c0, 0);
+    let pos_c = view_position(uv, d_c);
     let n_enc = textureLoad(t_normal, c0, 0).xyz;
-    let n = normalize(n_enc * 2.0 - 1.0);
+    let n_c = normalize(n_enc * 2.0 - 1.0);
+
+    let rnd = hash2(px + vec2<f32>(g.screen.x, g.screen.y)) * 6.2831853;
+    let texel = vec2<f32>(1.0 / max(f32(dims.x), 1.0), 1.0 / max(f32(dims.y), 1.0));
+
+    let radius_px = 18.0;
+    let rings = 3u;
+    let dirs = 8u;
     var occ = 0.0;
-    let k = 8;
-    for (var j = 0; j < k; j++) {
-        let ang = f32(j) * 0.785398 + uv.x * 12.0;
-        let off = vec2<i32>(i32(cos(ang) * 14.0), i32(sin(ang) * 14.0));
-        let c2 = vec2<i32>(clamp(c0 + off, vec2<i32>(0), vec2<i32>(i32(dims.x) - 1, i32(dims.y) - 1)));
-        let d2 = textureLoad(t_depth, c2, 0);
-        let lin2 = linearize_depth(d2);
-        occ += select(0.0, 1.0, (lin2 - lin) > 0.00012);
+    var wsum = 0.0;
+
+    for (var ring = 1u; ring <= rings; ring++) {
+        let r = f32(ring) / f32(rings) * radius_px;
+        for (var s = 0u; s < dirs; s++) {
+            let ang = rnd + f32(s) * 0.78539816;
+            let off_f = vec2<f32>(cos(ang), sin(ang)) * r;
+            let c1 = vec2<i32>(
+                clamp(c0.x + i32(round(off_f.x)), 0, i32(dims.x) - 1),
+                clamp(c0.y + i32(round(off_f.y)), 0, i32(dims.y) - 1),
+            );
+            let d_s = textureLoad(t_depth, c1, 0);
+            let uv_s = (vec2<f32>(f32(c1.x) + 0.5, f32(c1.y) + 0.5)) * texel;
+            let pos_s = view_position(uv_s, d_s);
+
+            let delta = pos_s - pos_c;
+            let dist = length(delta);
+            if (dist < 1e-4) {
+                continue;
+            }
+            let d_hat = delta / dist;
+            let plane_align = abs(dot(d_hat, n_c));
+
+            // Suppress self-occlusion along nearly tangent directions (flat expanses, coplanar neighbors).
+            let tangent_gate = smoothstep(0.08, 0.22, plane_align);
+
+            let lin_c = linearize_depth(d_c);
+            let lin_s = linearize_depth(d_s);
+            let dz = lin_s - lin_c;
+            let range_f = smoothstep(0.0, 0.012, abs(dz));
+
+            let bias = 0.00035 + 0.00008 * f32(ring);
+            let depth_occ = smoothstep(bias, bias + 0.0045, dz);
+
+            let w = (1.0 / f32(ring)) * tangent_gate * range_f;
+            occ += depth_occ * w;
+            wsum += w;
+        }
     }
-    let ao = 1.0 - (occ / f32(k)) * 0.85;
-    return clamp(ao, 0.25, 1.0);
+
+    var ao = 1.0;
+    if (wsum > 1e-5) {
+        ao = 1.0 - clamp((occ / wsum) * 0.82, 0.0, 0.75);
+    }
+    return clamp(ao, 0.28, 1.0);
 }

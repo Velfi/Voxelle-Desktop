@@ -22,8 +22,12 @@ pub const GLASS_SHADOW_DEPTH_PUSH_MAX: f32 = 0.02;
 
 /// Web `sceneSetup` directional shadow map size.
 pub const SHADOW_MAP_SIZE: u32 = 4096;
-pub const SHADOW_BIAS: f32 = -0.0002;
-pub const SHADOW_NORMAL_BIAS: f32 = 0.02;
+/// NDC depth subtracted in `textureSampleCompare` (base term; see `scene.wgsl` slope term).
+pub const SHADOW_DEPTH_BIAS_BASE: f32 = 0.0015;
+/// Extra NDC bias when the surface is tilted relative to the light (`(1 - N·L)` scaling).
+pub const SHADOW_DEPTH_BIAS_SLOPE: f32 = 0.003;
+/// World-space receiver offset along the normal (toward lit side) before projecting to light space.
+pub const SHADOW_NORMAL_BIAS: f32 = 0.012;
 
 /// `webgpuBloom.ts`
 pub const BLOOM_STRENGTH: f32 = 0.88;

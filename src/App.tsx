@@ -84,7 +84,14 @@ function App() {
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [chatLines, setChatLines] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const [chatPanelOpen, setChatPanelOpen] = useState(false);
   const [hostPort, setHostPort] = useState(27300);
+  /** Opt-in UPnP port mapping for WAN guests; default off. */
+  const [shareOverInternet, setShareOverInternet] = useState(false);
+  /** Set when UPnP reports a public WebSocket URL (host only). */
+  const [hostWanUrl, setHostWanUrl] = useState<string | null>(null);
+  const [natPending, setNatPending] = useState(false);
+  const [natError, setNatError] = useState<string | null>(null);
   const [autosaveSecs, setAutosaveSecs] = useState(() => {
     if (typeof localStorage === "undefined") return 120;
     const v = localStorage.getItem(LS_AUTOSAVE);
@@ -114,125 +121,159 @@ function App() {
     const ro = new ResizeObserver(() => sendResize());
     const el = viewportRef.current;
     if (el) ro.observe(el);
-    const unlistenStart = listen<string>("voxelle-load-start", (e) => {
-      setLoadError(null);
-      setCollabBanner(null);
-      setPathLabel(e.payload);
-      setLoading(true);
-      setLoadProgress(0);
-    });
-    const unlistenProgress = listen<number>("voxelle-load-progress", (e) => {
-      setLoadProgress(e.payload);
-    });
-    const unlistenLoaded = listen<string>("voxelle-loaded", (e) => {
-      setLoadError(null);
-      setPathLabel(e.payload);
-      setLoading(false);
-      setLoadProgress(1);
-    });
-    const unlistenErr = listen<string>("voxelle-load-error", (e) => {
-      setLoadError(e.payload);
-      setLoading(false);
-    });
-    const unlistenFps = listen<number>("viewport-fps", (e) => {
-      setFpsDisplayed(e.payload);
-    });
-    const unlistenNewProject = listen("voxelle-open-new-project", () => {
-      setNewProjectOpen(true);
-    });
-    const unlistenToggleCollab = listen("voxelle-toggle-collab", () => {
-      setCollabOpen((o) => !o);
-    });
-    const unlistenCollabChat = listen<string>("collab-chat", (e) => {
-      try {
-        const j = JSON.parse(e.payload) as {
-          displayName?: string;
-          display_name?: string;
-          text?: string;
-        };
-        const who = j.displayName ?? j.display_name ?? "?";
-        const line = `${who}: ${j.text ?? ""}`;
-        setChatLines((prev) => [...prev.slice(-80), line]);
-      } catch {
-        setChatLines((prev) => [...prev.slice(-80), e.payload]);
-      }
-    });
-    const unlistenCollabJoined = listen("collab-joined", () => {
-      setCollabBanner(null);
-      setCollabActive(true);
-    });
-    const unlistenCollabLocalPeer = listen<number>("collab-local-peer", (e) => {
-      setLocalPeerId(typeof e.payload === "number" ? e.payload : 0);
-    });
-    const unlistenCollabRoster = listen<string>("collab-roster", (e) => {
-      try {
-        const arr = JSON.parse(e.payload) as RosterEntry[];
-        setRoster(arr);
-      } catch {
-        /* ignore */
-      }
-    });
-    const unlistenCollabErr = listen<string>("collab-error", (e) => {
-      setLoadError(e.payload);
-    });
+
     const clearCollabSessionUi = () => {
       setCollabActive(false);
       setHostWsUrl(null);
+      setHostWanUrl(null);
+      setNatPending(false);
+      setNatError(null);
       setRoster([]);
       setLocalPeerId(0);
       setChatLines([]);
       setChatInput("");
     };
-    const unlistenCollabEnded = listen<string>("collab-ended", (e) => {
-      const text =
-        typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
-      setCollabBanner({ text, tone: "info" });
-      clearCollabSessionUi();
-    });
-    const unlistenCollabKicked = listen<string>("collab-kicked", (e) => {
-      const msg = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
-      setCollabBanner({
-        text: `You were removed from the session: ${msg}`,
-        tone: "alert",
-      });
-      clearCollabSessionUi();
-    });
-    const unlistenCheckUpdates = listen("voxelle-check-updates", async () => {
-      try {
-        const update = await check();
-        if (!update) {
-          window.alert("You're on the latest version.");
-          return;
+
+    /** `listen()` is async; React Strict Mode runs cleanup before those promises resolve, which used to call stale `unlisten` and break Tauri's listener table. */
+    let active = true;
+    const unlistenReady = Promise.all([
+      listen<string>("voxelle-load-start", (e) => {
+        setLoadError(null);
+        setCollabBanner(null);
+        setPathLabel(e.payload);
+        setLoading(true);
+        setLoadProgress(0);
+      }),
+      listen<number>("voxelle-load-progress", (e) => {
+        setLoadProgress(e.payload);
+      }),
+      listen<string>("voxelle-loaded", (e) => {
+        setLoadError(null);
+        setPathLabel(e.payload);
+        setLoading(false);
+        setLoadProgress(1);
+      }),
+      listen<string>("voxelle-load-error", (e) => {
+        setLoadError(e.payload);
+        setLoading(false);
+      }),
+      listen<number>("viewport-fps", (e) => {
+        setFpsDisplayed(e.payload);
+      }),
+      listen("voxelle-open-new-project", () => {
+        setNewProjectOpen(true);
+      }),
+      listen("voxelle-toggle-collab", () => {
+        setCollabOpen((o) => !o);
+      }),
+      listen("voxelle-show-chat-panel", () => {
+        setChatPanelOpen(true);
+      }),
+      listen<string>("collab-chat", (e) => {
+        try {
+          const j = JSON.parse(e.payload) as {
+            displayName?: string;
+            display_name?: string;
+            text?: string;
+          };
+          const who = j.displayName ?? j.display_name ?? "?";
+          const line = `${who}: ${j.text ?? ""}`;
+          setChatLines((prev) => [...prev.slice(-80), line]);
+        } catch {
+          setChatLines((prev) => [...prev.slice(-80), e.payload]);
         }
-        const ok = window.confirm(
-          `Download and install Voxelle Desktop ${update.version}?`,
-        );
-        if (!ok) return;
-        await update.downloadAndInstall();
-        await relaunch();
-      } catch (e) {
-        window.alert(
-          e instanceof Error ? e.message : `Update failed: ${String(e)}`,
-        );
+      }),
+      listen("collab-joined", () => {
+        setCollabBanner(null);
+        setCollabActive(true);
+      }),
+      listen<number>("collab-local-peer", (e) => {
+        setLocalPeerId(typeof e.payload === "number" ? e.payload : 0);
+      }),
+      listen<string>("collab-roster", (e) => {
+        try {
+          const arr = JSON.parse(e.payload) as RosterEntry[];
+          setRoster(arr);
+        } catch {
+          /* ignore */
+        }
+      }),
+      listen<string>("collab-error", (e) => {
+        setLoadError(e.payload);
+      }),
+      listen<unknown>("collab-nat-result", (e) => {
+        try {
+          const raw = e.payload;
+          const j =
+            typeof raw === "string"
+              ? (JSON.parse(raw) as {
+                  wanUrl?: string | null;
+                  error?: string | null;
+                })
+              : (raw as { wanUrl?: string | null; error?: string | null });
+          setNatPending(false);
+          setNatError(
+            typeof j.error === "string" && j.error.length > 0 ? j.error : null,
+          );
+          setHostWanUrl(
+            typeof j.wanUrl === "string" && j.wanUrl.length > 0
+              ? j.wanUrl
+              : null,
+          );
+        } catch {
+          setNatPending(false);
+        }
+      }),
+      listen<string>("collab-ended", (e) => {
+        const text =
+          typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+        if (text.trim().length > 0) {
+          setCollabBanner({ text, tone: "info" });
+        }
+        clearCollabSessionUi();
+      }),
+      listen<string>("collab-kicked", (e) => {
+        const msg =
+          typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+        setCollabBanner({
+          text: `You were removed from the session: ${msg}`,
+          tone: "alert",
+        });
+        clearCollabSessionUi();
+      }),
+      listen("voxelle-check-updates", async () => {
+        try {
+          const update = await check();
+          if (!update) {
+            window.alert("You're on the latest version.");
+            return;
+          }
+          const ok = window.confirm(
+            `Download and install Voxelle Desktop ${update.version}?`,
+          );
+          if (!ok) return;
+          await update.downloadAndInstall();
+          await relaunch();
+        } catch (e) {
+          window.alert(
+            e instanceof Error ? e.message : `Update failed: ${String(e)}`,
+          );
+        }
+      }),
+    ]).then((unlisteners) => {
+      if (!active) {
+        unlisteners.forEach((u) => u());
+        return undefined;
       }
+      return unlisteners;
     });
+
     return () => {
       ro.disconnect();
-      void unlistenStart.then((fn) => fn());
-      void unlistenProgress.then((fn) => fn());
-      void unlistenLoaded.then((fn) => fn());
-      void unlistenErr.then((fn) => fn());
-      void unlistenFps.then((fn) => fn());
-      void unlistenNewProject.then((fn) => fn());
-      void unlistenToggleCollab.then((fn) => fn());
-      void unlistenCollabChat.then((fn) => fn());
-      void unlistenCollabJoined.then((fn) => fn());
-      void unlistenCollabLocalPeer.then((fn) => fn());
-      void unlistenCollabRoster.then((fn) => fn());
-      void unlistenCollabErr.then((fn) => fn());
-      void unlistenCollabEnded.then((fn) => fn());
-      void unlistenCollabKicked.then((fn) => fn());
-      void unlistenCheckUpdates.then((fn) => fn());
+      active = false;
+      void unlistenReady.then((uns) => {
+        if (uns) uns.forEach((u) => u());
+      });
     };
   }, [sendResize]);
 
@@ -282,6 +323,15 @@ function App() {
     }, 150);
     return () => clearInterval(id);
   }, [collabActive]);
+
+  useEffect(() => {
+    if (!chatPanelOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setChatPanelOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [chatPanelOpen]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -562,25 +612,39 @@ function App() {
 
   const startHost = () => {
     setCollabBanner(null);
+    setLoadError(null);
     const rgb = hexToRgb(accentColor);
     void invoke("collab_host_start", {
       port: hostPort,
       displayName,
       colorRgb: rgb,
-    }).then((url) => {
-      setHostWsUrl(url as string);
-      setCollabActive(true);
-    });
+      enableUpnp: shareOverInternet,
+    })
+      .then((res) => {
+        const r = res as { lanUrl: string; nat: string };
+        setHostWsUrl(r.lanUrl);
+        setHostWanUrl(null);
+        setNatError(null);
+        setNatPending(r.nat === "pending");
+        setCollabActive(true);
+      })
+      .catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        setLoadError(
+          `Could not start hosting.\n\n${msg}\n\nIf you are already in a session, leave it first. Otherwise try another port.`,
+        );
+      });
   };
 
   const joinSession = () => {
     setCollabBanner(null);
+    setLoadError(null);
     const rgb = hexToRgb(accentColor);
     void invoke("collab_join", {
       url: joinUrl,
       displayName,
       colorRgb: rgb,
-    }).then(() => setCollabActive(true));
+    });
   };
 
   const leaveSession = () => {
@@ -692,8 +756,18 @@ function App() {
           aria-label="3D viewport"
         />
         {loadError ? (
-          <div className="viewport-error" role="alert" title={loadError}>
-            {loadError}
+          <div className="viewport-error" role="alert">
+            <span className="viewport-notice-text" title={loadError}>
+              {loadError}
+            </span>
+            <button
+              type="button"
+              className="viewport-notice-dismiss"
+              aria-label="Dismiss error"
+              onClick={() => setLoadError(null)}
+            >
+              Dismiss
+            </button>
           </div>
         ) : null}
         {collabBanner ? (
@@ -763,16 +837,45 @@ function App() {
                   onChange={(e) =>
                     setHostPort(Math.max(1, Number(e.target.value) || 27300))
                   }
+                  disabled={collabActive}
                 />
               </label>
-              <button type="button" onClick={startHost}>
+              <button type="button" onClick={startHost} disabled={collabActive}>
                 Host
               </button>
             </div>
+            <label className="modal-field collab-checkbox-row">
+              <input
+                type="checkbox"
+                checked={shareOverInternet}
+                onChange={(e) => setShareOverInternet(e.target.checked)}
+                disabled={collabActive}
+              />
+              <span>Share over internet (UPnP)</span>
+            </label>
             {hostWsUrl ? (
-              <p className="collab-hint">
-                Share: <code>{hostWsUrl}</code>
-              </p>
+              <>
+                <p className="collab-hint">
+                  On your network: <code>{hostWsUrl}</code>
+                </p>
+                {shareOverInternet && natPending ? (
+                  <p className="collab-hint collab-hint-muted" role="status">
+                    Contacting your router for internet sharing…
+                  </p>
+                ) : null}
+                {hostWanUrl ? (
+                  <p className="collab-hint">
+                    Internet (UPnP): <code>{hostWanUrl}</code>
+                  </p>
+                ) : null}
+                {natError ? (
+                  <p className="collab-hint collab-hint-warn" role="alert">
+                    {natError} If UPnP is disabled on the router, forward TCP port{" "}
+                    {hostPort} manually. CGNAT can block internet guests even when
+                    UPnP succeeds.
+                  </p>
+                ) : null}
+              </>
             ) : null}
             <div className="collab-row">
               <label className="modal-field collab-grow">
@@ -846,13 +949,40 @@ function App() {
                 </li>
               ))}
             </ul>
-            <h4 className="collab-subtitle">Chat</h4>
-            <div className="collab-chat-log" role="log">
+            <button
+              type="button"
+              disabled={!collabActive}
+              onClick={() =>
+                void invoke("collab_send_ping", { x: 0, y: 0, z: 0 })
+              }
+            >
+              Ping origin
+            </button>
+          </aside>
+        ) : null}
+        {chatPanelOpen ? (
+          <div
+            className="chat-float-panel"
+            role="dialog"
+            aria-label="Collaboration chat"
+          >
+            <div className="chat-float-header">
+              <h3 className="chat-float-title">Chat</h3>
+              <button
+                type="button"
+                className="chat-float-close"
+                onClick={() => setChatPanelOpen(false)}
+                aria-label="Close chat"
+              >
+                ×
+              </button>
+            </div>
+            <div className="collab-chat-log chat-float-log" role="log">
               {chatLines.map((line, i) => (
                 <div key={i}>{line}</div>
               ))}
             </div>
-            <div className="collab-row">
+            <div className="collab-row chat-float-input-row">
               <input
                 className="collab-grow"
                 type="text"
@@ -870,16 +1000,7 @@ function App() {
                 Send
               </button>
             </div>
-            <button
-              type="button"
-              disabled={!collabActive}
-              onClick={() =>
-                void invoke("collab_send_ping", { x: 0, y: 0, z: 0 })
-              }
-            >
-              Ping origin
-            </button>
-          </aside>
+          </div>
         ) : null}
       </div>
       {newProjectOpen ? (
