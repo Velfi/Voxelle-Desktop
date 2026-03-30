@@ -172,7 +172,6 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
     var rgb = base * (hemi * 0.38 + 0.72 * ndl * sh) + vec3<f32>(pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh);
     rgb = rgb + base * glow;
-    rgb = rgb / (rgb + vec3<f32>(1.0));
     let glow_mask = select(0.0, 1.0, in.mat_kind > 0.5 && in.mat_kind < 1.5);
     out.color = vec4<f32>(rgb, glow_mask);
     let vn = (g.inv_view * vec4<f32>(n, 0.0)).xyz;

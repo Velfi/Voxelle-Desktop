@@ -211,6 +211,9 @@ pub struct WgpuViewer {
 
     /// Last opaque mesh rebuild path (for perf): `gpu_greedy`, `cpu`, `cpu_chunked`, `clear`, `gpu_no_headers`, etc.
     pub last_mesh_route: String,
+
+    /// Screen-space AO pass + blur; when false, AO texture stays white (no dark silhouette halos).
+    pub ssao_enabled: bool,
 }
 
 /// GPU buffers for one spatial chunk of opaque greedy mesh.
@@ -1710,6 +1713,7 @@ impl WgpuViewer {
             mesh_greedy_pl_version: 0,
             mesh_greedy_pool: MeshGreedyPool::default(),
             last_mesh_route: String::new(),
+            ssao_enabled: true,
         })
     }
 

@@ -31,7 +31,8 @@ fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     let ao = textureSample(t_ao, samp_linear, i.uv).r;
     let blo = textureSample(t_bloom, samp_linear, i.uv).rgb;
     let rgb = hdr * ao + blo * 0.88;
+    // Single Reinhard here; scene + sky write linear scene-referred HDR (Rgba16Float).
     let mapped = rgb / (rgb + vec3<f32>(1.0));
-    let gamma = pow(mapped, vec3<f32>(1.0 / 2.2));
-    return vec4<f32>(gamma, 1.0);
+    // Linear display-referred RGB; sRGB swapchain encodes for the framebuffer.
+    return vec4<f32>(mapped, 1.0);
 }

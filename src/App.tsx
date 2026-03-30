@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { confirm } from "@tauri-apps/plugin-dialog";
 import { check } from "@tauri-apps/plugin-updater";
 import "./App.css";
 
@@ -248,8 +249,9 @@ function App() {
             window.alert("You're on the latest version.");
             return;
           }
-          const ok = window.confirm(
+          const ok = await confirm(
             `Download and install Voxelle Desktop ${update.version}?`,
+            { title: "Update available", kind: "info" },
           );
           if (!ok) return;
           await update.downloadAndInstall();

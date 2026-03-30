@@ -55,7 +55,6 @@ fn fs_sky_mrt(in: FullscreenOut) -> SkyOut {
     var rgb = mix(SKY_GROUND, SKY_ZENITH, t);
     let h = 1.0 - abs(dir.y);
     rgb = mix(rgb, SKY_HORIZON, h * h * 0.35);
-    rgb = rgb / (rgb + vec3<f32>(1.0));
     var out: SkyOut;
     out.color = vec4<f32>(rgb, 0.0);
     let vn = normalize((g.inv_view * vec4<f32>(0.0, 1.0, 0.0, 0.0)).xyz);
