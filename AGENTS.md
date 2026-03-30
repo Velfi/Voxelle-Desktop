@@ -2,6 +2,24 @@
 
 Guidance for humans and coding agents working in this repo. This app is desktop-only, no web, no android, no ios.
 
+## Main UI
+
+| Name | Role |
+| --- | --- |
+| **Tool sidebar** (left) | Controls and inputs for making art (modes, brushes, palette-style tools as they land). Implemented in [`src/App.tsx`](src/App.tsx) as the left `aside`. |
+| **Inspector sidebar** (right) | Project metadata and management: hierarchy / outliner-style tools, properties, and related panels. Implemented as the right `aside`. |
+| **Status bar** (bottom) | High-level feedback on what the app is doing (current file, load/collab state, optional FPS). The `footer.app-status-bar` row. |
+
+## Viewport and screen-to-world ray mapping
+
+The native [`WgpuViewer`](src-tauri/src/render/mod.rs) swapchain is sized by [`viewer_resize`](src-tauri/src/lib.rs) from the **`.viewport`** div in [`src/App.tsx`](src/App.tsx) (not the full window: chrome + sidebars shrink the div). **Picking and hover** must map the pointer into **the same pixel grid** the shader uses (`proj` / `view_proj` and [`voxel_edit::screen_to_world_ray`](src-tauri/src/voxel_edit.rs)).
+
+**Conventions:**
+
+- **Origin**: Treat `(sx, sy)` passed to `voxel_pick_probe`, `voxel_edit_at_screen`, and `sync_preview_input` as **physical pixels** in the **render target**: `(0,0)` = top-left of the swapchain texture, **+X** right, **+Y** down (same as NDC→pixel in `screen_to_world_ray`).
+- **Do not** assume `(clientX - rect.left) * devicePixelRatio` matches that grid. CSS layout, `getBoundingClientRect`, and `devicePixelRatio` can disagree slightly with the **actual** drawable; that skews NDC. Use **proportional** mapping with **`(clientX - rect.left) / rect.width`** and **`(clientY - rect.top) / rect.height`** (same **`getBoundingClientRect()`** as in `sendResize`), scaled by **`physW` × `physH`**. Do **not** use **`offsetX / clientWidth`**: `clientWidth` / `clientHeight` are integers and can disagree with **fractional** `rect.width` / `rect.height`, which **breaks aspect ratio** (picking looks fine at the **center** of the viewport and **diverges toward the edges**). When converting CSS size to physical pixels for `viewer_resize`, derive **one** dimension with `Math.round` and the other from **aspect** (`height = round(width * (rh/rw))`) so **pw/ph** matches the element aspect.
+- **Source of truth for `physW` × `physH`**: [`get_viewport_pixel_size`](src-tauri/src/lib.rs), the **`viewport-pixel-size`** event when the surface size changes after a frame, and the ref updated from [`sendResize`](src/App.tsx). Each frame, [`WgpuViewer::render`](src-tauri/src/render/mod.rs) syncs `self.size` from `frame.texture.size()` so CPU math matches the swapchain.
+
 ## Performance metrics
 
 When investigating slowness, regressions, or GPU/mesh behavior, **include a performance snapshot** in issues or chat:
@@ -13,12 +31,17 @@ That snapshot includes viewport FPS, physical viewport size, mesh index/vertex b
 
 If clipboard copy fails, say so and manually note: approximate FPS (shown in the viewport UI), OS, scene size, and what you were doing (e.g. editing vs orbiting).
 
+## Headless server mode (tests)
+
+For integration tests, VD can start with the main window hidden and a localhost HTTP health server. Flags, env vars, stdout readiness line, `/health`, and caveats (GPU still needs a display stack) are documented in [`docs/HEADLESS_SERVER.md`](docs/HEADLESS_SERVER.md). Rust entry: [`src-tauri/src/headless_server.rs`](src-tauri/src/headless_server.rs).
+
 ## Hints for code changes
 
 - **3D / mesh / editing**: [`src-tauri/src/render/`](src-tauri/src/render/), [`src-tauri/src/greedy_mesh.rs`](src-tauri/src/greedy_mesh.rs), [`src-tauri/src/voxel_edit.rs`](src-tauri/src/voxel_edit.rs), [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) (Tauri commands, `ViewerState`).
 - **CPU mesh benchmarks** (Criterion): from `src-tauri/`, run `cargo bench --bench greedy_mesh` (see [`benches/greedy_mesh.rs`](src-tauri/benches/greedy_mesh.rs)).
 - **Edit perf**: scene bounds use incremental updates when possible ([`greedy_mesh::mesh_bounds_expand_with_voxel`](src-tauri/src/greedy_mesh.rs), strict-interior removes skip full scans); chunk GPU buffers may reuse via `COPY_DST` + `write_buffer` when the new mesh fits.
-- **Frontend**: [`src/App.tsx`](src/App.tsx) — viewport events, `invoke` to Rust.
+- **Frontend**: [`src/App.tsx`](src/App.tsx) — viewport events, `invoke` to Rust. **Screen → voxel picking**: follow [Viewport and screen-to-world ray mapping](#viewport-and-screen-to-world-ray-mapping) so pointer math matches the GPU swapchain.
+- **Tauri IPC allowlist**: Custom commands registered in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) must also appear in [`src-tauri/permissions/voxelle.toml`](src-tauri/permissions/voxelle.toml) under `commands.allow`, or `invoke` from the webview will be denied. If a new command “does nothing,” check that list first (and avoid empty `.catch` handlers that hide the error).
 - **macOS Edit → Undo/Redo**: [`src-tauri/src/macos_undo.rs`](src-tauri/src/macos_undo.rs) registers each solo voxel edit with `NSUndoManager` so the system menu stays in sync with Rust stacks; collaboration does not use this path. If the webview has keyboard focus, `Cmd+Z` may still be handled by WebKit before AppKit—use the app menu or the in-viewport shortcut path if undo seems ignored.
 
 ## Format

@@ -65,10 +65,70 @@ fn v4_roundtrip_small() {
             z: 0,
             color: 0x112233,
             material: MaterialId::Metal,
+            object_id: 0,
         }],
+        objects: super::format::default_scene_objects(),
+        active_object_id: 0,
     };
     let bytes = encode_payload_v4(&file).unwrap();
     let back = decode_payload(&bytes).unwrap();
     assert_eq!(back.voxels.len(), 1);
     assert_eq!(back.voxels[0].material, MaterialId::Metal);
+}
+
+#[test]
+fn v4_objects_roundtrip_bson() {
+    use super::format::{SceneObject, VoxelleFile};
+    let file = VoxelleFile {
+        version: 4,
+        grid_size: 8,
+        scene: Default::default(),
+        scene_extra: None,
+        voxels: vec![
+            super::format::Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xff0000,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            super::format::Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                color: 0x00ff00,
+                material: MaterialId::Plastic,
+                object_id: 1,
+            },
+        ],
+        objects: vec![
+            SceneObject {
+                id: 0,
+                parent_id: None,
+                name: "A".into(),
+                visible: true,
+                sort_order: 0,
+                translation: [0.0; 3],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+            },
+            SceneObject {
+                id: 1,
+                parent_id: None,
+                name: "B".into(),
+                visible: true,
+                sort_order: 1,
+                translation: [2.0, 0.0, 0.0],
+                rotation: [0.0, 0.0, 0.0, 1.0],
+                scale: [1.0; 3],
+            },
+        ],
+        active_object_id: 1,
+    };
+    let bytes = encode_payload_v4(&file).unwrap();
+    let back = decode_payload(&bytes).unwrap();
+    assert_eq!(back.objects.len(), 2);
+    assert_eq!(back.active_object_id, 1);
+    assert_eq!(back.voxels[1].object_id, 1);
 }

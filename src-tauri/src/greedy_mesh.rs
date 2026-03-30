@@ -1,7 +1,7 @@
 //! Greedy meshing with Minecraft-style per-corner vertex AO — face visibility rules from Voxelle `greedyMeshCore`.
 
 use crate::gpu_brick::{pack_cell, pack_empty};
-use crate::voxelle::{MaterialId, Voxel};
+use crate::voxelle::{MaterialId, SceneObject, Voxel};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -12,6 +12,15 @@ type IVec3 = VoxelCoord;
 
 fn coord_key(x: i32, y: i32, z: i32) -> IVec3 {
     (x, y, z)
+}
+
+#[inline]
+fn grid_pos(axis: usize, depth: i32, u: i32, v: i32) -> IVec3 {
+    match axis {
+        0 => (depth, u, v),
+        1 => (u, depth, v),
+        _ => (u, v, depth),
+    }
 }
 
 fn is_transmissive(m: MaterialId) -> bool {
@@ -33,6 +42,7 @@ fn neighbor_occludes_face(
     axis: usize,
     sign: i32,
     src: MaterialId,
+    src_object_id: u32,
 ) -> bool {
     let (x, y, z) = pos;
     let (nx, ny, nz) = match axis {
@@ -43,6 +53,9 @@ fn neighbor_occludes_face(
     let Some(neigh) = map.get(&coord_key(nx, ny, nz)) else {
         return false;
     };
+    if neigh.object_id != src_object_id {
+        return false;
+    }
     face_occluded(src, neigh.material)
 }
 
@@ -80,25 +93,39 @@ fn quad_corner(axis: usize, sign: i32, depth: i32, u: i32, v: i32) -> glam::Vec3
     }
 }
 
+#[inline]
+fn cell_same_object(map: &HashMap<VoxelCoord, Voxel>, object_id: u32, pos: IVec3) -> bool {
+    map.get(&pos)
+        .map(|v| v.object_id == object_id)
+        .unwrap_or(false)
+}
+
 /// Minecraft-style corner AO: count solid neighbors among the three voxels meeting at this face corner.
-fn corner_ao_factor(map: &HashMap<VoxelCoord, Voxel>, axis: usize, depth: i32, cu: i32, cv: i32) -> f32 {
+fn corner_ao_factor(
+    map: &HashMap<VoxelCoord, Voxel>,
+    object_id: u32,
+    axis: usize,
+    depth: i32,
+    cu: i32,
+    cv: i32,
+) -> f32 {
     let occ = match axis {
         0 => {
-            let a = map.contains_key(&(depth, cu - 1, cv));
-            let b = map.contains_key(&(depth, cu, cv - 1));
-            let c = map.contains_key(&(depth, cu - 1, cv - 1));
+            let a = cell_same_object(map, object_id, (depth, cu - 1, cv));
+            let b = cell_same_object(map, object_id, (depth, cu, cv - 1));
+            let c = cell_same_object(map, object_id, (depth, cu - 1, cv - 1));
             u32::from(a) + u32::from(b) + u32::from(c)
         }
         1 => {
-            let a = map.contains_key(&(cu - 1, depth, cv));
-            let b = map.contains_key(&(cu, depth, cv - 1));
-            let c = map.contains_key(&(cu - 1, depth, cv - 1));
+            let a = cell_same_object(map, object_id, (cu - 1, depth, cv));
+            let b = cell_same_object(map, object_id, (cu, depth, cv - 1));
+            let c = cell_same_object(map, object_id, (cu - 1, depth, cv - 1));
             u32::from(a) + u32::from(b) + u32::from(c)
         }
         _ => {
-            let a = map.contains_key(&(cu - 1, cv, depth));
-            let b = map.contains_key(&(cu, cv - 1, depth));
-            let c = map.contains_key(&(cu - 1, cv - 1, depth));
+            let a = cell_same_object(map, object_id, (cu - 1, cv, depth));
+            let b = cell_same_object(map, object_id, (cu, cv - 1, depth));
+            let c = cell_same_object(map, object_id, (cu - 1, cv - 1, depth));
             u32::from(a) + u32::from(b) + u32::from(c)
         }
     };
@@ -198,6 +225,7 @@ mod bounds_edit_tests {
             z: 0,
             color: 1,
             material: MaterialId::Plastic,
+            object_id: 0,
         };
         let e = mesh_bounds_expand_with_voxel(&b, &v);
         assert_eq!(e.max.x, 5.0);
@@ -333,7 +361,14 @@ pub fn pack_gpu_greedy_slices(
             for i in 0..6usize {
                 let axis = i / 2;
                 let sign = if i % 2 == 0 { 1 } else { -1 };
-                if !neighbor_occludes_face(map, pos, axis, sign, source.material) {
+                if !neighbor_occludes_face(
+                    map,
+                    pos,
+                    axis,
+                    sign,
+                    source.material,
+                    source.object_id,
+                ) {
                     faces.push((pos, axis, sign));
                 }
             }
@@ -551,24 +586,40 @@ pub fn mesh_buffers_for_chunk_key(
 
 /// Single pass: [`SpatialMeshCache`] plus per-chunk greedy meshes (one `voxel_map` + bucketing).
 /// Chunk meshes build in parallel across chunks.
-pub fn build_chunk_meshes_and_spatial_cache(
-    voxels: &[Voxel],
-    cs: i32,
-) -> Option<(
+///
+/// `progress` is called from worker threads with values in \([0, 1]\) as chunks complete (throttled).
+pub fn build_chunk_meshes_and_spatial_cache<F>(voxels: &[Voxel], cs: i32, progress: F) -> Option<(
     (i32, i32, i32),
     BTreeMap<ChunkKey, MeshBuffers>,
     SpatialMeshCache,
-)> {
+)>
+where
+    F: Fn(f32) + Sync,
+{
+    use std::sync::atomic::{AtomicU32, Ordering};
+
     let cache = SpatialMeshCache::from_voxels(voxels, cs)?;
     let origin = cache.origin;
     let keys: Vec<ChunkKey> = cache.buckets.keys().copied().collect();
+    let total = keys.len().max(1) as u32;
+    let last_permille = AtomicU32::new(0);
+    let done = AtomicU32::new(0);
     let parts: Vec<(ChunkKey, MeshBuffers)> = keys
         .par_iter()
         .filter_map(|&key| {
             let mesh = mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, key);
+            let d = done.fetch_add(1, Ordering::Relaxed) + 1;
+            let frac = d as f32 / total as f32;
+            let permille = (frac * 1000.0).min(1000.0) as u32;
+            let prev = last_permille.load(Ordering::Relaxed);
+            if permille.saturating_sub(prev) >= 40 || d == total {
+                last_permille.store(permille, Ordering::Relaxed);
+                progress(frac);
+            }
             (!mesh.indices.is_empty()).then_some((key, mesh))
         })
         .collect();
+    progress(1.0);
     let meshes: BTreeMap<ChunkKey, MeshBuffers> = parts.into_iter().collect();
     Some((origin, meshes, cache))
 }
@@ -578,7 +629,7 @@ pub fn build_all_chunk_meshes_btree(
     voxels: &[Voxel],
     cs: i32,
 ) -> Option<((i32, i32, i32), BTreeMap<ChunkKey, MeshBuffers>)> {
-    let (origin, meshes, _) = build_chunk_meshes_and_spatial_cache(voxels, cs)?;
+    let (origin, meshes, _) = build_chunk_meshes_and_spatial_cache(voxels, cs, |_| {})?;
     Some((origin, meshes))
 }
 
@@ -680,7 +731,7 @@ pub fn voxels_by_spatial_chunks(voxels: &[Voxel], cs: i32) -> Vec<(Vec<Voxel>, V
 #[cfg(test)]
 mod chunk_tests {
     use super::*;
-    use crate::voxelle::MaterialId;
+    use crate::voxelle::{MaterialId, SceneObject};
 
     /// Baseline: one spatial cache, sequential per-chunk mesh (must match fused+parallel output).
     fn sequential_chunk_meshes_and_spatial_cache(
@@ -715,12 +766,13 @@ mod chunk_tests {
                         z,
                         color: 0x112233,
                         material: MaterialId::Plastic,
+                        object_id: 0,
                     });
                 }
             }
         }
         let cs = SPATIAL_CHUNK_SIZE;
-        let fused = build_chunk_meshes_and_spatial_cache(&voxels, cs).expect("fused");
+        let fused = build_chunk_meshes_and_spatial_cache(&voxels, cs, |_| {}).expect("fused");
         let seq = sequential_chunk_meshes_and_spatial_cache(&voxels, cs).expect("sequential");
         assert_eq!(fused.0, seq.0, "chunk origin");
         assert_eq!(fused.1.len(), seq.1.len(), "chunk count");
@@ -740,6 +792,7 @@ mod chunk_tests {
                 z: 0,
                 color: 1,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
             Voxel {
                 x: 100,
@@ -747,12 +800,70 @@ mod chunk_tests {
                 z: 0,
                 color: 2,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
         ];
         let ch = voxels_by_spatial_chunks(&voxels, 48);
         assert_eq!(ch.len(), 2);
         assert_eq!(ch[0].1.len(), 1);
         assert_eq!(ch[1].1.len(), 1);
+    }
+
+    #[test]
+    fn cross_object_adjacent_keeps_shared_faces() {
+        let same = vec![
+            Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 1,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                color: 2,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+        ];
+        let split = vec![
+            Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 1,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                color: 2,
+                material: MaterialId::Plastic,
+                object_id: 1,
+            },
+        ];
+        let objs = vec![
+            SceneObject::default(),
+            SceneObject {
+                id: 1,
+                name: "B".into(),
+                sort_order: 1,
+                ..Default::default()
+            },
+        ];
+        let (m_same, _) = build_greedy_mesh(&same, &[]);
+        let (m_split, _) = build_greedy_mesh(&split, &objs);
+        assert!(
+            m_split.indices.len() > m_same.indices.len(),
+            "expected extra faces between objects: same={}, split={}",
+            m_same.indices.len(),
+            m_split.indices.len(),
+        );
     }
 
     /// Per-triangle multiset of quantized vertex positions (order-independent).
@@ -796,6 +907,7 @@ mod chunk_tests {
                 z: 0,
                 color: 0xff0000,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
             Voxel {
                 x: 1,
@@ -803,6 +915,7 @@ mod chunk_tests {
                 z: 0,
                 color: 0x00ff00,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
             Voxel {
                 x: 0,
@@ -810,9 +923,10 @@ mod chunk_tests {
                 z: 0,
                 color: 0x0000ff,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
         ];
-        let (full, _) = build_greedy_mesh(&voxels);
+        let (full, _) = build_greedy_mesh(&voxels, &[]);
         let Some((_origin, btree)) = build_all_chunk_meshes_btree(&voxels, SPATIAL_CHUNK_SIZE)
         else {
             panic!("expected buckets");
@@ -842,6 +956,7 @@ mod chunk_tests {
                 z: 0,
                 color: 1,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
             Voxel {
                 x: 5,
@@ -849,6 +964,7 @@ mod chunk_tests {
                 z: 0,
                 color: 2,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
         ];
         let cs = SPATIAL_CHUNK_SIZE;
@@ -871,6 +987,7 @@ mod chunk_tests {
             z: 1,
             color: 3,
             material: MaterialId::Plastic,
+            object_id: 0,
         };
         cache.apply_add(add, cs);
         let mut after_add = after_remove;
@@ -888,6 +1005,7 @@ mod chunk_tests {
                 z: 0,
                 color: 1,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
             Voxel {
                 x: 50,
@@ -895,10 +1013,11 @@ mod chunk_tests {
                 z: 0,
                 color: 2,
                 material: MaterialId::Plastic,
+                object_id: 0,
             },
         ];
-        let (full, _) = build_greedy_mesh(&voxels);
-        let (chunked, _) = build_greedy_mesh_chunked(&voxels, SPATIAL_CHUNK_SIZE);
+        let (full, _) = build_greedy_mesh(&voxels, &[]);
+        let (chunked, _) = build_greedy_mesh_chunked(&voxels, SPATIAL_CHUNK_SIZE, &[]);
         assert_eq!(full.indices.len(), chunked.indices.len());
         assert_eq!(sorted_triangle_set(&full), sorted_triangle_set(&chunked));
     }
@@ -942,7 +1061,14 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
             for i in 0..6usize {
                 let axis = i / 2;
                 let sign = if i % 2 == 0 { 1 } else { -1 };
-                if !neighbor_occludes_face(map, pos, axis, sign, source.material) {
+                if !neighbor_occludes_face(
+                    map,
+                    pos,
+                    axis,
+                    sign,
+                    source.material,
+                    source.object_id,
+                ) {
                     faces.push((pos, axis, sign));
                 }
             }
@@ -971,10 +1097,14 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
                 let p11 = quad_corner(axis, sign, depth, u + w, v + h);
                 let p01 = quad_corner(axis, sign, depth, u, v + h);
 
-                let ao00 = corner_ao_factor(map, axis, depth, u, v);
-                let ao10 = corner_ao_factor(map, axis, depth, u + w - 1, v);
-                let ao11 = corner_ao_factor(map, axis, depth, u + w - 1, v + h - 1);
-                let ao01 = corner_ao_factor(map, axis, depth, u, v + h - 1);
+                let id00 = map[&grid_pos(axis, depth, u, v)].object_id;
+                let id10 = map[&grid_pos(axis, depth, u + w - 1, v)].object_id;
+                let id11 = map[&grid_pos(axis, depth, u + w - 1, v + h - 1)].object_id;
+                let id01 = map[&grid_pos(axis, depth, u, v + h - 1)].object_id;
+                let ao00 = corner_ao_factor(map, id00, axis, depth, u, v);
+                let ao10 = corner_ao_factor(map, id10, axis, depth, u + w - 1, v);
+                let ao11 = corner_ao_factor(map, id11, axis, depth, u + w - 1, v + h - 1);
+                let ao01 = corner_ao_factor(map, id01, axis, depth, u, v + h - 1);
                 let ao_face = (ao00 + ao10 + ao11 + ao01) * 0.25;
 
                 let base = (out.positions.len() / 3) as u32;
@@ -1349,24 +1479,98 @@ pub fn preview_cube_wireframe_mesh(
     }
 }
 
-/// `mat_kind` per vertex: 0 solid, 1 glow, 2 glass/water (shader uses for emissive / spec).
-pub fn build_greedy_mesh(voxels: &[Voxel]) -> (MeshBuffers, MeshBounds) {
-    let map = voxel_map(voxels);
+pub fn transform_mesh_buffers(mesh: &mut MeshBuffers, model: glam::Mat4) {
+    let inv_t = model.inverse().transpose();
+    for i in (0..mesh.positions.len()).step_by(3) {
+        let p = glam::Vec3::new(mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2]);
+        let pw = model.transform_point3(p);
+        mesh.positions[i] = pw.x;
+        mesh.positions[i + 1] = pw.y;
+        mesh.positions[i + 2] = pw.z;
+    }
+    for i in (0..mesh.normals.len()).step_by(3) {
+        let n = glam::Vec3::new(mesh.normals[i], mesh.normals[i + 1], mesh.normals[i + 2]);
+        let nw = inv_t.transform_vector3(n).normalize();
+        mesh.normals[i] = nw.x;
+        mesh.normals[i + 1] = nw.y;
+        mesh.normals[i + 2] = nw.z;
+    }
+}
+
+/// Bounds of voxel centers transformed into world space (respects object visibility).
+pub fn mesh_bounds_from_voxels_world(voxels: &[Voxel], objects: &[SceneObject]) -> Option<MeshBounds> {
+    if voxels.is_empty() {
+        return None;
+    }
     let mut min = glam::Vec3::splat(f32::INFINITY);
     let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    let mut any = false;
     for v in voxels {
-        let pf = glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32);
+        if !crate::voxelle::scene::is_object_visible(objects, v.object_id) {
+            continue;
+        }
+        any = true;
+        let m = crate::voxelle::object_world_matrix(objects, v.object_id);
+        let pf = m.transform_point3(glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32));
         min = min.min(pf);
         max = max.max(pf);
     }
-    let bounds = MeshBounds { min, max };
-    let mesh = build_greedy_mesh_mapped(voxels, &map);
-    (mesh, bounds)
+    if !any {
+        return None;
+    }
+    Some(MeshBounds { min, max })
+}
+
+fn append_object_meshes_sorted(
+    voxels: &[Voxel],
+    map: &HashMap<VoxelCoord, Voxel>,
+    objects: &[SceneObject],
+    dst: &mut MeshBuffers,
+) {
+    let mut order: Vec<(i32, u32)> = objects.iter().map(|o| (o.sort_order, o.id)).collect();
+    order.sort_by_key(|(s, id)| (*s, *id));
+    for (_, oid) in order {
+        if !crate::voxelle::scene::is_object_visible(objects, oid) {
+            continue;
+        }
+        let emit: Vec<Voxel> = voxels.iter().filter(|v| v.object_id == oid).cloned().collect();
+        if emit.is_empty() {
+            continue;
+        }
+        let mut part = build_greedy_mesh_mapped(&emit, map);
+        let m = crate::voxelle::object_world_matrix(objects, oid);
+        transform_mesh_buffers(&mut part, m);
+        append_mesh_buffers(dst, part);
+    }
+}
+
+/// `mat_kind` per vertex: 0 solid, 1 glow, 2 glass/water (shader uses for emissive / spec).
+pub fn build_greedy_mesh(voxels: &[Voxel], objects: &[SceneObject]) -> (MeshBuffers, MeshBounds) {
+    let default_objs = crate::voxelle::default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
+    let map = voxel_map(voxels);
+    let mut combined = MeshBuffers::default();
+    append_object_meshes_sorted(voxels, &map, objs, &mut combined);
+    let bounds = mesh_bounds_from_voxels_world(voxels, objs)
+        .or_else(|| mesh_bounds_from_voxels(voxels))
+        .unwrap_or_else(|| MeshBounds {
+            min: glam::Vec3::ZERO,
+            max: glam::Vec3::ZERO,
+        });
+    (combined, bounds)
 }
 
 /// Same output as [`build_greedy_mesh`], but builds per spatial chunk (with global occlusion map) for large scenes.
 #[allow(dead_code)] // Retained for tests and callers; runtime uses [`build_all_chunk_meshes_btree`].
-pub fn build_greedy_mesh_chunked(voxels: &[Voxel], chunk_size: i32) -> (MeshBuffers, MeshBounds) {
+pub fn build_greedy_mesh_chunked(
+    voxels: &[Voxel],
+    chunk_size: i32,
+    objects: &[SceneObject],
+) -> (MeshBuffers, MeshBounds) {
     if voxels.is_empty() {
         return (
             MeshBuffers::default(),
@@ -1376,16 +1580,23 @@ pub fn build_greedy_mesh_chunked(voxels: &[Voxel], chunk_size: i32) -> (MeshBuff
             },
         );
     }
+    let default_objs = crate::voxelle::default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
     let map = voxel_map(voxels);
-    let bounds = mesh_bounds_from_voxels(voxels).unwrap();
+    let bounds = mesh_bounds_from_voxels_world(voxels, objs)
+        .or_else(|| mesh_bounds_from_voxels(voxels))
+        .unwrap();
     let chunks = voxels_by_spatial_chunks(voxels, chunk_size);
     let mut acc = MeshBuffers::default();
     for (_halo, core) in chunks {
         if core.is_empty() {
             continue;
         }
-        let part = build_greedy_mesh_mapped(&core, &map);
-        append_mesh_buffers(&mut acc, part);
+        append_object_meshes_sorted(&core, &map, objs, &mut acc);
     }
     (acc, bounds)
 }
@@ -1403,12 +1614,13 @@ mod gpu_pack_tests {
             z: 0,
             color: 0xff00ff,
             material: MaterialId::Plastic,
+            object_id: 0,
         }];
         let map = voxel_map(&voxels);
         let (headers, bits) = pack_gpu_greedy_slices(&map, &voxels).expect("pack");
         assert!(!headers.is_empty());
         assert!(!bits.is_empty());
-        let (cpu, _) = build_greedy_mesh(&voxels);
+        let (cpu, _) = build_greedy_mesh(&voxels, &[]);
         assert!(!cpu.indices.is_empty());
     }
 }

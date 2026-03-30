@@ -32,7 +32,7 @@ use crate::gpu_brick::{BrickCellWrite, GpuVoxelBrick};
 use crate::greedy_mesh::{self, ChunkKey, MeshBounds, MeshBuffers};
 use crate::render_constants::{BLOOM_STRENGTH, SHADOW_MAP_SIZE};
 use crate::voxel_edit::VoxelEditDelta;
-use crate::voxelle::Voxel;
+use crate::voxelle::{SceneObject, Voxel};
 use glam::{IVec3, Mat4, Vec3};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -102,7 +102,13 @@ pub struct WgpuViewer {
     pub queue: wgpu::Queue,
     pub config: wgpu::SurfaceConfiguration,
     pub format: wgpu::TextureFormat,
-    pub size: (u32, u32),
+    /// Swapchain / Metal drawable size (full webview — must match window or macOS stretches the image).
+    pub surface_size: (u32, u32),
+    /// `.viewport` div in physical pixels (same space as [`Self::surface_size`]).
+    pub viewport_x: u32,
+    pub viewport_y: u32,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
 
     global_buffer: wgpu::Buffer,
     brick_buffer: wgpu::Buffer,
@@ -132,6 +138,9 @@ pub struct WgpuViewer {
     bloom_a_view: wgpu::TextureView,
     bloom_b: wgpu::Texture,
     bloom_b_view: wgpu::TextureView,
+
+    present_texture: wgpu::Texture,
+    present_view: wgpu::TextureView,
 
     scene_layout0: wgpu::BindGroupLayout,
     scene_layout1: wgpu::BindGroupLayout,
@@ -431,6 +440,33 @@ fn fullscreen_pipeline(
     })
 }
 
+/// Tonemapped sRGB output at **viewport** resolution before [`copy_texture_to_texture`] into the swapchain.
+fn create_present_texture(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let w = width.max(1);
+    let h = height.max(1);
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("present"),
+        size: wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
 fn create_shadow_tex(
     device: &wgpu::Device,
     width: u32,
@@ -619,7 +655,7 @@ impl WgpuViewer {
 
         let size = (800u32, 600u32);
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format,
             width: size.0.max(1),
             height: size.1.max(1),
@@ -1270,6 +1306,9 @@ impl WgpuViewer {
             bloom_b_view,
         ) = create_screen_targets(&device, size.0, size.1, vf);
 
+        let (present_texture, present_view) =
+            create_present_texture(&device, size.0, size.1, format);
+
         // placeholder bind groups — rebuilt in resize / upload
         let bind_scene_opaque = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("scene_op"),
@@ -1402,7 +1441,11 @@ impl WgpuViewer {
             queue,
             config,
             format,
-            size,
+            surface_size: size,
+            viewport_x: 0,
+            viewport_y: 0,
+            viewport_width: size.0,
+            viewport_height: size.1,
             global_buffer,
             brick_buffer,
             brick_cell_count: 1,
@@ -1424,6 +1467,8 @@ impl WgpuViewer {
             bloom_a_view,
             bloom_b,
             bloom_b_view,
+            present_texture,
+            present_view,
             scene_layout0,
             scene_layout1,
             shadow_vs_layout,
@@ -1507,14 +1552,34 @@ impl WgpuViewer {
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
-        if width == 0 || height == 0 {
+    /// `surface_*` = full webview drawable (must match the native window). Viewport = `.viewport` div in the same pixel space.
+    pub fn resize(
+        &mut self,
+        surface_w: u32,
+        surface_h: u32,
+        mut viewport_x: u32,
+        mut viewport_y: u32,
+        mut viewport_width: u32,
+        mut viewport_height: u32,
+    ) {
+        if surface_w == 0 || surface_h == 0 {
             return;
         }
-        self.size = (width, height);
-        self.config.width = width;
-        self.config.height = height;
+        viewport_x = viewport_x.min(surface_w.saturating_sub(1));
+        viewport_y = viewport_y.min(surface_h.saturating_sub(1));
+        viewport_width = viewport_width.max(1).min(surface_w - viewport_x);
+        viewport_height = viewport_height.max(1).min(surface_h - viewport_y);
+
+        self.surface_size = (surface_w, surface_h);
+        self.viewport_x = viewport_x;
+        self.viewport_y = viewport_y;
+        self.viewport_width = viewport_width;
+        self.viewport_height = viewport_height;
+
+        self.config.width = surface_w;
+        self.config.height = surface_h;
         self.surface.configure(&self.device, &self.config);
+
         let vf = hdr_format();
         let (
             hdr_opaque_texture,
@@ -1529,7 +1594,7 @@ impl WgpuViewer {
             bloom_a_view,
             bloom_b,
             bloom_b_view,
-        ) = create_screen_targets(&self.device, width, height, vf);
+        ) = create_screen_targets(&self.device, viewport_width, viewport_height, vf);
         self.hdr_opaque_texture = hdr_opaque_texture;
         self.hdr_opaque_view = hdr_opaque_view;
         self.hdr_texture = hdr_texture;
@@ -1542,7 +1607,17 @@ impl WgpuViewer {
         self.bloom_a_view = bloom_a_view;
         self.bloom_b = bloom_b;
         self.bloom_b_view = bloom_b_view;
+
+        let (present_texture, present_view) =
+            create_present_texture(&self.device, viewport_width, viewport_height, self.format);
+        self.present_texture = present_texture;
+        self.present_view = present_view;
+
         self.rebuild_bind_groups();
+    }
+
+    pub fn viewport_size(&self) -> (u32, u32) {
+        (self.viewport_width.max(1), self.viewport_height.max(1))
     }
 
     /// `mode`: 0 neutral … 5 reinhard (see `post_composite.wgsl` / Voxelle web tone mapping ids).
@@ -1784,7 +1859,7 @@ impl WgpuViewer {
         self.index_count = 0;
         self.opaque_chunks.clear();
         let Some((origin, meshes, spatial_cache)) =
-            greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE)
+            greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE, |_| {})
         else {
             self.opaque_chunked = false;
             self.spatial_mesh_cache = None;
@@ -1872,11 +1947,23 @@ impl WgpuViewer {
     }
 
     /// CPU greedy mesh, using chunked construction for very large voxel counts.
-    pub fn cpu_mesh_fallback(&mut self, voxels: &[Voxel]) {
-        if voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS {
+    pub fn cpu_mesh_fallback(&mut self, voxels: &[Voxel], objects: &[SceneObject]) {
+        let default_objs = crate::voxelle::default_scene_objects();
+        let objs: &[SceneObject] = if objects.is_empty() {
+            default_objs.as_slice()
+        } else {
+            objects
+        };
+        let multi = voxels
+            .iter()
+            .map(|v| v.object_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1;
+        if voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS && !multi {
             self.upload_cpu_mesh_chunked_full(voxels);
         } else {
-            let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels);
+            let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
             self.upload_mesh(&mesh);
             self.last_mesh_route = "cpu".to_string();
         }
@@ -1884,7 +1971,11 @@ impl WgpuViewer {
 
     /// GPU greedy mesh (WGSL) when slice bitmaps fit 64×64; otherwise CPU [`greedy_mesh::build_greedy_mesh`].
     /// Set `VOXELLE_CPU_MESH=1` to force CPU meshing.
-    pub fn rebuild_mesh_gpu_greedy(&mut self, voxels: &[Voxel]) -> Result<MeshBounds, String> {
+    pub fn rebuild_mesh_gpu_greedy(
+        &mut self,
+        voxels: &[Voxel],
+        objects: &[SceneObject],
+    ) -> Result<MeshBounds, String> {
         if voxels.is_empty() {
             self.vertex_buffer = None;
             self.index_buffer = None;
@@ -1895,10 +1986,50 @@ impl WgpuViewer {
             return Err("empty voxels".into());
         }
 
+        let default_objs = crate::voxelle::default_scene_objects();
+        let objs: &[SceneObject] = if objects.is_empty() {
+            default_objs.as_slice()
+        } else {
+            objects
+        };
+        let multi = voxels
+            .iter()
+            .map(|v| v.object_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1;
+        let transformed = objs.iter().any(|o| {
+            o.translation != [0.0, 0.0, 0.0]
+                || o.rotation[0].abs() + o.rotation[1].abs() + o.rotation[2].abs() > 1e-5
+                || o.rotation[3] < 0.9999
+                || o.scale != [1.0, 1.0, 1.0]
+        });
+        if multi || transformed {
+            let (mesh, _bounds) = greedy_mesh::build_greedy_mesh(voxels, objs);
+            self.vertex_buffer = None;
+            self.index_buffer = None;
+            self.index_count = 0;
+            self.opaque_chunked = false;
+            self.opaque_chunks.clear();
+            self.spatial_mesh_cache = None;
+            self.upload_mesh(&mesh);
+            self.last_mesh_route = if multi {
+                "cpu_multi_object"
+            } else {
+                "cpu_object_transform"
+            }
+            .to_string();
+            return Ok(
+                greedy_mesh::mesh_bounds_from_voxels_world(voxels, objs)
+                    .or_else(|| greedy_mesh::mesh_bounds_from_voxels(voxels))
+                    .ok_or_else(|| "mesh bounds".to_string())?,
+            );
+        }
+
         let bounds = greedy_mesh::mesh_bounds_from_voxels(voxels).ok_or("mesh bounds")?;
 
         if std::env::var("VOXELLE_CPU_MESH").is_ok() {
-            self.cpu_mesh_fallback(voxels);
+            self.cpu_mesh_fallback(voxels, objs);
             return Ok(bounds);
         }
 
@@ -1906,7 +2037,7 @@ impl WgpuViewer {
         let (headers, bits) = match greedy_mesh::pack_gpu_greedy_slices(&map, voxels) {
             Ok(x) => x,
             Err(()) => {
-                self.cpu_mesh_fallback(voxels);
+                self.cpu_mesh_fallback(voxels, objs);
                 return Ok(bounds);
             }
         };
@@ -1947,7 +2078,7 @@ impl WgpuViewer {
             || idx_storage_size > max_bind
             || headers.len() > max_wg
         {
-            self.cpu_mesh_fallback(voxels);
+            self.cpu_mesh_fallback(voxels, objs);
             return Ok(bounds);
         }
 
@@ -2211,7 +2342,7 @@ impl WgpuViewer {
         readback.unmap();
 
         if v_total == 0 || i_total == 0 || v_total > max_vertices || i_total > max_indices {
-            self.cpu_mesh_fallback(voxels);
+            self.cpu_mesh_fallback(voxels, objs);
             return Ok(bounds);
         }
 
@@ -2482,8 +2613,8 @@ impl WgpuViewer {
     }
 
     pub fn update_uniforms(&self, camera: &OrbitCamera) {
-        let w = self.size.0 as f32;
-        let h = self.size.1 as f32;
+        let w = self.viewport_width.max(1) as f32;
+        let h = self.viewport_height.max(1) as f32;
         let proj = camera.proj_matrix(w, h);
         let view = camera.view_matrix();
         let vp = proj * view;
@@ -2614,11 +2745,14 @@ impl WgpuViewer {
         pass.draw(0..self.collab_line_vertex_count, 0..1);
     }
 
-    pub fn render(&self) -> Result<(), String> {
+    pub fn render(&mut self) -> Result<(), String> {
         let frame = self
             .surface
             .get_current_texture()
             .map_err(|e| e.to_string())?;
+        let tex_size = frame.texture.size();
+        // Keep CPU-side surface size in sync with the actual swapchain (configure can differ slightly).
+        self.surface_size = (tex_size.width.max(1), tex_size.height.max(1));
         let swap_view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -2698,8 +2832,8 @@ impl WgpuViewer {
         }
 
         let ext = wgpu::Extent3d {
-            width: self.size.0.max(1),
-            height: self.size.1.max(1),
+            width: self.viewport_width.max(1),
+            height: self.viewport_height.max(1),
             depth_or_array_layers: 1,
         };
         encoder.copy_texture_to_texture(
@@ -2820,7 +2954,7 @@ impl WgpuViewer {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &swap_view,
+                    view: &self.present_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -2840,6 +2974,49 @@ impl WgpuViewer {
             pass.set_bind_group(0, &self.bind_composite, &[]);
             pass.draw(0..3, 0..1);
         }
+
+        {
+            let _clear_swap = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("clear_swap"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &swap_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+        }
+
+        let vw = self.viewport_width.max(1);
+        let vh = self.viewport_height.max(1);
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.present_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &frame.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: self.viewport_x,
+                    y: self.viewport_y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: vw,
+                height: vh,
+                depth_or_array_layers: 1,
+            },
+        );
 
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();

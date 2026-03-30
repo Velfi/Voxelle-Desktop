@@ -2,6 +2,7 @@
 
 use crate::camera::Spherical;
 use crate::finish_voxel_edit_gpu;
+use crate::VoxelGpuRefreshReason;
 use crate::voxel_edit;
 use crate::voxelle::{empty_collab_placeholder, encode_payload_v4};
 use crate::ViewerState;
@@ -395,10 +396,11 @@ fn apply_delta_on_main(
     delta: &voxel_edit::VoxelEditDelta,
 ) -> Result<(), String> {
     let delta = *delta;
-    let app = app.clone();
+    let app_rt = app.clone();
+    let app_progress = app.clone();
     let state = Arc::clone(state);
     let (tx, rx) = std::sync::mpsc::channel();
-    let _ = app.run_on_main_thread(move || {
+    let _ = app_rt.run_on_main_thread(move || {
         let r = (|| {
             let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
             let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
@@ -421,7 +423,14 @@ fn apply_delta_on_main(
         })();
         let r2 = r.and_then(|_| {
             let t = std::time::Instant::now();
-            finish_voxel_edit_gpu(&state, &delta, 0.0, t)
+            finish_voxel_edit_gpu(
+                &state,
+                &delta,
+                0.0,
+                t,
+                &app_progress,
+                VoxelGpuRefreshReason::CollabApply,
+            )
         });
         let _ = tx.send(r2);
     });
@@ -438,9 +447,14 @@ fn replace_file_on_main(
         .rendering_mode
         .lock()
         .map_err(|e| e.to_string())?;
-    let prepared = crate::prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
     let _ = app.emit("voxelle-load-start", "Project from host");
-    let _ = app.emit("voxelle-load-progress", 0.35f32);
+    let prepared = crate::prepare_load_scene_cpu(
+        file.grid_size,
+        &file.voxels,
+        &file.objects,
+        mode,
+        Some(app),
+    )?;
     let app = app.clone();
     let state = Arc::clone(state);
     let app_mesh = app.clone();
@@ -452,7 +466,6 @@ fn replace_file_on_main(
     let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
     match main_result {
         Ok(()) => {
-            let _ = app.emit("voxelle-load-progress", 0.85f32);
             let _ = app.emit("voxelle-loaded", "collab snapshot");
             Ok(())
         }
@@ -509,14 +522,20 @@ pub fn host_undo_peer(
         }
     };
     let t = std::time::Instant::now();
-    finish_voxel_edit_gpu(state, &mesh_delta, 0.0, t)?;
+    finish_voxel_edit_gpu(
+        state,
+        &mesh_delta,
+        0.0,
+        t,
+        app,
+        VoxelGpuRefreshReason::Undo,
+    )?;
     collab.host_redo.entry(peer_id).or_default().push(original);
-    let _ = app;
     Ok(Some(mesh_delta))
 }
 
 pub fn host_redo_peer(
-    _app: &AppHandle,
+    app: &AppHandle,
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
@@ -547,7 +566,14 @@ pub fn host_redo_peer(
         }
     };
     let t = std::time::Instant::now();
-    finish_voxel_edit_gpu(state, &mesh_delta, 0.0, t)?;
+    finish_voxel_edit_gpu(
+        state,
+        &mesh_delta,
+        0.0,
+        t,
+        app,
+        VoxelGpuRefreshReason::Redo,
+    )?;
     collab.host_undo.entry(peer_id).or_default().push(forward);
     Ok(Some(mesh_delta))
 }

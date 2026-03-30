@@ -168,6 +168,7 @@ mod tests {
             z: 0,
             color: 0x112233,
             material: MaterialId::Plastic,
+            object_id: 0,
         };
         let b = GpuVoxelBrick::from_voxels(&[v], 256).unwrap();
         assert_eq!(b.origin, IVec3::ZERO);

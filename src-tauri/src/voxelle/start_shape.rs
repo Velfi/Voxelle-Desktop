@@ -45,6 +45,7 @@ pub fn voxels_for_start_shape(size: i32, shape: StartShape) -> Result<Vec<Voxel>
         z,
         color,
         material,
+        object_id: 0,
     };
 
     for x in lo..=hi {

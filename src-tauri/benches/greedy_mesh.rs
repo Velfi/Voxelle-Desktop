@@ -41,6 +41,7 @@ fn solid_box(origin: (i32, i32, i32), edge: i32, color: u32) -> Vec<Voxel> {
                     z: oz + dz,
                     color,
                     material: MaterialId::Plastic,
+                    object_id: 0,
                 });
             }
         }
@@ -89,6 +90,7 @@ fn bench_spatial_cache(c: &mut Criterion) {
         z: 0,
         color: 0xff0000,
         material: MaterialId::Plastic,
+        object_id: 0,
     };
     c.bench_function("SpatialMeshCache apply_add + apply_remove", |b| {
         b.iter(|| {
@@ -120,7 +122,9 @@ fn bench_load_chunk_meshes_fused_vs_sequential(c: &mut Criterion) {
     let mut group = c.benchmark_group("load_chunk_meshes 64³ solid");
     group.sample_size(15);
     group.bench_function("fused_parallel", |b| {
-        b.iter(|| greedy_mesh::build_chunk_meshes_and_spatial_cache(black_box(&voxels), cs))
+        b.iter(|| {
+            greedy_mesh::build_chunk_meshes_and_spatial_cache(black_box(&voxels), cs, |_| {})
+        })
     });
     group.bench_function("sequential_chunk_meshes", |b| {
         b.iter(|| sequential_chunk_meshes_after_cache(black_box(&voxels), cs))

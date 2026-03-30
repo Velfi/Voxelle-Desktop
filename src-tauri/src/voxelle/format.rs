@@ -9,6 +9,8 @@ use thiserror::Error;
 pub const V3_MAGIC: [u8; 4] = [0x56, 0x58, 0x33, 0x1a];
 pub const V4_MAGIC: [u8; 4] = [0x56, 0x58, 0x34, 0x1a];
 pub const V3_RECORD_SIZE: usize = 20;
+/// Wire v5: adds `object_id` u32 per voxel after v3 record fields (24 bytes total).
+pub const V5_RECORD_SIZE: usize = 24;
 /// Use dense v3-style body when at least this many voxels (matches web / prior tooling).
 pub const V3_WIRE_VOXEL_THRESHOLD: usize = 50_000;
 
@@ -103,6 +105,42 @@ pub struct Voxel {
     pub z: i32,
     pub color: u32,
     pub material: MaterialId,
+    /// Scene object that owns this voxel (local integer coordinates relative to object).
+    pub object_id: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneObject {
+    pub id: u32,
+    pub parent_id: Option<u32>,
+    pub name: String,
+    pub visible: bool,
+    pub sort_order: i32,
+    pub translation: [f32; 3],
+    /// xyzw quaternion (identity = 0,0,0,1).
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+}
+
+impl Default for SceneObject {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            parent_id: None,
+            name: "Scene".to_string(),
+            visible: true,
+            sort_order: 0,
+            translation: [0.0; 3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+            scale: [1.0, 1.0, 1.0],
+        }
+    }
+}
+
+/// Single implicit object for legacy files or empty `objects` in BSON.
+pub fn default_scene_objects() -> Vec<SceneObject> {
+    vec![SceneObject::default()]
 }
 
 #[derive(Clone, Debug, Default)]
@@ -121,6 +159,9 @@ pub struct VoxelleFile {
     /// Full `scene` subdocument when loaded (preserves `atmosphere` etc.). If `Some`, encode prefers this over [`Scene`] alone.
     pub scene_extra: Option<Document>,
     pub voxels: Vec<Voxel>,
+    pub objects: Vec<SceneObject>,
+    /// Target object for new voxel edits (persisted in BSON; default 0).
+    pub active_object_id: u32,
 }
 
 /// Match `focalLengthToFov` in Voxelle `sceneSetup.ts`.
@@ -147,14 +188,104 @@ fn is_v3_wire(bytes: &[u8]) -> bool {
         && bytes[3] == V3_MAGIC[3]
 }
 
+fn record_size_for_wire(wire_ver: u32) -> Result<usize, ParseError> {
+    match wire_ver {
+        3 | 4 => Ok(V3_RECORD_SIZE),
+        5 => Ok(V5_RECORD_SIZE),
+        _ => Err(ParseError::InvalidV3),
+    }
+}
+
+fn parse_objects_from_document(doc: &Document) -> Option<Vec<SceneObject>> {
+    let arr = doc.get_array("objects").ok()?;
+    let mut out = Vec::with_capacity(arr.len());
+    for b in arr {
+        let sub = b.as_document()?;
+        let id = doc_u32(sub, "id")?;
+        let parent_id = match sub.get("parent") {
+            None | Some(Bson::Null) => None,
+            Some(Bson::Int32(i)) if *i >= 0 => Some(*i as u32),
+            Some(Bson::Int64(i)) if *i >= 0 && *i <= u32::MAX as i64 => Some(*i as u32),
+            Some(Bson::Double(d)) if *d >= 0.0 && d.is_finite() => Some(*d as u32),
+            _ => None,
+        };
+        let name = sub
+            .get_str("name")
+            .ok()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("Object {id}"));
+        let visible = sub.get_bool("visible").unwrap_or(true);
+        let sort_order = doc_i32(sub, "sortOrder").unwrap_or(0);
+        let translation = parse_f32_array3(sub, "t").unwrap_or([0.0; 3]);
+        let rotation = parse_f32_array4(sub, "r").unwrap_or([0.0, 0.0, 0.0, 1.0]);
+        let scale = parse_f32_array3(sub, "s").unwrap_or([1.0, 1.0, 1.0]);
+        out.push(SceneObject {
+            id,
+            parent_id,
+            name,
+            visible,
+            sort_order,
+            translation,
+            rotation,
+            scale,
+        });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn doc_u32(doc: &Document, key: &str) -> Option<u32> {
+    doc.get(key).and_then(|b| match b {
+        Bson::Int32(i) if *i >= 0 => Some(*i as u32),
+        Bson::Int64(i) if *i >= 0 && *i <= i64::from(u32::MAX) => Some(*i as u32),
+        Bson::Double(d) if *d >= 0.0 && d.is_finite() => Some(*d as u32),
+        _ => None,
+    })
+}
+
+fn parse_f32_array3(doc: &Document, key: &str) -> Option<[f32; 3]> {
+    let arr = doc.get_array(key).ok()?;
+    if arr.len() < 3 {
+        return None;
+    }
+    let mut o = [0.0_f32; 3];
+    for i in 0..3 {
+        o[i] = match &arr[i] {
+            Bson::Double(d) => *d as f32,
+            Bson::Int32(v) => *v as f32,
+            Bson::Int64(v) => *v as f32,
+            _ => return None,
+        };
+    }
+    Some(o)
+}
+
+fn parse_f32_array4(doc: &Document, key: &str) -> Option<[f32; 4]> {
+    let arr = doc.get_array(key).ok()?;
+    if arr.len() < 4 {
+        return None;
+    }
+    let mut o = [0.0_f32; 4];
+    for i in 0..4 {
+        o[i] = match &arr[i] {
+            Bson::Double(d) => *d as f32,
+            Bson::Int32(v) => *v as f32,
+            Bson::Int64(v) => *v as f32,
+            _ => return None,
+        };
+    }
+    Some(o)
+}
+
 fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     if bytes.len() < 16 {
         return Err(ParseError::InvalidV3);
     }
     let wire_ver = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    if wire_ver != 3 && wire_ver != 4 {
-        return Err(ParseError::InvalidV3);
-    }
+    let rec_size = record_size_for_wire(wire_ver)?;
     let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     if header_len < 8 || 12 + header_len > bytes.len() {
         return Err(ParseError::InvalidV3);
@@ -170,20 +301,27 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     if voxel_count < 0 || hidden_count < 0 {
         return Err(ParseError::InvalidV3);
     }
-    let body_len = (voxel_count + hidden_count) as usize * V3_RECORD_SIZE;
+    let body_len = (voxel_count + hidden_count) as usize * rec_size;
     if 12 + header_len + body_len != bytes.len() {
         return Err(ParseError::InvalidV3);
     }
 
     let scene = parse_scene_bson(&doc);
     let scene_extra = doc.get_document("scene").ok().cloned();
-    let file_version = doc_i32(&doc, "version").unwrap_or(if wire_ver == 4 { 4 } else { 3 });
+    let file_version = doc_i32(&doc, "version").unwrap_or(if wire_ver >= 4 { 4 } else { 3 });
+    let objects = parse_objects_from_document(&doc).unwrap_or_else(default_scene_objects);
+    let active_object_id = doc_u32(&doc, "activeObjectId").unwrap_or(0);
+
     let mut voxels = Vec::with_capacity(voxel_count as usize);
     let mut o = 12 + header_len;
     for i in 0..voxel_count {
-        let v = read_v3_record(bytes, o)?;
+        let v = if wire_ver >= 5 {
+            read_v5_record(bytes, o)?
+        } else {
+            read_v3_record(bytes, o)?
+        };
         voxels.push(v);
-        o += V3_RECORD_SIZE;
+        o += rec_size;
         if i & 0x7fff == 0x7fff {
             std::thread::yield_now();
         }
@@ -195,6 +333,8 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         scene,
         scene_extra,
         voxels,
+        objects,
+        active_object_id,
     })
 }
 
@@ -213,7 +353,17 @@ fn read_v3_record(bytes: &[u8], o: usize) -> Result<Voxel, ParseError> {
         z,
         color,
         material: MaterialId::from_index(mi),
+        object_id: 0,
     })
+}
+
+fn read_v5_record(bytes: &[u8], o: usize) -> Result<Voxel, ParseError> {
+    if o + V5_RECORD_SIZE > bytes.len() {
+        return Err(ParseError::InvalidV3);
+    }
+    let mut v = read_v3_record(bytes, o)?;
+    v.object_id = u32::from_le_bytes(bytes[o + 20..o + 24].try_into().unwrap());
+    Ok(v)
 }
 
 fn parse_scene_bson(doc: &Document) -> Scene {
@@ -257,6 +407,15 @@ fn raw_bson_to_i32(b: RawBsonRef<'_>) -> Option<i32> {
     }
 }
 
+fn raw_bson_to_u32(b: RawBsonRef<'_>) -> Option<u32> {
+    match b {
+        RawBsonRef::Int32(i) if i >= 0 => Some(i as u32),
+        RawBsonRef::Int64(i) if i >= 0 && i <= i64::from(u32::MAX) => Some(i as u32),
+        RawBsonRef::Double(d) if d.is_finite() && d >= 0.0 => Some(d as u32),
+        _ => None,
+    }
+}
+
 fn raw_doc_i32(doc: &RawDocument, key: &str) -> Result<i32, ParseError> {
     let Some(v) = doc
         .get(key)
@@ -287,12 +446,17 @@ fn parse_voxel_row_raw(row: &RawArray) -> Option<Voxel> {
         Some(b) => MaterialId::from_index(raw_bson_to_i32(b).unwrap_or(0).clamp(0, 6) as u8),
         None => MaterialId::Plastic,
     };
+    let object_id = match row.get(5).ok().flatten() {
+        Some(b) => raw_bson_to_u32(b).unwrap_or(0),
+        None => 0,
+    };
     Some(Voxel {
         x,
         y,
         z,
         color,
         material,
+        object_id,
     })
 }
 
@@ -306,6 +470,18 @@ fn doc_i32(doc: &Document, key: &str) -> Option<i32> {
             _ => None,
         }
     })
+}
+
+fn parse_objects_bson_full(bytes: &[u8]) -> (Vec<SceneObject>, u32) {
+    if bytes.len() > 32 * 1024 * 1024 {
+        return (default_scene_objects(), 0);
+    }
+    let Ok(doc) = bson::from_slice::<Document>(bytes) else {
+        return (default_scene_objects(), 0);
+    };
+    let objects = parse_objects_from_document(&doc).unwrap_or_else(default_scene_objects);
+    let active = doc_u32(&doc, "activeObjectId").unwrap_or(0);
+    (objects, active)
 }
 
 /// Stream voxels from BSON without deserializing the full document into `Document` / `Bson`.
@@ -340,12 +516,16 @@ fn parse_bson_full_raw(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         None
     };
 
+    let (objects, active_object_id) = parse_objects_bson_full(bytes);
+
     Ok(VoxelleFile {
         version,
         grid_size,
         scene,
         scene_extra,
         voxels,
+        objects,
+        active_object_id,
     })
 }
 
@@ -404,11 +584,61 @@ fn grid_size_for_encode(file: &VoxelleFile) -> i32 {
     file.grid_size.max(1).max(extent)
 }
 
+fn scene_object_to_bson(o: &SceneObject) -> Bson {
+    let mut d = Document::new();
+    d.insert("id", Bson::Int32(o.id as i32));
+    match o.parent_id {
+        Some(p) => d.insert("parent", Bson::Int32(p as i32)),
+        None => d.insert("parent", Bson::Null),
+    };
+    d.insert("name", Bson::String(o.name.clone()));
+    d.insert("visible", Bson::Boolean(o.visible));
+    d.insert("sortOrder", Bson::Int32(o.sort_order));
+    d.insert(
+        "t",
+        Bson::Array(
+            o.translation
+                .map(|x| Bson::Double(f64::from(x)))
+                .into_iter()
+                .collect(),
+        ),
+    );
+    d.insert(
+        "r",
+        Bson::Array(
+            o.rotation
+                .map(|x| Bson::Double(f64::from(x)))
+                .into_iter()
+                .collect(),
+        ),
+    );
+    d.insert(
+        "s",
+        Bson::Array(
+            o.scale
+                .map(|x| Bson::Double(f64::from(x)))
+                .into_iter()
+                .collect(),
+        ),
+    );
+    Bson::Document(d)
+}
+
+fn objects_array_for_encode(file: &VoxelleFile) -> bson::Array {
+    let objs = if file.objects.is_empty() {
+        default_scene_objects()
+    } else {
+        file.objects.clone()
+    };
+    objs.iter().map(scene_object_to_bson).collect()
+}
+
 fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8>, EncodeError> {
     let grid_size = grid_size_for_encode(file);
     let voxel_count = file.voxels.len() as i32;
     let hidden_count = 0_i32;
     let scene = scene_document_for_encode(file);
+    let objects_bson = objects_array_for_encode(file);
 
     let header = bson::doc! {
         "version": 4_i32,
@@ -416,14 +646,34 @@ fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8
         "scene": scene,
         "voxelCount": voxel_count,
         "hiddenCount": hidden_count,
+        "objects": objects_bson,
+        "activeObjectId": Bson::Int32(file.active_object_id as i32),
     };
+    // Wire v5: per-voxel object_id
+    let header = if wire_version >= 5 {
+        header
+    } else {
+        let mut h = Document::new();
+        for (k, v) in header {
+            if k != "objects" && k != "activeObjectId" {
+                h.insert(k, v);
+            }
+        }
+        h
+    };
+
     let mut header_bytes = Vec::new();
     header
         .to_writer(&mut header_bytes)
         .map_err(EncodeError::Bson)?;
     let header_len = header_bytes.len() as u32;
 
-    let mut out = Vec::with_capacity(12 + header_bytes.len() + file.voxels.len() * V3_RECORD_SIZE);
+    let rec_size = if wire_version >= 5 {
+        V5_RECORD_SIZE
+    } else {
+        V3_RECORD_SIZE
+    };
+    let mut out = Vec::with_capacity(12 + header_bytes.len() + file.voxels.len() * rec_size);
     out.extend_from_slice(&V3_MAGIC);
     out.extend_from_slice(&wire_version.to_le_bytes());
     out.extend_from_slice(&header_len.to_le_bytes());
@@ -435,6 +685,9 @@ fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8
         out.extend_from_slice(&(v.color & 0xffffff).to_le_bytes());
         let pad = [v.material.material_index(), 0, 0, 0];
         out.extend_from_slice(&pad);
+        if wire_version >= 5 {
+            out.extend_from_slice(&v.object_id.to_le_bytes());
+        }
     }
     Ok(out)
 }
@@ -444,25 +697,32 @@ fn build_bson_v4_payload(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     let scene = scene_document_for_encode(file);
     let mut voxels_bson = bson::Array::new();
     for v in &file.voxels {
-        voxels_bson.push(Bson::Array(vec![
+        let mut row = vec![
             Bson::Int32(v.x),
             Bson::Int32(v.y),
             Bson::Int32(v.z),
             Bson::Int32((v.color & 0xffffff) as i32),
             Bson::String(v.material.as_str_id().to_string()),
-        ]));
+        ];
+        if v.object_id != 0 {
+            row.push(Bson::Int32(v.object_id as i32));
+        }
+        voxels_bson.push(Bson::Array(row));
     }
     let file_meta = bson::doc! {
         "savedAt": chrono::Utc::now().to_rfc3339(),
         "generator": concat!("voxelle-desktop/", env!("CARGO_PKG_VERSION")),
         "documentId": uuid::Uuid::new_v4().to_string(),
     };
+    let objects_bson = objects_array_for_encode(file);
     let doc = bson::doc! {
         "version": 4_i32,
         "gridSize": grid_size,
         "voxels": voxels_bson,
         "scene": scene,
         "fileMeta": file_meta,
+        "objects": objects_bson,
+        "activeObjectId": Bson::Int32(file.active_object_id as i32),
     };
     let mut buf = Vec::new();
     doc.to_writer(&mut buf).map_err(EncodeError::Bson)?;
@@ -480,13 +740,19 @@ pub fn empty_collab_placeholder() -> VoxelleFile {
         },
         scene_extra: None,
         voxels: Vec::new(),
+        objects: default_scene_objects(),
+        active_object_id: 0,
     }
 }
 
 /// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner). Inner is BSON or v3-style wire.
 pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
+    let needs_v5 = file.voxels.iter().any(|v| v.object_id != 0)
+        || file.objects.len() > 1
+        || file.active_object_id != 0;
     let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {
-        build_v3_wire_payload(file, 4)?
+        let wire = if needs_v5 { 5_u32 } else { 4_u32 };
+        build_v3_wire_payload(file, wire)?
     } else {
         build_bson_v4_payload(file)?
     };

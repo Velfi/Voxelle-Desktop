@@ -234,6 +234,7 @@ pub fn apply_edit(
                         z: pz,
                         color: 0x8899aa,
                         material: MaterialId::Plastic,
+                        object_id: file.active_object_id,
                     };
                     let idx = file.voxels.len();
                     file.voxels.push(nv);
