@@ -27,6 +27,9 @@ struct PostCompositeOpts {
     grain_strength: f32,
     vignette_strength: f32,
     distance_tint_strength: f32,
+    atmosphere_strength: f32,
+    sun_shaft_strength: f32,
+    _pad: vec2<f32>,
 }
 
 @group(0) @binding(3)
@@ -121,6 +124,21 @@ fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
         let fog_amt = smoothstep(0.15, 1.0, radial) * dt;
         let horizon = vec3<f32>(0.52, 0.58, 0.66);
         mapped = mix(mapped, horizon, fog_amt);
+    }
+    let atm = post_opts.atmosphere_strength;
+    if atm > 0.001 {
+        let radial = distance(i.uv, vec2<f32>(0.5, 0.5));
+        let fog_amt = smoothstep(0.05, 0.92, radial) * atm;
+        let sky = vec3<f32>(0.55, 0.62, 0.72);
+        mapped = mix(mapped, sky, fog_amt * 0.55);
+    }
+    let ss = post_opts.sun_shaft_strength;
+    if ss > 0.001 {
+        let dx = i.uv.x - 0.48;
+        let dy = i.uv.y - 0.38;
+        let r = sqrt(dx * dx + dy * dy);
+        let streak = pow(max(0.0, 1.0 - r * 3.5), 6.0) * ss;
+        mapped = mapped + vec3<f32>(0.35, 0.32, 0.22) * streak;
     }
     return vec4<f32>(mapped, 1.0);
 }

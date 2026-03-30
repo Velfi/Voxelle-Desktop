@@ -55,6 +55,16 @@ Canonical spec: [`docs/VOXELLE_FORMAT_V4.md`](docs/VOXELLE_FORMAT_V4.md). Implem
 - **Tauri IPC allowlist**: Custom commands registered in [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs) must also appear in [`src-tauri/permissions/voxelle.toml`](src-tauri/permissions/voxelle.toml) under `commands.allow`, or `invoke` from the webview will be denied. If a new command “does nothing,” check that list first (and avoid empty `.catch` handlers that hide the error).
 - **macOS Edit → Undo/Redo**: [`src-tauri/src/macos_undo.rs`](src-tauri/src/macos_undo.rs) registers each solo voxel edit with `NSUndoManager` so the system menu stays in sync with Rust stacks; collaboration does not use this path. If the webview has keyboard focus, `Cmd+Z` may still be handled by WebKit before AppKit—use the app menu or the in-viewport shortcut path if undo seems ignored.
 
+## Rust → webview: what to emit and how
+
+The webview does not automatically mirror Rust. If the user should see a change, or the UI’s React state should match native/session state, **something has to cross the boundary**—usually a Tauri event the frontend already `listen`s for, or the return value of an `invoke`.
+
+**What deserves an emit:** Any authoritative change in Rust (or async work) that the UI is meant to reflect: session/collab state, errors, load/save and other long-running progress (see **Long waits** above), presence, file/scene metadata the sidebar shows, etc. If you only update structs, mutexes, or files and skip the event path, the UI can stay stale even though Rust is “correct.”
+
+**How to do it:** Follow existing event names and helpers wired in [`src/App.tsx`](src/App.tsx) and the Rust emit sites—add or extend listeners and emits together; avoid one-off duplicate channels for the same concept.
+
+**Collaboration:** Shared session state must reach **every** participant. The host’s webview and each guest’s client each need the update; guests get it over the WebSocket, not only via `app.emit` on the host process. Use the established helpers in [`src-tauri/src/collab.rs`](src-tauri/src/collab.rs) (e.g. [`broadcast_roster_to_guests`](src-tauri/src/collab.rs) for roster-shaped updates) that both emit to the local app and forward on `host_broadcast` where that pattern applies—emitting only to the host while mutating shared state is a common way to strand remote clients. See emits in [`src-tauri/src/collab.rs`](src-tauri/src/collab.rs) and [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs).
+
 ## Format
 
 Extend this file with project conventions as they solidify (e.g. build commands, test expectations). Keep entries short and scannable.

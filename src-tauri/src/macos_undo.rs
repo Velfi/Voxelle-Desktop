@@ -11,7 +11,7 @@ use objc2::runtime::{AnyObject, NSObject};
 use objc2_app_kit::NSWindow;
 use objc2_foundation::{ns_string, NSUndoManager};
 
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::perform_solo_voxel_redo;
 use crate::perform_solo_voxel_undo;
@@ -40,7 +40,7 @@ fn run_on_main<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     }
 }
 
-fn undo_manager_for_main_window(app: &AppHandle) -> Option<Retained<NSUndoManager>> {
+fn undo_manager_for_main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Retained<NSUndoManager>> {
     let window = app.get_webview_window("main")?;
     let ptr = window.ns_window().ok()?;
     if ptr.is_null() {
@@ -158,7 +158,7 @@ fn register_undo_only_on_main(
 }
 
 /// Clear AppKit undo/redo when Rust stacks are cleared (e.g. new file load).
-pub fn clear_all(app: &AppHandle) {
+pub fn clear_all<R: Runtime>(app: &AppHandle<R>) {
     let app = app.clone();
     run_on_main(move || {
         let Some(um) = undo_manager_for_main_window(&app) else {

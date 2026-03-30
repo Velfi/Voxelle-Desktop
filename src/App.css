@@ -381,6 +381,23 @@ body,
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+/** Single column — stacked buttons (Tool column beside Selection). */
+.sidebar-mode-grid-stacked {
+  grid-template-columns: 1fr;
+}
+
+/** Tool | Selection two-column row (matches web draw sidebar). */
+.sidebar-tool-selection-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.35rem 0.65rem;
+  align-items: start;
+}
+
+.sidebar-tool-selection-col {
+  min-width: 0;
+}
+
 .sidebar-color-row {
   display: grid;
   grid-template-columns: 3rem minmax(0, 1fr);
@@ -514,6 +531,67 @@ body,
 .status-bar-hosting-btn:focus-visible {
   outline: 2px solid rgba(160, 190, 255, 0.55);
   outline-offset: 1px;
+}
+
+.collab-join-progress-overlay {
+  z-index: 20;
+}
+
+.collab-join-progress-modal {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  min-width: min(100%, 22rem);
+  padding-top: 1.35rem;
+}
+
+.collab-join-progress-spinner {
+  width: 2rem;
+  height: 2rem;
+  margin-bottom: 0.75rem;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-top-color: rgba(147, 197, 253, 0.9);
+  border-radius: 50%;
+  animation: collab-join-spin 0.75s linear infinite;
+}
+
+@keyframes collab-join-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.collab-join-progress-title {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+}
+
+.collab-join-progress-detail {
+  margin: 0 0 0.85rem;
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.72);
+  min-height: 2.6rem;
+}
+
+.collab-join-progress-bar-wrap {
+  width: 100%;
+  height: 6px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.collab-join-progress-bar {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    rgba(59, 130, 246, 0.55),
+    rgba(147, 197, 253, 0.85)
+  );
+  transition: width 0.12s ease-out;
 }
 
 .modal-overlay {
@@ -1659,22 +1737,3 @@ body,
   max-height: 14rem;
   overflow: auto;
 }
-
-.inspector-ping-origin {
-  align-self: flex-start;
-  margin-top: 0.35rem;
-  padding: 0.3rem 0.55rem;
-  font: inherit;
-  font-size: 0.75rem;
-  color: rgba(255, 255, 255, 0.95);
-  background: rgba(0, 0, 0, 0.45);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.inspector-ping-origin:hover {
-  background: rgba(40, 40, 45, 0.85);
-  border-color: rgba(255, 255, 255, 0.2);
-}
-

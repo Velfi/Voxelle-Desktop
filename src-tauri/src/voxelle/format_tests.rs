@@ -55,12 +55,37 @@ fn gzip_bson() {
 }
 
 #[test]
+fn mood_scene_roundtrip() {
+    use super::format::{MoodSettings, VoxelleFile};
+    let file = VoxelleFile {
+        version: 4,
+        grid_size: 8,
+        scene: Default::default(),
+        scene_extra: None,
+        mood: Some(MoodSettings {
+            grain: 0.1,
+            vignette: 0.2,
+            distance_tint: 0.3,
+            atmosphere: 0.4,
+            sun_shafts: 0.5,
+        }),
+        voxels: vec![],
+        objects: super::format::default_scene_objects(),
+        active_object_id: 0,
+    };
+    let bytes = encode_payload_v4(&file).unwrap();
+    let back = decode_payload(&bytes).unwrap();
+    assert_eq!(back.mood, file.mood);
+}
+
+#[test]
 fn v4_roundtrip_small() {
     let file = super::format::VoxelleFile {
         version: 4,
         grid_size: 16,
         scene: Default::default(),
         scene_extra: None,
+        mood: None,
         voxels: vec![super::format::Voxel {
             x: 0,
             y: 0,
@@ -86,6 +111,7 @@ fn v4_objects_roundtrip_bson() {
         grid_size: 8,
         scene: Default::default(),
         scene_extra: None,
+        mood: None,
         voxels: vec![
             super::format::Voxel {
                 x: 0,

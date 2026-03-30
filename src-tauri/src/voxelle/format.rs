@@ -149,6 +149,120 @@ pub struct Scene {
     pub orthographic: bool,
 }
 
+/// Post-process mood stored under `scene.mood` in BSON (matches `set_mood_params` / GPU uniforms).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoodSettings {
+    pub grain: f32,
+    pub vignette: f32,
+    pub distance_tint: f32,
+    pub atmosphere: f32,
+    pub sun_shafts: f32,
+}
+
+impl Default for MoodSettings {
+    fn default() -> Self {
+        Self {
+            grain: 0.0,
+            vignette: 0.0,
+            distance_tint: 0.0,
+            atmosphere: 0.0,
+            sun_shafts: 0.0,
+        }
+    }
+}
+
+fn bson_f32(b: &Bson) -> Option<f32> {
+    match b {
+        Bson::Double(d) if d.is_finite() => Some(*d as f32),
+        Bson::Int32(i) => Some(*i as f32),
+        Bson::Int64(i) => Some(*i as f32),
+        _ => None,
+    }
+}
+
+/// Read `scene.mood` from a full scene document. Returns `None` if the `mood` key is absent.
+pub fn parse_mood_from_scene_optional(scene: &Document) -> Option<MoodSettings> {
+    let m = scene.get_document("mood").ok()?;
+    Some(MoodSettings {
+        grain: m.get("grain").and_then(|b| bson_f32(b)).unwrap_or(0.0),
+        vignette: m.get("vignette").and_then(|b| bson_f32(b)).unwrap_or(0.0),
+        distance_tint: m
+            .get("distanceTint")
+            .and_then(|b| bson_f32(b))
+            .unwrap_or(0.0),
+        atmosphere: m.get("atmosphere").and_then(|b| bson_f32(b)).unwrap_or(0.0),
+        sun_shafts: m.get("sunShafts").and_then(|b| bson_f32(b)).unwrap_or(0.0),
+    })
+}
+
+fn mood_to_bson_document(m: &MoodSettings) -> Document {
+    bson::doc! {
+        "grain": m.grain as f64,
+        "vignette": m.vignette as f64,
+        "distanceTint": m.distance_tint as f64,
+        "atmosphere": m.atmosphere as f64,
+        "sunShafts": m.sun_shafts as f64,
+    }
+}
+
+fn raw_bson_to_f32(b: RawBsonRef<'_>) -> Option<f32> {
+    match b {
+        RawBsonRef::Double(d) if d.is_finite() => Some(d as f32),
+        RawBsonRef::Int32(i) => Some(i as f32),
+        RawBsonRef::Int64(i) => Some(i as f32),
+        _ => None,
+    }
+}
+
+fn parse_mood_from_raw_file_bytes(bytes: &[u8]) -> Option<MoodSettings> {
+    let doc = RawDocument::from_bytes(bytes).ok()?;
+    let scene = doc.get_document("scene").ok()?;
+    let mood = scene.get_document("mood").ok()?;
+    Some(MoodSettings {
+        grain: mood
+            .get("grain")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0),
+        vignette: mood
+            .get("vignette")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0),
+        distance_tint: mood
+            .get("distanceTint")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0),
+        atmosphere: mood
+            .get("atmosphere")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0),
+        sun_shafts: mood
+            .get("sunShafts")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0),
+    })
+}
+
+fn parse_mood_from_file_bytes(bytes: &[u8]) -> Option<MoodSettings> {
+    if bytes.len() <= 8 * 1024 * 1024 {
+        let doc = bson::from_slice::<Document>(bytes).ok()?;
+        let scene = doc.get_document("scene").ok()?;
+        parse_mood_from_scene_optional(scene)
+    } else {
+        parse_mood_from_raw_file_bytes(bytes)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VoxelleFile {
     #[allow(dead_code)]
@@ -158,6 +272,8 @@ pub struct VoxelleFile {
     pub scene: Scene,
     /// Full `scene` subdocument when loaded (preserves `atmosphere` etc.). If `Some`, encode prefers this over [`Scene`] alone.
     pub scene_extra: Option<Document>,
+    /// Parsed from `scene.mood` on load; merged into `scene` on save when `Some`.
+    pub mood: Option<MoodSettings>,
     pub voxels: Vec<Voxel>,
     pub objects: Vec<SceneObject>,
     /// Target object for new voxel edits (persisted in BSON; default 0).
@@ -357,12 +473,16 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
             std::thread::yield_now();
         }
     }
+    let mood = scene_extra
+        .as_ref()
+        .and_then(parse_mood_from_scene_optional);
     // Skip hidden voxels (viewer policy: visible only)
     Ok(VoxelleFile {
         version: file_version,
         grid_size,
         scene,
         scene_extra,
+        mood,
         voxels,
         objects,
         active_object_id,
@@ -547,6 +667,8 @@ fn parse_bson_full_raw(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         None
     };
 
+    let mood = parse_mood_from_file_bytes(bytes);
+
     let (objects, active_object_id) = parse_objects_bson_full(bytes);
 
     Ok(VoxelleFile {
@@ -554,6 +676,7 @@ fn parse_bson_full_raw(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         grid_size,
         scene,
         scene_extra,
+        mood,
         voxels,
         objects,
         active_object_id,
@@ -592,14 +715,19 @@ fn parse_v4_container(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
 }
 
 fn scene_document_for_encode(file: &VoxelleFile) -> Document {
-    if let Some(ref ext) = file.scene_extra {
-        return ext.clone();
+    let mut d = if let Some(ref ext) = file.scene_extra {
+        ext.clone()
+    } else {
+        let mut d = Document::new();
+        if let Some(fl) = file.scene.focal_length_mm {
+            d.insert("focalLength", Bson::Double(fl as f64));
+        }
+        d.insert("orthographic", Bson::Boolean(file.scene.orthographic));
+        d
+    };
+    if let Some(ref mood) = file.mood {
+        d.insert("mood", Bson::Document(mood_to_bson_document(mood)));
     }
-    let mut d = Document::new();
-    if let Some(fl) = file.scene.focal_length_mm {
-        d.insert("focalLength", Bson::Double(fl as f64));
-    }
-    d.insert("orthographic", Bson::Boolean(file.scene.orthographic));
     d
 }
 
@@ -754,6 +882,7 @@ pub fn empty_collab_placeholder() -> VoxelleFile {
             orthographic: false,
         },
         scene_extra: None,
+        mood: None,
         voxels: Vec::new(),
         objects: default_scene_objects(),
         active_object_id: 0,

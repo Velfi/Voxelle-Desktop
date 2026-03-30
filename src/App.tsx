@@ -10,6 +10,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
+import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
 import { JoinSessionModal } from "./JoinSessionModal";
 import { PreferencesModal } from "./PreferencesModal";
 import { loadRecentJoinUrls, rememberJoinedUrl } from "./joinRecent";
@@ -171,9 +172,51 @@ type InteractionMode =
 
 /** `line` = anchor-to-cursor line (web Stroke / Line). `brush` = follow ray + connect samples (web Spray path). */
 type StrokeDrawStyle = "line" | "brush";
+
+/** Matches Rust `stroke_modes::DrawStrokeMode` (JSON camelCase). */
+type DrawStrokeModeApi =
+  | "line"
+  | "spray"
+  | "plane"
+  | "precise"
+  | "circle"
+  | "cuboid"
+  | "cylinder"
+  | "polygonHull"
+  | "polygon"
+  | "fill";
+/** Plane constraint for `plane` stroke (Rust `PlaneAxis`). */
+type PlaneAxisApi = "auto" | "x" | "y" | "z";
+
+function strokeModeSkipsDrag(mode: DrawStrokeModeApi): boolean {
+  return (
+    mode === "polygon" ||
+    mode === "polygonHull" ||
+    mode === "circle" ||
+    mode === "cuboid" ||
+    mode === "cylinder"
+  );
+}
+
 type ToolsPane = "hand" | "draw" | "sculpt" | "generators" | "mood" | "fly";
 
+/** Matches Rust `SculptStrokeMode` (JSON camelCase). */
+type SculptStrokeModeApi =
+  | "draw"
+  | "smooth"
+  | "gouge"
+  | "wall"
+  | "terrain"
+  | "branch";
+/** Matches Rust `TerrainSculptOp`. */
+type TerrainSculptOpApi = "raise" | "lower" | "smooth";
+
+type GeneratorKindId = "sphere" | "rocks" | "grass" | "rope" | "squishy";
+
 type BrushShape = "sphere" | "cube" | "pyramid";
+
+/** Distinguishes Stroke vs Solid when both use line stroke + no spray (web parity). */
+type StrokeFamilyVariant = "stroke" | "solid";
 
 const MATERIAL_OPTIONS: { id: string; label: string }[] = [
   { id: "plastic", label: "Plastic" },
@@ -206,6 +249,8 @@ function App() {
   const brushRadiusRef = useRef(0);
   const brushShapeRef = useRef<BrushShape>("sphere");
   const strokeDrawStyleRef = useRef<StrokeDrawStyle>("line");
+  const drawStrokeModeRef = useRef<DrawStrokeModeApi>("line");
+  const planeAxisRef = useRef<PlaneAxisApi>("auto");
   const sprayDensityRef = useRef(0);
   /** Viewport-physical start of stroke (for line stroke). */
   const strokeViewportStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -227,6 +272,8 @@ function App() {
   const [moodGrain, setMoodGrain] = useState(0);
   const [moodVignette, setMoodVignette] = useState(0);
   const [moodDistanceTint, setMoodDistanceTint] = useState(0);
+  const [moodAtmosphere, setMoodAtmosphere] = useState(0);
+  const [moodSunShafts, setMoodSunShafts] = useState(0);
   const [selectionCount, setSelectionCount] = useState(0);
   const [matchMaterialSelectColor, setMatchMaterialSelectColor] =
     useState(false);
@@ -237,9 +284,54 @@ function App() {
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
   const [strokeDrawStyle, setStrokeDrawStyle] =
     useState<StrokeDrawStyle>("line");
+  const [strokeFamilyVariant, setStrokeFamilyVariant] =
+    useState<StrokeFamilyVariant>("stroke");
+  const [drawStrokeMode, setDrawStrokeMode] =
+    useState<DrawStrokeModeApi>("line");
+  const [planeAxis, setPlaneAxis] = useState<PlaneAxisApi>("auto");
   const [sprayDensity, setSprayDensity] = useState(0);
   const [toolsPane, setToolsPane] = useState<ToolsPane>("draw");
   const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
+  const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("sphere");
+  const [squishyMode, setSquishyMode] = useState<"add" | "edit" | "delete">(
+    "add",
+  );
+  const squishyModeRef = useRef<"add" | "edit" | "delete">("add");
+  const [squishyHollow, setSquishyHollow] = useState(false);
+  const [squishyWallThickness, setSquishyWallThickness] = useState(1);
+  const [squishySnapToSurface, setSquishySnapToSurface] = useState(true);
+  const [squishyBallCount, setSquishyBallCount] = useState(0);
+  const [strokePolygonVerts, setStrokePolygonVerts] = useState<
+    [number, number, number][]
+  >([]);
+  const strokeClickRef = useRef<{
+    circleCenter: [number, number, number] | null;
+    cuboidMin: [number, number, number] | null;
+    cylinderA: [number, number, number] | null;
+  }>({
+    circleCenter: null,
+    cuboidMin: null,
+    cylinderA: null,
+  });
+  const strokePolygonLastScreenRef = useRef<{ x: number; y: number } | null>(
+    null,
+  );
+  const [ropeFirstScreen, setRopeFirstScreen] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const [ropeSag, setRopeSag] = useState(2.5);
+  const [rockRoughness, setRockRoughness] = useState(0.45);
+  const [grassDensity, setGrassDensity] = useState(4);
+  const [grassMaxHeight, setGrassMaxHeight] = useState(3);
+  const [sculptStrokeMode, setSculptStrokeMode] =
+    useState<SculptStrokeModeApi>("draw");
+  const [terrainSculptOp, setTerrainSculptOp] =
+    useState<TerrainSculptOpApi>("raise");
+  const [terrainBaseY, setTerrainBaseY] = useState(0);
+  const [terrainStrength, setTerrainStrength] = useState(4);
+  const [terrainSmoothRadius, setTerrainSmoothRadius] = useState(2);
+  const [sculptSmoothPasses, setSculptSmoothPasses] = useState(1);
   const [pathLabel, setPathLabel] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
   /** Session ended (leave, lost connection, or kicked); cleared on dismiss or new load/join. */
@@ -301,6 +393,7 @@ function App() {
   toolPanePosRef.current = toolPanePos;
 
   const [joinModalOpen, setJoinModalOpen] = useState(false);
+  const [collabJoinPending, setCollabJoinPending] = useState(false);
   const [hostWsUrl, setHostWsUrl] = useState<string | null>(null);
   const [joinUrl, setJoinUrl] = useState(() => {
     const r = loadRecentJoinUrls();
@@ -435,6 +528,7 @@ function App() {
 
     const clearCollabSessionUi = () => {
       pendingJoinUrlRef.current = null;
+      setCollabJoinPending(false);
       setCollabActive(false);
       setHostWsUrl(null);
       setHostWanUrl(null);
@@ -479,9 +573,37 @@ function App() {
           setWorkBusy(true);
         }
       }),
-      listen<string>("voxelle-loaded", (e) => {
+      listen<unknown>("voxelle-loaded", (e) => {
         setLoadError(null);
-        setPathLabel(e.payload);
+        const p = e.payload;
+        if (typeof p === "string") {
+          setPathLabel(p);
+        } else if (p && typeof p === "object" && "path" in p) {
+          const o = p as {
+            path: string;
+            mood?: {
+              grain: number;
+              vignette: number;
+              distanceTint: number;
+              atmosphere: number;
+              sunShafts: number;
+            };
+          };
+          setPathLabel(o.path);
+          if (o.mood) {
+            setMoodGrain(o.mood.grain);
+            setMoodVignette(o.mood.vignette);
+            setMoodDistanceTint(o.mood.distanceTint);
+            setMoodAtmosphere(o.mood.atmosphere);
+            setMoodSunShafts(o.mood.sunShafts);
+          } else {
+            setMoodGrain(0);
+            setMoodVignette(0);
+            setMoodDistanceTint(0);
+            setMoodAtmosphere(0);
+            setMoodSunShafts(0);
+          }
+        }
         setLoading(false);
         setLoadProgress(1);
         setLoadPhase("");
@@ -491,6 +613,7 @@ function App() {
         setLoadError(e.payload);
         setLoading(false);
         setLoadPhase("");
+        setCollabJoinPending((p) => (p ? false : p));
       }),
       listen<number>("viewport-fps", (e) => {
         setFpsDisplayed(e.payload);
@@ -582,6 +705,7 @@ function App() {
       listen("collab-joined", () => {
         setCollabBanner(null);
         setCollabActive(true);
+        setCollabJoinPending(false);
         const u = pendingJoinUrlRef.current;
         if (u) {
           rememberJoinedUrl(u);
@@ -622,6 +746,7 @@ function App() {
       }),
       listen<string>("collab-error", (e) => {
         pendingJoinUrlRef.current = null;
+        setCollabJoinPending(false);
         setLoadError(e.payload);
       }),
       listen<unknown>("collab-nat-result", (e) => {
@@ -692,6 +817,32 @@ function App() {
         ) {
           localStorage.setItem(LS_RENDERING_MODE, m);
         }
+      }),
+      listen<string>("voxelle-menu-selection-mode", (e) => {
+        const m = e.payload;
+        if (
+          m === "selectByColor" ||
+          m === "selectCoplanar" ||
+          m === "selectCoplanarEmpty"
+        ) {
+          setInteractionMode(m);
+        }
+      }),
+      listen<boolean>("voxelle-menu-match-material", (e) => {
+        setMatchMaterialSelectColor(e.payload);
+      }),
+      listen<number>("voxelle-selection-updated", (e) => {
+        setSelectionCount(typeof e.payload === "number" ? e.payload : 0);
+      }),
+      listen<string>("voxelle-menu-not-implemented", (e) => {
+        const msg =
+          typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+        console.warn(msg);
+      }),
+      listen("voxelle-open-project-stats", () => {
+        window.alert(
+          "Project stats: use the menu Debug → Copy performance info, then paste into a note or issue.",
+        );
       }),
     ]).then((unlisteners) => {
       if (!active) {
@@ -819,12 +970,168 @@ function App() {
     brushShapeRef.current = brushShape;
   }, [brushShape]);
   const generatorSphereRadiusRef = useRef(4);
+  const generatorKindRef = useRef<GeneratorKindId>("sphere");
+  const sculptStrokeModeRef = useRef<SculptStrokeModeApi>("draw");
+  const terrainSculptOpRef = useRef<TerrainSculptOpApi>("raise");
+  const terrainBaseYRef = useRef(0);
+  const terrainStrengthRef = useRef(4);
+  const terrainSmoothRadiusRef = useRef(2);
+  const sculptSmoothPassesRef = useRef(1);
   useEffect(() => {
     generatorSphereRadiusRef.current = generatorSphereRadius;
   }, [generatorSphereRadius]);
   useEffect(() => {
+    generatorKindRef.current = generatorKind;
+  }, [generatorKind]);
+  useEffect(() => {
+    sculptStrokeModeRef.current = sculptStrokeMode;
+  }, [sculptStrokeMode]);
+  useEffect(() => {
+    terrainSculptOpRef.current = terrainSculptOp;
+  }, [terrainSculptOp]);
+  useEffect(() => {
+    terrainBaseYRef.current = terrainBaseY;
+  }, [terrainBaseY]);
+  useEffect(() => {
+    terrainStrengthRef.current = terrainStrength;
+  }, [terrainStrength]);
+  useEffect(() => {
+    terrainSmoothRadiusRef.current = terrainSmoothRadius;
+  }, [terrainSmoothRadius]);
+  useEffect(() => {
+    sculptSmoothPassesRef.current = sculptSmoothPasses;
+  }, [sculptSmoothPasses]);
+  useEffect(() => {
     strokeDrawStyleRef.current = strokeDrawStyle;
   }, [strokeDrawStyle]);
+  useEffect(() => {
+    drawStrokeModeRef.current = drawStrokeMode;
+  }, [drawStrokeMode]);
+  useEffect(() => {
+    planeAxisRef.current = planeAxis;
+  }, [planeAxis]);
+  useEffect(() => {
+    strokeClickRef.current = {
+      circleCenter: null,
+      cuboidMin: null,
+      cylinderA: null,
+    };
+    setStrokePolygonVerts([]);
+    strokePolygonLastScreenRef.current = null;
+  }, [drawStrokeMode]);
+  useEffect(() => {
+    squishyModeRef.current = squishyMode;
+  }, [squishyMode]);
+  useEffect(() => {
+    void invoke("squishy_session_set_flags", {
+      args: {
+        hollow: squishyHollow,
+        addSnapToSurface: squishySnapToSurface,
+        wallThickness: Math.max(1, squishyWallThickness | 0),
+      },
+    }).catch(() => { });
+  }, [squishyHollow, squishySnapToSurface, squishyWallThickness]);
+
+  function runVoxelEditAtScreen(
+    physX: number,
+    physY: number,
+    strokeAux: {
+      polygonVertices?: [number, number, number][];
+      circleCenter?: [number, number, number];
+      circleEdge?: [number, number, number];
+      cuboidMin?: [number, number, number];
+      cuboidMax?: [number, number, number];
+      cylinderA?: [number, number, number];
+      cylinderB?: [number, number, number];
+    },
+  ) {
+    const im = interactionModeRef.current;
+    if (im !== "add" && im !== "remove" && im !== "paint") return;
+    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    void invoke("voxel_edit_at_screen", {
+      args: {
+        x: physX,
+        y: physY,
+        tool,
+        color: activeColorRef.current,
+        material: activeMaterialRef.current,
+        brushRadius: brushRadiusRef.current,
+        brushShape: brushShapeRef.current,
+        sprayDensity: sprayDensityRef.current,
+        strokeMode: drawStrokeModeRef.current,
+        planeAxis: planeAxisRef.current,
+        strokeAux,
+        matchMaterial: matchMaterialSelectColorRef.current,
+      },
+    }).catch(() => { });
+  }
+
+  async function handleStrokeAnchorClick(physX: number, physY: number) {
+    const im = interactionModeRef.current;
+    if (im !== "add" && im !== "remove" && im !== "paint") return;
+    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    const c = await invoke<[number, number, number] | null>(
+      "voxel_stroke_anchor_coord_at_screen",
+      { args: { x: physX, y: physY, tool } },
+    );
+    if (!c) return;
+    const sm = drawStrokeModeRef.current;
+    if (sm === "polygon" || sm === "polygonHull") {
+      setStrokePolygonVerts((v) => [...v, c]);
+      strokePolygonLastScreenRef.current = { x: physX, y: physY };
+      return;
+    }
+    if (sm === "circle") {
+      const r = strokeClickRef.current;
+      if (!r.circleCenter) {
+        r.circleCenter = c;
+      } else {
+        runVoxelEditAtScreen(physX, physY, {
+          circleCenter: r.circleCenter,
+          circleEdge: c,
+        });
+        r.circleCenter = null;
+      }
+      return;
+    }
+    if (sm === "cuboid") {
+      const r = strokeClickRef.current;
+      if (!r.cuboidMin) {
+        r.cuboidMin = c;
+      } else {
+        runVoxelEditAtScreen(physX, physY, {
+          cuboidMin: r.cuboidMin,
+          cuboidMax: c,
+        });
+        r.cuboidMin = null;
+      }
+      return;
+    }
+    if (sm === "cylinder") {
+      const r = strokeClickRef.current;
+      if (!r.cylinderA) {
+        r.cylinderA = c;
+      } else {
+        runVoxelEditAtScreen(physX, physY, {
+          cylinderA: r.cylinderA,
+          cylinderB: c,
+        });
+        r.cylinderA = null;
+      }
+    }
+  }
+
+  function applyPolygonStrokeFill() {
+    if (strokePolygonVerts.length < 3) return;
+    const scr =
+      strokePolygonLastScreenRef.current ?? lastViewportPickPhysRef.current;
+    const x = scr?.x ?? 0;
+    const y = scr?.y ?? 0;
+    runVoxelEditAtScreen(x, y, {
+      polygonVertices: strokePolygonVerts.map((v) => [v[0], v[1], v[2]]),
+    });
+  }
+
   useEffect(() => {
     sprayDensityRef.current = sprayDensity;
   }, [sprayDensity]);
@@ -866,6 +1173,7 @@ function App() {
     if (m === "add") return "add";
     if (m === "remove") return "remove";
     if (m === "paint") return "paint";
+    if (m === "sculpt") return "add";
     if (m === "fly") return "fly";
     return "navigate";
   };
@@ -1012,7 +1320,13 @@ function App() {
       ) {
         return;
       }
-      if (preferencesOpen || joinModalOpen || newProjectOpen) return;
+      if (
+        preferencesOpen ||
+        joinModalOpen ||
+        newProjectOpen ||
+        collabJoinPending
+      )
+        return;
       const p = lastViewportPickPhysRef.current;
       if (!p) return;
       e.preventDefault();
@@ -1037,12 +1351,17 @@ function App() {
           };
           setPingHudTick((n) => n + 1);
           playPingSound();
+          void invoke("collab_send_ping", {
+            x: r.x,
+            y: r.y,
+            z: r.z,
+          }).catch(() => {});
         })
         .catch(() => { });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferencesOpen, joinModalOpen, newProjectOpen]);
+  }, [preferencesOpen, joinModalOpen, newProjectOpen, collabJoinPending]);
 
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
@@ -1061,14 +1380,22 @@ function App() {
   }, [matchMaterialSelectColor]);
 
   useEffect(() => {
+    void invoke("selection_menu_sync_match_material", {
+      checked: matchMaterialSelectColor,
+    }).catch(() => {});
+  }, [matchMaterialSelectColor]);
+
+  useEffect(() => {
     void invoke("set_mood_params", {
       args: {
         grain: moodGrain,
         vignette: moodVignette,
         distanceTint: moodDistanceTint,
+        atmosphere: moodAtmosphere,
+        sunShafts: moodSunShafts,
       },
     }).catch(() => { });
-  }, [moodGrain, moodVignette, moodDistanceTint]);
+  }, [moodGrain, moodVignette, moodDistanceTint, moodAtmosphere, moodSunShafts]);
 
   useEffect(() => {
     if (interactionMode !== "fly") {
@@ -1265,7 +1592,10 @@ function App() {
 
     if (
       gestureRef.current.mode === "voxel" &&
-      (mode === "add" || mode === "remove" || mode === "paint")
+      (mode === "add" ||
+        mode === "remove" ||
+        mode === "paint" ||
+        mode === "sculpt")
     ) {
       dragDidEditRef.current = false;
       strokeViewportStartRef.current = { x, y };
@@ -1296,7 +1626,8 @@ function App() {
       !probingRef.current &&
       (interactionModeRef.current === "add" ||
         interactionModeRef.current === "remove" ||
-        interactionModeRef.current === "paint") &&
+        interactionModeRef.current === "paint" ||
+        interactionModeRef.current === "sculpt") &&
       !interactionBlockedRef.current
     ) {
       const m = previewModeForSync(interactionModeRef.current);
@@ -1326,7 +1657,8 @@ function App() {
         e.buttons &&
         (m === "add" || m === "remove" || m === "paint") &&
         !loading &&
-        !workBusy
+        !workBusy &&
+        !strokeModeSkipsDrag(drawStrokeModeRef.current)
       ) {
         const now = Date.now();
         if (now - lastStrokeEditMsRef.current >= 24) {
@@ -1351,6 +1683,10 @@ function App() {
               brushRadius: brushRadiusRef.current,
               brushShape: brushShapeRef.current,
               sprayDensity: sprayDensityRef.current,
+              strokeMode: drawStrokeModeRef.current,
+              planeAxis: planeAxisRef.current,
+              strokeAux: {},
+              matchMaterial: matchMaterialSelectColorRef.current,
               ...(lineStart
                 ? {
                   strokeLineStartX: lineStart.x,
@@ -1361,6 +1697,70 @@ function App() {
                 ? {
                   strokeSegmentPrevX: brushPrev.x,
                   strokeSegmentPrevY: brushPrev.y,
+                }
+                : {}),
+            },
+          })
+            .finally(() => {
+              if (strokeDrawStyleRef.current === "brush") {
+                lastStrokePhysRef.current = { x: px, y: py };
+              }
+            })
+            .catch(() => { });
+        }
+      }
+      if (
+        e.buttons &&
+        m === "sculpt" &&
+        !loading &&
+        !workBusy
+      ) {
+        const now = Date.now();
+        if (now - lastStrokeEditMsRef.current >= 24) {
+          lastStrokeEditMsRef.current = now;
+          dragDidEditRef.current = true;
+          const lineStart =
+            strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
+              ? strokeViewportStartRef.current
+              : null;
+          const brushPrev =
+            strokeDrawStyleRef.current === "brush" && lastStrokePhysRef.current
+              ? lastStrokePhysRef.current
+              : null;
+          const sm = sculptStrokeModeRef.current;
+          void invoke("voxel_sculpt_stroke_at_screen", {
+            args: {
+              x: px,
+              y: py,
+              sculptMode: sm,
+              color: activeColorRef.current,
+              material: activeMaterialRef.current,
+              brushRadius: brushRadiusRef.current,
+              brushShape: brushShapeRef.current,
+              sprayDensity: sprayDensityRef.current,
+              ...(lineStart
+                ? {
+                  strokeLineStartX: lineStart.x,
+                  strokeLineStartY: lineStart.y,
+                }
+                : {}),
+              ...(!lineStart && brushPrev
+                ? {
+                  strokeSegmentPrevX: brushPrev.x,
+                  strokeSegmentPrevY: brushPrev.y,
+                }
+                : {}),
+              ...(sm === "terrain"
+                ? {
+                  terrainOp: terrainSculptOpRef.current,
+                  terrainBaseY: terrainBaseYRef.current,
+                  terrainStrength: terrainStrengthRef.current,
+                  terrainSmoothRadius: terrainSmoothRadiusRef.current,
+                }
+                : {}),
+              ...(sm === "smooth"
+                ? {
+                  smoothNeighborPasses: sculptSmoothPassesRef.current,
                 }
                 : {}),
             },
@@ -1454,25 +1854,88 @@ function App() {
           void invoke("clipboard_punch_at_screen", { args: { x, y } }).catch(
             () => { },
           );
-        } else if (m === "sculpt") {
-          void invoke("voxel_sculpt_raise_at_screen", {
-            args: {
-              x,
-              y,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-            },
-          }).catch(() => { });
         } else if (m === "generator") {
-          void invoke("generator_sphere_at_screen", {
-            args: {
-              x,
-              y,
-              radius: generatorSphereRadiusRef.current,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-            },
-          }).catch(() => { });
+          const gk = generatorKindRef.current;
+          if (gk === "sphere") {
+            void invoke("generator_sphere_at_screen", {
+              args: {
+                x,
+                y,
+                radius: generatorSphereRadiusRef.current,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => { });
+          } else if (gk === "rocks") {
+            void invoke("generator_rocks_at_screen", {
+              args: {
+                x,
+                y,
+                seed: (Math.random() * 1e9) | 0,
+                size: Math.max(1, generatorSphereRadiusRef.current),
+                roughness: rockRoughness,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => { });
+          } else if (gk === "grass") {
+            void invoke("generator_grass_at_screen", {
+              args: {
+                x,
+                y,
+                seed: (Math.random() * 1e9) | 0,
+                density: grassDensity,
+                maxHeight: grassMaxHeight,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => { });
+          } else if (gk === "rope") {
+            if (!ropeFirstScreen) {
+              setRopeFirstScreen({ x, y });
+            } else {
+              void invoke("generator_rope_at_screen", {
+                args: {
+                  x1: ropeFirstScreen.x,
+                  y1: ropeFirstScreen.y,
+                  x2: x,
+                  y2: y,
+                  sag: ropeSag,
+                  color: activeColorRef.current,
+                  material: activeMaterialRef.current,
+                },
+              }).catch(() => { });
+              setRopeFirstScreen(null);
+            }
+          } else if (gk === "squishy") {
+            const mode = squishyModeRef.current;
+            void invoke("squishy_session_set_mode", { args: { mode } })
+              .then(() => {
+                if (mode === "add") {
+                  return invoke("squishy_metaball_add_at_screen", {
+                    args: {
+                      x,
+                      y,
+                      radius: Math.max(2, generatorSphereRadiusRef.current),
+                    },
+                  });
+                }
+                return invoke<number | null>("squishy_pick_at_screen", {
+                  args: { x, y },
+                }).then((id) => {
+                  if (id == null) return;
+                  if (mode === "delete") {
+                    return invoke("squishy_metaball_remove", { args: { id } });
+                  }
+                  return invoke("squishy_metaball_select", { args: { id } });
+                });
+              })
+              .then(() =>
+                invoke<{ balls: { id: number }[] }>("squishy_session_get"),
+              )
+              .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
+              .catch(() => { });
+          }
         } else if (m === "selectByColor") {
           void invoke<number>("selection_add_by_color_at_screen", {
             args: {
@@ -1549,18 +2012,55 @@ function App() {
             })
             .catch(() => { });
         }
-        } else if (m === "add" || m === "remove" || m === "paint") {
+      } else if (m === "add" || m === "remove" || m === "paint") {
+        const sm = drawStrokeModeRef.current;
         if (!dragDidEditRef.current && moved < 5) {
-          const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
+          if (strokeModeSkipsDrag(sm)) {
+            void handleStrokeAnchorClick(x, y);
+          } else {
+            const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
+            const lineStart =
+              strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
+                ? strokeViewportStartRef.current
+                : null;
+            void invoke("voxel_edit_at_screen", {
+              args: {
+                x,
+                y,
+                tool,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+                brushRadius: brushRadiusRef.current,
+                brushShape: brushShapeRef.current,
+                sprayDensity: sprayDensityRef.current,
+                strokeMode: drawStrokeModeRef.current,
+                planeAxis: planeAxisRef.current,
+                strokeAux: {},
+                matchMaterial: matchMaterialSelectColorRef.current,
+                ...(lineStart
+                  ? {
+                    strokeLineStartX: lineStart.x,
+                    strokeLineStartY: lineStart.y,
+                  }
+                  : {}),
+              },
+            }).catch(() => { });
+          }
+        }
+        void invoke("voxel_stroke_end").catch(() => { });
+        lastStrokePhysRef.current = null;
+      } else if (m === "sculpt") {
+        if (!dragDidEditRef.current && moved < 5) {
           const lineStart =
             strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
               ? strokeViewportStartRef.current
               : null;
-          void invoke("voxel_edit_at_screen", {
+          const sm = sculptStrokeModeRef.current;
+          void invoke("voxel_sculpt_stroke_at_screen", {
             args: {
               x,
               y,
-              tool,
+              sculptMode: sm,
               color: activeColorRef.current,
               material: activeMaterialRef.current,
               brushRadius: brushRadiusRef.current,
@@ -1570,6 +2070,19 @@ function App() {
                 ? {
                   strokeLineStartX: lineStart.x,
                   strokeLineStartY: lineStart.y,
+                }
+                : {}),
+              ...(sm === "terrain"
+                ? {
+                  terrainOp: terrainSculptOpRef.current,
+                  terrainBaseY: terrainBaseYRef.current,
+                  terrainStrength: terrainStrengthRef.current,
+                  terrainSmoothRadius: terrainSmoothRadiusRef.current,
+                }
+                : {}),
+              ...(sm === "smooth"
+                ? {
+                  smoothNeighborPasses: sculptSmoothPassesRef.current,
                 }
                 : {}),
             },
@@ -1654,6 +2167,7 @@ function App() {
     }
     setJoinUrl(u);
     pendingJoinUrlRef.current = u;
+    setCollabJoinPending(true);
     const rgb = hexToRgb(normalizeCollabAccentColor(accentColor));
     void invoke("collab_join", {
       url: u,
@@ -1957,96 +2471,156 @@ function App() {
 
                   {toolsPane === "draw" ? (
                     <>
-                      <div className="sidebar-section-label">Tool</div>
-                      <div className="sidebar-mode-grid">
-                        {(["add", "remove", "paint"] as const).map((m) => (
-                          <button
-                            key={m}
-                            type="button"
-                            className={interactionMode === m ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                            disabled={loading || workBusy}
-                            onClick={() => setInteractionMode(m)}
-                          >
-                            <span className="sidebar-mode-label">{m[0].toUpperCase() + m.slice(1)}</span>
-                          </button>
-                        ))}
-                      </div>
-
-                      <div className="sidebar-section-label">Selection</div>
-                      <div className="sidebar-selection-count">{selectionCount} selected</div>
-                      <div className="sidebar-mode-grid sidebar-mode-grid-2">
-                        <button
-                          type="button"
-                          className={interactionMode === "select" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("select")}
-                        >
-                          <span className="sidebar-mode-label">Select</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={interactionMode === "stamp" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("stamp")}
-                        >
-                          <span className="sidebar-mode-label">Stamp</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={interactionMode === "selectByColor" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("selectByColor")}
-                        >
-                          <span className="sidebar-mode-label">By color</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={interactionMode === "punch" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("punch")}
-                        >
-                          <span className="sidebar-mode-label">Punch</span>
-                        </button>
+                      <div
+                        className="sidebar-tool-selection-row"
+                        role="group"
+                        aria-label="Tool and selection"
+                      >
+                        <div className="sidebar-tool-selection-col">
+                          <div className="sidebar-section-label">Tool</div>
+                          <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
+                            {(["add", "remove", "paint"] as const).map((m) => (
+                              <button
+                                key={m}
+                                type="button"
+                                className={interactionMode === m ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                                disabled={loading || workBusy}
+                                onClick={() => setInteractionMode(m)}
+                              >
+                                <span className="sidebar-mode-label">{m[0].toUpperCase() + m.slice(1)}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="sidebar-tool-selection-col">
+                          <div className="sidebar-section-label">Selection</div>
+                          <div className="sidebar-selection-count">{selectionCount} selected</div>
+                          <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
+                            <button
+                              type="button"
+                              className={interactionMode === "select" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                              disabled={loading || workBusy}
+                              onClick={() => setInteractionMode("select")}
+                            >
+                              <span className="sidebar-mode-label">Select</span>
+                            </button>
+                            <button
+                              type="button"
+                              className={interactionMode === "stamp" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                              disabled={loading || workBusy}
+                              onClick={() => setInteractionMode("stamp")}
+                            >
+                              <span className="sidebar-mode-label">Stamp</span>
+                            </button>
+                            <button
+                              type="button"
+                              className={interactionMode === "punch" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                              disabled={loading || workBusy}
+                              onClick={() => setInteractionMode("punch")}
+                            >
+                              <span className="sidebar-mode-label">Punch</span>
+                            </button>
+                          </div>
+                        </div>
                       </div>
 
                       <div className="sidebar-section-label">Selection method</div>
                       <div className="sidebar-mode-grid sidebar-mode-grid-3">
                         <button
                           type="button"
-                          className={strokeDrawStyle === "line" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          className={
+                            interactionMode !== "fill" &&
+                              strokeDrawStyle === "line" &&
+                              sprayDensity === 0 &&
+                              strokeFamilyVariant === "stroke"
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
                           disabled={loading || workBusy}
-                          onClick={() => setStrokeDrawStyle("line")}
-                          title="Line from pointer down to cursor (matches web Stroke → Line)"
+                          onClick={() => {
+                            if (interactionMode === "fill") setInteractionMode("add");
+                            setStrokeDrawStyle("line");
+                            setSprayDensity(0);
+                            setStrokeFamilyVariant("stroke");
+                          }}
+                          title="Line from pointer down to cursor (web Stroke)"
                         >
                           <span className="sidebar-mode-label">Stroke</span>
                         </button>
                         <button
                           type="button"
-                          className={strokeDrawStyle === "brush" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          className={
+                            interactionMode !== "fill" &&
+                              strokeDrawStyle === "brush" &&
+                              sprayDensity === 0
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
                           disabled={loading || workBusy}
-                          onClick={() => setStrokeDrawStyle("brush")}
-                          title="Brush along the drag with connected samples (matches web Spray path)"
+                          onClick={() => {
+                            if (interactionMode === "fill") setInteractionMode("add");
+                            setStrokeDrawStyle("brush");
+                            setSprayDensity(0);
+                          }}
+                          title="Brush along the drag (web Surface)"
                         >
-                          <span className="sidebar-mode-label">Brush</span>
+                          <span className="sidebar-mode-label">Surface</span>
                         </button>
-                        <button type="button" className="sidebar-mode-btn" disabled title="Not available yet">
+                        <button
+                          type="button"
+                          className={
+                            interactionMode !== "fill" &&
+                              strokeDrawStyle === "line" &&
+                              sprayDensity === 0 &&
+                              strokeFamilyVariant === "solid"
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => {
+                            if (interactionMode === "fill") setInteractionMode("add");
+                            setStrokeDrawStyle("line");
+                            setSprayDensity(0);
+                            setStrokeFamilyVariant("solid");
+                          }}
+                          title="Solid volume stroke (line; placeholder for future volume behavior)"
+                        >
                           <span className="sidebar-mode-label">Solid</span>
                         </button>
                       </div>
-                      <div className="sidebar-mode-grid sidebar-mode-grid-2">
+                      <div
+                        className="sidebar-mode-grid sidebar-mode-grid-2"
+                        style={{ marginTop: "0.35rem" }}
+                      >
                         <button
                           type="button"
-                          className={sprayDensity > 0 ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          className={
+                            interactionMode !== "fill" &&
+                              strokeDrawStyle === "brush" &&
+                              sprayDensity > 0
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
                           disabled={loading || workBusy}
-                          onClick={() => setSprayDensity((v) => (v > 0 ? 0 : 0.45))}
+                          onClick={() => {
+                            if (interactionMode === "fill") setInteractionMode("add");
+                            setStrokeDrawStyle("brush");
+                            setSprayDensity(0.45);
+                          }}
+                          title="Spray density along brush path"
                         >
                           <span className="sidebar-mode-label">Spray</span>
                         </button>
                         <button
                           type="button"
-                          className={interactionMode === "fill" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          className={
+                            interactionMode === "fill"
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
                           disabled={loading || workBusy}
                           onClick={() => setInteractionMode("fill")}
+                          title="Fill connected region"
                         >
                           <span className="sidebar-mode-label">Fill</span>
                         </button>
@@ -2108,16 +2682,6 @@ function App() {
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
                         Brush size and shape are in the tool options panel.
                       </p>
-
-                      <label className="sidebar-checkbox-row">
-                        <input
-                          type="checkbox"
-                          checked={matchMaterialSelectColor}
-                          onChange={(ev) => setMatchMaterialSelectColor(ev.target.checked)}
-                          disabled={loading || workBusy}
-                        />
-                        <span>Match material (by color / fill)</span>
-                      </label>
                     </>
                   ) : null}
 
@@ -2130,10 +2694,65 @@ function App() {
                         disabled={loading || workBusy}
                         onClick={() => setInteractionMode("sculpt")}
                       >
-                        <span className="sidebar-mode-label">Raise</span>
+                        <span className="sidebar-mode-label">Sculpt</span>
                       </button>
+                      <div className="sidebar-section-label">Mode</div>
+                      <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                        {(
+                          [
+                            ["draw", "Draw"],
+                            ["smooth", "Smooth"],
+                            ["gouge", "Gouge"],
+                            ["wall", "Wall"],
+                            ["terrain", "Terrain"],
+                            ["branch", "Branch"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              sculptStrokeMode === id
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy || interactionMode !== "sculpt"}
+                            onClick={() => setSculptStrokeMode(id)}
+                          >
+                            <span className="sidebar-mode-label">{label}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {sculptStrokeMode === "terrain" ? (
+                        <>
+                          <div className="sidebar-section-label">Terrain op</div>
+                          <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                            {(
+                              [
+                                ["raise", "Raise"],
+                                ["lower", "Lower"],
+                                ["smooth", "Smooth"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  terrainSculptOp === id
+                                    ? "sidebar-mode-btn is-active"
+                                    : "sidebar-mode-btn"
+                                }
+                                disabled={loading || workBusy || interactionMode !== "sculpt"}
+                                onClick={() => setTerrainSculptOp(id)}
+                              >
+                                <span className="sidebar-mode-label">{label}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      ) : null}
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Sculpt color is in the tool options panel.
+                        Brush, stroke, and color are in the tool options panel.
                       </p>
                     </>
                   ) : null}
@@ -2147,10 +2766,44 @@ function App() {
                         disabled={loading || workBusy}
                         onClick={() => setInteractionMode("generator")}
                       >
-                        <span className="sidebar-mode-label">Sphere</span>
+                        <span className="sidebar-mode-label">Place</span>
                       </button>
+                      <div className="sidebar-section-label">Tool</div>
+                      <div className="sidebar-mode-grid sidebar-mode-grid-2">
+                        {(
+                          [
+                            ["sphere", "Sphere"],
+                            ["rocks", "Rocks"],
+                            ["grass", "Grass"],
+                            ["rope", "Rope"],
+                            ["squishy", "Squishy"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              generatorKind === id
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              setGeneratorKind(id);
+                              setRopeFirstScreen(null);
+                            }}
+                          >
+                            <span className="sidebar-mode-label">{label}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {generatorKind === "rope" && ropeFirstScreen ? (
+                        <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
+                          Click second point to finish rope.
+                        </p>
+                      ) : null}
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Sphere size and options are in the tool options panel.
+                        Options in the tool options panel. Rope: two clicks.
                       </p>
                     </>
                   ) : null}
@@ -2335,40 +2988,492 @@ function App() {
                   </p>
                 </div>
               ) : null}
-              {toolsPane === "sculpt" ? (
+              {toolsPane === "sculpt" && interactionMode === "sculpt" ? (
+                <>
+                  <div className="tool-options-section">
+                    <div className="tool-options-heading">Brush</div>
+                    <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
+                      {(
+                        [
+                          ["sphere", "Sphere"],
+                          ["cube", "Cube"],
+                          ["pyramid", "Pyr"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className={
+                            brushShape === id
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setBrushShape(id)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <label className="tool-options-range-label">
+                      <span>Size</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={32}
+                        value={brushRadius}
+                        onChange={(ev) =>
+                          setBrushRadius(Number(ev.target.value))
+                        }
+                        disabled={loading || workBusy}
+                      />
+                    </label>
+                    <div className="tool-options-heading" style={{ marginTop: "0.5rem" }}>
+                      Stroke
+                    </div>
+                    <div className="tool-options-shape-row" role="group" aria-label="Stroke style">
+                      <button
+                        type="button"
+                        className={
+                          strokeDrawStyle === "line"
+                            ? "tool-options-shape-btn is-active"
+                            : "tool-options-shape-btn"
+                        }
+                        disabled={loading || workBusy}
+                        onClick={() => setStrokeDrawStyle("line")}
+                      >
+                        Line
+                      </button>
+                      <button
+                        type="button"
+                        className={
+                          strokeDrawStyle === "brush"
+                            ? "tool-options-shape-btn is-active"
+                            : "tool-options-shape-btn"
+                        }
+                        disabled={loading || workBusy}
+                        onClick={() => setStrokeDrawStyle("brush")}
+                      >
+                        Brush
+                      </button>
+                    </div>
+                    <label
+                      className="tool-options-range-label"
+                      style={{ marginTop: "0.35rem" }}
+                    >
+                      <span>Stroke mode</span>
+                      <select
+                        value={drawStrokeMode}
+                        onChange={(ev) =>
+                          setDrawStrokeMode(ev.target.value as DrawStrokeModeApi)
+                        }
+                        disabled={loading || workBusy}
+                      >
+                        <option value="line">Line</option>
+                        <option value="spray">Spray</option>
+                        <option value="plane">Plane</option>
+                        <option value="precise">Precise</option>
+                        <option value="circle">Circle</option>
+                        <option value="cuboid">Cuboid</option>
+                        <option value="cylinder">Cylinder</option>
+                        <option value="polygonHull">Polygon hull</option>
+                        <option value="polygon">Polygon</option>
+                        <option value="fill">Fill (paint)</option>
+                      </select>
+                    </label>
+                    {drawStrokeMode === "plane" ? (
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.25rem" }}
+                      >
+                        <span>Plane axis</span>
+                        <select
+                          value={planeAxis}
+                          onChange={(ev) =>
+                            setPlaneAxis(ev.target.value as PlaneAxisApi)
+                          }
+                          disabled={loading || workBusy}
+                        >
+                          <option value="auto">Auto (face)</option>
+                          <option value="x">X</option>
+                          <option value="y">Y</option>
+                          <option value="z">Z</option>
+                        </select>
+                      </label>
+                    ) : null}
+                    {(drawStrokeMode === "polygon" ||
+                      drawStrokeMode === "polygonHull") ? (
+                      <div style={{ marginTop: "0.35rem" }}>
+                        <p style={{ margin: "0 0 0.35rem", fontSize: "0.85rem", opacity: 0.9 }}>
+                          Vertices: {strokePolygonVerts.length}. Click to add corners; Apply with three or more.
+                        </p>
+                        <div className="tool-options-shape-row" style={{ flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="tool-options-shape-btn"
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              setStrokePolygonVerts([]);
+                              strokePolygonLastScreenRef.current = null;
+                            }}
+                          >
+                            Clear
+                          </button>
+                          <button
+                            type="button"
+                            className="tool-options-shape-btn"
+                            disabled={
+                              loading || workBusy || strokePolygonVerts.length < 3
+                            }
+                            onClick={() => applyPolygonStrokeFill()}
+                          >
+                            Apply
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                    {drawStrokeMode === "circle" ? (
+                      <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", opacity: 0.9 }}>
+                        Circle: first click center, second click edge.
+                      </p>
+                    ) : null}
+                    {drawStrokeMode === "cuboid" ? (
+                      <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", opacity: 0.9 }}>
+                        Cuboid: two opposite corners.
+                      </p>
+                    ) : null}
+                    {drawStrokeMode === "cylinder" ? (
+                      <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", opacity: 0.9 }}>
+                        Cylinder: axis start then end (uses brush radius).
+                      </p>
+                    ) : null}
+                    {sprayDensity > 0 ? (
+                      <label className="tool-options-range-label">
+                        <span>Spray density</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={sprayDensity}
+                          onChange={(ev) =>
+                            setSprayDensity(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                  <div className="tool-options-section">
+                    <div className="tool-options-heading">Color</div>
+                    <label className="tool-options-color-label">
+                      <span>Color</span>
+                      <input
+                        type="color"
+                        value={`#${activeColor.toString(16).padStart(6, "0")}`}
+                        onChange={(ev) => {
+                          const h = ev.target.value.slice(1);
+                          const n = Number.parseInt(h, 16);
+                          if (!Number.isNaN(n)) setActiveColor(n);
+                        }}
+                        disabled={loading || workBusy}
+                      />
+                    </label>
+                  </div>
+                  {sculptStrokeMode === "terrain" ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Terrain</div>
+                      <label className="tool-options-range-label">
+                        <span>Base Y</span>
+                        <input
+                          type="range"
+                          min={-64}
+                          max={64}
+                          value={terrainBaseY}
+                          onChange={(ev) =>
+                            setTerrainBaseY(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Strength</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={32}
+                          value={terrainStrength}
+                          onChange={(ev) =>
+                            setTerrainStrength(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      {terrainSculptOp === "smooth" ? (
+                        <label className="tool-options-range-label">
+                          <span>Smooth radius</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={8}
+                            value={terrainSmoothRadius}
+                            onChange={(ev) =>
+                              setTerrainSmoothRadius(Number(ev.target.value))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {sculptStrokeMode === "smooth" ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Smooth</div>
+                      <label className="tool-options-range-label">
+                        <span>Passes</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={8}
+                          value={sculptSmoothPasses}
+                          onChange={(ev) =>
+                            setSculptSmoothPasses(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+                </>
+              ) : toolsPane === "sculpt" ? (
                 <div className="tool-options-section">
-                  <div className="tool-options-heading">Sculpt</div>
-                  <label className="tool-options-color-label">
-                    <span>Color</span>
-                    <input
-                      type="color"
-                      value={`#${activeColor.toString(16).padStart(6, "0")}`}
-                      onChange={(ev) => {
-                        const h = ev.target.value.slice(1);
-                        const n = Number.parseInt(h, 16);
-                        if (!Number.isNaN(n)) setActiveColor(n);
-                      }}
-                      disabled={loading || workBusy}
-                    />
-                  </label>
+                  <p className="tool-options-hint">Select Sculpt mode in the sidebar.</p>
                 </div>
               ) : null}
               {toolsPane === "generators" ? (
                 <div className="tool-options-section">
-                  <div className="tool-options-heading">Sphere</div>
-                  <label className="tool-options-range-label">
-                    <span>Radius</span>
-                    <input
-                      type="range"
-                      min={1}
-                      max={32}
-                      value={generatorSphereRadius}
-                      onChange={(ev) =>
-                        setGeneratorSphereRadius(Number(ev.target.value))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                  </label>
+                  <div className="tool-options-heading">Generator</div>
+                  {generatorKind === "sphere" ? (
+                    <label className="tool-options-range-label">
+                      <span>Radius</span>
+                      <input
+                        type="range"
+                        min={1}
+                        max={32}
+                        value={generatorSphereRadius}
+                        onChange={(ev) =>
+                          setGeneratorSphereRadius(Number(ev.target.value))
+                        }
+                        disabled={loading || workBusy}
+                      />
+                    </label>
+                  ) : null}
+                  {generatorKind === "rocks" ? (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Size</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={12}
+                          value={Math.min(12, generatorSphereRadius)}
+                          onChange={(ev) =>
+                            setGeneratorSphereRadius(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Roughness</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={rockRoughness}
+                          onChange={(ev) =>
+                            setRockRoughness(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  {generatorKind === "grass" ? (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Density</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={8}
+                          value={grassDensity}
+                          onChange={(ev) =>
+                            setGrassDensity(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Max height</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={8}
+                          value={grassMaxHeight}
+                          onChange={(ev) =>
+                            setGrassMaxHeight(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  {generatorKind === "rope" ? (
+                    <label className="tool-options-range-label">
+                      <span>Sag</span>
+                      <input
+                        type="range"
+                        min={0}
+                        max={8}
+                        step={0.1}
+                        value={ropeSag}
+                        onChange={(ev) => setRopeSag(Number(ev.target.value))}
+                        disabled={loading || workBusy}
+                      />
+                    </label>
+                  ) : null}
+                  {generatorKind === "squishy" ? (
+                    <>
+                      <div className="tool-options-heading">Squishy session</div>
+                      <div className="tool-options-shape-row" role="group" aria-label="Squishy mode">
+                        <button
+                          type="button"
+                          className={
+                            squishyMode === "add"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setSquishyMode("add")}
+                        >
+                          Add
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            squishyMode === "edit"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setSquishyMode("edit")}
+                        >
+                          Pick
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            squishyMode === "delete"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setSquishyMode("delete")}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      <p style={{ fontSize: "0.85rem", opacity: 0.85, margin: "0.25rem 0" }}>
+                        Metaballs: {squishyBallCount}. Click viewport to add/pick/delete; Commit voxelizes the combined field.
+                      </p>
+                      <label className="tool-options-range-label">
+                        <span>Blob radius (add)</span>
+                        <input
+                          type="range"
+                          min={2}
+                          max={10}
+                          value={Math.min(10, Math.max(2, generatorSphereRadius))}
+                          onChange={(ev) =>
+                            setGeneratorSphereRadius(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={squishyHollow}
+                          onChange={(ev) => setSquishyHollow(ev.target.checked)}
+                          disabled={loading || workBusy}
+                        />
+                        <span>Hollow shell</span>
+                      </label>
+                      {squishyHollow ? (
+                        <label className="tool-options-range-label">
+                          <span>Shell thickness (voxels)</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            step={1}
+                            value={Math.min(8, Math.max(1, squishyWallThickness))}
+                            onChange={(ev) =>
+                              setSquishyWallThickness(Number(ev.target.value))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                      ) : null}
+                      <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={squishySnapToSurface}
+                          onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
+                          disabled={loading || workBusy}
+                        />
+                        <span>Snap add to surface</span>
+                      </label>
+                      <div className="tool-options-shape-row" style={{ marginTop: "0.35rem" }}>
+                        <button
+                          type="button"
+                          className="tool-options-shape-btn"
+                          disabled={loading || workBusy}
+                          onClick={() => {
+                            void invoke("squishy_session_commit", {
+                              args: {
+                                color: activeColorRef.current,
+                                material: activeMaterialRef.current,
+                              },
+                            })
+                              .then(() =>
+                                invoke<{ balls: { id: number }[] }>(
+                                  "squishy_session_get",
+                                ),
+                              )
+                              .then((s) =>
+                                setSquishyBallCount(s.balls?.length ?? 0),
+                              )
+                              .catch(() => { });
+                          }}
+                        >
+                          Commit to voxels
+                        </button>
+                        <button
+                          type="button"
+                          className="tool-options-shape-btn"
+                          disabled={loading || workBusy}
+                          onClick={() => {
+                            void invoke("squishy_session_clear")
+                              .then(() => setSquishyBallCount(0))
+                              .catch(() => { });
+                          }}
+                        >
+                          Clear session
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
                 </div>
               ) : null}
               {toolsPane === "mood" ? (
@@ -2412,6 +3517,34 @@ function App() {
                       value={moodDistanceTint}
                       onChange={(ev) =>
                         setMoodDistanceTint(Number(ev.target.value))
+                      }
+                      disabled={loading || workBusy}
+                    />
+                  </label>
+                  <label className="tool-options-range-label">
+                    <span>Atmosphere</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={moodAtmosphere}
+                      onChange={(ev) =>
+                        setMoodAtmosphere(Number(ev.target.value))
+                      }
+                      disabled={loading || workBusy}
+                    />
+                  </label>
+                  <label className="tool-options-range-label">
+                    <span>Sun shafts</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={moodSunShafts}
+                      onChange={(ev) =>
+                        setMoodSunShafts(Number(ev.target.value))
                       }
                       disabled={loading || workBusy}
                     />
@@ -2811,15 +3944,6 @@ function App() {
                         </li>
                       ))}
                     </ul>
-                    <button
-                      type="button"
-                      className="inspector-ping-origin"
-                      onClick={() =>
-                        void invoke("collab_send_ping", { x: 0, y: 0, z: 0 })
-                      }
-                    >
-                      Ping origin
-                    </button>
                   </div>
                 ) : null}
               </div>
@@ -2868,6 +3992,14 @@ function App() {
         onJoinUrlChange={setJoinUrl}
         onJoin={joinSession}
         collabActive={collabActive}
+        connecting={collabJoinPending}
+      />
+      <CollabJoinProgressModal
+        open={collabJoinPending}
+        loading={loading}
+        loadProgress={loadProgress}
+        loadPhase={loadPhase}
+        pathLabel={pathLabel}
       />
       <PreferencesModal
         open={preferencesOpen}

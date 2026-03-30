@@ -7,6 +7,8 @@ type Props = {
   onJoinUrlChange: (url: string) => void;
   onJoin: (urlOverride?: string) => void;
   collabActive: boolean;
+  /** True while connect / host snapshot is in progress; blocks dismiss. */
+  connecting?: boolean;
 };
 
 export function JoinSessionModal({
@@ -16,6 +18,7 @@ export function JoinSessionModal({
   onJoinUrlChange,
   onJoin,
   collabActive,
+  connecting = false,
 }: Props) {
   if (!open) return null;
 
@@ -28,8 +31,10 @@ export function JoinSessionModal({
       aria-modal="true"
       aria-labelledby="join-session-title"
       tabIndex={-1}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
-      onKeyDown={(e) => e.key === "Escape" && onClose()}
+      onClick={(e) =>
+        e.target === e.currentTarget && !connecting && onClose()
+      }
+      onKeyDown={(e) => e.key === "Escape" && !connecting && onClose()}
     >
       <div className="modal modal--join-session">
         <h3 id="join-session-title" className="modal--join-session-title">
@@ -49,7 +54,7 @@ export function JoinSessionModal({
                   <button
                     type="button"
                     className="join-session-recent-link"
-                    disabled={collabActive}
+                    disabled={collabActive || connecting}
                     title={url}
                     onClick={() => {
                       onJoinUrlChange(url);
@@ -73,19 +78,19 @@ export function JoinSessionModal({
               e.key === "Enter" && !collabActive && onJoin(undefined)
             }
             placeholder="ws://host:port"
-            disabled={collabActive}
+            disabled={collabActive || connecting}
             spellCheck={false}
             autoComplete="off"
           />
         </label>
         <div className="modal-buttons join-session-actions">
-          <button type="button" onClick={onClose}>
+          <button type="button" onClick={onClose} disabled={connecting}>
             Cancel
           </button>
           <button
             type="button"
             className="join-session-submit"
-            disabled={collabActive}
+            disabled={collabActive || connecting}
             onClick={() => onJoin(undefined)}
           >
             Join

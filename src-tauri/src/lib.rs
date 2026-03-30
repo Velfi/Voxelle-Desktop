@@ -12,6 +12,8 @@ mod macos_undo;
 mod render;
 mod render_constants;
 mod voxel_edit;
+mod stroke_modes;
+mod generators;
 mod export_glb;
 /// Voxel format / types (public for `cargo bench` and tests).
 pub mod voxelle;
@@ -23,7 +25,7 @@ use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, EventTarget, Manager, RunEvent, State};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, RunEvent, Runtime, State};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use ahash::{AHashMap, AHashSet};
@@ -103,6 +105,17 @@ impl RenderingMode {
             RenderingMode::MarchingCubes | RenderingMode::DualContour
         )
     }
+}
+
+/// How additive selection tools merge with the current selection (matches web Voxelle).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SelectionCombineMode {
+    #[default]
+    Replace,
+    Add,
+    Subtract,
+    Intersect,
 }
 
 /// Millisecond timings for the last successful voxel add/remove (`voxel_edit_at_screen`).
@@ -337,8 +350,13 @@ pub struct ViewerState {
     pub fly_mode: Mutex<bool>,
     /// Selected solid cells (world grid); used for copy / stamp source.
     pub selection_cells: Mutex<AHashSet<greedy_mesh::VoxelCoord>>,
+    pub selection_combine_mode: Mutex<SelectionCombineMode>,
+    /// Matches native "Match Material" for color / connected selection (synced with menu + webview).
+    pub selection_match_material: Mutex<bool>,
     /// Last copy from [`Self::selection_cells`] (relative offsets).
     pub stamp_clipboard: Mutex<Option<voxel_edit::StampClipboard>>,
+    /// Multi-metaball squishy editor (generators pane).
+    pub squishy_session: Mutex<generators::SquishySession>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -473,7 +491,7 @@ pub(crate) struct LoadProgressPayload {
     pub phase: String,
 }
 
-pub(crate) fn emit_load_progress(app: &AppHandle, fraction: f32, phase: impl Into<String>) {
+pub(crate) fn emit_load_progress<R: Runtime>(app: &AppHandle<R>, fraction: f32, phase: impl Into<String>) {
     let _ = app.emit(
         "voxelle-load-progress",
         LoadProgressPayload {
@@ -484,7 +502,7 @@ pub(crate) fn emit_load_progress(app: &AppHandle, fraction: f32, phase: impl Int
 }
 
 /// Status bar progress for save, heavy mesh refresh, undo/redo (webview `voxelle-work-progress`).
-pub(crate) fn emit_work_progress(app: &AppHandle, fraction: f32, phase: impl Into<String>) {
+pub(crate) fn emit_work_progress<R: Runtime>(app: &AppHandle<R>, fraction: f32, phase: impl Into<String>) {
     let _ = app.emit(
         "voxelle-work-progress",
         LoadProgressPayload {
@@ -495,13 +513,13 @@ pub(crate) fn emit_work_progress(app: &AppHandle, fraction: f32, phase: impl Int
 }
 
 /// When armed, [`Drop`] emits 100% work progress so the status bar clears after `?` early returns too.
-pub(crate) struct WorkProgressGuard<'a> {
-    app: &'a AppHandle,
+pub(crate) struct WorkProgressGuard<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
     armed: bool,
 }
 
-impl<'a> WorkProgressGuard<'a> {
-    pub fn new(app: &'a AppHandle) -> Self {
+impl<'a, R: Runtime> WorkProgressGuard<'a, R> {
+    pub fn new(app: &'a AppHandle<R>) -> Self {
         Self { app, armed: false }
     }
 
@@ -510,7 +528,7 @@ impl<'a> WorkProgressGuard<'a> {
     }
 }
 
-impl Drop for WorkProgressGuard<'_> {
+impl<R: Runtime> Drop for WorkProgressGuard<'_, R> {
     fn drop(&mut self) {
         if self.armed {
             emit_work_progress(self.app, 1.0, "");
@@ -581,12 +599,12 @@ pub(crate) struct PreparedLoadScene {
 }
 
 /// CPU-only work for open/new/collab snapshot: greedy mesh + brick layout off the AppKit main thread.
-pub(crate) fn prepare_load_scene_cpu(
+pub(crate) fn prepare_load_scene_cpu<R: Runtime>(
     grid_size: i32,
     voxels: &[voxelle::Voxel],
     objects: &[voxelle::SceneObject],
     mode: RenderingMode,
-    app: Option<&AppHandle>,
+    app: Option<&AppHandle<R>>,
 ) -> Result<PreparedLoadScene, String> {
     let emit = |frac: f32, phase: &str| {
         if let Some(a) = app {
@@ -770,6 +788,7 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
                             grid_size: size,
                             scene: Default::default(),
                             scene_extra: None,
+                            mood: None,
                             voxels,
                             objects: voxelle::default_scene_objects(),
                             active_object_id: 0,
@@ -833,7 +852,7 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
             }
             match done_rx.recv() {
                 Ok(Ok(())) => {
-                    let _ = app.emit("voxelle-loaded", label);
+                    emit_voxelle_loaded(&app, label, &state);
                 }
                 Ok(Err(e)) => {
                     let _ = app.emit("voxelle-load-error", e);
@@ -1000,7 +1019,7 @@ fn spawn_decode_and_mesh_with_label(
                     if label.ends_with(".voxelle") {
                         persist_last_document_path(&app, &label);
                     }
-                    let _ = app.emit("voxelle-loaded", label);
+                    emit_voxelle_loaded(&app, label, &state);
                 }
                 Ok(Err(e)) => {
                     let _ = app.emit("voxelle-load-error", e);
@@ -1023,9 +1042,9 @@ fn spawn_decode_and_mesh_with_label(
     }
 }
 
-pub(crate) fn apply_mesh_and_camera(
+pub(crate) fn apply_mesh_and_camera<R: Runtime>(
     state: &Arc<ViewerState>,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     file: voxelle::VoxelleFile,
     prepared: PreparedLoadScene,
 ) -> Result<(), String> {
@@ -1043,6 +1062,7 @@ pub(crate) fn apply_mesh_and_camera(
         Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels))
     };
     let voxel_map = greedy_mesh::voxel_map_indices(&file.voxels);
+    let mood = file.mood;
     {
         let mut cf = state.current_file.lock().map_err(|e| e.to_string())?;
         let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
@@ -1056,6 +1076,15 @@ pub(crate) fn apply_mesh_and_camera(
     viewer.upload_scene_data_from_brick(bounds, brick);
     viewer.upload_prepared_opaque(opaque);
     viewer.clear_preview_mesh();
+    if let Some(m) = mood {
+        viewer.set_mood_params(
+            m.grain,
+            m.vignette,
+            m.distance_tint,
+            m.atmosphere,
+            m.sun_shafts,
+        );
+    }
 
     let mut cam = state.camera.lock().map_err(|e| e.to_string())?;
     cam.fov_y = focal_length_to_fov_y_radians(fl);
@@ -1083,6 +1112,30 @@ pub(crate) fn apply_mesh_and_camera(
     emit_load_progress(app, 0.97, "Finishing…");
     emit_load_progress(app, 1.0, "");
     Ok(())
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VoxelleLoadedEvent {
+    path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mood: Option<voxelle::MoodSettings>,
+}
+
+pub(crate) fn emit_voxelle_loaded<R: Runtime>(
+    app: &AppHandle<R>,
+    path: String,
+    state: &ViewerState,
+) {
+    let mood = state
+        .current_file
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|f| f.mood));
+    let _ = app.emit(
+        "voxelle-loaded",
+        VoxelleLoadedEvent { path, mood },
+    );
 }
 
 fn scene_bounds_for_edit(
@@ -1142,12 +1195,12 @@ fn resolve_voxel_edit_stats_batch(
 }
 
 /// GPU upload + mesh rebuild after one or more voxel changes (shared by edit, undo, redo, collab).
-pub(crate) fn finish_voxel_edit_gpu_deltas(
+pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     state: &Arc<ViewerState>,
     deltas: &[voxel_edit::VoxelEditDelta],
     apply_edit_ms: f64,
     t_total: Instant,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     reason: VoxelGpuRefreshReason,
 ) -> Result<(), String> {
     if deltas.is_empty() {
@@ -1327,9 +1380,9 @@ pub(crate) fn finish_voxel_edit_gpu_deltas(
 }
 
 /// Rebuild opaque mesh from current voxels + [`RenderingMode`] (after switching view mode in the UI).
-pub(crate) fn refresh_opaque_mesh(
+pub(crate) fn refresh_opaque_mesh<R: Runtime>(
     state: &Arc<ViewerState>,
-    app: Option<&AppHandle>,
+    app: Option<&AppHandle<R>>,
 ) -> Result<(), String> {
     let rm = *state.rendering_mode.lock().map_err(|e| e.to_string())?;
     let fg = state.current_file.lock().map_err(|e| e.to_string())?;
@@ -1340,7 +1393,7 @@ pub(crate) fn refresh_opaque_mesh(
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
-    let mut wp: Option<WorkProgressGuard> = None;
+    let mut wp: Option<WorkProgressGuard<R>> = None;
     if let Some(a) = app {
         if work_progress_for_voxel_refresh(viewer, file, rm) {
             let mut g = WorkProgressGuard::new(a);
@@ -1734,6 +1787,25 @@ fn set_orthographic(
     Ok(())
 }
 
+/// Keeps the native **Match Material** menu checkbox in sync with app state.
+#[tauri::command]
+fn selection_menu_sync_match_material(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    checked: bool,
+) -> Result<(), String> {
+    *state.selection_match_material.lock().map_err(|e| e.to_string())? = checked;
+    #[cfg(desktop)]
+    {
+        if let Some(menu) = app.try_state::<SelectionMenuState>() {
+            menu.match_material
+                .set_checked(checked)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn set_tone_mapping(state: State<'_, Arc<ViewerState>>, mode: u32) -> Result<(), String> {
     let mut v = state.viewer.lock().map_err(|e| e.to_string())?;
@@ -1751,6 +1823,10 @@ struct MoodParamsArgs {
     vignette: f32,
     /// Screen-space distance tint (0–1), lerps toward horizon color toward edges.
     distance_tint: f32,
+    #[serde(default)]
+    atmosphere: f32,
+    #[serde(default)]
+    sun_shafts: f32,
 }
 
 #[tauri::command]
@@ -1762,7 +1838,26 @@ fn set_mood_params(
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
-    viewer.set_mood_params(args.grain, args.vignette, args.distance_tint);
+    viewer.set_mood_params(
+        args.grain,
+        args.vignette,
+        args.distance_tint,
+        args.atmosphere,
+        args.sun_shafts,
+    );
+    drop(v);
+    let m = voxelle::MoodSettings {
+        grain: args.grain,
+        vignette: args.vignette,
+        distance_tint: args.distance_tint,
+        atmosphere: args.atmosphere,
+        sun_shafts: args.sun_shafts,
+    };
+    if let Ok(mut cf) = state.current_file.lock() {
+        if let Some(f) = cf.as_mut() {
+            f.mood = Some(m);
+        }
+    }
     Ok(())
 }
 
@@ -1841,6 +1936,48 @@ fn voxel_pick_probe(
     Ok(voxel_edit::probe_solid_hit(
         file, vmap, &cam, w, h, args.x, args.y,
     ))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StrokeAnchorAtScreen {
+    x: f32,
+    y: f32,
+    tool: voxel_edit::EditTool,
+}
+
+/// Anchor voxel for multi-click stroke geometry (add → placement cell; remove/paint → solid under ray).
+#[tauri::command]
+fn voxel_stroke_anchor_coord_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    args: StrokeAnchorAtScreen,
+) -> Result<Option<[i32; 3]>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Ok(None);
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Ok(None);
+    };
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Ok(None);
+    };
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    let c = match args.tool {
+        voxel_edit::EditTool::Add => {
+            voxel_edit::preview_add_cell(file, vmap, &cam, w, h, args.x, args.y)
+        }
+        voxel_edit::EditTool::Remove | voxel_edit::EditTool::Paint => {
+            voxel_edit::preview_remove_cell(file, vmap, &cam, w, h, args.x, args.y)
+        }
+    };
+    Ok(c.map(|(x, y, z)| [x, y, z]))
 }
 
 fn pick_cell_for_ping(
@@ -2037,6 +2174,15 @@ struct VoxelEditAtScreen {
     stroke_segment_prev_x: Option<f32>,
     #[serde(default)]
     stroke_segment_prev_y: Option<f32>,
+    #[serde(default)]
+    stroke_mode: stroke_modes::DrawStrokeMode,
+    #[serde(default)]
+    plane_axis: stroke_modes::PlaneAxis,
+    #[serde(default)]
+    stroke_aux: stroke_modes::StrokeAux,
+    /// When `stroke_mode` is fill + paint: match material as well as color.
+    #[serde(default)]
+    match_material: bool,
 }
 
 fn push_solo_undo_step(
@@ -2190,8 +2336,47 @@ fn voxel_pick_color_at_screen(
     }))
 }
 
+fn merge_coords_into_selection(
+    sel: &mut AHashSet<greedy_mesh::VoxelCoord>,
+    coords: Vec<greedy_mesh::VoxelCoord>,
+    mode: SelectionCombineMode,
+) {
+    let set: AHashSet<_> = coords.iter().copied().collect();
+    match mode {
+        SelectionCombineMode::Replace => {
+            sel.clear();
+            sel.extend(coords);
+        }
+        SelectionCombineMode::Add => {
+            sel.extend(coords);
+        }
+        SelectionCombineMode::Subtract => {
+            for c in coords {
+                sel.remove(&c);
+            }
+        }
+        SelectionCombineMode::Intersect => {
+            sel.retain(|c| set.contains(c));
+        }
+    }
+}
+
+fn emit_selection_updated(app: &AppHandle, state: &Arc<ViewerState>) {
+    let n = state
+        .selection_cells
+        .lock()
+        .map(|s| s.len() as u32)
+        .unwrap_or(0);
+    let _ = app.emit_to(
+        EventTarget::webview_window("main"),
+        "voxelle-selection-updated",
+        n,
+    );
+}
+
 #[tauri::command]
 fn selection_toggle_at_screen(
+    app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     args: PickAtScreen,
 ) -> Result<bool, String> {
@@ -2216,18 +2401,40 @@ fn selection_toggle_at_screen(
     else {
         return Ok(false);
     };
+    let mode = *state.selection_combine_mode.lock().map_err(|e| e.to_string())?;
     let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
-    if sel.contains(&c) {
-        sel.remove(&c);
-    } else {
-        sel.insert(c);
+    match mode {
+        SelectionCombineMode::Replace => {
+            sel.clear();
+            sel.insert(c);
+        }
+        SelectionCombineMode::Add => {
+            if sel.contains(&c) {
+                sel.remove(&c);
+            } else {
+                sel.insert(c);
+            }
+        }
+        SelectionCombineMode::Subtract => {
+            sel.remove(&c);
+        }
+        SelectionCombineMode::Intersect => {
+            if sel.contains(&c) {
+                sel.clear();
+                sel.insert(c);
+            } else {
+                sel.clear();
+            }
+        }
     }
+    emit_selection_updated(&app, state.inner());
     Ok(true)
 }
 
 #[tauri::command]
-fn selection_clear(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+fn selection_clear(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
     state.selection_cells.lock().map_err(|e| e.to_string())?.clear();
+    emit_selection_updated(&app, state.inner());
     Ok(())
 }
 
@@ -2250,6 +2457,7 @@ struct SelectByColorArgs {
 
 #[tauri::command]
 fn selection_add_by_color_at_screen(
+    app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     args: SelectByColorArgs,
 ) -> Result<u32, String> {
@@ -2279,16 +2487,18 @@ fn selection_add_by_color_at_screen(
         args.match_material,
         v.material,
     );
-    let n = coords.len() as u32;
+    let mode = *state.selection_combine_mode.lock().map_err(|e| e.to_string())?;
     let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
-    for c in coords {
-        sel.insert(c);
-    }
+    merge_coords_into_selection(&mut sel, coords, mode);
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
     Ok(n)
 }
 
 #[tauri::command]
 fn selection_add_coplanar_at_screen(
+    app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     args: PickAtScreen,
 ) -> Result<u32, String> {
@@ -2314,16 +2524,18 @@ fn selection_add_coplanar_at_screen(
     ) else {
         return Ok(0);
     };
-    let n = coords.len() as u32;
+    let mode = *state.selection_combine_mode.lock().map_err(|e| e.to_string())?;
     let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
-    for c in coords {
-        sel.insert(c);
-    }
+    merge_coords_into_selection(&mut sel, coords, mode);
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
     Ok(n)
 }
 
 #[tauri::command]
 fn selection_add_coplanar_empty_at_screen(
+    app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     args: PickAtScreen,
 ) -> Result<u32, String> {
@@ -2349,12 +2561,265 @@ fn selection_add_coplanar_empty_at_screen(
     ) else {
         return Ok(0);
     };
-    let n = coords.len() as u32;
+    let mode = *state.selection_combine_mode.lock().map_err(|e| e.to_string())?;
     let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
-    for c in coords {
-        sel.insert(c);
-    }
+    merge_coords_into_selection(&mut sel, coords, mode);
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
     Ok(n)
+}
+
+#[tauri::command]
+fn selection_select_all(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    sel.clear();
+    sel.extend(vmap.keys().copied());
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+#[tauri::command]
+fn selection_invert(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let all: AHashSet<_> = vmap.keys().copied().collect();
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    let new_sel: AHashSet<_> = all.difference(&sel).copied().collect();
+    *sel = new_sel;
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+#[tauri::command]
+fn selection_grow(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let grid_size = file.grid_size.max(1);
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    if sel.is_empty() {
+        return Ok(0);
+    }
+    let mut to_add = AHashSet::new();
+    for &c in sel.iter() {
+        for n in voxel_edit::neighbors_6(c) {
+            if voxel_edit::in_grid(n.0, n.1, n.2, grid_size) && vmap.contains_key(&n) {
+                to_add.insert(n);
+            }
+        }
+    }
+    sel.extend(to_add);
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+#[tauri::command]
+fn selection_shrink(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let grid_size = file.grid_size.max(1);
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    if sel.is_empty() {
+        return Ok(0);
+    }
+    let mut next = AHashSet::new();
+    for &c in sel.iter() {
+        let mut boundary = false;
+        for n in voxel_edit::neighbors_6(c) {
+            if !voxel_edit::in_grid(n.0, n.1, n.2, grid_size) {
+                boundary = true;
+                break;
+            }
+            if !sel.contains(&n) {
+                boundary = true;
+                break;
+            }
+        }
+        if !boundary {
+            next.insert(c);
+        }
+    }
+    *sel = next;
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+#[tauri::command]
+fn selection_deselect_inner_voxels(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    if sel.is_empty() {
+        return Ok(0);
+    }
+    let mut next = AHashSet::new();
+    for &c in sel.iter() {
+        let mut inner = true;
+        for n in voxel_edit::neighbors_6(c) {
+            if !sel.contains(&n) {
+                inner = false;
+                break;
+            }
+        }
+        if !inner {
+            next.insert(c);
+        }
+    }
+    *sel = next;
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+/// Keep only selected cells that are empty (no solid voxel) — matches web "Deselect voxels".
+#[tauri::command]
+fn selection_retain_empty_only(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    sel.retain(|c| !vmap.contains_key(c));
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+/// Keep only selected cells that have a solid voxel — matches web "Deselect empty spaces".
+#[tauri::command]
+fn selection_retain_solid_only(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    sel.retain(|c| vmap.contains_key(c));
+    let n = sel.len() as u32;
+    drop(sel);
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+fn run_selection_add_connected(
+    state: &Arc<ViewerState>,
+    args: PickAtScreen,
+) -> Result<u32, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    let mm = *state.selection_match_material.lock().map_err(|e| e.to_string())?;
+    let Some(coords) = voxel_edit::connected_solid_same_color_from_screen(
+        file, vmap, &cam, w, h, args.x, args.y, mm,
+    ) else {
+        return Ok(0);
+    };
+    let mode = *state.selection_combine_mode.lock().map_err(|e| e.to_string())?;
+    let mut sel = state.selection_cells.lock().map_err(|e| e.to_string())?;
+    merge_coords_into_selection(&mut sel, coords, mode);
+    Ok(sel.len() as u32)
+}
+
+#[tauri::command]
+fn selection_add_connected_at_screen(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: PickAtScreen,
+) -> Result<u32, String> {
+    let n = run_selection_add_connected(state.inner(), args)?;
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+#[tauri::command]
+fn selection_add_connected_at_cursor(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
+    let (sx, sy) = state
+        .preview_cursor
+        .lock()
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Move the pointer over the viewport first.".to_string())?;
+    let n = run_selection_add_connected(state.inner(), PickAtScreen { x: sx, y: sy })?;
+    emit_selection_updated(&app, state.inner());
+    Ok(n)
+}
+
+#[tauri::command]
+fn selection_set_combine_mode(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    mode: SelectionCombineMode,
+) -> Result<(), String> {
+    *state.selection_combine_mode.lock().map_err(|e| e.to_string())? = mode;
+    let payload = match mode {
+        SelectionCombineMode::Replace => "replace",
+        SelectionCombineMode::Add => "add",
+        SelectionCombineMode::Subtract => "subtract",
+        SelectionCombineMode::Intersect => "intersect",
+    };
+    let _ = app.emit_to(
+        EventTarget::webview_window("main"),
+        "voxelle-selection-combine-mode",
+        payload,
+    );
+    Ok(())
+}
+
+#[tauri::command]
+fn get_selection_combine_mode(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<SelectionCombineMode, String> {
+    state
+        .selection_combine_mode
+        .lock()
+        .map_err(|e| e.to_string())
+        .map(|m| *m)
 }
 
 #[derive(serde::Deserialize)]
@@ -2608,6 +3073,152 @@ fn voxel_sculpt_raise_at_screen(
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SculptStrokeAtScreenArgs {
+    x: f32,
+    y: f32,
+    sculpt_mode: voxel_edit::SculptStrokeMode,
+    color: u32,
+    material: String,
+    brush_radius: u32,
+    brush_shape: voxel_edit::BrushShape,
+    #[serde(default)]
+    spray_density: f32,
+    #[serde(default)]
+    stroke_line_start_x: Option<f32>,
+    #[serde(default)]
+    stroke_line_start_y: Option<f32>,
+    #[serde(default)]
+    stroke_segment_prev_x: Option<f32>,
+    #[serde(default)]
+    stroke_segment_prev_y: Option<f32>,
+    #[serde(default)]
+    terrain_op: Option<voxel_edit::TerrainSculptOp>,
+    #[serde(default)]
+    terrain_base_y: i32,
+    #[serde(default = "default_terrain_strength")]
+    terrain_strength: i32,
+    #[serde(default)]
+    terrain_smooth_radius: i32,
+    #[serde(default = "default_smooth_passes")]
+    smooth_neighbor_passes: u32,
+}
+
+fn default_terrain_strength() -> i32 {
+    4
+}
+
+fn default_smooth_passes() -> u32 {
+    1
+}
+
+#[tauri::command]
+fn voxel_sculpt_stroke_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: SculptStrokeAtScreenArgs,
+) -> Result<bool, String> {
+    let t_total = Instant::now();
+    let t_apply_start = Instant::now();
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let line = match (args.stroke_line_start_x, args.stroke_line_start_y) {
+        (Some(lx), Some(ly)) => Some((lx, ly)),
+        _ => None,
+    };
+    let seg = match (args.stroke_segment_prev_x, args.stroke_segment_prev_y) {
+        (Some(px), Some(py)) => Some((px, py)),
+        _ => None,
+    };
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock().map_err(|e| e.to_string())?;
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        voxel_edit::apply_sculpt_stroke(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            args.x,
+            args.y,
+            args.sculpt_mode,
+            args.color,
+            material,
+            args.brush_radius,
+            args.brush_shape,
+            args.spray_density,
+            line,
+            seg,
+            args.terrain_op,
+            args.terrain_base_y,
+            args.terrain_strength,
+            args.terrain_smooth_radius,
+            args.smooth_neighbor_passes,
+        )?
+    };
+    let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
+    if deltas.is_empty() {
+        return Ok(false);
+    }
+    finish_voxel_edit_gpu_deltas(
+        &state,
+        &deltas,
+        apply_edit_ms,
+        t_total,
+        &app,
+        VoxelGpuRefreshReason::SoloEdit,
+    )?;
+    let stroke_on = *state.stroke_active.lock().map_err(|e| e.to_string())?;
+    if stroke_on {
+        state
+            .stroke_buffer
+            .lock()
+            .map_err(|e| e.to_string())?
+            .extend(deltas.iter().copied());
+        return Ok(true);
+    }
+    let cm = Arc::clone(&state.collab);
+    let mut cb = cm.lock().map_err(|e| e.to_string())?;
+    if cb.is_client() {
+        if let Some(tx) = &cb.client_tx {
+            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
+                deltas: deltas.clone(),
+            })
+            .unwrap();
+            let _ = tx.send(msg);
+        }
+    } else if cb.is_host() {
+        cb.next_seq += 1;
+        let seq = cb.next_seq;
+        cb.host_undo
+            .entry(collab::HOST_PEER_ID)
+            .or_default()
+            .push(deltas.clone());
+        cb.host_redo.remove(&collab::HOST_PEER_ID);
+        drop(cb);
+        collab::host_emit_edit_batch(&cm, &app, seq, collab::HOST_PEER_ID, &deltas);
+    } else {
+        drop(cb);
+        push_solo_undo_step(&state, &app, deltas)?;
+    }
+    Ok(true)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct GeneratorSphereArgs {
     x: f32,
     y: f32,
@@ -2657,6 +3268,460 @@ fn generator_sphere_at_screen(
     commit_voxel_edits(&state, &app, deltas)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorRocksArgs {
+    x: f32,
+    y: f32,
+    #[serde(default)]
+    seed: i32,
+    #[serde(default = "default_rock_size")]
+    size: i32,
+    #[serde(default = "default_roughness")]
+    roughness: f32,
+    color: u32,
+    material: String,
+}
+
+fn default_rock_size() -> i32 {
+    4
+}
+
+fn default_roughness() -> f32 {
+    0.45
+}
+
+#[tauri::command]
+fn generator_rocks_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorRocksArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock().map_err(|e| e.to_string())?;
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        crate::generators::generator_rocks_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            args.x,
+            args.y,
+            args.seed,
+            args.size,
+            args.roughness,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorGrassArgs {
+    x: f32,
+    y: f32,
+    #[serde(default)]
+    seed: i32,
+    #[serde(default = "default_grass_density")]
+    density: i32,
+    #[serde(default = "default_grass_height")]
+    max_height: i32,
+    color: u32,
+    material: String,
+}
+
+fn default_grass_density() -> i32 {
+    4
+}
+
+fn default_grass_height() -> i32 {
+    3
+}
+
+#[tauri::command]
+fn generator_grass_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorGrassArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock().map_err(|e| e.to_string())?;
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        crate::generators::generator_grass_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            args.x,
+            args.y,
+            args.seed,
+            args.density,
+            args.max_height,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorRopeArgs {
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    #[serde(default = "default_rope_sag")]
+    sag: f32,
+    color: u32,
+    material: String,
+}
+
+fn default_rope_sag() -> f32 {
+    2.5
+}
+
+#[tauri::command]
+fn generator_rope_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorRopeArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock().map_err(|e| e.to_string())?;
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        crate::generators::generator_rope_between_screens(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            args.x1,
+            args.y1,
+            args.x2,
+            args.y2,
+            args.sag,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorSquishyArgs {
+    x: f32,
+    y: f32,
+    #[serde(default = "default_squishy_radius")]
+    radius: i32,
+    color: u32,
+    material: String,
+}
+
+fn default_squishy_radius() -> i32 {
+    5
+}
+
+#[tauri::command]
+fn generator_squishy_metaball_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorSquishyArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock().map_err(|e| e.to_string())?;
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock().map_err(|e| e.to_string())?;
+        crate::generators::squishy_metaball_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            args.x,
+            args.y,
+            args.radius,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+#[tauri::command]
+fn squishy_session_get(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<generators::SquishySession, String> {
+    state
+        .squishy_session
+        .lock()
+        .map_err(|e| e.to_string())
+        .map(|g| g.clone())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishySetModeArgs {
+    mode: String,
+}
+
+#[tauri::command]
+fn squishy_session_set_mode(
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishySetModeArgs,
+) -> Result<(), String> {
+    let mut g = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    g.mode = match args.mode.as_str() {
+        "edit" => generators::SquishyMode::Edit,
+        "delete" => generators::SquishyMode::Delete,
+        _ => generators::SquishyMode::Add,
+    };
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishySessionFlagsArgs {
+    #[serde(default)]
+    hollow: Option<bool>,
+    #[serde(default)]
+    wall_thickness: Option<i32>,
+    #[serde(default)]
+    add_snap_to_surface: Option<bool>,
+}
+
+#[tauri::command]
+fn squishy_session_set_flags(
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishySessionFlagsArgs,
+) -> Result<(), String> {
+    let mut g = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    if let Some(h) = args.hollow {
+        g.hollow = h;
+    }
+    if let Some(w) = args.wall_thickness {
+        g.wall_thickness = w.max(1);
+    }
+    if let Some(a) = args.add_snap_to_surface {
+        g.add_snap_to_surface = a;
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishyMetaballAddArgs {
+    x: f32,
+    y: f32,
+    #[serde(default = "default_squishy_radius")]
+    radius: i32,
+}
+
+#[tauri::command]
+fn squishy_metaball_add_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishyMetaballAddArgs,
+) -> Result<Option<u32>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let mut sg = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    let id = generators::squishy_add_ball_at_screen(
+        &mut *sg,
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        args.x,
+        args.y,
+        args.radius,
+    );
+    Ok(id)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishyMetaballIdArgs {
+    id: u32,
+}
+
+#[tauri::command]
+fn squishy_metaball_remove(
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishyMetaballIdArgs,
+) -> Result<bool, String> {
+    let mut g = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    Ok(g.remove_ball(args.id))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishySelectArgs {
+    id: Option<u32>,
+}
+
+#[tauri::command]
+fn squishy_metaball_select(
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishySelectArgs,
+) -> Result<(), String> {
+    let mut g = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    g.selected_id = args.id;
+    Ok(())
+}
+
+#[tauri::command]
+fn squishy_session_clear(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    let mut g = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    g.clear();
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishyCommitArgs {
+    color: u32,
+    material: String,
+}
+
+#[tauri::command]
+fn squishy_session_commit(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: SquishyCommitArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let sg = state.squishy_session.lock().map_err(|e| e.to_string())?;
+        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
+        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        generators::squishy_commit_session(&sg, file, vmap, args.color, material)?
+    };
+    if deltas.is_empty() {
+        return Ok(false);
+    }
+    commit_voxel_edits(&state, &app, deltas)?;
+    let mut g = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    g.clear();
+    Ok(true)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SquishyPickArgs {
+    x: f32,
+    y: f32,
+}
+
+#[tauri::command]
+fn squishy_pick_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishyPickArgs,
+) -> Result<Option<u32>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock().map_err(|e| e.to_string())?;
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let sg = state.squishy_session.lock().map_err(|e| e.to_string())?;
+    let cam = state.camera.lock().map_err(|e| e.to_string())?;
+    Ok(generators::pick_metaball_at_screen(
+        &sg, &cam, w, h, args.x, args.y,
+    ))
+}
+
 #[tauri::command]
 fn voxel_edit_at_screen(
     state: State<'_, Arc<ViewerState>>,
@@ -2685,29 +3750,49 @@ fn voxel_edit_at_screen(
             return Err("voxel index not ready".into());
         };
         let cam = state.camera.lock().map_err(|e| e.to_string())?;
-        voxel_edit::apply_edit(
-            file,
-            vmap,
-            &cam,
-            w,
-            h,
-            args.x,
-            args.y,
-            args.tool,
-            args.color,
-            material,
-            args.brush_radius,
-            args.brush_shape,
-            args.spray_density,
-            match (args.stroke_line_start_x, args.stroke_line_start_y) {
-                (Some(lx), Some(ly)) => Some((lx, ly)),
-                _ => None,
-            },
-            match (args.stroke_segment_prev_x, args.stroke_segment_prev_y) {
-                (Some(px), Some(py)) => Some((px, py)),
-                _ => None,
-            },
-        )?
+        if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill)
+            && matches!(args.tool, voxel_edit::EditTool::Paint)
+        {
+            voxel_edit::flood_fill_paint_at_screen(
+                file,
+                vmap,
+                &cam,
+                w,
+                h,
+                args.x,
+                args.y,
+                args.color,
+                material,
+                args.match_material,
+            )?
+        } else {
+            voxel_edit::apply_edit(
+                file,
+                vmap,
+                &cam,
+                w,
+                h,
+                args.x,
+                args.y,
+                args.tool,
+                args.color,
+                material,
+                args.brush_radius,
+                args.brush_shape,
+                args.spray_density,
+                match (args.stroke_line_start_x, args.stroke_line_start_y) {
+                    (Some(lx), Some(ly)) => Some((lx, ly)),
+                    _ => None,
+                },
+                match (args.stroke_segment_prev_x, args.stroke_segment_prev_y) {
+                    (Some(px), Some(py)) => Some((px, py)),
+                    _ => None,
+                },
+                args.stroke_mode,
+                args.plane_axis,
+                &args.stroke_aux,
+            )?
+        }
     };
     let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -3195,7 +4280,7 @@ fn save_voxelle_as(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result
             *g = s.clone();
         }
         persist_last_document_path(&app_c, &s);
-        let _ = app_c.emit("voxelle-loaded", s);
+        emit_voxelle_loaded(&app_c, s, &state_c);
     });
     Ok(())
 }
@@ -3530,9 +4615,93 @@ fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadat
     Ok(m)
 }
 
+/// Native menu handle for [`CheckMenuItem`] sync (match material).
 #[cfg(desktop)]
-fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
+pub struct SelectionMenuState {
+    pub match_material: tauri::menu::CheckMenuItem<tauri::Wry>,
+}
+
+/// Order top-level menus as: … File, Edit, **Selection**, View, Window, **Voxels**, Help, **Debug**
+/// (after the app menu on macOS). [`Menu::default`] would leave Help before appended items; we
+/// insert Selection / Voxels / Debug at the correct indices instead of appending at the end.
+#[cfg(desktop)]
+fn place_voxelle_custom_top_level_menus<R: tauri::Runtime>(
+    menu: &tauri::menu::Menu<R>,
+    selection_submenu: &tauri::menu::Submenu<R>,
+    voxels_submenu: &tauri::menu::Submenu<R>,
+    debug_menu: &tauri::menu::Submenu<R>,
+) -> tauri::Result<()> {
+    use tauri::menu::MenuItemKind;
+
+    fn submenu_title<R2: tauri::Runtime>(kind: &MenuItemKind<R2>) -> Option<String> {
+        match kind {
+            MenuItemKind::Submenu(s) => s.text().ok(),
+            _ => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let items = menu.items()?;
+        let edit_idx = items
+            .iter()
+            .position(|i| submenu_title(i).as_deref() == Some("Edit"))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "menubar: Edit submenu not found",
+                )
+            })?;
+        menu.insert(selection_submenu, edit_idx + 1)?;
+
+        let items = menu.items()?;
+        let window_idx = items
+            .iter()
+            .position(|i| submenu_title(i).as_deref() == Some("Window"))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "menubar: Window submenu not found",
+                )
+            })?;
+        menu.insert(voxels_submenu, window_idx + 1)?;
+
+        let items = menu.items()?;
+        let help_idx = items
+            .iter()
+            .position(|i| submenu_title(i).as_deref() == Some("Help"))
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "menubar: Help submenu not found",
+                )
+            })?;
+        menu.insert(debug_menu, help_idx + 1)?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let items = menu.items()?;
+        if let Some(edit_idx) = items
+            .iter()
+            .position(|i| submenu_title(i).as_deref() == Some("Edit"))
+        {
+            menu.insert(selection_submenu, edit_idx + 1)?;
+        } else {
+            menu.append(selection_submenu)?;
+        }
+        menu.append(voxels_submenu)?;
+        menu.append(debug_menu)?;
+        Ok(())
+    }
+}
+
+#[cfg(desktop)]
+fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
+    use tauri::menu::{
+        CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
+    };
 
     let menu = Menu::default(app)?;
     let about_item = PredefinedMenuItem::about(app, None, Some(vd_about_metadata(app)?))?;
@@ -3628,7 +4797,21 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         true,
         &[&view_render_greedy, &view_render_marching, &view_render_dual],
     )?;
+    let view_perspective_item =
+        MenuItem::with_id(app, "menu_view_perspective", "Perspective", true, None::<&str>)?;
     let ortho_view_item = MenuItem::with_id(app, "menu_view_ortho", "Orthographic", true, None::<&str>)?;
+    let view_render_ray =
+        MenuItem::with_id(app, "menu_view_render_ray", "Ray (WebGPU)", true, None::<&str>)?;
+    let sep_view_extras = PredefinedMenuItem::separator(app)?;
+    let view_borders_show =
+        MenuItem::with_id(app, "menu_view_borders_show", "Show borders", true, None::<&str>)?;
+    let view_borders_hide =
+        MenuItem::with_id(app, "menu_view_borders_hide", "Hide borders", true, None::<&str>)?;
+    let sep_view_stamp = PredefinedMenuItem::separator(app)?;
+    let view_stamp_book =
+        MenuItem::with_id(app, "menu_view_stamp_book", "Stamp book…", true, None::<&str>)?;
+    let view_project_stats =
+        MenuItem::with_id(app, "menu_view_project_stats", "Project stats…", true, None::<&str>)?;
     let sep_before_chat = PredefinedMenuItem::separator(app)?;
 
     let mut file_inserted = false;
@@ -3675,7 +4858,15 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
                 edit_inserted = true;
             } else if text == "View" {
                 sub.append(&rendering_submenu)?;
+                sub.append(&view_perspective_item)?;
                 sub.append(&ortho_view_item)?;
+                sub.append(&view_render_ray)?;
+                sub.append(&sep_view_extras)?;
+                sub.append(&view_borders_show)?;
+                sub.append(&view_borders_hide)?;
+                sub.append(&sep_view_stamp)?;
+                sub.append(&view_stamp_book)?;
+                sub.append(&view_project_stats)?;
                 sub.append(&sep_before_chat)?;
                 sub.append(&chat_panel_item)?;
                 view_inserted = true;
@@ -3688,7 +4879,20 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
             app,
             "View",
             true,
-            &[&rendering_submenu, &ortho_view_item, &sep_before_chat, &chat_panel_item],
+            &[
+                &rendering_submenu,
+                &view_perspective_item,
+                &ortho_view_item,
+                &view_render_ray,
+                &sep_view_extras,
+                &view_borders_show,
+                &view_borders_hide,
+                &sep_view_stamp,
+                &view_stamp_book,
+                &view_project_stats,
+                &sep_before_chat,
+                &chat_panel_item,
+            ],
         )?;
         menu.append(&view_menu)?;
     }
@@ -3755,9 +4959,202 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
         }
     }
 
-    menu.append(&debug_menu)?;
+    let voxel_hide_selected = MenuItem::with_id(
+        app,
+        "menu_voxel_hide_selected",
+        "Hide selected",
+        true,
+        None::<&str>,
+    )?;
+    let voxel_unhide_all = MenuItem::with_id(
+        app,
+        "menu_voxel_unhide_all",
+        "Unhide all",
+        true,
+        None::<&str>,
+    )?;
+    let sep_voxel_1 = PredefinedMenuItem::separator(app)?;
+    let voxel_hollow = MenuItem::with_id(app, "menu_voxel_hollow", "Hollow out", true, None::<&str>)?;
+    let voxel_scale = MenuItem::with_id(
+        app,
+        "menu_voxel_scale",
+        "Scale by factor…",
+        true,
+        None::<&str>,
+    )?;
+    let voxel_rotate = MenuItem::with_id(
+        app,
+        "menu_voxel_rotate",
+        "Rotate by degrees…",
+        true,
+        None::<&str>,
+    )?;
+    let sep_voxel_2 = PredefinedMenuItem::separator(app)?;
+    let voxel_mirror_hdr = MenuItem::with_id(app, "menu_voxel_mirror_hdr", "Mirror", false, None::<&str>)?;
+    let voxel_mirror_x = MenuItem::with_id(
+        app,
+        "menu_voxel_mirror_x",
+        "Across X (YZ plane)",
+        true,
+        None::<&str>,
+    )?;
+    let voxel_mirror_y = MenuItem::with_id(
+        app,
+        "menu_voxel_mirror_y",
+        "Across Y (XZ plane)",
+        true,
+        None::<&str>,
+    )?;
+    let voxel_mirror_z = MenuItem::with_id(
+        app,
+        "menu_voxel_mirror_z",
+        "Across Z (XY plane)",
+        true,
+        None::<&str>,
+    )?;
+    let voxels_submenu = Submenu::with_items(
+        app,
+        "Voxels",
+        true,
+        &[
+            &voxel_hide_selected,
+            &voxel_unhide_all,
+            &sep_voxel_1,
+            &voxel_hollow,
+            &voxel_scale,
+            &voxel_rotate,
+            &sep_voxel_2,
+            &voxel_mirror_hdr,
+            &voxel_mirror_x,
+            &voxel_mirror_y,
+            &voxel_mirror_z,
+        ],
+    )?;
+
+    let menu_sel_all = MenuItem::with_id(app, "menu_sel_all", "Select All", true, None::<&str>)?;
+    let menu_sel_by_color = MenuItem::with_id(
+        app,
+        "menu_sel_by_color",
+        "Select by Color",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_connected = MenuItem::with_id(
+        app,
+        "menu_sel_connected",
+        "Select Connected",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_coplanar = MenuItem::with_id(
+        app,
+        "menu_sel_coplanar",
+        "Select Coplanar Faces",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_coplanar_empty = MenuItem::with_id(
+        app,
+        "menu_sel_coplanar_empty",
+        "Select Coplanar Void",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_sep1 = PredefinedMenuItem::separator(app)?;
+    let menu_sel_grow = MenuItem::with_id(app, "menu_sel_grow", "Grow", true, None::<&str>)?;
+    let menu_sel_shrink = MenuItem::with_id(app, "menu_sel_shrink", "Shrink", true, None::<&str>)?;
+    let menu_sel_invert = MenuItem::with_id(app, "menu_sel_invert", "Invert", true, None::<&str>)?;
+    let menu_sel_sep2 = PredefinedMenuItem::separator(app)?;
+    let menu_sel_deselect_all =
+        MenuItem::with_id(app, "menu_sel_deselect_all", "Deselect All", true, None::<&str>)?;
+    let menu_sel_deselect_inner = MenuItem::with_id(
+        app,
+        "menu_sel_deselect_inner",
+        "Deselect Inner Voxels",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_deselect_voxels = MenuItem::with_id(
+        app,
+        "menu_sel_deselect_voxels",
+        "Deselect Voxels",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_deselect_empty = MenuItem::with_id(
+        app,
+        "menu_sel_deselect_empty",
+        "Deselect Empty Spaces",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_sep3 = PredefinedMenuItem::separator(app)?;
+    let menu_sel_mode_replace =
+        MenuItem::with_id(app, "menu_sel_mode_replace", "Replace", true, None::<&str>)?;
+    let menu_sel_mode_add =
+        MenuItem::with_id(app, "menu_sel_mode_add", "Add to Selection", true, None::<&str>)?;
+    let menu_sel_mode_subtract = MenuItem::with_id(
+        app,
+        "menu_sel_mode_subtract",
+        "Subtract from Selection",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_mode_intersect = MenuItem::with_id(
+        app,
+        "menu_sel_mode_intersect",
+        "Intersect with Selection",
+        true,
+        None::<&str>,
+    )?;
+    let menu_sel_sep4 = PredefinedMenuItem::separator(app)?;
+    let menu_sel_match_material = CheckMenuItem::with_id(
+        app,
+        "menu_sel_match_material",
+        "Match Material",
+        true,
+        false,
+        None::<&str>,
+    )?;
+    let selection_submenu = Submenu::with_items(
+        app,
+        "Selection",
+        true,
+        &[
+            &menu_sel_all,
+            &menu_sel_by_color,
+            &menu_sel_connected,
+            &menu_sel_coplanar,
+            &menu_sel_coplanar_empty,
+            &menu_sel_sep1,
+            &menu_sel_grow,
+            &menu_sel_shrink,
+            &menu_sel_invert,
+            &menu_sel_sep2,
+            &menu_sel_deselect_all,
+            &menu_sel_deselect_inner,
+            &menu_sel_deselect_voxels,
+            &menu_sel_deselect_empty,
+            &menu_sel_sep3,
+            &menu_sel_mode_replace,
+            &menu_sel_mode_add,
+            &menu_sel_mode_subtract,
+            &menu_sel_mode_intersect,
+            &menu_sel_sep4,
+            &menu_sel_match_material,
+        ],
+    )?;
+
+    place_voxelle_custom_top_level_menus(
+        &menu,
+        &selection_submenu,
+        &voxels_submenu,
+        &debug_menu,
+    )?;
     menu.set_as_app_menu()?;
-    Ok(())
+    Ok(SelectionMenuState {
+        match_material: menu_sel_match_material.clone(),
+    })
 }
 
 #[cfg(desktop)]
@@ -4024,6 +5421,7 @@ fn collab_update_profile(
 
 #[tauri::command]
 fn collab_set_can_edit(
+    app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     target_peer: u32,
     can_edit: bool,
@@ -4044,6 +5442,9 @@ fn collab_set_can_edit(
                 r.can_edit = can_edit;
             }
         }
+        let roster = c.roster.clone();
+        drop(c);
+        collab::broadcast_roster_to_guests(&app, &state.collab, &roster);
     }
     Ok(())
 }
@@ -4309,7 +5710,10 @@ pub fn run() {
         autosave_slot: Mutex::new(HashMap::new()),
         fly_mode: Mutex::new(false),
         selection_cells: Mutex::new(AHashSet::new()),
+        selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
+        selection_match_material: Mutex::new(false),
         stamp_clipboard: Mutex::new(None),
+        squishy_session: Mutex::new(generators::SquishySession::new()),
     });
     let vs = viewer_state.clone();
 
@@ -4415,6 +5819,10 @@ pub fn run() {
                     "voxelle-rendering-mode-changed",
                     "dualContour",
                 );
+            } else if event.id() == "menu_view_perspective" {
+                let state = app.state::<Arc<ViewerState>>();
+                let _ = apply_orthographic(state.inner(), false);
+                wake_viewport_loop(&app);
             } else if event.id() == "menu_view_ortho" {
                 let state = app.state::<Arc<ViewerState>>();
                 let new_o = state
@@ -4424,11 +5832,133 @@ pub fn run() {
                     .unwrap_or(true);
                 let _ = apply_orthographic(&state, new_o);
                 wake_viewport_loop(&app);
+            } else if event.id() == "menu_view_render_ray" {
+                let state = app.state::<Arc<ViewerState>>();
+                let _ = apply_rendering_mode(&state, &app, RenderingMode::Ray);
+                wake_viewport_loop(&app);
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-rendering-mode-changed",
+                    "ray",
+                );
+            } else if event.id() == "menu_view_borders_show"
+                || event.id() == "menu_view_borders_hide"
+            {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-not-implemented",
+                    "Viewport border overlay is not available in the desktop build yet.",
+                );
+            } else if event.id() == "menu_view_stamp_book" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-not-implemented",
+                    "Stamp book is not available in the desktop build yet.",
+                );
+            } else if event.id() == "menu_view_project_stats" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-open-project-stats",
+                    (),
+                );
+            } else if event.id() == "menu_voxel_hide_selected"
+                || event.id() == "menu_voxel_unhide_all"
+                || event.id() == "menu_voxel_hollow"
+                || event.id() == "menu_voxel_scale"
+                || event.id() == "menu_voxel_rotate"
+                || event.id() == "menu_voxel_mirror_x"
+                || event.id() == "menu_voxel_mirror_y"
+                || event.id() == "menu_voxel_mirror_z"
+            {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-not-implemented",
+                    "This voxel transform is not wired up in the desktop build yet.",
+                );
+            } else if event.id() == "menu_sel_all" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_select_all(app.clone(), state);
+            } else if event.id() == "menu_sel_connected" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_add_connected_at_cursor(app.clone(), state);
+            } else if event.id() == "menu_sel_grow" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_grow(app.clone(), state);
+            } else if event.id() == "menu_sel_shrink" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_shrink(app.clone(), state);
+            } else if event.id() == "menu_sel_invert" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_invert(app.clone(), state);
+            } else if event.id() == "menu_sel_deselect_all" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_clear(app.clone(), state);
+            } else if event.id() == "menu_sel_deselect_inner" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_deselect_inner_voxels(app.clone(), state);
+            } else if event.id() == "menu_sel_deselect_voxels" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_retain_empty_only(app.clone(), state);
+            } else if event.id() == "menu_sel_deselect_empty" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_retain_solid_only(app.clone(), state);
+            } else if event.id() == "menu_sel_mode_replace" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_set_combine_mode(app.clone(), state, SelectionCombineMode::Replace);
+            } else if event.id() == "menu_sel_mode_add" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_set_combine_mode(app.clone(), state, SelectionCombineMode::Add);
+            } else if event.id() == "menu_sel_mode_subtract" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_set_combine_mode(app.clone(), state, SelectionCombineMode::Subtract);
+            } else if event.id() == "menu_sel_mode_intersect" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_set_combine_mode(
+                    app.clone(),
+                    state,
+                    SelectionCombineMode::Intersect,
+                );
+            } else if event.id() == "menu_sel_by_color" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-selection-mode",
+                    "selectByColor",
+                );
+            } else if event.id() == "menu_sel_coplanar" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-selection-mode",
+                    "selectCoplanar",
+                );
+            } else if event.id() == "menu_sel_coplanar_empty" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-selection-mode",
+                    "selectCoplanarEmpty",
+                );
+            } else if event.id() == "menu_sel_match_material" {
+                #[cfg(desktop)]
+                if let Some(sel) = app.try_state::<SelectionMenuState>() {
+                    if let Ok(checked) = sel.match_material.is_checked() {
+                        let state = app.state::<Arc<ViewerState>>();
+                        if let Ok(mut g) = state.selection_match_material.lock() {
+                            *g = checked;
+                        }
+                        let _ = app.emit_to(
+                            EventTarget::webview_window("main"),
+                            "voxelle-menu-match-material",
+                            checked,
+                        );
+                    }
+                }
             }
         })
         .setup(move |app| {
             #[cfg(desktop)]
-            install_app_menu(app.handle())?;
+            {
+                let selection_menu_state = install_app_menu(app.handle())?;
+                app.manage(selection_menu_state);
+            }
 
             let window = app.get_webview_window("main").expect("main window");
             if headless_server_port.is_some() {
@@ -4466,6 +5996,7 @@ pub fn run() {
             get_last_session_info,
             create_new_project,
             voxel_pick_probe,
+            voxel_stroke_anchor_coord_at_screen,
             ping_cursor_pick,
             world_to_viewport_pixels,
             sync_preview_input,
@@ -4494,6 +6025,7 @@ pub fn run() {
             set_rendering_mode,
             get_orthographic,
             set_orthographic,
+            selection_menu_sync_match_material,
             set_tone_mapping,
             set_mood_params,
             set_fly_mode,
@@ -4505,12 +6037,37 @@ pub fn run() {
             selection_add_by_color_at_screen,
             selection_add_coplanar_at_screen,
             selection_add_coplanar_empty_at_screen,
+            selection_select_all,
+            selection_invert,
+            selection_grow,
+            selection_shrink,
+            selection_deselect_inner_voxels,
+            selection_retain_empty_only,
+            selection_retain_solid_only,
+            selection_add_connected_at_screen,
+            selection_add_connected_at_cursor,
+            selection_set_combine_mode,
+            get_selection_combine_mode,
             voxel_fill_at_screen,
             clipboard_copy_selection,
             clipboard_stamp_at_screen,
             clipboard_punch_at_screen,
             voxel_sculpt_raise_at_screen,
+            voxel_sculpt_stroke_at_screen,
             generator_sphere_at_screen,
+            generator_rocks_at_screen,
+            generator_grass_at_screen,
+            generator_rope_at_screen,
+            generator_squishy_metaball_at_screen,
+            squishy_session_get,
+            squishy_session_set_mode,
+            squishy_session_set_flags,
+            squishy_metaball_add_at_screen,
+            squishy_metaball_remove,
+            squishy_metaball_select,
+            squishy_session_clear,
+            squishy_session_commit,
+            squishy_pick_at_screen,
             export_mesh_glb,
             get_scene_objects,
             set_active_object,
@@ -4588,6 +6145,46 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
+    Arc::new(ViewerState {
+        viewer: Mutex::new(None),
+        camera: Mutex::new(OrbitCamera::new()),
+        file_label: Mutex::new(String::new()),
+        current_file: Mutex::new(None),
+        voxel_map: Mutex::new(None),
+        preview_cursor: Mutex::new(None),
+        preview_mode: Mutex::new(PreviewMode::Navigate),
+        rendering_mode: Mutex::new(RenderingMode::Greedy),
+        fps: Mutex::new(FpsCounter {
+            period_start: None,
+            accum_frames: 0,
+            last_fps: 0,
+        }),
+        last_edit_perf: Mutex::new(None),
+        last_scene_bounds: Mutex::new(None),
+        mesh_refresh_generation: AtomicU64::new(0),
+        voxel_edit_stats_cache: Mutex::new(None),
+        edit_undo: Mutex::new(Vec::new()),
+        edit_redo: Mutex::new(Vec::new()),
+        stroke_active: Mutex::new(false),
+        stroke_buffer: Mutex::new(Vec::new()),
+        collab: Arc::new(std::sync::Mutex::new(collab::CollabRuntime::default())),
+        ping_flash: Mutex::new(None),
+        autosave_interval_secs: Mutex::new(120),
+        last_autosave: Mutex::new(None),
+        autosave_enabled: Mutex::new(true),
+        autosave_keep_count: Mutex::new(5),
+        autosave_slot: Mutex::new(HashMap::new()),
+        fly_mode: Mutex::new(false),
+        selection_cells: Mutex::new(AHashSet::new()),
+        selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
+        selection_match_material: Mutex::new(false),
+        stamp_clipboard: Mutex::new(None),
+        squishy_session: Mutex::new(generators::SquishySession::new()),
+    })
 }
 
 #[cfg(test)]

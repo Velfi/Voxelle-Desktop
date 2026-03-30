@@ -36,7 +36,7 @@ use crate::voxelle::{SceneObject, Voxel};
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
-use tauri::AppHandle;
+use tauri::{AppHandle, Runtime};
 use wgpu::util::DeviceExt;
 
 /// Bump when [`gpu::mesh_greedy::WGSL`] bind group layout changes.
@@ -285,6 +285,12 @@ struct PostCompositeOpts {
     grain_strength: f32,
     vignette_strength: f32,
     distance_tint_strength: f32,
+    /// Extra horizon fog (web atmosphere tool).
+    atmosphere_strength: f32,
+    /// Stylized radial streak (web sun shafts).
+    sun_shaft_strength: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 pub struct WgpuViewer {
@@ -1454,6 +1460,10 @@ impl WgpuViewer {
             grain_strength: 0.0,
             vignette_strength: 0.0,
             distance_tint_strength: 0.0,
+            atmosphere_strength: 0.0,
+            sun_shaft_strength: 0.0,
+            _pad0: 0.0,
+            _pad1: 0.0,
         };
         let post_composite_opts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("post_composite_opts"),
@@ -1834,11 +1844,20 @@ impl WgpuViewer {
         );
     }
 
-    /// Film grain, edge vignette, and screen-space distance tint (0–1 each), after tone mapping.
-    pub fn set_mood_params(&mut self, grain: f32, vignette: f32, distance_tint: f32) {
+    /// Film grain, edge vignette, screen-space distance tint, atmosphere, sun shafts (0–1 each).
+    pub fn set_mood_params(
+        &mut self,
+        grain: f32,
+        vignette: f32,
+        distance_tint: f32,
+        atmosphere: f32,
+        sun_shafts: f32,
+    ) {
         self.post_composite_opts.grain_strength = grain.clamp(0.0, 1.0);
         self.post_composite_opts.vignette_strength = vignette.clamp(0.0, 1.0);
         self.post_composite_opts.distance_tint_strength = distance_tint.clamp(0.0, 1.0);
+        self.post_composite_opts.atmosphere_strength = atmosphere.clamp(0.0, 1.0);
+        self.post_composite_opts.sun_shaft_strength = sun_shafts.clamp(0.0, 1.0);
         self.queue.write_buffer(
             &self.post_composite_opts_buf,
             0,
@@ -2108,11 +2127,11 @@ impl WgpuViewer {
     /// Rebuild GPU buffers for `keys` only. Returns `true` if only those chunks were updated; `false` if a full chunked upload ran (origin drift).
     ///
     /// Incremental greedy: [`greedy_mesh::pack_gpu_greedy_slices`] plus GPU greedy compute (same pipeline as [`Self::run_mesh_greedy_compute_with_brick`]) per dirty chunk unless `VOXELLE_CPU_CHUNK_REMESH` is set (any value forces CPU [`greedy_mesh::mesh_buffers_for_chunk_key`] only).
-    pub fn remesh_opaque_chunks(
+    pub fn remesh_opaque_chunks<R: Runtime>(
         &mut self,
         keys: &[ChunkKey],
         voxels: &[Voxel],
-        work_progress: Option<&AppHandle>,
+        work_progress: Option<&AppHandle<R>>,
     ) -> (bool, RemeshOpaquePerf) {
         let mut perf = RemeshOpaquePerf::default();
         let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;

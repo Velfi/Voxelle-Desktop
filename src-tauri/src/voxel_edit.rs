@@ -2,6 +2,9 @@
 
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
+use crate::stroke_modes::{
+    stroke_anchor_centers_with_mode, DrawStrokeMode, PlaneAxis, StrokeAux,
+};
 use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use ahash::{AHashMap, AHashSet};
 use glam::{Vec3, Vec4};
@@ -131,7 +134,7 @@ fn exit_t_axis(ox: f32, dx: f32, c: i32, t_min: f32) -> f32 {
 }
 
 /// First solid voxel along the ray within the grid bounding box, and the previous empty cell visited (adjacent along the ray).
-fn ray_first_solid(
+pub(crate) fn ray_first_solid(
     origin: Vec3,
     dir: Vec3,
     occupied: &AHashMap<VoxelCoord, usize>,
@@ -253,7 +256,7 @@ pub fn preview_remove_cell(
 }
 
 #[inline]
-fn anchor_for_edit(
+pub(crate) fn anchor_for_edit(
     tool: EditTool,
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
@@ -268,47 +271,6 @@ fn anchor_for_edit(
         EditTool::Remove | EditTool::Paint => {
             preview_remove_cell(file, voxel_map, camera, width, height, sx, sy)
         }
-    }
-}
-
-/// Stroke anchor cells: line between press and cursor, segment between previous and current sample,
-/// or a single-ray sample when neither line nor segment is set.
-fn stroke_anchor_centers(
-    tool: EditTool,
-    file: &VoxelleFile,
-    voxel_map: &AHashMap<VoxelCoord, usize>,
-    camera: &OrbitCamera,
-    width: f32,
-    height: f32,
-    sx: f32,
-    sy: f32,
-    stroke_line_start: Option<(f32, f32)>,
-    stroke_segment_prev: Option<(f32, f32)>,
-) -> Vec<(i32, i32, i32)> {
-    if let Some((lsx, lsy)) = stroke_line_start {
-        match (
-            anchor_for_edit(tool, file, voxel_map, camera, width, height, lsx, lsy),
-            anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy),
-        ) {
-            (Some(a), Some(b)) => voxel_line_dda(a, b),
-            _ => anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
-                .into_iter()
-                .collect(),
-        }
-    } else if let Some((px, py)) = stroke_segment_prev {
-        match (
-            anchor_for_edit(tool, file, voxel_map, camera, width, height, px, py),
-            anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy),
-        ) {
-            (Some(a), Some(b)) => voxel_line_dda(a, b),
-            _ => anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
-                .into_iter()
-                .collect(),
-        }
-    } else {
-        anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
-            .into_iter()
-            .collect()
     }
 }
 
@@ -352,7 +314,7 @@ fn spray_passes(cell: (i32, i32, i32), spray: f32) -> bool {
 }
 
 /// Voxel centers along a 3D line (inclusive endpoints).
-fn voxel_line_dda(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
+pub(crate) fn voxel_line_dda(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
     let dx = b.0 - a.0;
     let dy = b.1 - a.1;
     let dz = b.2 - a.2;
@@ -370,7 +332,7 @@ fn voxel_line_dda(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)
     pts
 }
 
-fn neighbors_6(c: VoxelCoord) -> [VoxelCoord; 6] {
+pub fn neighbors_6(c: VoxelCoord) -> [VoxelCoord; 6] {
     let (x, y, z) = c;
     [
         (x + 1, y, z),
@@ -443,6 +405,60 @@ pub fn flood_fill_paint_at_screen(
         }
     }
     Ok(out)
+}
+
+/// 6-connected solid voxels matching the seed hit's color (and optionally material) — selection / flood without edits.
+pub fn connected_solid_same_color_from_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    match_material: bool,
+) -> Option<Vec<VoxelCoord>> {
+    let grid_size = file.grid_size.max(1);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return None;
+    };
+    let Some(&seed_idx) = voxel_map.get(&hit) else {
+        return None;
+    };
+    let seed = file.voxels[seed_idx];
+    let tc = seed.color;
+    let tm = seed.material;
+
+    let mut out: Vec<VoxelCoord> = Vec::new();
+    let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
+    let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
+    visited.insert(hit);
+    queue.push_back(hit);
+
+    while let Some(c) = queue.pop_front() {
+        let Some(&idx) = voxel_map.get(&c) else {
+            continue;
+        };
+        let v = file.voxels[idx];
+        if v.color != tc || (match_material && v.material != tm) {
+            continue;
+        }
+        out.push(c);
+        for n in neighbors_6(c) {
+            if !in_grid(n.0, n.1, n.2, grid_size) {
+                continue;
+            }
+            if visited.insert(n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 /// Face-connected empty cells on the same plane as the add-cell in front of the ray hit.
@@ -574,6 +590,7 @@ pub fn pick_voxel_at_screen(
 /// pointer-down and `(sx, sy)` (Stroke / line mode).
 /// `stroke_segment_prev`: when `stroke_line_start` is `None` and this is `Some`, samples along
 /// the segment from the previous screen position to `(sx, sy)` (Brush path / web spray-style drag).
+#[allow(clippy::too_many_arguments)]
 pub fn apply_edit(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
@@ -590,11 +607,17 @@ pub fn apply_edit(
     spray_density: f32,
     stroke_line_start: Option<(f32, f32)>,
     stroke_segment_prev: Option<(f32, f32)>,
+    stroke_mode: DrawStrokeMode,
+    plane_axis: PlaneAxis,
+    stroke_aux: &StrokeAux,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = file.grid_size.max(1);
     let offsets = brush_offset_cells(brush_shape, brush_radius);
     let spray = spray_density.clamp(0.0, 1.0);
-    let centers = stroke_anchor_centers(
+    let centers = stroke_anchor_centers_with_mode(
+        stroke_mode,
+        plane_axis,
+        stroke_aux,
         tool,
         file,
         voxel_map,
@@ -603,6 +626,7 @@ pub fn apply_edit(
         height,
         sx,
         sy,
+        brush_radius,
         stroke_line_start,
         stroke_segment_prev,
     );
@@ -709,6 +733,475 @@ pub fn apply_edit(
     }
 
     Ok(out)
+}
+
+/// Matches web [`SculptMode`](digital-garden) for stroke-based sculpting (excluding rope/cloth generators).
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SculptStrokeMode {
+    Draw,
+    Smooth,
+    Gouge,
+    Wall,
+    Terrain,
+    Branch,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TerrainSculptOp {
+    Raise,
+    Lower,
+    Smooth,
+}
+
+#[inline]
+fn sculpt_edit_tool(mode: SculptStrokeMode) -> EditTool {
+    match mode {
+        SculptStrokeMode::Draw
+        | SculptStrokeMode::Wall
+        | SculptStrokeMode::Branch
+        | SculptStrokeMode::Terrain => EditTool::Add,
+        SculptStrokeMode::Smooth | SculptStrokeMode::Gouge => EditTool::Remove,
+    }
+}
+
+fn stroke_anchor_centers_sculpt(
+    mode: SculptStrokeMode,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+) -> Vec<(i32, i32, i32)> {
+    let tool = sculpt_edit_tool(mode);
+    stroke_anchor_centers_with_mode(
+        DrawStrokeMode::Line,
+        PlaneAxis::Auto,
+        &StrokeAux::default(),
+        tool,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        0,
+        stroke_line_start,
+        stroke_segment_prev,
+    )
+}
+
+fn smoothstep01(t: f32) -> f32 {
+    let x = t.clamp(0.0, 1.0);
+    x * x * (3.0 - 2.0 * x)
+}
+
+/// XZ distance falloff to nearest spine sample (column centers), matching web terrain brush.
+fn terrain_brush_falloff(x: i32, z: i32, spine: &[(i32, i32, i32)], brush_radius_vox: f32) -> f32 {
+    let mut d_min = f32::INFINITY;
+    for (px, _, pz) in spine {
+        let d = (((x - px).pow(2) + (z - pz).pow(2)) as f32).sqrt();
+        if d < d_min {
+            d_min = d;
+        }
+    }
+    if !d_min.is_finite() {
+        return 0.0;
+    }
+    let r = brush_radius_vox.max(0.25) + 0.25;
+    let u = (d_min / r).clamp(0.0, 1.0);
+    1.0 - smoothstep01(u)
+}
+
+fn column_top_bottom(
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    grid_size: i32,
+    x: i32,
+    z: i32,
+) -> Option<(i32, i32)> {
+    let (y_lo, y_hi) = grid_valid_range(grid_size);
+    let mut max_y: Option<i32> = None;
+    for y in (y_lo..=y_hi).rev() {
+        if voxel_map.contains_key(&(x, y, z)) {
+            max_y = Some(y);
+            break;
+        }
+    }
+    let max_y = max_y?;
+    let mut min_y = y_lo;
+    for y in y_lo..=max_y {
+        if voxel_map.contains_key(&(x, y, z)) {
+            min_y = y;
+            break;
+        }
+    }
+    Some((min_y, max_y))
+}
+
+fn column_max_y(
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    grid_size: i32,
+    x: i32,
+    z: i32,
+) -> Option<i32> {
+    let (y_lo, y_hi) = grid_valid_range(grid_size);
+    for y in (y_lo..=y_hi).rev() {
+        if voxel_map.contains_key(&(x, y, z)) {
+            return Some(y);
+        }
+    }
+    None
+}
+
+/// Heightfield terrain: columns listed in `cols` are rebuilt from `y_fill` through target height.
+fn apply_terrain_sculpt(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    grid_size: i32,
+    cols: &[(i32, i32)],
+    col_meta: &[(i32, i32, i32, i32, Voxel)], // x, z, y_fill, old_max, template voxel appearance
+    new_heights: &[i32],
+) -> Vec<VoxelEditDelta> {
+    let mut out: Vec<VoxelEditDelta> = Vec::new();
+    let (y_lo, y_hi) = grid_valid_range(grid_size);
+    for (i, &(x, z)) in cols.iter().enumerate() {
+        let h = new_heights[i];
+        let (y_fill, _old_max, template) = {
+            let m = &col_meta[i];
+            (m.2, m.3, m.4)
+        };
+        for y in y_lo..=y_hi {
+            let want = h >= y_fill && y >= y_fill && y <= h;
+            let had = voxel_map.contains_key(&(x, y, z));
+            if had && !want {
+                let Some(&remove_idx) = voxel_map.get(&(x, y, z)) else {
+                    continue;
+                };
+                let removed_voxel = file.voxels[remove_idx];
+                let last = file.voxels.len() - 1;
+                if remove_idx != last {
+                    file.voxels.swap(remove_idx, last);
+                    let moved = file.voxels[remove_idx];
+                    voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+                }
+                file.voxels.pop();
+                voxel_map.remove(&(x, y, z));
+                out.push(VoxelEditDelta::Removed {
+                    voxel: removed_voxel,
+                });
+            } else if want {
+                let key = (x, y, z);
+                if let Some(&idx) = voxel_map.get(&key) {
+                    let before = file.voxels[idx];
+                    if before.color != template.color || before.material != template.material {
+                        let after = Voxel {
+                            color: template.color,
+                            material: template.material,
+                            ..before
+                        };
+                        file.voxels[idx] = after;
+                        out.push(VoxelEditDelta::Painted { before, after });
+                    }
+                } else {
+                    let nv = Voxel {
+                        x,
+                        y,
+                        z,
+                        color: template.color,
+                        material: template.material,
+                        object_id: file.active_object_id,
+                    };
+                    let idx = file.voxels.len();
+                    file.voxels.push(nv);
+                    voxel_map.insert(key, idx);
+                    out.push(VoxelEditDelta::Added(nv));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Stroke-based sculpt: draw / gouge / smooth / wall / branch behave like add/remove/smooth;
+/// terrain uses column heightfield ops (web `applyTerrainStroke`).
+pub fn apply_sculpt_stroke(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    mode: SculptStrokeMode,
+    color: u32,
+    material: MaterialId,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    terrain_op: Option<TerrainSculptOp>,
+    terrain_base_y: i32,
+    terrain_strength: i32,
+    terrain_smooth_radius: i32,
+    smooth_neighbor_passes: u32,
+) -> Result<Vec<VoxelEditDelta>, String> {
+    let grid_size = file.grid_size.max(1);
+    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let spray = spray_density.clamp(0.0, 1.0);
+
+    let spine = stroke_anchor_centers_sculpt(
+        mode,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if spine.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut footprint: Vec<(i32, i32, i32)> = Vec::new();
+    for (cx, cy, cz) in &spine {
+        for (dx, dy, dz) in &offsets {
+            let x = cx + dx;
+            let y = cy + dy;
+            let z = cz + dz;
+            if !in_grid(x, y, z, grid_size) {
+                continue;
+            }
+            if !spray_passes((x, y, z), spray) {
+                continue;
+            }
+            if seen.insert((x, y, z)) {
+                footprint.push((x, y, z));
+            }
+        }
+    }
+    if footprint.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    match mode {
+        SculptStrokeMode::Draw | SculptStrokeMode::Wall | SculptStrokeMode::Branch => {
+            let mut out: Vec<VoxelEditDelta> = Vec::new();
+            for (x, y, z) in footprint {
+                if voxel_map.contains_key(&(x, y, z)) {
+                    continue;
+                }
+                let nv = Voxel {
+                    x,
+                    y,
+                    z,
+                    color,
+                    material,
+                    object_id: file.active_object_id,
+                };
+                let idx = file.voxels.len();
+                file.voxels.push(nv);
+                voxel_map.insert((x, y, z), idx);
+                out.push(VoxelEditDelta::Added(nv));
+            }
+            Ok(out)
+        }
+        SculptStrokeMode::Gouge => {
+            let mut out: Vec<VoxelEditDelta> = Vec::new();
+            for (x, y, z) in footprint {
+                let Some(&remove_idx) = voxel_map.get(&(x, y, z)) else {
+                    continue;
+                };
+                let removed_voxel = file.voxels[remove_idx];
+                let last = file.voxels.len() - 1;
+                if remove_idx != last {
+                    file.voxels.swap(remove_idx, last);
+                    let moved = file.voxels[remove_idx];
+                    voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+                }
+                file.voxels.pop();
+                voxel_map.remove(&(x, y, z));
+                out.push(VoxelEditDelta::Removed {
+                    voxel: removed_voxel,
+                });
+            }
+            Ok(out)
+        }
+        SculptStrokeMode::Smooth => {
+            let mut candidates: Vec<VoxelCoord> = Vec::new();
+            for (x, y, z) in &footprint {
+                if voxel_map.contains_key(&(*x, *y, *z)) {
+                    candidates.push((*x, *y, *z));
+                }
+            }
+            if candidates.is_empty() {
+                return Ok(Vec::new());
+            }
+            let passes = smooth_neighbor_passes.max(1);
+            let mut out: Vec<VoxelEditDelta> = Vec::new();
+            for _ in 0..passes {
+                let mut paints: Vec<(VoxelCoord, u32, MaterialId)> = Vec::new();
+                for &(x, y, z) in &candidates {
+                    let mut counts: AHashMap<(u32, MaterialId), u32> = AHashMap::new();
+                    for (nx, ny, nz) in neighbors_6((x, y, z)) {
+                        if let Some(&idx) = voxel_map.get(&(nx, ny, nz)) {
+                            let v = file.voxels[idx];
+                            *counts.entry((v.color, v.material)).or_insert(0) += 1;
+                        }
+                    }
+                    let Some(&idx) = voxel_map.get(&(x, y, z)) else {
+                        continue;
+                    };
+                    let before = file.voxels[idx];
+                    *counts.entry((before.color, before.material)).or_insert(0) += 1;
+                    let mut best: Option<((u32, MaterialId), u32)> = None;
+                    for (k, c) in counts {
+                        match best {
+                            None => best = Some((k, c)),
+                            Some((_bk, bc)) if c > bc => best = Some((k, c)),
+                            Some((bk, bc)) if c == bc && k.0 < bk.0 => best = Some((k, c)),
+                            _ => {}
+                        }
+                    }
+                    let Some(((nc, nm), _)) = best else { continue };
+                    if nc != before.color || nm != before.material {
+                        paints.push(((x, y, z), nc, nm));
+                    }
+                }
+                for ((x, y, z), nc, nm) in paints {
+                    let Some(&idx) = voxel_map.get(&(x, y, z)) else {
+                        continue;
+                    };
+                    let before = file.voxels[idx];
+                    if before.color == nc && before.material == nm {
+                        continue;
+                    }
+                    let after = Voxel {
+                        color: nc,
+                        material: nm,
+                        ..before
+                    };
+                    file.voxels[idx] = after;
+                    out.push(VoxelEditDelta::Painted { before, after });
+                }
+            }
+            Ok(out)
+        }
+        SculptStrokeMode::Terrain => {
+            let op = terrain_op.unwrap_or(TerrainSculptOp::Raise);
+            let base_y = terrain_base_y;
+            let strength = terrain_strength.max(0).min(64);
+            let smooth_r = terrain_smooth_radius.max(0).min(8);
+
+            let mut xz_map: AHashMap<(i32, i32), (i32, i32)> = AHashMap::new();
+            for (x, y, z) in &footprint {
+                if in_grid(*x, *y, *z, grid_size) {
+                    xz_map.entry((*x, *z)).or_insert((*x, *z));
+                }
+            }
+            if xz_map.is_empty() {
+                return Ok(Vec::new());
+            }
+            let cols: Vec<(i32, i32)> = xz_map.values().copied().collect();
+            let brush_r_vox = brush_radius as f32 * 0.5 + 0.5;
+
+            let mut col_meta: Vec<(i32, i32, i32, i32, Voxel)> = Vec::new();
+            for &(x, z) in &cols {
+                let ext = column_top_bottom(voxel_map, grid_size, x, z);
+                let y_fill = if let Some((min_y, _max_y)) = ext {
+                    base_y.min(min_y)
+                } else {
+                    base_y
+                };
+                let old_max = ext.map(|(_, m)| m).unwrap_or(y_fill - 1);
+                let template = if let Some(my) = column_max_y(voxel_map, grid_size, x, z) {
+                    let idx = *voxel_map.get(&(x, my, z)).unwrap();
+                    file.voxels[idx]
+                } else {
+                    Voxel {
+                        x,
+                        y: y_fill,
+                        z,
+                        color,
+                        material,
+                        object_id: file.active_object_id,
+                    }
+                };
+
+                col_meta.push((x, z, y_fill, old_max, template));
+            }
+
+            let mut new_heights: Vec<i32> = vec![0; cols.len()];
+
+            match op {
+                TerrainSculptOp::Raise | TerrainSculptOp::Lower => {
+                    for (i, &(x, z)) in cols.iter().enumerate() {
+                        let meta = &col_meta[i];
+                        let old_max = meta.3;
+                        let y_fill = meta.2;
+                        let t = terrain_brush_falloff(x, z, &spine, brush_r_vox);
+                        let delta = (strength as f32 * t).round() as i32;
+                        let old_h = old_max;
+                        let h = if matches!(op, TerrainSculptOp::Raise) {
+                            old_h + delta
+                        } else {
+                            (old_h - delta).max(y_fill - 1)
+                        };
+                        new_heights[i] = h;
+                    }
+                }
+                TerrainSculptOp::Smooth => {
+                    let mut surface_cache: AHashMap<(i32, i32), i32> = AHashMap::new();
+                    let mut surface_h = |sx: i32, sz: i32| -> i32 {
+                        if let Some(&h) = surface_cache.get(&(sx, sz)) {
+                            return h;
+                        }
+                        let h = column_max_y(voxel_map, grid_size, sx, sz).unwrap_or(base_y - 1);
+                        surface_cache.insert((sx, sz), h);
+                        h
+                    };
+                    for (i, &(x, z)) in cols.iter().enumerate() {
+                        let mut sum: i32 = 0;
+                        let mut cnt: i32 = 0;
+                        for dz in -smooth_r..=smooth_r {
+                            for dx in -smooth_r..=smooth_r {
+                                let nx = x + dx;
+                                let nz = z + dz;
+                                if !in_grid(nx, base_y, nz, grid_size) {
+                                    continue;
+                                }
+                                sum += surface_h(nx, nz);
+                                cnt += 1;
+                            }
+                        }
+                        let avg = if cnt > 0 { sum / cnt } else { surface_h(x, z) };
+                        let meta = &col_meta[i];
+                        let y_fill = meta.2;
+                        new_heights[i] = avg.max(y_fill - 1);
+                    }
+                }
+            }
+
+            Ok(apply_terrain_sculpt(
+                file,
+                voxel_map,
+                grid_size,
+                &cols,
+                &col_meta,
+                &new_heights,
+            ))
+        }
+    }
 }
 
 pub fn apply_forward_delta(
@@ -1192,5 +1685,57 @@ mod tests {
         let ((x, y, z), prev) = r.unwrap();
         assert_eq!((x, y, z), (0, 0, 0));
         assert_eq!(prev, Some((0, 0, 1)));
+    }
+
+    #[test]
+    fn sculpt_stroke_draw_adds_empty_cells() {
+        let mut file = VoxelleFile {
+            version: 4,
+            grid_size: 16,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            voxels: vec![Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xff0000,
+                material: crate::voxelle::MaterialId::Plastic,
+                object_id: 0,
+            }],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        vm.insert((0, 0, 0), 0);
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let w = 256.0_f32;
+        let h = 256.0_f32;
+        let deltas = apply_sculpt_stroke(
+            &mut file,
+            &mut vm,
+            &cam,
+            w,
+            h,
+            128.0,
+            128.0,
+            SculptStrokeMode::Draw,
+            0x00ff00,
+            crate::voxelle::MaterialId::Plastic,
+            0,
+            BrushShape::Sphere,
+            0.0,
+            None,
+            None,
+            None,
+            0,
+            4,
+            2,
+            1,
+        )
+        .unwrap();
+        assert!(!deltas.is_empty());
     }
 }

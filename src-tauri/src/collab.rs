@@ -15,7 +15,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Runtime};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::watch;
@@ -320,8 +320,8 @@ pub fn schedule_remove_upnp_mapping(external_tcp_port: u16) {
     });
 }
 
-async fn try_upnp_internet_share(
-    app: AppHandle,
+async fn try_upnp_internet_share<R: Runtime>(
+    app: AppHandle<R>,
     collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
     lan_ip: IpAddr,
     port: u16,
@@ -420,8 +420,8 @@ pub(crate) enum CollabPeerLeftKind {
     Disconnected,
 }
 
-fn apply_deltas_on_main(
-    app: &AppHandle,
+fn apply_deltas_on_main<R: Runtime>(
+    app: &AppHandle<R>,
     state: &Arc<ViewerState>,
     deltas: &[voxel_edit::VoxelEditDelta],
 ) -> Result<(), String> {
@@ -464,8 +464,8 @@ fn apply_deltas_on_main(
     rx.recv().map_err(|_| "main thread closed".to_string())?
 }
 
-fn replace_file_on_main(
-    app: &AppHandle,
+fn replace_file_on_main<R: Runtime>(
+    app: &AppHandle<R>,
     state: &Arc<ViewerState>,
     bytes: &[u8],
 ) -> Result<(), String> {
@@ -483,17 +483,18 @@ fn replace_file_on_main(
         Some(app),
     )?;
     let app = app.clone();
-    let state = Arc::clone(state);
+    let state_apply = Arc::clone(state);
+    let state_emit = Arc::clone(state);
     let app_mesh = app.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = app.run_on_main_thread(move || {
-        let r = crate::apply_mesh_and_camera(&state, &app_mesh, file, prepared);
+        let r = crate::apply_mesh_and_camera(&state_apply, &app_mesh, file, prepared);
         let _ = tx.send(r);
     });
     let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
     match main_result {
         Ok(()) => {
-            let _ = app.emit("voxelle-loaded", "collab snapshot");
+            crate::emit_voxelle_loaded(&app, "collab snapshot".to_string(), state_emit.as_ref());
             Ok(())
         }
         Err(e) => {
@@ -503,8 +504,8 @@ fn replace_file_on_main(
     }
 }
 
-pub fn host_apply_remote_edit(
-    app: &AppHandle,
+pub fn host_apply_remote_edit<R: Runtime>(
+    app: &AppHandle<R>,
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
@@ -520,8 +521,8 @@ pub fn host_apply_remote_edit(
     Ok(())
 }
 
-pub fn host_undo_peer(
-    app: &AppHandle,
+pub fn host_undo_peer<R: Runtime>(
+    app: &AppHandle<R>,
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
@@ -559,8 +560,8 @@ pub fn host_undo_peer(
     Ok(Some(mesh_refresh))
 }
 
-pub fn host_redo_peer(
-    app: &AppHandle,
+pub fn host_redo_peer<R: Runtime>(
+    app: &AppHandle<R>,
     state: &Arc<ViewerState>,
     collab: &mut CollabRuntime,
     peer_id: u32,
@@ -596,7 +597,11 @@ pub fn host_redo_peer(
     Ok(Some(out))
 }
 
-fn emit_and_broadcast(collab: &std::sync::Mutex<CollabRuntime>, _app: &AppHandle, json: &str) {
+fn emit_and_broadcast<R: Runtime>(
+    collab: &std::sync::Mutex<CollabRuntime>,
+    _app: &AppHandle<R>,
+    json: &str,
+) {
     if let Ok(g) = collab.lock() {
         if let Some(tx) = &g.host_broadcast {
             let _ = tx.send(json.to_string());
@@ -605,9 +610,9 @@ fn emit_and_broadcast(collab: &std::sync::Mutex<CollabRuntime>, _app: &AppHandle
 }
 
 /// Host local edit after GPU sync: notify guests + UI.
-pub fn host_emit_edit_batch(
+pub fn host_emit_edit_batch<R: Runtime>(
     collab_mtx: &std::sync::Mutex<CollabRuntime>,
-    app: &AppHandle,
+    app: &AppHandle<R>,
     seq: u64,
     peer_id: u32,
     deltas: &[voxel_edit::VoxelEditDelta],
@@ -669,8 +674,8 @@ pub fn host_kick_peer(collab_mtx: &std::sync::Mutex<CollabRuntime>, target_peer:
     Ok(())
 }
 
-pub(crate) fn broadcast_roster_to_guests(
-    app: &AppHandle,
+pub(crate) fn broadcast_roster_to_guests<R: Runtime>(
+    app: &AppHandle<R>,
     collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
     roster: &[RosterEntry],
 ) {
@@ -690,8 +695,8 @@ pub(crate) fn broadcast_roster_to_guests(
     }
 }
 
-fn host_remove_peer_from_session(
-    app: &AppHandle,
+fn host_remove_peer_from_session<R: Runtime>(
+    app: &AppHandle<R>,
     collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
     peer_id: u32,
     notify: Option<CollabPeerLeftKind>,
@@ -742,10 +747,10 @@ fn touch_guest_activity(collab_mtx: &std::sync::Mutex<CollabRuntime>, peer_id: u
     }
 }
 
-async fn handle_host_connection(
+async fn handle_host_connection<R: Runtime>(
     mut ws: WsTcp,
     mut broadcast_rx: broadcast::Receiver<String>,
-    app: AppHandle,
+    app: AppHandle<R>,
     state: Arc<ViewerState>,
     collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
     peer_id: u32,
@@ -759,7 +764,7 @@ async fn handle_host_connection(
         r.color_rgb = color_rgb;
     }
     collab_mtx.lock().unwrap().roster = roster.clone();
-    let _ = app.emit("collab-roster", serde_json::to_string(&roster).unwrap());
+    broadcast_roster_to_guests(&app, &collab_mtx, &roster);
 
     let snap_result: Result<Vec<u8>, String> = (|| {
         let g = state
@@ -848,10 +853,15 @@ async fn handle_host_connection(
                 break;
             }
             ClientToHost::Edit { deltas } => {
-                let allowed = roster
-                    .iter()
-                    .find(|r| r.peer_id == peer_id)
-                    .map(|r| r.can_edit)
+                let allowed = collab_mtx
+                    .lock()
+                    .ok()
+                    .and_then(|g| {
+                        g.roster
+                            .iter()
+                            .find(|r| r.peer_id == peer_id)
+                            .map(|r| r.can_edit)
+                    })
                     .unwrap_or(false);
                 if !allowed {
                     let _ = ws
@@ -883,6 +893,27 @@ async fn handle_host_connection(
                 emit_and_broadcast(&collab_mtx, &app, &json);
             }
             ClientToHost::Undo => {
+                let allowed = collab_mtx
+                    .lock()
+                    .ok()
+                    .and_then(|g| {
+                        g.roster
+                            .iter()
+                            .find(|r| r.peer_id == peer_id)
+                            .map(|r| r.can_edit)
+                    })
+                    .unwrap_or(false);
+                if !allowed {
+                    let _ = ws
+                        .send(Message::Text(
+                            serde_json::to_string(&HostToClient::Deny {
+                                reason: "editing not allowed".into(),
+                            })
+                            .unwrap(),
+                        ))
+                        .await;
+                    continue;
+                }
                 let mesh = {
                     let mut c = collab_mtx.lock().unwrap();
                     host_undo_peer(&app, &state, &mut c, peer_id)
@@ -900,6 +931,27 @@ async fn handle_host_connection(
                 emit_and_broadcast(&collab_mtx, &app, &json);
             }
             ClientToHost::Redo => {
+                let allowed = collab_mtx
+                    .lock()
+                    .ok()
+                    .and_then(|g| {
+                        g.roster
+                            .iter()
+                            .find(|r| r.peer_id == peer_id)
+                            .map(|r| r.can_edit)
+                    })
+                    .unwrap_or(false);
+                if !allowed {
+                    let _ = ws
+                        .send(Message::Text(
+                            serde_json::to_string(&HostToClient::Deny {
+                                reason: "editing not allowed".into(),
+                            })
+                            .unwrap(),
+                        ))
+                        .await;
+                    continue;
+                }
                 let mesh = {
                     let mut c = collab_mtx.lock().unwrap();
                     host_redo_peer(&app, &state, &mut c, peer_id)
@@ -1020,8 +1072,8 @@ async fn handle_host_connection(
     }
 }
 
-pub fn start_host(
-    app: AppHandle,
+pub fn start_host<R: Runtime>(
+    app: AppHandle<R>,
     state: Arc<ViewerState>,
     collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
     port: u16,
@@ -1243,9 +1295,9 @@ fn format_ws_connect_failure(url: &str, err: tokio_tungstenite::tungstenite::Err
     format!("Could not open a WebSocket to:\n{url}\n\n{detail}\n\n{hint}")
 }
 
-pub async fn client_connect_blocking(
+pub async fn client_connect_blocking<R: Runtime>(
     url: &str,
-    app: AppHandle,
+    app: AppHandle<R>,
     state: Arc<ViewerState>,
     collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
     display_name: String,
@@ -1456,4 +1508,369 @@ pub async fn client_connect_blocking(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::minimal_viewer_state_for_collab_tests;
+    use crate::voxel_edit::VoxelEditDelta;
+    use crate::voxelle::{MaterialId, Voxel};
+    use futures_util::{SinkExt, StreamExt};
+    use std::net::TcpListener;
+    use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
+
+    type TestWs = tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+    fn pick_listen_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    }
+
+    fn stop_host(cm: &Arc<std::sync::Mutex<CollabRuntime>>) {
+        cm.lock().unwrap().leave();
+    }
+
+    async fn ws_join(
+        port: u16,
+    ) -> Result<
+        (
+            futures_util::stream::SplitSink<TestWs, Message>,
+            futures_util::stream::SplitStream<TestWs>,
+            u32,
+        ),
+        String,
+    > {
+        let url = format!("ws://127.0.0.1:{port}");
+        let (ws, _) = connect_async(&url).await.map_err(|e| e.to_string())?;
+        let (mut write, mut read) = ws.split();
+        let join = serde_json::to_string(&ClientToHost::Join {
+            display_name: "Guest".into(),
+            color_rgb: 0xff_00_ff,
+        })
+        .unwrap();
+        write
+            .send(Message::Text(join))
+            .await
+            .map_err(|e| e.to_string())?;
+        let first = read
+            .next()
+            .await
+            .ok_or_else(|| "websocket closed".to_string())?
+            .map_err(|e| e.to_string())?;
+        let Message::Text(t) = first else {
+            return Err("expected text frame".into());
+        };
+        let welcome: HostToClient = serde_json::from_str(&t).map_err(|e| e.to_string())?;
+        let peer_id = match welcome {
+            HostToClient::Welcome { peer_id, .. } => peer_id,
+            _ => return Err("expected Welcome".into()),
+        };
+        Ok((write, read, peer_id))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn host_kick_sends_kicked_message() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (_w, mut read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        host_kick_peer(&cm, peer_id).expect("kick");
+
+        let next = read
+            .next()
+            .await
+            .expect("frame")
+            .expect("ws");
+        let Message::Text(t) = next else {
+            panic!("expected text");
+        };
+        let ev: HostToClient = serde_json::from_str(&t).unwrap();
+        match ev {
+            HostToClient::Kicked { reason } => {
+                assert!(reason.contains("removed by host"), "{}", reason);
+            }
+            other => panic!("expected Kicked: {other:?}"),
+        }
+        stop_host(&cm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reconnect_gets_new_peer_id_and_no_ghost() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        {
+            let (_w1, _r1, id_a) = ws_join(port).await.expect("join a");
+            assert_eq!(id_a, 2);
+        }
+
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let g = cm.lock().unwrap();
+            if g.roster.iter().all(|r| r.peer_id != 2) {
+                break;
+            }
+            drop(g);
+        }
+        {
+            let g = cm.lock().unwrap();
+            assert!(
+                g.roster.iter().all(|r| r.peer_id != 2),
+                "roster should not retain disconnected guest: {:?}",
+                g.roster
+            );
+        }
+
+        let (_w2, _r2, id_b) = ws_join(port).await.expect("join b");
+        assert_eq!(id_b, 3);
+        {
+            let g = cm.lock().unwrap();
+            let ids: Vec<u32> = g.roster.iter().map(|r| r.peer_id).collect();
+            assert_eq!(ids, vec![HOST_PEER_ID, 3]);
+        }
+        stop_host(&cm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn edit_denied_when_can_edit_false() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, mut read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        let dummy = Voxel {
+            x: 0,
+            y: 0,
+            z: 0,
+            color: 1,
+            material: MaterialId::Plastic,
+            object_id: 0,
+        };
+        let edit = serde_json::to_string(&ClientToHost::Edit {
+            deltas: vec![VoxelEditDelta::Added(dummy)],
+        })
+        .unwrap();
+        write
+            .send(Message::Text(edit))
+            .await
+            .expect("send edit");
+
+        let next = read
+            .next()
+            .await
+            .expect("frame")
+            .expect("ws");
+        let Message::Text(t) = next else {
+            panic!("expected text");
+        };
+        let ev: HostToClient = serde_json::from_str(&t).unwrap();
+        match ev {
+            HostToClient::Deny { reason } => {
+                assert!(reason.contains("editing not allowed"), "{}", reason);
+            }
+            other => panic!("expected Deny: {other:?}"),
+        }
+        stop_host(&cm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn edit_empty_allowed_when_can_edit_true() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle.clone(),
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, mut read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        {
+            let mut g = cm.lock().unwrap();
+            if let Some(r) = g.roster.iter_mut().find(|r| r.peer_id == 2) {
+                r.can_edit = true;
+            }
+            let roster = g.roster.clone();
+            drop(g);
+            broadcast_roster_to_guests(&handle, &cm, &roster);
+        }
+
+        let edit = serde_json::to_string(&ClientToHost::Edit { deltas: vec![] }).unwrap();
+        write
+            .send(Message::Text(edit))
+            .await
+            .expect("send edit");
+
+        loop {
+            let next = read.next().await.expect("frame").expect("ws");
+            let Message::Text(t) = next else {
+                continue;
+            };
+            let ev: HostToClient = serde_json::from_str(&t).unwrap();
+            match ev {
+                HostToClient::Roster { .. } | HostToClient::Keepalive => continue,
+                HostToClient::Deny { .. } => panic!("unexpected Deny when can_edit"),
+                HostToClient::Edit { .. } => break,
+                other => panic!("expected Edit broadcast: {other:?}"),
+            }
+        }
+        stop_host(&cm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn guest_set_can_edit_via_wire_is_ignored() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, _read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        let msg = serde_json::to_string(&ClientToHost::SetCanEdit {
+            target_peer: 2,
+            can_edit: true,
+        })
+        .unwrap();
+        write.send(Message::Text(msg)).await.expect("send");
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        {
+            let g = cm.lock().unwrap();
+            let guest = g.roster.iter().find(|r| r.peer_id == 2).expect("guest");
+            assert!(!guest.can_edit);
+        }
+        stop_host(&cm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn guest_leave_removes_from_roster() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, mut read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        let leave = serde_json::to_string(&ClientToHost::Leave).unwrap();
+        write.send(Message::Text(leave)).await.expect("leave");
+
+        let _ = read.next().await;
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        {
+            let g = cm.lock().unwrap();
+            assert_eq!(g.roster.len(), 1);
+            assert_eq!(g.roster[0].peer_id, HOST_PEER_ID);
+        }
+        stop_host(&cm);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn two_guests_distinct_peers() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (_w1, _r1, a) = ws_join(port).await.expect("g1");
+        let (_w2, _r2, b) = ws_join(port).await.expect("g2");
+        assert_eq!(a, 2);
+        assert_eq!(b, 3);
+        {
+            let g = cm.lock().unwrap();
+            assert_eq!(g.roster.len(), 3);
+        }
+        stop_host(&cm);
+    }
 }
