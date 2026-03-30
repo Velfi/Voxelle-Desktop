@@ -252,6 +252,16 @@ function App() {
     localStorage.setItem(LS_COLOR, accentColor);
   }, [accentColor]);
 
+  /** Keep roster / chat labels in sync when name or accent changes mid-session. */
+  useEffect(() => {
+    if (!collabActive) return;
+    const rgb = hexToRgb(accentColor);
+    void invoke("collab_update_profile", {
+      displayName,
+      colorRgb: rgb,
+    }).catch(() => {});
+  }, [displayName, accentColor, collabActive]);
+
   useEffect(() => {
     localStorage.setItem(LS_AUTOSAVE, String(autosaveSecs));
     void invoke("set_autosave_interval_secs", { secs: autosaveSecs }).catch(
@@ -552,7 +562,12 @@ function App() {
 
   const startHost = () => {
     setCollabBanner(null);
-    void invoke("collab_host_start", { port: hostPort }).then((url) => {
+    const rgb = hexToRgb(accentColor);
+    void invoke("collab_host_start", {
+      port: hostPort,
+      displayName,
+      colorRgb: rgb,
+    }).then((url) => {
       setHostWsUrl(url as string);
       setCollabActive(true);
     });

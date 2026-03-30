@@ -1377,9 +1377,18 @@ fn collab_host_start(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
     port: u16,
+    display_name: String,
+    color_rgb: u32,
 ) -> Result<String, String> {
     let vs = Arc::clone(&*state);
-    collab::start_host(app, vs.clone(), Arc::clone(&vs.collab), port)
+    collab::start_host(
+        app,
+        vs.clone(),
+        Arc::clone(&vs.collab),
+        port,
+        display_name,
+        color_rgb,
+    )
 }
 
 #[tauri::command]
@@ -1432,6 +1441,43 @@ fn collab_local_peer_id(state: State<'_, Arc<ViewerState>>) -> u32 {
 #[tauri::command]
 fn collab_kick_peer(state: State<'_, Arc<ViewerState>>, target_peer: u32) -> Result<(), String> {
     collab::host_kick_peer(&state.collab, target_peer)
+}
+
+#[tauri::command]
+fn collab_update_profile(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    display_name: String,
+    color_rgb: u32,
+) -> Result<(), String> {
+    let mut c = state.collab.lock().map_err(|e| e.to_string())?;
+    if !c.is_active() {
+        return Ok(());
+    }
+    let pid = c.local_peer_id;
+    if c.is_client() {
+        let msg = serde_json::to_string(&collab::ClientToHost::UpdateProfile {
+            display_name,
+            color_rgb,
+        })
+        .unwrap();
+        if let Some(tx) = &c.client_tx {
+            let _ = tx.send(msg);
+        }
+        return Ok(());
+    }
+    if c.is_host() {
+        for r in &mut c.roster {
+            if r.peer_id == pid {
+                r.display_name = display_name.clone();
+                r.color_rgb = color_rgb;
+            }
+        }
+        let roster = c.roster.clone();
+        drop(c);
+        collab::broadcast_roster_to_guests(&app, &state.collab, &roster);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -1518,9 +1564,15 @@ fn collab_send_chat(
 ) -> Result<(), String> {
     let c = state.collab.lock().map_err(|e| e.to_string())?;
     if c.is_host() {
+        let host_name = c
+            .roster
+            .iter()
+            .find(|r| r.peer_id == collab::HOST_PEER_ID)
+            .map(|r| r.display_name.clone())
+            .unwrap_or_else(|| "Host".into());
         let ev = collab::HostToClient::Chat {
             peer_id: collab::HOST_PEER_ID,
-            display_name: "Host".into(),
+            display_name: host_name,
             text,
             ts_ms: chrono::Utc::now().timestamp_millis(),
         };
@@ -1720,6 +1772,7 @@ pub fn run() {
             collab_leave,
             collab_local_peer_id,
             collab_kick_peer,
+            collab_update_profile,
             collab_set_can_edit,
             collab_push_camera,
             collab_snap_camera,

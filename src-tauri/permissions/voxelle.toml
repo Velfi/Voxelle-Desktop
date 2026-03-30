@@ -17,6 +17,8 @@ commands.allow = [
   "save_voxelle_as",
   "collab_host_start",
   "collab_join",
+  "collab_kick_peer",
+  "collab_update_profile",
   "collab_leave",
   "collab_local_peer_id",
   "collab_set_can_edit",

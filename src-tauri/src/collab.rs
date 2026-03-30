@@ -25,6 +25,10 @@ const GUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
 const GUEST_ACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// Clients send this periodically so idle tabs still count as alive.
 const CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+/// Host → guests: lightweight message so clients can tell the host is still alive (see [`CLIENT_HOST_SILENCE_TIMEOUT`]).
+const HOST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+/// Guest: if no inbound WebSocket frame for this long, treat the host as unresponsive.
+const CLIENT_HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
 
 const GUEST_TIMEOUT_KICK_REASON: &str = "timed out (no activity)";
 
@@ -125,6 +129,11 @@ pub enum ClientToHost {
         target_peer: u32,
         can_edit: bool,
     },
+    /// Rename / recolor this connection (host applies and broadcasts [`HostToClient::Roster`]).
+    UpdateProfile {
+        display_name: String,
+        color_rgb: u32,
+    },
     /// Periodic liveness; host also treats any other inbound message as activity.
     Heartbeat,
 }
@@ -171,6 +180,8 @@ pub enum HostToClient {
     Snapshot {
         bytes: Vec<u8>,
     },
+    /// Broadcast periodically while hosting so guests reset their read timeout during idle sessions.
+    Keepalive,
 }
 
 pub struct CollabRuntime {
@@ -484,6 +495,27 @@ pub fn host_kick_peer(collab_mtx: &std::sync::Mutex<CollabRuntime>, target_peer:
     Ok(())
 }
 
+pub(crate) fn broadcast_roster_to_guests(
+    app: &AppHandle,
+    collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
+    roster: &[RosterEntry],
+) {
+    let _ = app.emit(
+        "collab-roster",
+        serde_json::to_string(roster).unwrap_or_default(),
+    );
+    let br = HostToClient::Roster {
+        roster: roster.to_vec(),
+    };
+    if let Ok(g) = collab_mtx.lock() {
+        if let Some(tx) = &g.host_broadcast {
+            if let Ok(json) = serde_json::to_string(&br) {
+                let _ = tx.send(json);
+            }
+        }
+    }
+}
+
 fn host_remove_peer_from_session(
     app: &AppHandle,
     collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
@@ -502,18 +534,7 @@ fn host_remove_peer_from_session(
         g.host_redo.remove(&peer_id);
         g.roster.clone()
     };
-    let _ = app.emit(
-        "collab-roster",
-        serde_json::to_string(&roster).unwrap_or_default(),
-    );
-    let br = HostToClient::Roster { roster };
-    if let Ok(g) = collab_mtx.lock() {
-        if let Some(tx) = &g.host_broadcast {
-            if let Ok(json) = serde_json::to_string(&br) {
-                let _ = tx.send(json);
-            }
-        }
-    }
+    broadcast_roster_to_guests(app, collab_mtx, &roster);
 }
 
 fn touch_guest_activity(collab_mtx: &std::sync::Mutex<CollabRuntime>, peer_id: u32) {
@@ -700,6 +721,19 @@ async fn handle_host_connection(
                     }
                 }
             }
+            ClientToHost::UpdateProfile {
+                display_name,
+                color_rgb,
+            } => {
+                for r in &mut roster {
+                    if r.peer_id == peer_id {
+                        r.display_name = display_name.clone();
+                        r.color_rgb = color_rgb;
+                    }
+                }
+                collab_mtx.lock().unwrap().roster = roster.clone();
+                broadcast_roster_to_guests(&app, &collab_mtx, &roster);
+            }
             ClientToHost::Ping { x, y, z } => {
                 record_ping_flash(state.as_ref(), peer_id, x, y, z);
                 let ping = HostToClient::Ping { peer_id, x, y, z };
@@ -739,7 +773,7 @@ async fn handle_host_connection(
                     }
                 }
                 collab_mtx.lock().unwrap().roster = roster.clone();
-                let _ = app.emit("collab-roster", serde_json::to_string(&roster).unwrap());
+                broadcast_roster_to_guests(&app, &collab_mtx, &roster);
             }
                 }
             }
@@ -753,6 +787,8 @@ pub fn start_host(
     state: Arc<ViewerState>,
     collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
     port: u16,
+    display_name: String,
+    color_rgb: u32,
 ) -> Result<String, String> {
     let mut c = collab_mtx.lock().map_err(|e| e.to_string())?;
     if c.is_active() {
@@ -766,8 +802,8 @@ pub fn start_host(
     c.leader_id = HOST_PEER_ID;
     c.roster = vec![RosterEntry {
         peer_id: HOST_PEER_ID,
-        display_name: "Host".into(),
-        color_rgb: 0x4488ff,
+        display_name,
+        color_rgb,
         is_leader: true,
         can_edit: true,
     }];
@@ -811,6 +847,36 @@ pub fn start_host(
                 if let Some(tx) = tx_opt {
                     let _ = tx.send(Some(GUEST_TIMEOUT_KICK_REASON.to_string()));
                 }
+            }
+        }
+    });
+
+    let cm_keep = Arc::clone(&collab_mtx);
+    let sd_keep = Arc::clone(&sd);
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(HOST_KEEPALIVE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let keepalive_json =
+            serde_json::to_string(&HostToClient::Keepalive).unwrap_or_default();
+        loop {
+            interval.tick().await;
+            if sd_keep.load(Ordering::SeqCst) {
+                break;
+            }
+            let send = {
+                let g = match cm_keep.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                if !g.is_host() {
+                    break;
+                }
+                g.host_broadcast
+                    .as_ref()
+                    .map(|tx| tx.send(keepalive_json.clone()))
+            };
+            if send.is_none() {
+                break;
             }
         }
     });
@@ -973,58 +1039,78 @@ pub async fn client_connect_blocking(
     let st4 = Arc::clone(&state);
     let cm4 = Arc::clone(&collab_mtx);
     tauri::async_runtime::spawn(async move {
-        while let Some(msg) = read.next().await {
-            let Ok(Message::Text(t)) = msg else {
-                continue;
+        let mut host_timed_out = false;
+        loop {
+            let frame =
+                tokio::time::timeout(CLIENT_HOST_SILENCE_TIMEOUT, read.next()).await;
+            let msg = match frame {
+                Err(_) => {
+                    host_timed_out = true;
+                    break;
+                }
+                Ok(None) => break,
+                Ok(Some(Err(_))) => break,
+                Ok(Some(Ok(m))) => m,
             };
-            if let Ok(ev) = serde_json::from_str::<HostToClient>(&t) {
-                match ev {
-                    HostToClient::Edit { delta, peer_id, .. } => {
-                        let local = cm4.lock().unwrap().local_peer_id;
-                        if peer_id == local {
-                            continue;
+            match msg {
+                Message::Close(_) => break,
+                Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}
+                Message::Text(t) => {
+                    if let Ok(ev) = serde_json::from_str::<HostToClient>(&t) {
+                        match ev {
+                            HostToClient::Keepalive => {}
+                            HostToClient::Edit { delta, peer_id, .. } => {
+                                let local = cm4.lock().unwrap().local_peer_id;
+                                if peer_id == local {
+                                    continue;
+                                }
+                                let _ = apply_delta_on_main(&app4, &st4, &delta);
+                                let _ = app4.emit("collab-edit", t);
+                            }
+                            HostToClient::Roster { roster } => {
+                                cm4.lock().unwrap().roster = roster.clone();
+                                let _ = app4.emit(
+                                    "collab-roster",
+                                    serde_json::to_string(&roster).unwrap(),
+                                );
+                            }
+                            HostToClient::Snapshot { bytes } => {
+                                let _ = replace_file_on_main(&app4, &st4, &bytes);
+                            }
+                            HostToClient::Kicked { reason } => {
+                                {
+                                    let mut c = cm4.lock().unwrap();
+                                    c.leave();
+                                }
+                                if let Ok(mut g) = st4.ping_flash.lock() {
+                                    *g = None;
+                                }
+                                let _ = app4.emit("collab-kicked", reason);
+                                break;
+                            }
+                            HostToClient::Chat { .. } => {
+                                let _ = app4.emit("collab-chat", t);
+                            }
+                            HostToClient::Ping {
+                                peer_id: pid,
+                                x,
+                                y,
+                                z,
+                            } => {
+                                record_ping_flash(st4.as_ref(), pid, x, y, z);
+                                let _ = app4.emit("collab-ping", t);
+                            }
+                            HostToClient::Camera { peer_id, presence } => {
+                                cm4.lock().unwrap().presence.insert(peer_id, presence);
+                                let _ = app4.emit("collab-camera", t);
+                            }
+                            _ => {
+                                let _ = app4.emit("collab-msg", t);
+                            }
                         }
-                        let _ = apply_delta_on_main(&app4, &st4, &delta);
-                        let _ = app4.emit("collab-edit", t);
-                    }
-                    HostToClient::Roster { roster } => {
-                        cm4.lock().unwrap().roster = roster.clone();
-                        let _ = app4.emit("collab-roster", serde_json::to_string(&roster).unwrap());
-                    }
-                    HostToClient::Snapshot { bytes } => {
-                        let _ = replace_file_on_main(&app4, &st4, &bytes);
-                    }
-                    HostToClient::Kicked { reason } => {
-                        {
-                            let mut c = cm4.lock().unwrap();
-                            c.leave();
-                        }
-                        if let Ok(mut g) = st4.ping_flash.lock() {
-                            *g = None;
-                        }
-                        let _ = app4.emit("collab-kicked", reason);
-                        break;
-                    }
-                    HostToClient::Chat { .. } => {
-                        let _ = app4.emit("collab-chat", t);
-                    }
-                    HostToClient::Ping {
-                        peer_id: pid,
-                        x,
-                        y,
-                        z,
-                    } => {
-                        record_ping_flash(st4.as_ref(), pid, x, y, z);
-                        let _ = app4.emit("collab-ping", t);
-                    }
-                    HostToClient::Camera { peer_id, presence } => {
-                        cm4.lock().unwrap().presence.insert(peer_id, presence);
-                        let _ = app4.emit("collab-camera", t);
-                    }
-                    _ => {
-                        let _ = app4.emit("collab-msg", t);
                     }
                 }
+                _ => {}
             }
         }
         let still_client = cm4.lock().map(|c| c.is_client()).unwrap_or(false);
@@ -1036,10 +1122,12 @@ pub async fn client_connect_blocking(
             if let Ok(mut g) = st4.ping_flash.lock() {
                 *g = None;
             }
-            let _ = app4.emit(
-                "collab-ended",
-                "Disconnected from the host. The connection was closed.",
-            );
+            let reason = if host_timed_out {
+                "The host stopped responding. Your connection was closed."
+            } else {
+                "Disconnected from the host. The connection was closed."
+            };
+            let _ = app4.emit("collab-ended", reason);
         }
     });
 
