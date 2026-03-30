@@ -616,14 +616,15 @@ pub fn mesh_buffers_for_chunk_key(
 /// Single pass: [`SpatialMeshCache`] plus per-chunk greedy meshes (one `voxel_map` + bucketing).
 /// Chunk meshes build in parallel across chunks.
 ///
-/// `progress` is called from worker threads with values in \([0, 1]\) as chunks complete (throttled).
+/// `progress` is called from worker threads: `fraction` in \([0, 1]\), and `completed` / `total_chunks`
+/// count spatial buckets processed (including empty buckets). Throttled to avoid excessive UI updates.
 pub fn build_chunk_meshes_and_spatial_cache<F>(voxels: &[Voxel], cs: i32, progress: F) -> Option<(
     (i32, i32, i32),
     BTreeMap<ChunkKey, MeshBuffers>,
     SpatialMeshCache,
 )>
 where
-    F: Fn(f32) + Sync,
+    F: Fn(f32, u32, u32) + Sync,
 {
     use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -643,12 +644,12 @@ where
             let prev = last_permille.load(Ordering::Relaxed);
             if permille.saturating_sub(prev) >= 40 || d == total {
                 last_permille.store(permille, Ordering::Relaxed);
-                progress(frac);
+                progress(frac, d, total);
             }
             (!mesh.indices.is_empty()).then_some((key, mesh))
         })
         .collect();
-    progress(1.0);
+    progress(1.0, total, total);
     let meshes: BTreeMap<ChunkKey, MeshBuffers> = parts.into_iter().collect();
     Some((origin, meshes, cache))
 }
@@ -658,7 +659,7 @@ pub fn build_all_chunk_meshes_btree(
     voxels: &[Voxel],
     cs: i32,
 ) -> Option<((i32, i32, i32), BTreeMap<ChunkKey, MeshBuffers>)> {
-    let (origin, meshes, _) = build_chunk_meshes_and_spatial_cache(voxels, cs, |_| {})?;
+    let (origin, meshes, _) = build_chunk_meshes_and_spatial_cache(voxels, cs, |_, _, _| {})?;
     Some((origin, meshes))
 }
 
@@ -816,7 +817,7 @@ mod chunk_tests {
             }
         }
         let cs = SPATIAL_CHUNK_SIZE;
-        let fused = build_chunk_meshes_and_spatial_cache(&voxels, cs, |_| {}).expect("fused");
+        let fused = build_chunk_meshes_and_spatial_cache(&voxels, cs, |_, _, _| {}).expect("fused");
         let seq = sequential_chunk_meshes_and_spatial_cache(&voxels, cs).expect("sequential");
         assert_eq!(fused.0, seq.0, "chunk origin");
         assert_eq!(fused.1.len(), seq.1.len(), "chunk count");

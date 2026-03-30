@@ -36,6 +36,7 @@ use crate::voxelle::{SceneObject, Voxel};
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::{BTreeMap, HashSet};
 use std::time::Instant;
+use tauri::AppHandle;
 use wgpu::util::DeviceExt;
 
 /// Bump when [`gpu::mesh_greedy::WGSL`] bind group layout changes.
@@ -97,6 +98,7 @@ fn cpu_mesh_fallback_prepare(
     voxels: &[Voxel],
     objects: &[SceneObject],
     grid_size: i32,
+    chunk_progress: Option<&(dyn Fn(f32, u32, u32) + Sync)>,
 ) -> Result<(PreparedOpaqueUpload, MeshBounds, String), String> {
     let default_objs = crate::voxelle::default_scene_objects();
     let objs: &[SceneObject] = if objects.is_empty() {
@@ -126,7 +128,11 @@ fn cpu_mesh_fallback_prepare(
             greedy_mesh::build_chunk_meshes_and_spatial_cache(
                 &work,
                 greedy_mesh::SPATIAL_CHUNK_SIZE,
-                |_| {},
+                |frac, done, total| {
+                    if let Some(cb) = chunk_progress {
+                        cb(frac, done, total);
+                    }
+                },
             )
         else {
             return Ok((
@@ -159,10 +165,12 @@ fn cpu_mesh_fallback_prepare(
 }
 
 /// CPU work for a full greedy mesh rebuild (background thread + [`WgpuViewer::rebuild_mesh_gpu_greedy`]).
+/// `chunk_progress` is invoked while building large chunked meshes (fraction, completed buckets, total buckets).
 pub(crate) fn compute_greedy_rebuild_cpu(
     voxels: &[Voxel],
     objects: &[SceneObject],
     grid_size: i32,
+    chunk_progress: Option<&(dyn Fn(f32, u32, u32) + Sync)>,
 ) -> Result<PreparedGreedyRebuild, String> {
     if voxels.is_empty() {
         return Ok(PreparedGreedyRebuild::NoVoxels);
@@ -211,7 +219,8 @@ pub(crate) fn compute_greedy_rebuild_cpu(
         .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&work))
         .ok_or("mesh bounds")?;
     if std::env::var("VOXELLE_CPU_MESH").is_ok() {
-        let (opaque, b, route) = cpu_mesh_fallback_prepare(voxels, objs, grid_size)?;
+        let (opaque, b, route) =
+            cpu_mesh_fallback_prepare(voxels, objs, grid_size, chunk_progress)?;
         return Ok(PreparedGreedyRebuild::Opaque {
             opaque,
             bounds: b,
@@ -222,7 +231,8 @@ pub(crate) fn compute_greedy_rebuild_cpu(
     let (headers, bits) = match greedy_mesh::pack_gpu_greedy_slices(&map, &work) {
         Ok(x) => x,
         Err(()) => {
-            let (opaque, b, route) = cpu_mesh_fallback_prepare(voxels, objs, grid_size)?;
+            let (opaque, b, route) =
+                cpu_mesh_fallback_prepare(voxels, objs, grid_size, chunk_progress)?;
             return Ok(PreparedGreedyRebuild::Opaque {
                 opaque,
                 bounds: b,
@@ -2061,7 +2071,7 @@ impl WgpuViewer {
         self.index_count = 0;
         self.opaque_chunks.clear();
         let Some((origin, meshes, spatial_cache)) =
-            greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE, |_| {})
+            greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE, |_, _, _| {})
         else {
             self.opaque_chunked = false;
             self.spatial_mesh_cache = None;
@@ -2102,6 +2112,7 @@ impl WgpuViewer {
         &mut self,
         keys: &[ChunkKey],
         voxels: &[Voxel],
+        work_progress: Option<&AppHandle>,
     ) -> (bool, RemeshOpaquePerf) {
         let mut perf = RemeshOpaquePerf::default();
         let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;
@@ -2157,7 +2168,23 @@ impl WgpuViewer {
         let mut greedy_gpu_ms = 0.0f64;
         let mut greedy_cpu_ms = 0.0f64;
 
-        for key in keys {
+        let nk = keys.len().max(1) as u32;
+        let mut last_emit_permille: u32 = 0;
+        for (ki, key) in keys.iter().enumerate() {
+            let done = (ki + 1) as u32;
+            let frac = done as f32 / nk as f32;
+            let permille = (frac * 1000.0).min(1000.0) as u32;
+            if let Some(app) = work_progress {
+                if permille.saturating_sub(last_emit_permille) >= 40 || done == nk {
+                    last_emit_permille = permille;
+                    crate::emit_work_progress(
+                        app,
+                        0.38 + 0.55 * frac,
+                        format!("Mesh chunks {done}/{nk}…"),
+                    );
+                }
+            }
+
             let core = cache
                 .buckets
                 .get(key)
@@ -2795,7 +2822,7 @@ impl WgpuViewer {
         objects: &[SceneObject],
         grid_size: i32,
     ) -> Result<MeshBounds, String> {
-        let prepared = compute_greedy_rebuild_cpu(voxels, objects, grid_size)?;
+        let prepared = compute_greedy_rebuild_cpu(voxels, objects, grid_size, None)?;
         self.apply_prepared_greedy_rebuild(prepared)
     }
 

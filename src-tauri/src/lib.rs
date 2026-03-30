@@ -677,12 +677,12 @@ pub(crate) fn prepare_load_scene_cpu(
         let chunked = greedy_mesh::build_chunk_meshes_and_spatial_cache(
             &visible_voxels,
             greedy_mesh::SPATIAL_CHUNK_SIZE,
-            |chunk_t| {
-                let g = LOAD_P_MESH_START + chunk_t * mesh_span;
-                let pct = (chunk_t * 100.0).min(100.0) as u32;
+            |frac, done, total| {
+                let g = LOAD_P_MESH_START + frac * mesh_span;
+                let pct = (frac * 100.0).min(100.0) as u32;
                 emit(
                     g,
-                    &format!("Building mesh ({pct}%)"),
+                    &format!("Building mesh chunks {done}/{total} ({pct}%)"),
                 );
             },
         );
@@ -1271,7 +1271,11 @@ pub(crate) fn finish_voxel_edit_gpu_deltas(
                 origin_new,
                 greedy_mesh::SPATIAL_CHUNK_SIZE,
             );
-            let (ok, rperf) = viewer.remesh_opaque_chunks(&dirty, &file.voxels);
+            let (ok, rperf) = viewer.remesh_opaque_chunks(
+                &dirty,
+                &file.voxels,
+                if show_work { Some(app) } else { None },
+            );
             mesh_buckets_ms = rperf.buckets_ms;
             mesh_greedy_ms = rperf.greedy_ms;
             mesh_greedy_gpu_ms = rperf.greedy_gpu_ms;
@@ -1456,8 +1460,29 @@ fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHandle) {
                     route,
                 })
             } else {
-                compute_greedy_rebuild_cpu(&file.voxels, &file.objects, file.grid_size)
-                    .map(OpaqueRefreshWork::Greedy)
+                use std::sync::atomic::{AtomicU32, Ordering};
+                let last_permille = AtomicU32::new(0);
+                let app_pb = app.clone();
+                emit_work_progress(&app_pb, 0.08, "Rebuilding mesh…");
+                let chunk_progress = move |frac: f32, done: u32, total: u32| {
+                    let permille = (frac * 1000.0).min(1000.0) as u32;
+                    let prev = last_permille.load(Ordering::Relaxed);
+                    if permille.saturating_sub(prev) >= 40 || done == total {
+                        last_permille.store(permille, Ordering::Relaxed);
+                        emit_work_progress(
+                            &app_pb,
+                            0.1 + 0.85 * frac,
+                            format!("Building mesh chunks {done}/{total}…"),
+                        );
+                    }
+                };
+                compute_greedy_rebuild_cpu(
+                    &file.voxels,
+                    &file.objects,
+                    file.grid_size,
+                    Some(&chunk_progress),
+                )
+                .map(OpaqueRefreshWork::Greedy)
             };
             let work = match work {
                 Ok(w) => w,
@@ -1467,6 +1492,7 @@ fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHandle) {
                 }
             };
             let file_snapshot = file.clone();
+            let app_emit = app.clone();
             if let Err(e) = app.run_on_main_thread(move || {
                 if state_c.mesh_refresh_generation.load(Ordering::SeqCst) != token {
                     return;
@@ -1528,6 +1554,7 @@ fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHandle) {
                 } else if let Ok(mut g) = state_c.voxel_edit_stats_cache.lock() {
                     *g = Some(voxel_aabb_min_and_single_object_one_pass(&file_snapshot.voxels));
                 }
+                emit_work_progress(&app_emit, 1.0, "");
             }) {
                 log::warn!(target: "voxelle", "opaque refresh run_on_main_thread: {e}");
             }
@@ -2006,6 +2033,10 @@ struct VoxelEditAtScreen {
     stroke_line_start_x: Option<f32>,
     #[serde(default)]
     stroke_line_start_y: Option<f32>,
+    #[serde(default)]
+    stroke_segment_prev_x: Option<f32>,
+    #[serde(default)]
+    stroke_segment_prev_y: Option<f32>,
 }
 
 fn push_solo_undo_step(
@@ -2670,6 +2701,10 @@ fn voxel_edit_at_screen(
             args.spray_density,
             match (args.stroke_line_start_x, args.stroke_line_start_y) {
                 (Some(lx), Some(ly)) => Some((lx, ly)),
+                _ => None,
+            },
+            match (args.stroke_segment_prev_x, args.stroke_segment_prev_y) {
+                (Some(px), Some(py)) => Some((px, py)),
                 _ => None,
             },
         )?

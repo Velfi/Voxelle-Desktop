@@ -10,6 +10,8 @@ Guidance for humans and coding agents working in this repo. This app is desktop-
 | **Inspector sidebar** (right) | Project metadata and management: hierarchy / outliner-style tools, properties, and related panels. Implemented as the right `aside`. |
 | **Status bar** (bottom) | High-level feedback on what the app is doing (current file, load/collab state, optional FPS). The `footer.app-status-bar` row. |
 
+**Long waits:** Whenever the user might wait more than a few seconds (load, save, mesh rebuild, visibility refresh, etc.), the status bar should explain **why**—not a spinner with no copy. Emit meaningful phases (and optional fraction) via the usual events (e.g. `voxelle-work-progress`, `voxelle-load-progress` from [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)); don’t leave the UI silent during noticeable work.
+
 ## Viewport and screen-to-world ray mapping
 
 The native [`WgpuViewer`](src-tauri/src/render/mod.rs) swapchain is sized by [`viewer_resize`](src-tauri/src/lib.rs) from the **`.viewport`** div in [`src/App.tsx`](src/App.tsx) (not the full window: chrome + sidebars shrink the div). **Picking and hover** must map the pointer into **the same pixel grid** the shader uses (`proj` / `view_proj` and [`voxel_edit::screen_to_world_ray`](src-tauri/src/voxel_edit.rs)).

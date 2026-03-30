@@ -88,7 +88,7 @@ function playPingSound() {
   try {
     const a = new Audio(PING_MP3_URL);
     a.volume = 0.85;
-    void a.play().catch(() => {});
+    void a.play().catch(() => { });
   } catch {
     /* ignore */
   }
@@ -169,7 +169,8 @@ type InteractionMode =
   | "sculpt"
   | "generator";
 
-type StrokeDrawStyle = "volume" | "line";
+/** `line` = anchor-to-cursor line (web Stroke / Line). `brush` = follow ray + connect samples (web Spray path). */
+type StrokeDrawStyle = "line" | "brush";
 type ToolsPane = "hand" | "draw" | "sculpt" | "generators" | "mood" | "fly";
 
 type BrushShape = "sphere" | "cube" | "pyramid";
@@ -204,18 +205,20 @@ function App() {
   const activeMaterialRef = useRef("plastic");
   const brushRadiusRef = useRef(0);
   const brushShapeRef = useRef<BrushShape>("sphere");
-  const strokeDrawStyleRef = useRef<StrokeDrawStyle>("volume");
+  const strokeDrawStyleRef = useRef<StrokeDrawStyle>("line");
   const sprayDensityRef = useRef(0);
   /** Viewport-physical start of stroke (for line stroke). */
   const strokeViewportStartRef = useRef<{ x: number; y: number } | null>(null);
+  /** Previous sample for brush-mode segment chaining (viewport physical px). */
+  const lastStrokePhysRef = useRef<{ x: number; y: number } | null>(null);
   const lastStrokeEditMsRef = useRef(0);
   const dragDidEditRef = useRef(false);
   const loadingRef = useRef(false);
   const interactionBlockedRef = useRef(false);
   const pendingJoinUrlRef = useRef<string | null>(null);
   const collabActiveMenuRef = useRef(false);
-  const startHostMenuRef = useRef<() => void>(() => {});
-  const leaveSessionMenuRef = useRef<() => void>(() => {});
+  const startHostMenuRef = useRef<() => void>(() => { });
+  const leaveSessionMenuRef = useRef<() => void>(() => { });
   const keysDownRef = useRef<Set<string>>(new Set());
   const flyRafRef = useRef<number>(0);
   const flyLastTRef = useRef<number | null>(null);
@@ -233,7 +236,7 @@ function App() {
   const [brushRadius, setBrushRadius] = useState(0);
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
   const [strokeDrawStyle, setStrokeDrawStyle] =
-    useState<StrokeDrawStyle>("volume");
+    useState<StrokeDrawStyle>("line");
   const [sprayDensity, setSprayDensity] = useState(0);
   const [toolsPane, setToolsPane] = useState<ToolsPane>("draw");
   const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
@@ -411,7 +414,7 @@ function App() {
       .then((sz) => {
         viewportPhysRef.current = { w: sz.width, h: sz.height };
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -627,9 +630,9 @@ function App() {
           const j =
             typeof raw === "string"
               ? (JSON.parse(raw) as {
-                  wanUrl?: string | null;
-                  error?: string | null;
-                })
+                wanUrl?: string | null;
+                error?: string | null;
+              })
               : (raw as { wanUrl?: string | null; error?: string | null });
           setNatPending(false);
           setNatError(
@@ -789,7 +792,7 @@ function App() {
             topPct: (sy / h) * 100,
           });
         })
-        .catch(() => {});
+        .catch(() => { });
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -897,7 +900,7 @@ function App() {
     void invoke("collab_update_profile", {
       displayName: normalizeCollabDisplayName(displayName),
       colorRgb: rgb,
-    }).catch(() => {});
+    }).catch(() => { });
   }, [displayName, accentColor, collabActive]);
 
   useEffect(() => {
@@ -929,7 +932,7 @@ function App() {
   useEffect(() => {
     const p = loadPreferences();
     void invoke("set_autosave_settings", autosaveSettingsInvokeArgs(p)).catch(
-      () => {},
+      () => { },
     );
   }, []);
 
@@ -944,7 +947,7 @@ function App() {
     const p = loadPreferences();
     void invoke("set_tone_mapping", {
       mode: toneMappingToGpuMode(p.toneMapping),
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   useEffect(() => {
@@ -955,16 +958,16 @@ function App() {
     void invoke<RenderingMode>("get_rendering_mode")
       .then((m) => {
         if (valid && saved !== m) {
-          void invoke("set_rendering_mode", { mode: saved }).catch(() => {});
+          void invoke("set_rendering_mode", { mode: saved }).catch(() => { });
         }
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   useEffect(() => {
     if (!collabActive) return;
     const id = window.setInterval(() => {
-      void invoke("collab_push_camera").catch(() => {});
+      void invoke("collab_push_camera").catch(() => { });
     }, 150);
     return () => clearInterval(id);
   }, [collabActive]);
@@ -984,16 +987,16 @@ function App() {
       if (meta && e.key === "z") {
         e.preventDefault();
         if (e.shiftKey) {
-          void invoke("voxel_redo").catch(() => {});
+          void invoke("voxel_redo").catch(() => { });
         } else {
-          void invoke("voxel_undo").catch(() => {});
+          void invoke("voxel_undo").catch(() => { });
         }
         return;
       }
       if (meta && e.key === "s") {
         e.preventDefault();
         void invoke("save_voxelle").catch(() => {
-          void invoke("save_voxelle_as").catch(() => {});
+          void invoke("save_voxelle_as").catch(() => { });
         });
         return;
       }
@@ -1035,7 +1038,7 @@ function App() {
           setPingHudTick((n) => n + 1);
           playPingSound();
         })
-        .catch(() => {});
+        .catch(() => { });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -1044,13 +1047,13 @@ function App() {
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
       args: { x: -1, y: 0, mode: "navigate" },
-    }).catch(() => {});
+    }).catch(() => { });
   }, []);
 
   useEffect(() => {
     void invoke("sync_preview_input", {
       args: { x: -1, y: 0, mode: previewModeForSync(interactionMode) },
-    }).catch(() => {});
+    }).catch(() => { });
   }, [interactionMode]);
 
   useEffect(() => {
@@ -1064,17 +1067,17 @@ function App() {
         vignette: moodVignette,
         distanceTint: moodDistanceTint,
       },
-    }).catch(() => {});
+    }).catch(() => { });
   }, [moodGrain, moodVignette, moodDistanceTint]);
 
   useEffect(() => {
     if (interactionMode !== "fly") {
-      void invoke("set_fly_mode", { enabled: false }).catch(() => {});
+      void invoke("set_fly_mode", { enabled: false }).catch(() => { });
       flyLastTRef.current = null;
       keysDownRef.current.clear();
       return;
     }
-    void invoke("set_fly_mode", { enabled: true }).catch(() => {});
+    void invoke("set_fly_mode", { enabled: true }).catch(() => { });
     const onKeyDown = (e: KeyboardEvent) => {
       keysDownRef.current.add(e.code);
     };
@@ -1099,7 +1102,7 @@ function App() {
       if (k.has("ShiftLeft") || k.has("ShiftRight")) up -= 1;
       void invoke("camera_fly_tick", {
         args: { forward, right, up, dtSecs: dt },
-      }).catch(() => {});
+      }).catch(() => { });
       flyRafRef.current = requestAnimationFrame(tick);
     };
     flyRafRef.current = requestAnimationFrame(tick);
@@ -1107,7 +1110,7 @@ function App() {
       cancelAnimationFrame(flyRafRef.current);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
-      void invoke("set_fly_mode", { enabled: false }).catch(() => {});
+      void invoke("set_fly_mode", { enabled: false }).catch(() => { });
     };
   }, [interactionMode]);
 
@@ -1121,7 +1124,7 @@ function App() {
       return;
     void invoke<number>("selection_get_count")
       .then((n) => setSelectionCount(n))
-      .catch(() => {});
+      .catch(() => { });
   }, [interactionMode]);
 
   useEffect(() => {
@@ -1266,7 +1269,8 @@ function App() {
     ) {
       dragDidEditRef.current = false;
       strokeViewportStartRef.current = { x, y };
-      void invoke("voxel_stroke_begin").catch(() => {});
+      lastStrokePhysRef.current = { x, y };
+      void invoke("voxel_stroke_begin").catch(() => { });
     }
 
     if (gestureRef.current.mode === "camera" && mode !== "fly") {
@@ -1298,7 +1302,7 @@ function App() {
       const m = previewModeForSync(interactionModeRef.current);
       void invoke("sync_preview_input", {
         args: { x: px, y: py, mode: m },
-      }).catch(() => {});
+      }).catch(() => { });
     }
 
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
@@ -1333,6 +1337,10 @@ function App() {
             strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
               ? strokeViewportStartRef.current
               : null;
+          const brushPrev =
+            strokeDrawStyleRef.current === "brush" && lastStrokePhysRef.current
+              ? lastStrokePhysRef.current
+              : null;
           void invoke("voxel_edit_at_screen", {
             args: {
               x: px,
@@ -1345,12 +1353,24 @@ function App() {
               sprayDensity: sprayDensityRef.current,
               ...(lineStart
                 ? {
-                    strokeLineStartX: lineStart.x,
-                    strokeLineStartY: lineStart.y,
-                  }
+                  strokeLineStartX: lineStart.x,
+                  strokeLineStartY: lineStart.y,
+                }
+                : {}),
+              ...(!lineStart && brushPrev
+                ? {
+                  strokeSegmentPrevX: brushPrev.x,
+                  strokeSegmentPrevY: brushPrev.y,
+                }
                 : {}),
             },
-          }).catch(() => {});
+          })
+            .finally(() => {
+              if (strokeDrawStyleRef.current === "brush") {
+                lastStrokePhysRef.current = { x: px, y: py };
+              }
+            })
+            .catch(() => { });
         }
       }
       return;
@@ -1420,7 +1440,7 @@ function App() {
                 setSelectionCount(n),
               ),
             )
-            .catch(() => {});
+            .catch(() => { });
         } else if (m === "stamp") {
           void invoke("clipboard_stamp_at_screen", {
             args: {
@@ -1429,10 +1449,10 @@ function App() {
               color: activeColorRef.current,
               material: activeMaterialRef.current,
             },
-          }).catch(() => {});
+          }).catch(() => { });
         } else if (m === "punch") {
           void invoke("clipboard_punch_at_screen", { args: { x, y } }).catch(
-            () => {},
+            () => { },
           );
         } else if (m === "sculpt") {
           void invoke("voxel_sculpt_raise_at_screen", {
@@ -1442,7 +1462,7 @@ function App() {
               color: activeColorRef.current,
               material: activeMaterialRef.current,
             },
-          }).catch(() => {});
+          }).catch(() => { });
         } else if (m === "generator") {
           void invoke("generator_sphere_at_screen", {
             args: {
@@ -1452,7 +1472,7 @@ function App() {
               color: activeColorRef.current,
               material: activeMaterialRef.current,
             },
-          }).catch(() => {});
+          }).catch(() => { });
         } else if (m === "selectByColor") {
           void invoke<number>("selection_add_by_color_at_screen", {
             args: {
@@ -1468,7 +1488,7 @@ function App() {
                 );
               }
             })
-            .catch(() => {});
+            .catch(() => { });
         } else if (m === "selectCoplanar") {
           void invoke<number>("selection_add_coplanar_at_screen", {
             args: { x, y },
@@ -1480,7 +1500,7 @@ function App() {
                 );
               }
             })
-            .catch(() => {});
+            .catch(() => { });
         } else if (m === "selectCoplanarEmpty") {
           void invoke<number>("selection_add_coplanar_empty_at_screen", {
             args: { x, y },
@@ -1492,7 +1512,7 @@ function App() {
                 );
               }
             })
-            .catch(() => {});
+            .catch(() => { });
         } else if (m === "fill") {
           void invoke<boolean>("voxel_fill_at_screen", {
             args: {
@@ -1502,7 +1522,7 @@ function App() {
               material: activeMaterialRef.current,
               matchMaterial: matchMaterialSelectColorRef.current,
             },
-          }).catch(() => {});
+          }).catch(() => { });
         }
       }
       if (m === "eyedropper") {
@@ -1527,9 +1547,9 @@ function App() {
                 setActiveMaterial(r.material);
               }
             })
-            .catch(() => {});
+            .catch(() => { });
         }
-      } else if (m === "add" || m === "remove" || m === "paint") {
+        } else if (m === "add" || m === "remove" || m === "paint") {
         if (!dragDidEditRef.current && moved < 5) {
           const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
           const lineStart =
@@ -1548,14 +1568,15 @@ function App() {
               sprayDensity: sprayDensityRef.current,
               ...(lineStart
                 ? {
-                    strokeLineStartX: lineStart.x,
-                    strokeLineStartY: lineStart.y,
-                  }
+                  strokeLineStartX: lineStart.x,
+                  strokeLineStartY: lineStart.y,
+                }
                 : {}),
             },
-          }).catch(() => {});
+          }).catch(() => { });
         }
-        void invoke("voxel_stroke_end").catch(() => {});
+        void invoke("voxel_stroke_end").catch(() => { });
+        lastStrokePhysRef.current = null;
       }
     }
 
@@ -1642,7 +1663,7 @@ function App() {
   };
 
   const leaveSession = () => {
-    void invoke("collab_leave").catch(() => {});
+    void invoke("collab_leave").catch(() => { });
   };
 
   collabActiveMenuRef.current = collabActive;
@@ -1657,7 +1678,7 @@ function App() {
         setHostingCopied(true);
         window.setTimeout(() => setHostingCopied(false), 2000);
       },
-      () => {},
+      () => { },
     );
   };
 
@@ -1726,17 +1747,17 @@ function App() {
   const sendChat = () => {
     const t = chatInput.trim();
     if (!t) return;
-    void invoke("collab_send_chat", { text: t }).catch(() => {});
+    void invoke("collab_send_chat", { text: t }).catch(() => { });
     setChatInput("");
   };
 
   const onRosterSnapCamera = (peerId: number) => {
-    void invoke("collab_snap_camera", { peerId }).catch(() => {});
+    void invoke("collab_snap_camera", { peerId }).catch(() => { });
   };
 
   const setCanEdit = (peerId: number, canEdit: boolean) => {
     void invoke("collab_set_can_edit", { targetPeer: peerId, canEdit }).catch(
-      () => {},
+      () => { },
     );
   };
 
@@ -1759,11 +1780,10 @@ function App() {
           <div className="app-sidebar-spacer" aria-hidden />
         ) : null}
         <aside
-          className={`${
-            sidebarExpanded
+          className={`${sidebarExpanded
               ? "app-sidebar is-expanded"
               : "app-sidebar is-collapsed"
-          }${toolsPaneFloating ? " is-floating" : ""}`}
+            }${toolsPaneFloating ? " is-floating" : ""}`}
           style={
             toolsPaneFloating
               ? { left: toolPanePos.x, top: toolPanePos.y }
@@ -1993,21 +2013,21 @@ function App() {
                       <div className="sidebar-mode-grid sidebar-mode-grid-3">
                         <button
                           type="button"
-                          className={strokeDrawStyle === "volume" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          className={strokeDrawStyle === "line" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
                           disabled={loading || workBusy}
-                          onClick={() => setStrokeDrawStyle("volume")}
-                          title="Stroke (volume brush path)"
+                          onClick={() => setStrokeDrawStyle("line")}
+                          title="Line from pointer down to cursor (matches web Stroke → Line)"
                         >
                           <span className="sidebar-mode-label">Stroke</span>
                         </button>
                         <button
                           type="button"
-                          className={strokeDrawStyle === "line" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          className={strokeDrawStyle === "brush" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
                           disabled={loading || workBusy}
-                          onClick={() => setStrokeDrawStyle("line")}
-                          title="Surface (line between stroke anchors)"
+                          onClick={() => setStrokeDrawStyle("brush")}
+                          title="Brush along the drag with connected samples (matches web Spray path)"
                         >
-                          <span className="sidebar-mode-label">Surface</span>
+                          <span className="sidebar-mode-label">Brush</span>
                         </button>
                         <button type="button" className="sidebar-mode-btn" disabled title="Not available yet">
                           <span className="sidebar-mode-label">Solid</span>
@@ -2192,7 +2212,7 @@ function App() {
                 style={{
                   width: `${Math.round(
                     Math.min(1, Math.max(0, loading ? loadProgress : workProgress)) *
-                      100,
+                    100,
                   )}%`,
                 }}
               />
@@ -2231,26 +2251,23 @@ function App() {
           </div>
           {showToolOptionsPanel ? (
             <div
-              className={`tool-options-panel${
-                toolsPaneFloating ? " is-tools-floating" : ""
-              }${
-                !toolsPaneFloating && sidebarExpanded
+              className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""
+                }${!toolsPaneFloating && sidebarExpanded
                   ? " is-sidebar-expanded"
                   : ""
-              }${
-                !toolsPaneFloating && !sidebarExpanded
+                }${!toolsPaneFloating && !sidebarExpanded
                   ? " is-sidebar-collapsed"
                   : ""
-              }`}
+                }`}
               role="dialog"
               aria-label="Tool options"
               onPointerDown={(e) => e.stopPropagation()}
               onPointerUp={(e) => e.stopPropagation()}
             >
               {toolsPane === "draw" &&
-              (interactionMode === "add" ||
-                interactionMode === "remove" ||
-                interactionMode === "paint") ? (
+                (interactionMode === "add" ||
+                  interactionMode === "remove" ||
+                  interactionMode === "paint") ? (
                 <>
                   <div className="tool-options-section">
                     <div className="tool-options-heading">Brush</div>
@@ -2404,202 +2421,202 @@ function App() {
             </div>
           ) : null}
           {showEmptyOpenFile ? (
-          <div
-            className="viewport-empty-open"
-            role="region"
-            aria-label="No file open"
-          >
-            <div className="viewport-empty-open-stack">
-              {lastSessionReady &&
-              lastSessionInfo?.lastDocumentPath &&
-              (lastSessionInfo.documentExists ||
-                lastSessionInfo.autosaveExists) ? (
-                <div
-                  className="viewport-empty-last"
-                  role="group"
-                  aria-label="Continue last project"
-                >
-                  <div className="viewport-empty-last-title">Continue</div>
-                  {lastSessionInfo.documentBasename ? (
-                    <div
-                      className="viewport-empty-last-filename"
-                      title={lastSessionInfo.lastDocumentPath ?? undefined}
-                    >
-                      {lastSessionInfo.documentBasename}
+            <div
+              className="viewport-empty-open"
+              role="region"
+              aria-label="No file open"
+            >
+              <div className="viewport-empty-open-stack">
+                {lastSessionReady &&
+                  lastSessionInfo?.lastDocumentPath &&
+                  (lastSessionInfo.documentExists ||
+                    lastSessionInfo.autosaveExists) ? (
+                  <div
+                    className="viewport-empty-last"
+                    role="group"
+                    aria-label="Continue last project"
+                  >
+                    <div className="viewport-empty-last-title">Continue</div>
+                    {lastSessionInfo.documentBasename ? (
+                      <div
+                        className="viewport-empty-last-filename"
+                        title={lastSessionInfo.lastDocumentPath ?? undefined}
+                      >
+                        {lastSessionInfo.documentBasename}
+                      </div>
+                    ) : null}
+                    {lastProjectBlurb ? (
+                      <p
+                        id="viewport-empty-last-desc"
+                        className="viewport-empty-last-blurb"
+                      >
+                        {lastProjectBlurb}
+                      </p>
+                    ) : null}
+                    <div className="viewport-empty-last-actions">
+                      <button
+                        type="button"
+                        className="viewport-empty-open-btn"
+                        onClick={reopenLastProject}
+                        aria-describedby={
+                          lastProjectBlurb ? "viewport-empty-last-desc" : undefined
+                        }
+                      >
+                        Reopen last project
+                      </button>
                     </div>
-                  ) : null}
-                  {lastProjectBlurb ? (
-                    <p
-                      id="viewport-empty-last-desc"
-                      className="viewport-empty-last-blurb"
-                    >
-                      {lastProjectBlurb}
-                    </p>
-                  ) : null}
-                  <div className="viewport-empty-last-actions">
-                    <button
-                      type="button"
-                      className="viewport-empty-open-btn"
-                      onClick={reopenLastProject}
-                      aria-describedby={
-                        lastProjectBlurb ? "viewport-empty-last-desc" : undefined
-                      }
-                    >
-                      Open
-                    </button>
                   </div>
-                </div>
-              ) : null}
-              <button
-                type="button"
-                className="viewport-empty-open-btn is-secondary"
-                onClick={() =>
-                  void invoke("open_voxelle_dialog").catch(() => {})
-                }
-              >
-                Open file…
-              </button>
-              <div className="viewport-empty-session-row">
+                ) : null}
                 <button
                   type="button"
                   className="viewport-empty-open-btn is-secondary"
-                  onClick={() => setJoinModalOpen(true)}
-                  disabled={collabActive}
-                  title={
-                    collabActive
-                      ? "Leave your session first"
-                      : "Paste a host link"
+                  onClick={() =>
+                    void invoke("open_voxelle_dialog").catch(() => { })
                   }
                 >
-                  Join Session
+                  Open file…
                 </button>
-                <button
-                  type="button"
-                  className="viewport-empty-open-btn"
-                  onClick={collabActive ? leaveSession : startHost}
-                  title={
-                    collabActive
-                      ? hostWsUrl
-                        ? "End the session for everyone"
-                        : "Leave session"
-                      : undefined
-                  }
-                >
-                  {hostWsUrl
-                    ? "Stop hosting"
-                    : collabGuest
-                      ? "Leave"
-                      : "Start Session"}
-                </button>
+                <div className="viewport-empty-session-row">
+                  <button
+                    type="button"
+                    className="viewport-empty-open-btn is-secondary"
+                    onClick={() => setJoinModalOpen(true)}
+                    disabled={collabActive}
+                    title={
+                      collabActive
+                        ? "Leave your session first"
+                        : "Paste a host link"
+                    }
+                  >
+                    Join Session
+                  </button>
+                  <button
+                    type="button"
+                    className="viewport-empty-open-btn"
+                    onClick={collabActive ? leaveSession : startHost}
+                    title={
+                      collabActive
+                        ? hostWsUrl
+                          ? "End the session for everyone"
+                          : "Leave session"
+                        : undefined
+                    }
+                  >
+                    {hostWsUrl
+                      ? "Stop hosting"
+                      : collabGuest
+                        ? "Leave"
+                        : "Start Session"}
+                  </button>
+                </div>
               </div>
             </div>
-          </div>
-        ) : null}
-        {loadError ? (
-          <div className="viewport-error" role="alert">
-            <span className="viewport-notice-text" title={loadError}>
-              {loadError}
-            </span>
-            <button
-              type="button"
-              className="viewport-notice-dismiss"
-              aria-label="Dismiss error"
-              onClick={() => setLoadError(null)}
-            >
-              Dismiss
-            </button>
-          </div>
-        ) : null}
-        {collabBanner ? (
-          <div
-            className={
-              collabBanner.tone === "alert"
-                ? "viewport-notice is-alert"
-                : "viewport-notice"
-            }
-            role={collabBanner.tone === "alert" ? "alert" : "status"}
-          >
-            <span className="viewport-notice-text">{collabBanner.text}</span>
-            <button
-              type="button"
-              className="viewport-notice-dismiss"
-              onClick={() => setCollabBanner(null)}
-            >
-              Dismiss
-            </button>
-          </div>
-        ) : null}
-        {collabActive && chatToasts.length > 0 ? (
-          <div
-            className="chat-toast-stack"
-            aria-live="polite"
-            aria-label="New chat messages"
-          >
-            {chatToasts.map((t) => (
-              <div
-                key={t.id}
-                className="chat-toast"
-                role="status"
-                onClick={() => setChatPanelOpen(true)}
+          ) : null}
+          {loadError ? (
+            <div className="viewport-error" role="alert">
+              <span className="viewport-notice-text" title={loadError}>
+                {loadError}
+              </span>
+              <button
+                type="button"
+                className="viewport-notice-dismiss"
+                aria-label="Dismiss error"
+                onClick={() => setLoadError(null)}
               >
-                <span className="chat-toast-text">{t.text}</span>
+                Dismiss
+              </button>
+            </div>
+          ) : null}
+          {collabBanner ? (
+            <div
+              className={
+                collabBanner.tone === "alert"
+                  ? "viewport-notice is-alert"
+                  : "viewport-notice"
+              }
+              role={collabBanner.tone === "alert" ? "alert" : "status"}
+            >
+              <span className="viewport-notice-text">{collabBanner.text}</span>
+              <button
+                type="button"
+                className="viewport-notice-dismiss"
+                onClick={() => setCollabBanner(null)}
+              >
+                Dismiss
+              </button>
+            </div>
+          ) : null}
+          {collabActive && chatToasts.length > 0 ? (
+            <div
+              className="chat-toast-stack"
+              aria-live="polite"
+              aria-label="New chat messages"
+            >
+              {chatToasts.map((t) => (
+                <div
+                  key={t.id}
+                  className="chat-toast"
+                  role="status"
+                  onClick={() => setChatPanelOpen(true)}
+                >
+                  <span className="chat-toast-text">{t.text}</span>
+                  <button
+                    type="button"
+                    className="chat-toast-dismiss"
+                    aria-label="Dismiss notification"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {chatPanelOpen ? (
+            <div
+              className="chat-float-panel"
+              role="dialog"
+              aria-label="Collaboration chat"
+            >
+              <div className="chat-float-header">
+                <h3 className="chat-float-title">Chat</h3>
                 <button
                   type="button"
-                  className="chat-toast-dismiss"
-                  aria-label="Dismiss notification"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
-                  }}
+                  className="chat-float-close"
+                  onClick={() => setChatPanelOpen(false)}
+                  aria-label="Close chat"
                 >
                   ×
                 </button>
               </div>
-            ))}
-          </div>
-        ) : null}
-        {chatPanelOpen ? (
-          <div
-            className="chat-float-panel"
-            role="dialog"
-            aria-label="Collaboration chat"
-          >
-            <div className="chat-float-header">
-              <h3 className="chat-float-title">Chat</h3>
-              <button
-                type="button"
-                className="chat-float-close"
-                onClick={() => setChatPanelOpen(false)}
-                aria-label="Close chat"
-              >
-                ×
-              </button>
+              <div className="collab-chat-log chat-float-log" role="log">
+                {chatLines.map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </div>
+              <div className="collab-row chat-float-input-row">
+                <input
+                  className="collab-grow"
+                  type="text"
+                  value={chatInput}
+                  placeholder={
+                    collabActive ? "Message…" : "Join or host to chat"
+                  }
+                  disabled={!collabActive}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) =>
+                    collabActive && e.key === "Enter" && sendChat()
+                  }
+                />
+                <button type="button" onClick={sendChat} disabled={!collabActive}>
+                  Send
+                </button>
+              </div>
             </div>
-            <div className="collab-chat-log chat-float-log" role="log">
-              {chatLines.map((line, i) => (
-                <div key={i}>{line}</div>
-              ))}
-            </div>
-            <div className="collab-row chat-float-input-row">
-              <input
-                className="collab-grow"
-                type="text"
-                value={chatInput}
-                placeholder={
-                  collabActive ? "Message…" : "Join or host to chat"
-                }
-                disabled={!collabActive}
-                onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) =>
-                  collabActive && e.key === "Enter" && sendChat()
-                }
-              />
-              <button type="button" onClick={sendChat} disabled={!collabActive}>
-                Send
-              </button>
-            </div>
-          </div>
-        ) : null}
+          ) : null}
         </div>
         <aside
           className={
@@ -2833,9 +2850,8 @@ function App() {
             >
               {hostingCopied
                 ? "Copied invite link"
-                : `Hosting · ${roster.length} ${
-                    roster.length === 1 ? "person" : "people"
-                  }`}
+                : `Hosting · ${roster.length} ${roster.length === 1 ? "person" : "people"
+                }`}
             </button>
           ) : null}
         </div>

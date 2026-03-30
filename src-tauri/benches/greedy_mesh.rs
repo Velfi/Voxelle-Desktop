@@ -126,7 +126,7 @@ fn bench_load_chunk_meshes_fused_vs_sequential(c: &mut Criterion) {
     group.sample_size(15);
     group.bench_function("fused_parallel", |b| {
         b.iter(|| {
-            greedy_mesh::build_chunk_meshes_and_spatial_cache(black_box(&voxels), cs, |_| {})
+            greedy_mesh::build_chunk_meshes_and_spatial_cache(black_box(&voxels), cs, |_, _, _| {})
         })
     });
     group.bench_function("sequential_chunk_meshes", |b| {

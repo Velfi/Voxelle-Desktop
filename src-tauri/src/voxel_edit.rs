@@ -271,7 +271,8 @@ fn anchor_for_edit(
     }
 }
 
-/// Stroke anchor cells: single-ray volume, or a 3D line between two screen anchors (line stroke).
+/// Stroke anchor cells: line between press and cursor, segment between previous and current sample,
+/// or a single-ray sample when neither line nor segment is set.
 fn stroke_anchor_centers(
     tool: EditTool,
     file: &VoxelleFile,
@@ -282,10 +283,21 @@ fn stroke_anchor_centers(
     sx: f32,
     sy: f32,
     stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
 ) -> Vec<(i32, i32, i32)> {
     if let Some((lsx, lsy)) = stroke_line_start {
         match (
             anchor_for_edit(tool, file, voxel_map, camera, width, height, lsx, lsy),
+            anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy),
+        ) {
+            (Some(a), Some(b)) => voxel_line_dda(a, b),
+            _ => anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
+                .into_iter()
+                .collect(),
+        }
+    } else if let Some((px, py)) = stroke_segment_prev {
+        match (
+            anchor_for_edit(tool, file, voxel_map, camera, width, height, px, py),
             anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy),
         ) {
             (Some(a), Some(b)) => voxel_line_dda(a, b),
@@ -559,7 +571,9 @@ pub fn pick_voxel_at_screen(
 ///
 /// `spray_density`: `0` = full brush; `(0, 1]` thins voxels deterministically per cell.
 /// `stroke_line_start`: when `Some`, brush samples along the 3D line between anchors at
-/// `(start)` and `(sx, sy)`; when `None`, single-ray volume stroke.
+/// pointer-down and `(sx, sy)` (Stroke / line mode).
+/// `stroke_segment_prev`: when `stroke_line_start` is `None` and this is `Some`, samples along
+/// the segment from the previous screen position to `(sx, sy)` (Brush path / web spray-style drag).
 pub fn apply_edit(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
@@ -575,6 +589,7 @@ pub fn apply_edit(
     brush_shape: BrushShape,
     spray_density: f32,
     stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = file.grid_size.max(1);
     let offsets = brush_offset_cells(brush_shape, brush_radius);
@@ -589,6 +604,7 @@ pub fn apply_edit(
         sx,
         sy,
         stroke_line_start,
+        stroke_segment_prev,
     );
     if centers.is_empty() {
         return Ok(Vec::new());
