@@ -85,25 +85,25 @@ function basename(path: string): string {
   return i >= 0 ? n.slice(i + 1) : n;
 }
 
-/** One-line hint for which copy will load (newest of saved file vs autosave). */
+/** Optional note when reopening (backup vs file). */
 function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
   if (!info.lastDocumentPath) return null;
   if (!info.documentExists && info.autosaveExists) {
-    return "Saved file not found — restoring from backup.";
+    return "Couldn't find the file — opened your backup instead.";
   }
   if (
     info.documentExists &&
     info.autosaveExists &&
     info.autosaveNewerThanDocument
   ) {
-    return "Latest copy is the autosave (newer than the file on disk).";
+    return "Backup is newer than the saved file.";
   }
   if (
     info.documentExists &&
     info.autosaveExists &&
     !info.autosaveNewerThanDocument
   ) {
-    return "Latest copy is the saved file.";
+    return null;
   }
   return null;
 }
@@ -465,7 +465,7 @@ function App() {
         const msg =
           typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
         setCollabBanner({
-          text: `You were removed from the session: ${msg}`,
+          text: `Removed from session: ${msg}`,
           tone: "alert",
         });
         clearCollabSessionUi();
@@ -474,7 +474,7 @@ function App() {
         try {
           const update = await check();
           if (!update) {
-            window.alert("You're on the latest version.");
+            window.alert("You're up to date.");
             return;
           }
           const ok = await invoke<boolean>("confirm_app_update_dialog", {
@@ -946,7 +946,7 @@ function App() {
       .catch((err) => {
         const msg = err instanceof Error ? err.message : String(err);
         setLoadError(
-          `Could not start hosting.\n\n${msg}\n\nIf you are already in a session, leave it first. Otherwise try another port.`,
+          `Couldn't start a session.\n\n${msg}\n\nLeave any open session first, or try a different port.`,
         );
       });
   };
@@ -957,7 +957,7 @@ function App() {
     setLoadError(null);
     const u = (urlOverride ?? joinUrl).trim();
     if (!u) {
-      setLoadError("Enter a server URL (ws://…).");
+      setLoadError("Enter a host address.");
       return;
     }
     setJoinUrl(u);
@@ -1046,7 +1046,7 @@ function App() {
     }
     if (pathLabel) {
       const base = basename(pathLabel);
-      if (collabActive) return `${base} · Collaborating`;
+      if (collabActive) return `${base} · Live`;
       return base;
     }
     return "No file open";
@@ -1087,7 +1087,7 @@ function App() {
               onClick={() => setSidebarExpanded((v) => !v)}
               aria-expanded={sidebarExpanded}
               title={
-                sidebarExpanded ? "Collapse tool sidebar" : "Expand tool sidebar"
+                sidebarExpanded ? "Collapse tools" : "Expand tools"
               }
             >
               <span className="sidebar-expand-toggle-icon" aria-hidden>
@@ -1116,7 +1116,7 @@ function App() {
                 }
                 disabled={loading || workBusy}
                 onClick={() => setInteractionMode("navigate")}
-                title="Orbit, pan, dolly — clicks do not edit voxels"
+                title="Move the camera"
               >
                 <span className="sidebar-mode-icon" aria-hidden>
                   ✋
@@ -1134,7 +1134,7 @@ function App() {
                 }
                 disabled={loading || workBusy}
                 onClick={() => setInteractionMode("add")}
-                title="Click a face to place a voxel (green preview)"
+                title="Paint on a face"
               >
                 <span className="sidebar-mode-icon" aria-hidden>
                   👇
@@ -1152,7 +1152,7 @@ function App() {
                 }
                 disabled={loading || workBusy}
                 onClick={() => setInteractionMode("remove")}
-                title="Click a voxel to remove it (red preview)"
+                title="Erase blocks"
               >
                 <span className="sidebar-mode-icon" aria-hidden>
                   👊
@@ -1244,7 +1244,7 @@ function App() {
                         lastProjectBlurb ? "viewport-empty-last-desc" : undefined
                       }
                     >
-                      Reopen last project
+                      Open
                     </button>
                   </div>
                 </div>
@@ -1266,8 +1266,8 @@ function App() {
                   disabled={collabActive}
                   title={
                     collabActive
-                      ? "Already in a session — leave before joining another"
-                      : "Connect to a host by URL"
+                      ? "Leave your session first"
+                      : "Paste a host link"
                   }
                 >
                   Join Session
@@ -1279,8 +1279,8 @@ function App() {
                   title={
                     collabActive
                       ? hostWsUrl
-                        ? "Stop hosting and end the session for guests"
-                        : "Leave the collaboration session"
+                        ? "End the session for everyone"
+                        : "Leave session"
                       : undefined
                   }
                 >
@@ -1379,7 +1379,7 @@ function App() {
                 type="text"
                 value={chatInput}
                 placeholder={
-                  collabActive ? "Message…" : "Join or host to use chat"
+                  collabActive ? "Message…" : "Join or host to chat"
                 }
                 disabled={!collabActive}
                 onChange={(e) => setChatInput(e.target.value)}
@@ -1476,7 +1476,7 @@ function App() {
                                 }).then(() => refreshSceneObjects());
                               }}
                             />
-                            show
+                            Visible
                           </label>
                         </li>
                       ))}
@@ -1502,25 +1502,25 @@ function App() {
                       aria-live="polite"
                     >
                       {hostWsUrl
-                        ? "Hosting — guests can join using the link in the status bar."
-                        : "Connected as a guest."}
+                        ? "Guests can use the link in the status bar."
+                        : "You're a guest."}
                     </p>
                     {hostWsUrl ? (
                       <>
                         <p className="collab-hint inspector-collab-hint">
-                          On your network: <code>{hostWsUrl}</code>
+                          Nearby: <code>{hostWsUrl}</code>
                         </p>
                         {prefsEnableUpnp && natPending ? (
                           <p
                             className="collab-hint collab-hint-muted inspector-collab-hint"
                             role="status"
                           >
-                            Contacting your router for internet sharing…
+                            Checking your router…
                           </p>
                         ) : null}
                         {hostWanUrl ? (
                           <p className="collab-hint inspector-collab-hint">
-                            Internet (UPnP): <code>{hostWanUrl}</code>
+                            Internet: <code>{hostWanUrl}</code>
                           </p>
                         ) : null}
                         {natError ? (
@@ -1528,9 +1528,9 @@ function App() {
                             className="collab-hint collab-hint-warn inspector-collab-hint"
                             role="alert"
                           >
-                            {natError} If UPnP is disabled on the router, forward
-                            TCP port {hostPort} manually. CGNAT can block internet
-                            guests even when UPnP succeeds.
+                            {natError} You can forward port {hostPort} in your
+                            router settings. Some networks won&apos;t allow guests
+                            over the internet.
                           </p>
                         ) : null}
                       </>
@@ -1545,7 +1545,7 @@ function App() {
                             type="button"
                             className="collab-roster-name"
                             onClick={() => onRosterSnapCamera(r.peerId)}
-                            title="Click to match their camera"
+                            title="Jump to their view"
                           >
                             <span
                               className="collab-swatch"
@@ -1568,12 +1568,12 @@ function App() {
                                     setCanEdit(r.peerId, e.target.checked)
                                   }
                                 />
-                                edit
+                                Edit
                               </label>
                               <button
                                 type="button"
                                 className="collab-kick"
-                                title="Remove from session"
+                                title="Remove guest"
                                 onClick={() =>
                                   void invoke("collab_kick_peer", {
                                     targetPeer: r.peerId,
@@ -1620,14 +1620,14 @@ function App() {
               onClick={copyHostingJoinAddress}
               title={
                 hostingCopied
-                  ? "Join address copied"
-                  : "Copy join address (internet link if UPnP succeeded, else LAN)"
+                  ? "Copied"
+                  : "Copy invite link"
               }
             >
               {hostingCopied
-                ? "Copied join address"
+                ? "Copied invite link"
                 : `Hosting · ${roster.length} ${
-                    roster.length === 1 ? "user" : "users"
+                    roster.length === 1 ? "person" : "people"
                   }`}
             </button>
           ) : null}
@@ -1666,7 +1666,7 @@ function App() {
           onKeyDown={(e) => e.key === "Escape" && setNewProjectOpen(false)}
         >
           <div className="modal">
-            <h3>New grid</h3>
+            <h3>New project</h3>
             <label className="modal-field">
               Grid size (1–{MAX_GRID_SIZE.toLocaleString()})
               <input

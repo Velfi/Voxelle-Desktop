@@ -11,7 +11,7 @@ This document describes **how Voxelle Desktop writes `.voxelle` files today** an
   - **gzip + v3 wire** (VX3 inner, no outer VX4),
   - uncompressed BSON where applicable.
 
-There is no breaking change for older files: existing tooling that produced gzip BSON or v3 wire still loads.
+Legacy **VX3 wire version 3** (20-byte records) and gzip BSON still load. Older **VX3 wire version 4** payloads that used **20-byte** records (an unreleased experiment) are **not** supported; current **wire version 4** means **24-byte** records as below.
 
 ## Outer container (VX4)
 
@@ -57,14 +57,16 @@ Used when voxel count **≥** 50_000. Inner layout:
 | Offset | Size | Content |
 |--------|------|---------|
 | 0 | 4 | Magic **`VX3`** + `0x1a` |
-| 4 | 4 | `wire_version`: `u32` LE — **4** for v4 writers |
+| 4 | 4 | `wire_version`: `u32` LE — **3** (legacy 20-byte records) or **4** (v4 dense: 24-byte records + objects in header) |
 | 8 | 4 | `header_len`: `u32` LE |
 | 12 | `header_len` | BSON document (UTF-8 BSON bytes) |
-| … | `voxel_count × 20` | Dense voxel records (see below) |
+| … | `voxel_count × record_size` | Dense voxel records (see below) |
 
-Header BSON includes at least: `version` (4), `gridSize`, `scene`, `voxelCount`, `hiddenCount`. Desktop currently writes **`hiddenCount`: 0** for the dense body; hidden geometry is not round-tripped on save.
+**Wire version 3** (legacy): `record_size = 20`. Header BSON includes at least: `version`, `gridSize`, `scene`, `voxelCount`, `hiddenCount` — no `objects` / `activeObjectId` in the stripped writer path.
 
-**V3 record** (`V3_RECORD_SIZE = 20` bytes), little-endian:
+**Wire version 4** (dense): `record_size` is **24** (`V4_WIRE_RECORD_SIZE`) for current writers (per-voxel `object_id`). Header BSON includes **`version`** (4), **`gridSize`**, **`scene`**, **`voxelCount`**, **`hiddenCount`**, **`objects`**, **`activeObjectId`**. Some **unreleased** builds wrote wire version **4** with a **20**-byte body (same layout as wire version 3); **`decode_payload`** infers 20 vs 24 from total body length ÷ (`voxelCount` + `hiddenCount`). Desktop writes **`hiddenCount`: 0** for the dense body; hidden geometry is not round-tripped on save.
+
+**Legacy V3 record** (`V3_RECORD_SIZE = 20` bytes), wire version **3** only:
 
 | Bytes | Field |
 |-------|--------|
@@ -74,6 +76,13 @@ Header BSON includes at least: `version` (4), `gridSize`, `scene`, `voxelCount`,
 | 12–15 | `color` `u32` (lower 24 bits used) |
 | 16 | `material` index `u8` (see [Materials](#materials)) |
 | 17–19 | padding `0` |
+
+**V4 dense record** (`V4_WIRE_RECORD_SIZE = 24` bytes), wire version **4**:
+
+| Bytes | Field |
+|-------|--------|
+| 0–19 | Same as legacy V3 record above |
+| 20–23 | `object_id` `u32` LE |
 
 ## fileMeta
 
@@ -113,7 +122,7 @@ String ids in BSON rows and index in v3 wire must match:
 | v4 file | First 4 bytes = VX4 magic → parse container → inner BSON or VX3 wire. |
 | Legacy | Not VX4 → optional gzip decompress → VX3 magic at start of payload, else BSON. |
 
-Wire version **4** is accepted anywhere wire version **3** was (`parse_v3` allows 3 or 4).
+Wire version **3** (20-byte records) and **4** (24-byte records + object ids) are accepted (`parse_v3`).
 
 ## Related
 

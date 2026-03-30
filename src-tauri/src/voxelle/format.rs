@@ -9,8 +9,8 @@ use thiserror::Error;
 pub const V3_MAGIC: [u8; 4] = [0x56, 0x58, 0x33, 0x1a];
 pub const V4_MAGIC: [u8; 4] = [0x56, 0x58, 0x34, 0x1a];
 pub const V3_RECORD_SIZE: usize = 20;
-/// Wire v5: adds `object_id` u32 per voxel after v3 record fields (24 bytes total).
-pub const V5_RECORD_SIZE: usize = 24;
+/// Dense **VX3 wire version 4** body: `object_id` `u32` after the legacy 20-byte fields (24 bytes total).
+pub const V4_WIRE_RECORD_SIZE: usize = 24;
 /// Use dense v3-style body when at least this many voxels (matches web / prior tooling).
 pub const V3_WIRE_VOXEL_THRESHOLD: usize = 50_000;
 
@@ -188,10 +188,44 @@ fn is_v3_wire(bytes: &[u8]) -> bool {
         && bytes[3] == V3_MAGIC[3]
 }
 
-fn record_size_for_wire(wire_ver: u32) -> Result<usize, ParseError> {
+/// Infer bytes per voxel from total body length. Wire **4** may be legacy **20**-byte (pre–object-id
+/// writers) or current **24**-byte. Wire **5** was a short-lived label for 24-byte dense; still accepted.
+fn infer_v3_wire_record_size(
+    wire_ver: u32,
+    body_byte_len: usize,
+    voxel_count: i32,
+    hidden_count: i32,
+) -> Result<usize, ParseError> {
+    let total = (voxel_count + hidden_count) as usize;
+    if total == 0 {
+        return if body_byte_len == 0 {
+            Ok(V3_RECORD_SIZE)
+        } else {
+            Err(ParseError::InvalidV3)
+        };
+    }
+    if body_byte_len % total != 0 {
+        return Err(ParseError::InvalidV3);
+    }
+    let per = body_byte_len / total;
     match wire_ver {
-        3 | 4 => Ok(V3_RECORD_SIZE),
-        5 => Ok(V5_RECORD_SIZE),
+        3 => {
+            if per != V3_RECORD_SIZE {
+                return Err(ParseError::InvalidV3);
+            }
+            Ok(V3_RECORD_SIZE)
+        }
+        4 => match per {
+            V4_WIRE_RECORD_SIZE => Ok(V4_WIRE_RECORD_SIZE),
+            V3_RECORD_SIZE => Ok(V3_RECORD_SIZE),
+            _ => Err(ParseError::InvalidV3),
+        },
+        5 => {
+            if per != V4_WIRE_RECORD_SIZE {
+                return Err(ParseError::InvalidV3);
+            }
+            Ok(V4_WIRE_RECORD_SIZE)
+        }
         _ => Err(ParseError::InvalidV3),
     }
 }
@@ -285,7 +319,6 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         return Err(ParseError::InvalidV3);
     }
     let wire_ver = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    let rec_size = record_size_for_wire(wire_ver)?;
     let header_len = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     if header_len < 8 || 12 + header_len > bytes.len() {
         return Err(ParseError::InvalidV3);
@@ -301,10 +334,8 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     if voxel_count < 0 || hidden_count < 0 {
         return Err(ParseError::InvalidV3);
     }
-    let body_len = (voxel_count + hidden_count) as usize * rec_size;
-    if 12 + header_len + body_len != bytes.len() {
-        return Err(ParseError::InvalidV3);
-    }
+    let body_byte_len = bytes.len().saturating_sub(12 + header_len);
+    let rec_size = infer_v3_wire_record_size(wire_ver, body_byte_len, voxel_count, hidden_count)?;
 
     let scene = parse_scene_bson(&doc);
     let scene_extra = doc.get_document("scene").ok().cloned();
@@ -315,8 +346,8 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     let mut voxels = Vec::with_capacity(voxel_count as usize);
     let mut o = 12 + header_len;
     for i in 0..voxel_count {
-        let v = if wire_ver >= 5 {
-            read_v5_record(bytes, o)?
+        let v = if rec_size == V4_WIRE_RECORD_SIZE {
+            read_v4_wire_record(bytes, o)?
         } else {
             read_v3_record(bytes, o)?
         };
@@ -357,8 +388,8 @@ fn read_v3_record(bytes: &[u8], o: usize) -> Result<Voxel, ParseError> {
     })
 }
 
-fn read_v5_record(bytes: &[u8], o: usize) -> Result<Voxel, ParseError> {
-    if o + V5_RECORD_SIZE > bytes.len() {
+fn read_v4_wire_record(bytes: &[u8], o: usize) -> Result<Voxel, ParseError> {
+    if o + V4_WIRE_RECORD_SIZE > bytes.len() {
         return Err(ParseError::InvalidV3);
     }
     let mut v = read_v3_record(bytes, o)?;
@@ -633,7 +664,9 @@ fn objects_array_for_encode(file: &VoxelleFile) -> bson::Array {
     objs.iter().map(scene_object_to_bson).collect()
 }
 
-fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8>, EncodeError> {
+/// Dense VX3 wire **version 4**: BSON header includes `objects` + `activeObjectId`; each voxel is 24 bytes (`object_id` last).
+fn build_v3_wire_payload(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
+    const WIRE_VERSION: u32 = 4;
     let grid_size = grid_size_for_encode(file);
     let voxel_count = file.voxels.len() as i32;
     let hidden_count = 0_i32;
@@ -649,18 +682,6 @@ fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8
         "objects": objects_bson,
         "activeObjectId": Bson::Int32(file.active_object_id as i32),
     };
-    // Wire v5: per-voxel object_id
-    let header = if wire_version >= 5 {
-        header
-    } else {
-        let mut h = Document::new();
-        for (k, v) in header {
-            if k != "objects" && k != "activeObjectId" {
-                h.insert(k, v);
-            }
-        }
-        h
-    };
 
     let mut header_bytes = Vec::new();
     header
@@ -668,14 +689,10 @@ fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8
         .map_err(EncodeError::Bson)?;
     let header_len = header_bytes.len() as u32;
 
-    let rec_size = if wire_version >= 5 {
-        V5_RECORD_SIZE
-    } else {
-        V3_RECORD_SIZE
-    };
+    let rec_size = V4_WIRE_RECORD_SIZE;
     let mut out = Vec::with_capacity(12 + header_bytes.len() + file.voxels.len() * rec_size);
     out.extend_from_slice(&V3_MAGIC);
-    out.extend_from_slice(&wire_version.to_le_bytes());
+    out.extend_from_slice(&WIRE_VERSION.to_le_bytes());
     out.extend_from_slice(&header_len.to_le_bytes());
     out.extend_from_slice(&header_bytes);
     for v in &file.voxels {
@@ -685,9 +702,7 @@ fn build_v3_wire_payload(file: &VoxelleFile, wire_version: u32) -> Result<Vec<u8
         out.extend_from_slice(&(v.color & 0xffffff).to_le_bytes());
         let pad = [v.material.material_index(), 0, 0, 0];
         out.extend_from_slice(&pad);
-        if wire_version >= 5 {
-            out.extend_from_slice(&v.object_id.to_le_bytes());
-        }
+        out.extend_from_slice(&v.object_id.to_le_bytes());
     }
     Ok(out)
 }
@@ -745,14 +760,10 @@ pub fn empty_collab_placeholder() -> VoxelleFile {
     }
 }
 
-/// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner). Inner is BSON or v3-style wire.
+/// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner). Inner is BSON or VX3 dense wire v4.
 pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
-    let needs_v5 = file.voxels.iter().any(|v| v.object_id != 0)
-        || file.objects.len() > 1
-        || file.active_object_id != 0;
     let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {
-        let wire = if needs_v5 { 5_u32 } else { 4_u32 };
-        build_v3_wire_payload(file, wire)?
+        build_v3_wire_payload(file)?
     } else {
         build_bson_v4_payload(file)?
     };

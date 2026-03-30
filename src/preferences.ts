@@ -3,8 +3,8 @@
 export const VOXELLE_PREFERENCES_KEY = "voxelle-preferences";
 
 export const TONE_MAPPING_OPTIONS = [
-  { value: "neutral" as const, label: "Neutral (balanced)" },
-  { value: "aces" as const, label: "ACES Filmic" },
+  { value: "neutral" as const, label: "Neutral" },
+  { value: "aces" as const, label: "Filmic" },
   { value: "linear" as const, label: "Linear" },
   { value: "none" as const, label: "None" },
   { value: "agx" as const, label: "AgX" },

@@ -1,4 +1,6 @@
-use super::format::{decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, MaterialId};
+use super::format::{
+    decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, MaterialId, V3_MAGIC,
+};
 
 #[test]
 fn focal_matches_ts() {
@@ -131,4 +133,33 @@ fn v4_objects_roundtrip_bson() {
     assert_eq!(back.objects.len(), 2);
     assert_eq!(back.active_object_id, 1);
     assert_eq!(back.voxels[1].object_id, 1);
+}
+
+/// Pre-object-id desktop builds wrote `wire_version` **4** with **20**-byte records (same as v3 body).
+#[test]
+fn dense_wire_version_4_legacy_20_byte_record_loads() {
+    let header = bson::doc! {
+        "version": 4_i32,
+        "gridSize": 32_i32,
+        "scene": bson::doc! {},
+        "voxelCount": 1_i32,
+        "hiddenCount": 0_i32,
+    };
+    let mut header_bytes = Vec::new();
+    header.to_writer(&mut header_bytes).unwrap();
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&V3_MAGIC);
+    raw.extend_from_slice(&4u32.to_le_bytes());
+    raw.extend_from_slice(&(header_bytes.len() as u32).to_le_bytes());
+    raw.extend_from_slice(&header_bytes);
+    raw.extend_from_slice(&0i32.to_le_bytes());
+    raw.extend_from_slice(&0i32.to_le_bytes());
+    raw.extend_from_slice(&0i32.to_le_bytes());
+    raw.extend_from_slice(&0xff0000u32.to_le_bytes());
+    raw.extend_from_slice(&[0u8, 0, 0, 0]);
+
+    let file = decode_payload(&raw).unwrap();
+    assert_eq!(file.voxels.len(), 1);
+    assert_eq!(file.voxels[0].color, 0xff0000);
+    assert_eq!(file.voxels[0].object_id, 0);
 }

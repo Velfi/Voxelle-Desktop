@@ -165,18 +165,15 @@ export function PreferencesModal({
               checked={prefs.showMovementDeltaHint}
               onChange={(e) => onMovementDelta(e.target.checked)}
             />
-            Show movement delta hint (Δx, Δy, Δz near cursor during strokes)
+            Movement hints while drawing
           </label>
-          <p className="prefs-field-hint prefs-desktop-note">
-            Sculpt overlays match Voxelle web; not shown in this desktop build yet.
-          </p>
           <label className="prefs-checkbox-label">
             <input
               type="checkbox"
               checked={prefs.showDragDeltaHint}
               onChange={(e) => onDragDelta(e.target.checked)}
             />
-            Show selection move drag hint (line and delta at original position)
+            Selection move hints
           </label>
           <label className="prefs-checkbox-label">
             <input
@@ -184,12 +181,9 @@ export function PreferencesModal({
               checked={prefs.showFpsCounter}
               onChange={(e) => onFps(e.target.checked)}
             />
-            Show FPS counter (viewport overlay)
+            FPS overlay
           </label>
           <h4 className="prefs-section-title">Collaboration</h4>
-          <p className="prefs-field-hint prefs-section-hint">
-            Name and color are shown to others when you host or join a session.
-          </p>
           <label className="prefs-select-label">
             <span className="prefs-select-label-text">Display name</span>
             <input
@@ -211,14 +205,14 @@ export function PreferencesModal({
           </label>
           {collabHosting ? (
             <p className="prefs-field-hint prefs-section-hint">
-              Listen port and UPnP are locked while you are hosting. Stop the
-              session to change them.
+              Port and internet sharing are locked while you host. End the session
+              to change them.
             </p>
           ) : null}
           <label
             className={`prefs-select-label${collabHosting ? " is-disabled" : ""}`}
           >
-            <span className="prefs-select-label-text">Hosting port (TCP)</span>
+            <span className="prefs-select-label-text">Host port</span>
             <input
               type="number"
               className="prefs-number-input"
@@ -228,16 +222,13 @@ export function PreferencesModal({
               value={prefs.collabHostPort}
               onChange={(e) => onCollabHostPort(Number(e.target.value))}
             />
-            <span className="prefs-field-hint">
-              WebSocket listen port when you start a session (default 27300).
-            </span>
+            <span className="prefs-field-hint">Default 27300.</span>
           </label>
           <p
             className={`prefs-field-hint prefs-section-hint${collabHosting ? " is-disabled" : ""}`}
           >
-            When you host a session, this asks your router to open a port so guests
-            outside your LAN can connect (UPnP). Off by default; use only if you
-            need internet guests.
+            Lets friends online join without manual router setup. Leave off unless
+            you need it.
           </p>
           <label
             className={`prefs-checkbox-label${collabHosting ? " is-disabled" : ""}`}
@@ -248,12 +239,11 @@ export function PreferencesModal({
               disabled={collabHosting}
               onChange={(e) => onEnableUpnp(e.target.checked)}
             />
-            Enable UPnP when hosting
+            Internet guests (UPnP)
           </label>
           <h4 className="prefs-section-title">Autosave</h4>
           <p className="prefs-field-hint prefs-section-hint">
-            Backups are stored in app data only; your project file on disk is not
-            overwritten by autosave.
+            Backups live in the app — your file on disk updates when you save.
           </p>
           <label className="prefs-checkbox-label">
             <input
@@ -261,12 +251,12 @@ export function PreferencesModal({
               checked={prefs.autosaveEnabled}
               onChange={(e) => onAutosaveEnabled(e.target.checked)}
             />
-            Enable timed autosave
+            Timed backups
           </label>
           <label
             className={`prefs-select-label${prefs.autosaveEnabled ? "" : " is-disabled"}`}
           >
-            <span className="prefs-select-label-text">Interval (seconds)</span>
+            <span className="prefs-select-label-text">Every (seconds)</span>
             <input
               type="number"
               className="prefs-number-input"
@@ -276,12 +266,12 @@ export function PreferencesModal({
               value={prefs.autosaveIntervalSecs}
               onChange={(e) => onAutosaveInterval(Number(e.target.value))}
             />
-            <span className="prefs-field-hint">0 = never (same as disabling).</span>
+            <span className="prefs-field-hint">0 turns off the timer.</span>
           </label>
           <label
             className={`prefs-select-label${prefs.autosaveEnabled ? "" : " is-disabled"}`}
           >
-            <span className="prefs-select-label-text">Backups to keep (per project)</span>
+            <span className="prefs-select-label-text">Keep backups</span>
             <input
               type="number"
               className="prefs-number-input"
@@ -291,12 +281,10 @@ export function PreferencesModal({
               value={prefs.autosaveKeepCount}
               onChange={(e) => onAutosaveKeep(Number(e.target.value))}
             />
-            <span className="prefs-field-hint">
-              Rotating files in app data; reopen uses the newest backup.
-            </span>
+            <span className="prefs-field-hint">Per project; oldest drops first.</span>
           </label>
           <label className="prefs-select-label">
-            <span className="prefs-select-label-text">Viewport tone mapping</span>
+            <span className="prefs-select-label-text">Display look</span>
             <select
               className="prefs-tone-select"
               value={prefs.toneMapping}

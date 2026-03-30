@@ -2093,8 +2093,8 @@ fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadat
         name: Some(pkg.name.clone()),
         version: Some(pkg.version.to_string()),
         website: Some(GITHUB_VD.into()),
-        website_label: Some("GitHub — source & issues".into()),
-        comments: Some("Collaborative voxel editing on the desktop.".into()),
+        website_label: Some("GitHub".into()),
+        comments: Some("Voxel art, together on the desktop.".into()),
         copyright: app.config().bundle.copyright.clone(),
         ..Default::default()
     };
@@ -2105,7 +2105,7 @@ fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadat
         m.website_label = None;
         m.comments = None;
         m.credits = Some(format!(
-            "Collaborative voxel editing on the desktop.\n\nSource & issues:\n{GITHUB_VD}"
+            "Voxel art, together on the desktop.\n\n{GITHUB_VD}"
         ));
     }
     Ok(m)
@@ -2181,24 +2181,24 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<()> {
     let debug_copy_perf = MenuItem::with_id(
         app,
         "debug_copy_performance",
-        "Copy Performance Data to Clipboard",
+        "Copy performance info",
         true,
         None::<&str>,
     )?;
     let debug_menu = Submenu::with_items(app, "Debug", true, &[&debug_copy_perf])?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let view_render_greedy = MenuItem::with_id(app, "view_render_greedy", "Blocky (Greedy)", true, None::<&str>)?;
+    let view_render_greedy = MenuItem::with_id(app, "view_render_greedy", "Blocky", true, None::<&str>)?;
     let view_render_marching = MenuItem::with_id(
         app,
         "view_render_marching",
-        "Smooth (Marching Cubes)",
+        "Smooth",
         true,
         None::<&str>,
     )?;
     let view_render_dual = MenuItem::with_id(
         app,
         "view_render_dual",
-        "Smooth (Dual Contour)",
+        "Crisp",
         true,
         None::<&str>,
     )?;

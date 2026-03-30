@@ -4,7 +4,7 @@ Native voxel viewer and editor (Tauri + React + Vite).
 
 ## Format
 
-- **[Voxelle v4 file layout (writers & readers)](docs/VOXELLE_FORMAT_V4.md)** — VX4 container, inner BSON vs dense wire, `fileMeta`, materials.
+- **[Voxelle v4 file layout (writers & readers)](docs/VOXELLE_FORMAT_V4.md)** — VX4 container, inner BSON vs **VX3 dense wire** (`wire_version` 3 = 20-byte records, **4** = 24-byte + `object_id`), `fileMeta`, materials.
 
 ## Tooling
 

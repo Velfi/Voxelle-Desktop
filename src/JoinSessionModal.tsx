@@ -37,13 +37,13 @@ export function JoinSessionModal({
         </h3>
         {collabActive ? (
           <p className="join-session-blocked" role="status">
-            Leave your current session first to join another host.
+            Leave your session first.
           </p>
         ) : null}
         {recent.length > 0 ? (
           <div className="join-session-recent">
-            <div className="join-session-recent-label">Recent servers</div>
-            <ul className="join-session-recent-list" aria-label="Recent join URLs">
+            <div className="join-session-recent-label">Recent</div>
+            <ul className="join-session-recent-list" aria-label="Recent hosts">
               {recent.map((url) => (
                 <li key={url}>
                   <button
@@ -64,7 +64,7 @@ export function JoinSessionModal({
           </div>
         ) : null}
         <label className="modal-field join-session-url-field">
-          <span className="join-session-url-label">Server URL</span>
+          <span className="join-session-url-label">Host address</span>
           <input
             type="text"
             value={joinUrl}
