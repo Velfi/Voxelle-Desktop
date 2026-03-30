@@ -399,6 +399,7 @@ pub(crate) fn apply_mesh_and_camera(
     }
     #[cfg(target_os = "macos")]
     macos_undo::clear_all(app);
+    collab::broadcast_snapshot_to_guests(state);
     Ok(())
 }
 
@@ -1340,15 +1341,34 @@ fn collab_join(
 }
 
 #[tauri::command]
-fn collab_leave(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
-    state.collab.lock().map_err(|e| e.to_string())?.leave();
+fn collab_leave(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+    let (was_host, was_client) = {
+        let mut c = state.collab.lock().map_err(|e| e.to_string())?;
+        let wh = c.is_host();
+        let wc = c.is_client();
+        c.leave();
+        (wh, wc)
+    };
     *state.ping_flash.lock().map_err(|e| e.to_string())? = None;
+    if was_host {
+        let _ = app.emit(
+            "collab-ended",
+            "You stopped hosting. The session is no longer shared.",
+        );
+    } else if was_client {
+        let _ = app.emit("collab-ended", "You left the collaboration session.");
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn collab_local_peer_id(state: State<'_, Arc<ViewerState>>) -> u32 {
     state.collab.lock().map(|c| c.local_peer_id).unwrap_or(0)
+}
+
+#[tauri::command]
+fn collab_kick_peer(state: State<'_, Arc<ViewerState>>, target_peer: u32) -> Result<(), String> {
+    collab::host_kick_peer(&state.collab, target_peer)
 }
 
 #[tauri::command]
@@ -1636,6 +1656,7 @@ pub fn run() {
             collab_join,
             collab_leave,
             collab_local_peer_id,
+            collab_kick_peer,
             collab_set_can_edit,
             collab_push_camera,
             collab_snap_camera,

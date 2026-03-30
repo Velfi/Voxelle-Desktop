@@ -469,6 +469,20 @@ fn build_bson_v4_payload(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     Ok(buf)
 }
 
+/// Empty scene used for collab welcome when the host has no file open yet (lobby).
+pub fn empty_collab_placeholder() -> VoxelleFile {
+    VoxelleFile {
+        version: 4,
+        grid_size: 64,
+        scene: Scene {
+            focal_length_mm: Some(29.0),
+            orthographic: false,
+        },
+        scene_extra: None,
+        voxels: Vec::new(),
+    }
+}
+
 /// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner). Inner is BSON or v3-style wire.
 pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {

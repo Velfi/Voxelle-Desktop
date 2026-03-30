@@ -2376,12 +2376,13 @@ impl WgpuViewer {
             self.collab_line_vertex_count = 0;
             return;
         }
-        let n = verts.len();
-        let nbytes = (n * std::mem::size_of::<f32>()) as u64;
+        let n_floats = verts.len();
+        let vertex_count = (n_floats / 6) as u32;
+        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
         if let Some(ref buf) = self.collab_line_vertex_buffer {
             if buf.size() == nbytes {
                 self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
-                self.collab_line_vertex_count = n as u32;
+                self.collab_line_vertex_count = vertex_count;
                 return;
             }
         }
@@ -2392,7 +2393,7 @@ impl WgpuViewer {
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             },
         ));
-        self.collab_line_vertex_count = n as u32;
+        self.collab_line_vertex_count = vertex_count;
     }
 
     pub fn clear_collab_peer_lines(&mut self) {

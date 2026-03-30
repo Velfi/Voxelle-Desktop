@@ -4,8 +4,8 @@ mod format;
 pub mod start_shape;
 
 pub use format::{
-    decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, EncodeError, MaterialId,
-    Voxel, VoxelleFile,
+    decode_payload, empty_collab_placeholder, encode_payload_v4, focal_length_to_fov_y_radians,
+    EncodeError, MaterialId, Voxel, VoxelleFile,
 };
 
 #[cfg(test)]

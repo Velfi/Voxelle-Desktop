@@ -3,7 +3,7 @@
 use crate::camera::Spherical;
 use crate::finish_voxel_edit_gpu;
 use crate::voxel_edit;
-use crate::voxelle::encode_payload_v4;
+use crate::voxelle::{empty_collab_placeholder, encode_payload_v4};
 use crate::ViewerState;
 use futures_util::{SinkExt, StreamExt};
 use glam::Vec3;
@@ -11,12 +11,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
+use tokio::sync::watch;
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message, WebSocketStream};
 
 type WsTcp = WebSocketStream<TcpStream>;
+
+/// If a guest sends no message (including [`ClientToHost::Heartbeat`]) for this long, the host drops them from the roster.
+const GUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
+const GUEST_ACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
+/// Clients send this periodically so idle tabs still count as alive.
+const CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+
+const GUEST_TIMEOUT_KICK_REASON: &str = "timed out (no activity)";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -115,6 +125,8 @@ pub enum ClientToHost {
         target_peer: u32,
         can_edit: bool,
     },
+    /// Periodic liveness; host also treats any other inbound message as activity.
+    Heartbeat,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -153,6 +165,9 @@ pub enum HostToClient {
     Deny {
         reason: String,
     },
+    Kicked {
+        reason: String,
+    },
     Snapshot {
         bytes: Vec<u8>,
     },
@@ -171,6 +186,10 @@ pub struct CollabRuntime {
     /// Host → all connected guest websockets.
     pub host_broadcast: Option<broadcast::Sender<String>>,
     pub client_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Per connected guest (peer id ≥ 2): send [`Some`] with kick reason to close the socket.
+    pub host_peer_kick_tx: HashMap<u32, watch::Sender<Option<String>>>,
+    /// Last inbound activity from each guest (any message or heartbeat). Host only.
+    pub guest_last_activity: HashMap<u32, Instant>,
 }
 
 impl Default for CollabRuntime {
@@ -187,6 +206,8 @@ impl Default for CollabRuntime {
             host_redo: HashMap::new(),
             host_broadcast: None,
             client_tx: None,
+            host_peer_kick_tx: HashMap::new(),
+            guest_last_activity: HashMap::new(),
         }
     }
 }
@@ -225,6 +246,8 @@ impl CollabRuntime {
         self.local_peer_id = 0;
         self.host_broadcast = None;
         self.client_tx = None;
+        self.host_peer_kick_tx.clear();
+        self.guest_last_activity.clear();
     }
 }
 
@@ -275,6 +298,8 @@ fn replace_file_on_main(
     bytes: &[u8],
 ) -> Result<(), String> {
     let file = crate::voxelle::decode_payload(bytes).map_err(|e| e.to_string())?;
+    let _ = app.emit("voxelle-load-start", "Project from host");
+    let _ = app.emit("voxelle-load-progress", 0.35f32);
     let app = app.clone();
     let state = Arc::clone(state);
     let app_mesh = app.clone();
@@ -283,9 +308,18 @@ fn replace_file_on_main(
         let r = crate::apply_mesh_and_camera(&state, &app_mesh, file);
         let _ = tx.send(r);
     });
-    rx.recv().map_err(|_| "main thread closed".to_string())??;
-    let _ = app.emit("voxelle-loaded", "collab snapshot");
-    Ok(())
+    let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
+    match main_result {
+        Ok(()) => {
+            let _ = app.emit("voxelle-load-progress", 0.85f32);
+            let _ = app.emit("voxelle-loaded", "collab snapshot");
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("voxelle-load-error", e.clone());
+            Err(e)
+        }
+    }
 }
 
 pub fn host_apply_remote_edit(
@@ -403,6 +437,94 @@ pub fn host_emit_edit(
     }
 }
 
+/// Pushes the current host scene to all guests (after load, new project, or open file).
+pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
+    let bytes: Result<Vec<u8>, String> = (|| {
+        let g = state
+            .current_file
+            .lock()
+            .map_err(|_| "could not read scene".to_string())?;
+        let file = g
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(empty_collab_placeholder);
+        encode_payload_v4(&file).map_err(|e| e.to_string())
+    })();
+    let Ok(bytes) = bytes else {
+        return;
+    };
+    let json = match serde_json::to_string(&HostToClient::Snapshot { bytes }) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    let Ok(g) = state.collab.lock() else {
+        return;
+    };
+    if !g.is_host() {
+        return;
+    }
+    if let Some(tx) = &g.host_broadcast {
+        let _ = tx.send(json);
+    }
+}
+
+/// Host UI: disconnect a guest by peer id (sends [`HostToClient::Kicked`]).
+pub fn host_kick_peer(collab_mtx: &std::sync::Mutex<CollabRuntime>, target_peer: u32) -> Result<(), String> {
+    let c = collab_mtx.lock().map_err(|e| e.to_string())?;
+    if !c.is_host() {
+        return Err("only the host can remove peers".into());
+    }
+    if target_peer == HOST_PEER_ID {
+        return Err("cannot remove the host".into());
+    }
+    let Some(tx) = c.host_peer_kick_tx.get(&target_peer) else {
+        return Err("peer is not connected".into());
+    };
+    let _ = tx.send(Some("removed by host".into()));
+    Ok(())
+}
+
+fn host_remove_peer_from_session(
+    app: &AppHandle,
+    collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
+    peer_id: u32,
+) {
+    let roster = {
+        let mut g = match collab_mtx.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        g.roster.retain(|r| r.peer_id != peer_id);
+        g.host_peer_kick_tx.remove(&peer_id);
+        g.guest_last_activity.remove(&peer_id);
+        g.presence.remove(&peer_id);
+        g.host_undo.remove(&peer_id);
+        g.host_redo.remove(&peer_id);
+        g.roster.clone()
+    };
+    let _ = app.emit(
+        "collab-roster",
+        serde_json::to_string(&roster).unwrap_or_default(),
+    );
+    let br = HostToClient::Roster { roster };
+    if let Ok(g) = collab_mtx.lock() {
+        if let Some(tx) = &g.host_broadcast {
+            if let Ok(json) = serde_json::to_string(&br) {
+                let _ = tx.send(json);
+            }
+        }
+    }
+}
+
+fn touch_guest_activity(collab_mtx: &std::sync::Mutex<CollabRuntime>, peer_id: u32) {
+    if peer_id == HOST_PEER_ID {
+        return;
+    }
+    if let Ok(mut g) = collab_mtx.lock() {
+        g.guest_last_activity.insert(peer_id, Instant::now());
+    }
+}
+
 async fn handle_host_connection(
     mut ws: WsTcp,
     mut broadcast_rx: broadcast::Receiver<String>,
@@ -412,6 +534,7 @@ async fn handle_host_connection(
     peer_id: u32,
     display_name: String,
     color_rgb: u32,
+    mut kick_rx: watch::Receiver<Option<String>>,
 ) {
     let mut roster = collab_mtx.lock().unwrap().roster.clone();
     if let Some(r) = roster.iter_mut().find(|r| r.peer_id == peer_id) {
@@ -421,9 +544,28 @@ async fn handle_host_connection(
     collab_mtx.lock().unwrap().roster = roster.clone();
     let _ = app.emit("collab-roster", serde_json::to_string(&roster).unwrap());
 
-    let snap = {
-        let g = state.current_file.lock().unwrap();
-        encode_payload_v4(g.as_ref().unwrap()).unwrap()
+    let snap_result: Result<Vec<u8>, String> = (|| {
+        let g = state
+            .current_file
+            .lock()
+            .map_err(|_| "could not read host scene".to_string())?;
+        let file = g
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(empty_collab_placeholder);
+        encode_payload_v4(&file).map_err(|e| format!("snapshot encode failed: {e}"))
+    })();
+    let snap = match snap_result {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            let _ = ws
+                .send(Message::Text(
+                    serde_json::to_string(&HostToClient::Deny { reason }).unwrap(),
+                ))
+                .await;
+            host_remove_peer_from_session(&app, &collab_mtx, peer_id);
+            return;
+        }
     };
     let welcome = HostToClient::Welcome {
         peer_id,
@@ -438,6 +580,20 @@ async fn handle_host_connection(
     loop {
         tokio::select! {
             biased;
+            r = kick_rx.changed() => {
+                if r.is_err() {
+                    break;
+                }
+                let reason_opt = kick_rx.borrow().clone();
+                if let Some(reason) = reason_opt {
+                    let _ = ws
+                        .send(Message::Text(
+                            serde_json::to_string(&HostToClient::Kicked { reason }).unwrap(),
+                        ))
+                        .await;
+                    break;
+                }
+            }
             bmsg = broadcast_rx.recv() => {
                 if let Ok(text) = bmsg {
                     let _ = ws.send(Message::Text(text)).await;
@@ -451,8 +607,10 @@ async fn handle_host_connection(
                 let Ok(cmd) = serde_json::from_str::<ClientToHost>(&t) else {
                     continue;
                 };
+                touch_guest_activity(&collab_mtx, peer_id);
                 match cmd {
             ClientToHost::Join { .. } => {}
+            ClientToHost::Heartbeat => {}
             ClientToHost::Edit { delta } => {
                 let allowed = roster
                     .iter()
@@ -587,6 +745,7 @@ async fn handle_host_connection(
             }
         }
     }
+    host_remove_peer_from_session(&app, &collab_mtx, peer_id);
 }
 
 pub fn start_host(
@@ -618,6 +777,43 @@ pub fn start_host(
     drop(c);
     let _ = app.emit("collab-roster", roster_json);
     let _ = app.emit("collab-local-peer", HOST_PEER_ID);
+
+    let cm_watch = Arc::clone(&collab_mtx);
+    let sd_watch = Arc::clone(&sd);
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(GUEST_ACTIVITY_CHECK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if sd_watch.load(Ordering::SeqCst) {
+                break;
+            }
+            let stale: Vec<u32> = {
+                let g = match cm_watch.lock() {
+                    Ok(g) => g,
+                    Err(_) => continue,
+                };
+                if !g.is_host() {
+                    continue;
+                }
+                let now = Instant::now();
+                g.guest_last_activity
+                    .iter()
+                    .filter(|(_, t)| now.duration_since(**t) > GUEST_ACTIVITY_TIMEOUT)
+                    .map(|(pid, _)| *pid)
+                    .collect()
+            };
+            for pid in stale {
+                let tx_opt = cm_watch
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.host_peer_kick_tx.get(&pid).cloned());
+                if let Some(tx) = tx_opt {
+                    let _ = tx.send(Some(GUEST_TIMEOUT_KICK_REASON.to_string()));
+                }
+            }
+        }
+    });
 
     let app2 = app.clone();
     let state2 = Arc::clone(&state);
@@ -658,6 +854,7 @@ pub fn start_host(
             let app3 = app2.clone();
             let st3 = Arc::clone(&state2);
             let cm3 = Arc::clone(&cm2);
+            let (kick_tx, kick_rx) = watch::channel(None);
             {
                 let mut g = cm3.lock().unwrap();
                 g.roster.push(RosterEntry {
@@ -667,6 +864,8 @@ pub fn start_host(
                     is_leader: false,
                     can_edit: false,
                 });
+                g.guest_last_activity.insert(pid, Instant::now());
+                g.host_peer_kick_tx.insert(pid, kick_tx);
             }
             let sub = cm3
                 .lock()
@@ -676,7 +875,7 @@ pub fn start_host(
                 .unwrap()
                 .subscribe();
             tokio::spawn(handle_host_connection(
-                ws, sub, app3, st3, cm3, pid, dname, col,
+                ws, sub, app3, st3, cm3, pid, dname, col, kick_rx,
             ));
         }
     });
@@ -719,6 +918,9 @@ pub async fn client_connect_blocking(
     };
     let welcome: HostToClient = serde_json::from_str(&t).map_err(|e| e.to_string())?;
     match welcome {
+        HostToClient::Deny { reason } => {
+            return Err(reason);
+        }
         HostToClient::Welcome {
             peer_id,
             leader_id,
@@ -744,7 +946,19 @@ pub async fn client_connect_blocking(
     }
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let tx_hb = tx.clone();
     collab_mtx.lock().map_err(|e| e.to_string())?.client_tx = Some(tx);
+    let heartbeat_msg = serde_json::to_string(&ClientToHost::Heartbeat).unwrap();
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(CLIENT_HEARTBEAT_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            if tx_hb.send(heartbeat_msg.clone()).is_err() {
+                break;
+            }
+        }
+    });
 
     let mut write_w = write;
     tauri::async_runtime::spawn(async move {
@@ -780,6 +994,17 @@ pub async fn client_connect_blocking(
                     HostToClient::Snapshot { bytes } => {
                         let _ = replace_file_on_main(&app4, &st4, &bytes);
                     }
+                    HostToClient::Kicked { reason } => {
+                        {
+                            let mut c = cm4.lock().unwrap();
+                            c.leave();
+                        }
+                        if let Ok(mut g) = st4.ping_flash.lock() {
+                            *g = None;
+                        }
+                        let _ = app4.emit("collab-kicked", reason);
+                        break;
+                    }
                     HostToClient::Chat { .. } => {
                         let _ = app4.emit("collab-chat", t);
                     }
@@ -801,6 +1026,20 @@ pub async fn client_connect_blocking(
                     }
                 }
             }
+        }
+        let still_client = cm4.lock().map(|c| c.is_client()).unwrap_or(false);
+        if still_client {
+            {
+                let mut c = cm4.lock().unwrap();
+                c.leave();
+            }
+            if let Ok(mut g) = st4.ping_flash.lock() {
+                *g = None;
+            }
+            let _ = app4.emit(
+                "collab-ended",
+                "Disconnected from the host. The connection was closed.",
+            );
         }
     });
 

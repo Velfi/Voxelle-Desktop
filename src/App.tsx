@@ -56,6 +56,11 @@ function App() {
     useState<InteractionMode>("navigate");
   const [pathLabel, setPathLabel] = useState("");
   const [loadError, setLoadError] = useState<string | null>(null);
+  /** Session ended (leave, lost connection, or kicked); cleared on dismiss or new load/join. */
+  const [collabBanner, setCollabBanner] = useState<{
+    text: string;
+    tone: "info" | "alert";
+  } | null>(null);
   const [loading, setLoading] = useState(false);
   const [loadProgress, setLoadProgress] = useState(0);
   const [fpsDisplayed, setFpsDisplayed] = useState(0);
@@ -111,6 +116,7 @@ function App() {
     if (el) ro.observe(el);
     const unlistenStart = listen<string>("voxelle-load-start", (e) => {
       setLoadError(null);
+      setCollabBanner(null);
       setPathLabel(e.payload);
       setLoading(true);
       setLoadProgress(0);
@@ -152,6 +158,7 @@ function App() {
       }
     });
     const unlistenCollabJoined = listen("collab-joined", () => {
+      setCollabBanner(null);
       setCollabActive(true);
     });
     const unlistenCollabLocalPeer = listen<number>("collab-local-peer", (e) => {
@@ -167,6 +174,28 @@ function App() {
     });
     const unlistenCollabErr = listen<string>("collab-error", (e) => {
       setLoadError(e.payload);
+    });
+    const clearCollabSessionUi = () => {
+      setCollabActive(false);
+      setHostWsUrl(null);
+      setRoster([]);
+      setLocalPeerId(0);
+      setChatLines([]);
+      setChatInput("");
+    };
+    const unlistenCollabEnded = listen<string>("collab-ended", (e) => {
+      const text =
+        typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+      setCollabBanner({ text, tone: "info" });
+      clearCollabSessionUi();
+    });
+    const unlistenCollabKicked = listen<string>("collab-kicked", (e) => {
+      const msg = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+      setCollabBanner({
+        text: `You were removed from the session: ${msg}`,
+        tone: "alert",
+      });
+      clearCollabSessionUi();
     });
     const unlistenCheckUpdates = listen("voxelle-check-updates", async () => {
       try {
@@ -201,6 +230,8 @@ function App() {
       void unlistenCollabLocalPeer.then((fn) => fn());
       void unlistenCollabRoster.then((fn) => fn());
       void unlistenCollabErr.then((fn) => fn());
+      void unlistenCollabEnded.then((fn) => fn());
+      void unlistenCollabKicked.then((fn) => fn());
       void unlistenCheckUpdates.then((fn) => fn());
     };
   }, [sendResize]);
@@ -520,6 +551,7 @@ function App() {
   };
 
   const startHost = () => {
+    setCollabBanner(null);
     void invoke("collab_host_start", { port: hostPort }).then((url) => {
       setHostWsUrl(url as string);
       setCollabActive(true);
@@ -527,6 +559,7 @@ function App() {
   };
 
   const joinSession = () => {
+    setCollabBanner(null);
     const rgb = hexToRgb(accentColor);
     void invoke("collab_join", {
       url: joinUrl,
@@ -536,17 +569,18 @@ function App() {
   };
 
   const leaveSession = () => {
-    void invoke("collab_leave").then(() => {
-      setCollabActive(false);
-      setHostWsUrl(null);
-      setRoster([]);
-      setLocalPeerId(0);
-    });
+    void invoke("collab_leave").catch(() => {});
   };
 
   const amLeader = roster.some(
     (r) => r.peerId === localPeerId && r.isLeader,
   );
+
+  const collabPanelStatus = !collabActive
+    ? "Not connected — host or join a session to collaborate."
+    : hostWsUrl
+      ? "Hosting — share the link below so others can join."
+      : "Connected — you are in a session as a guest.";
 
   const sendChat = () => {
     const t = chatInput.trim();
@@ -647,9 +681,35 @@ function App() {
             {loadError}
           </div>
         ) : null}
+        {collabBanner ? (
+          <div
+            className={
+              collabBanner.tone === "alert"
+                ? "viewport-notice is-alert"
+                : "viewport-notice"
+            }
+            role={collabBanner.tone === "alert" ? "alert" : "status"}
+          >
+            <span className="viewport-notice-text">{collabBanner.text}</span>
+            <button
+              type="button"
+              className="viewport-notice-dismiss"
+              onClick={() => setCollabBanner(null)}
+            >
+              Dismiss
+            </button>
+          </div>
+        ) : null}
         {collabOpen ? (
           <aside className="collab-panel" aria-label="Collaboration">
             <h3 className="collab-panel-title">Session</h3>
+            <p
+              className={`collab-panel-status${collabActive ? " is-live" : ""}`}
+              role="status"
+              aria-live="polite"
+            >
+              {collabPanelStatus}
+            </p>
             <label className="modal-field">
               Display name
               <input
@@ -712,17 +772,25 @@ function App() {
                 Join
               </button>
             </div>
-            <button type="button" onClick={leaveSession}>
+            <button
+              type="button"
+              onClick={leaveSession}
+              disabled={!collabActive}
+            >
               Leave session
             </button>
             <h4 className="collab-subtitle">Roster</h4>
             <ul className="collab-roster">
+              {!collabActive ? (
+                <li className="collab-roster-empty">No session — roster appears when you connect.</li>
+              ) : null}
               {roster.map((r) => (
                 <li key={r.peerId}>
                   <button
                     type="button"
                     className="collab-roster-name"
                     onDoubleClick={() => onRosterDoubleClick(r.peerId)}
+                    disabled={!collabActive}
                     title="Double-click to match camera"
                   >
                     <span
@@ -735,16 +803,30 @@ function App() {
                     {r.isLeader ? " (leader)" : ""}
                   </button>
                   {!r.isLeader && amLeader ? (
-                    <label className="collab-can-edit">
-                      <input
-                        type="checkbox"
-                        checked={r.canEdit}
-                        onChange={(e) =>
-                          setCanEdit(r.peerId, e.target.checked)
+                    <>
+                      <label className="collab-can-edit">
+                        <input
+                          type="checkbox"
+                          checked={r.canEdit}
+                          onChange={(e) =>
+                            setCanEdit(r.peerId, e.target.checked)
+                          }
+                        />
+                        edit
+                      </label>
+                      <button
+                        type="button"
+                        className="collab-kick"
+                        title="Remove from session"
+                        onClick={() =>
+                          void invoke("collab_kick_peer", {
+                            targetPeer: r.peerId,
+                          })
                         }
-                      />
-                      edit
-                    </label>
+                      >
+                        Kick
+                      </button>
+                    </>
                   ) : null}
                 </li>
               ))}
@@ -760,17 +842,25 @@ function App() {
                 className="collab-grow"
                 type="text"
                 value={chatInput}
-                placeholder="Message…"
+                placeholder={
+                  collabActive ? "Message…" : "Join or host to use chat"
+                }
+                disabled={!collabActive}
                 onChange={(e) => setChatInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && sendChat()}
+                onKeyDown={(e) =>
+                  collabActive && e.key === "Enter" && sendChat()
+                }
               />
-              <button type="button" onClick={sendChat}>
+              <button type="button" onClick={sendChat} disabled={!collabActive}>
                 Send
               </button>
             </div>
             <button
               type="button"
-              onClick={() => void invoke("collab_send_ping", { x: 0, y: 0, z: 0 })}
+              disabled={!collabActive}
+              onClick={() =>
+                void invoke("collab_send_ping", { x: 0, y: 0, z: 0 })
+              }
             >
               Ping origin
             </button>
