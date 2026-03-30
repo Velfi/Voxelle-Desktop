@@ -13,6 +13,13 @@ const MAX_GRID_SIZE = 256;
 const LS_NAME = "voxelleCollabDisplayName";
 const LS_COLOR = "voxelleCollabColor";
 const LS_AUTOSAVE = "voxelleAutosaveSecs";
+const LS_RENDERING_MODE = "voxelleDesktopRenderingMode";
+
+type RenderingMode =
+  | "greedy"
+  | "marchingCubes"
+  | "dualContour"
+  | "ray";
 
 type StartShape =
   | "cube"
@@ -102,6 +109,10 @@ function App() {
   /** Set when hosting or after welcome; 0 when solo. */
   const [localPeerId, setLocalPeerId] = useState(0);
 
+  const [renderingMode, setRenderingMode] =
+    useState<RenderingMode>("greedy");
+  const [orthographic, setOrthographic] = useState(false);
+
   const hexToRgb = (hex: string): number => {
     const h = hex.replace("#", "");
     const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
@@ -153,6 +164,7 @@ function App() {
         setPathLabel(e.payload);
         setLoading(false);
         setLoadProgress(1);
+        void invoke<boolean>("get_orthographic").then(setOrthographic).catch(() => {});
       }),
       listen<string>("voxelle-load-error", (e) => {
         setLoadError(e.payload);
@@ -319,6 +331,25 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const saved = localStorage.getItem(LS_RENDERING_MODE) as RenderingMode | null;
+    const valid =
+      saved &&
+      ["greedy", "marchingCubes", "dualContour", "ray"].includes(saved);
+    void invoke<RenderingMode>("get_rendering_mode")
+      .then((m) => {
+        const mode = valid ? saved! : m;
+        setRenderingMode(mode);
+        if (valid && saved !== m) {
+          void invoke("set_rendering_mode", { mode: saved }).catch(() => {});
+        }
+      })
+      .catch(() => {});
+    void invoke<boolean>("get_orthographic")
+      .then(setOrthographic)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
     if (!collabActive) return;
     const id = window.setInterval(() => {
       void invoke("collab_push_camera").catch(() => {});
@@ -362,6 +393,25 @@ function App() {
       args: { x: -1, y: 0, mode: "navigate" },
     }).catch(() => {});
   }, []);
+
+  const onRenderingModeChange = useCallback(
+    (e: React.ChangeEvent<HTMLSelectElement>) => {
+      const mode = e.target.value as RenderingMode;
+      setRenderingMode(mode);
+      localStorage.setItem(LS_RENDERING_MODE, mode);
+      void invoke("set_rendering_mode", { mode }).catch(() => {});
+    },
+    [],
+  );
+
+  const onOrthographicChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const o = e.target.checked;
+      setOrthographic(o);
+      void invoke("set_orthographic", { orthographic: o }).catch(() => {});
+    },
+    [],
+  );
 
   useEffect(() => {
     void invoke("sync_preview_input", {
@@ -657,6 +707,11 @@ function App() {
     (r) => r.peerId === localPeerId && r.isLeader,
   );
 
+  /** Solo or host: can open files. Guests (session without hosting) cannot. */
+  const collabGuest = collabActive && !hostWsUrl;
+  const showEmptyOpenFile =
+    !pathLabel && !loading && !collabGuest;
+
   const collabPanelStatus = !collabActive
     ? "Not connected — host or join a session to collaborate."
     : hostWsUrl
@@ -732,6 +787,33 @@ function App() {
               👊
             </button>
           </div>
+          <div className="toolbar-view" aria-label="View">
+            <label>
+              <span>Rendering</span>
+              <select
+                value={renderingMode}
+                onChange={onRenderingModeChange}
+                disabled={loading}
+                title="Viewport meshing (Voxelle web View → Rendering)"
+              >
+                <option value="greedy">Blocky (greedy)</option>
+                <option value="marchingCubes">Smooth (marching cubes)</option>
+                <option value="dualContour">Smooth (dual contour)</option>
+                <option value="ray" disabled>
+                  Ray (web only)
+                </option>
+              </select>
+            </label>
+            <label title="Orthographic vs perspective (saved in .voxelle scene)">
+              <input
+                type="checkbox"
+                checked={orthographic}
+                onChange={onOrthographicChange}
+                disabled={loading}
+              />
+              Ortho
+            </label>
+          </div>
         </div>
       </header>
       <div className="viewport-wrap">
@@ -757,6 +839,23 @@ function App() {
           role="application"
           aria-label="3D viewport"
         />
+        {showEmptyOpenFile ? (
+          <div
+            className="viewport-empty-open"
+            role="region"
+            aria-label="No file open"
+          >
+            <button
+              type="button"
+              className="viewport-empty-open-btn"
+              onClick={() =>
+                void invoke("open_voxelle_dialog").catch(() => {})
+              }
+            >
+              Open file…
+            </button>
+          </div>
+        ) : null}
         {loadError ? (
           <div className="viewport-error" role="alert">
             <span className="viewport-notice-text" title={loadError}>

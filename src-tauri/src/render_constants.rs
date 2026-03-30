@@ -33,8 +33,3 @@ pub const SHADOW_NORMAL_BIAS: f32 = 0.012;
 pub const BLOOM_STRENGTH: f32 = 0.88;
 pub const BLOOM_RADIUS: f32 = 0.42;
 pub const BLOOM_THRESHOLD: f32 = 0.15;
-
-/// SSAO (tunable toward web `aoStrength` tiers).
-pub const SSAO_RADIUS: f32 = 0.35;
-pub const SSAO_STRENGTH: f32 = 0.85;
-pub const SSAO_BIAS: f32 = 0.025;

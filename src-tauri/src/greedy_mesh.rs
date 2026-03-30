@@ -1,6 +1,8 @@
-//! Greedy meshing (no AO) — face visibility rules from Voxelle `greedyMeshCore`.
+//! Greedy meshing with Minecraft-style per-corner vertex AO — face visibility rules from Voxelle `greedyMeshCore`.
 
+use crate::gpu_brick::{pack_cell, pack_empty};
 use crate::voxelle::{MaterialId, Voxel};
+use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Integer voxel coordinate key for maps and meshing.
@@ -76,6 +78,31 @@ fn quad_corner(axis: usize, sign: i32, depth: i32, u: i32, v: i32) -> glam::Vec3
         1 => glam::Vec3::new(u as f32 - 0.5, depth as f32 + fo, v as f32 - 0.5),
         _ => glam::Vec3::new(u as f32 - 0.5, v as f32 - 0.5, depth as f32 + fo),
     }
+}
+
+/// Minecraft-style corner AO: count solid neighbors among the three voxels meeting at this face corner.
+fn corner_ao_factor(map: &HashMap<VoxelCoord, Voxel>, axis: usize, depth: i32, cu: i32, cv: i32) -> f32 {
+    let occ = match axis {
+        0 => {
+            let a = map.contains_key(&(depth, cu - 1, cv));
+            let b = map.contains_key(&(depth, cu, cv - 1));
+            let c = map.contains_key(&(depth, cu - 1, cv - 1));
+            u32::from(a) + u32::from(b) + u32::from(c)
+        }
+        1 => {
+            let a = map.contains_key(&(cu - 1, depth, cv));
+            let b = map.contains_key(&(cu, depth, cv - 1));
+            let c = map.contains_key(&(cu - 1, depth, cv - 1));
+            u32::from(a) + u32::from(b) + u32::from(c)
+        }
+        _ => {
+            let a = map.contains_key(&(cu - 1, cv, depth));
+            let b = map.contains_key(&(cu, cv - 1, depth));
+            let c = map.contains_key(&(cu - 1, cv - 1, depth));
+            u32::from(a) + u32::from(b) + u32::from(c)
+        }
+    };
+    (1.0 - 0.2 * occ as f32).clamp(0.4, 1.0)
 }
 
 fn greedy_merge(cells: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
@@ -195,7 +222,48 @@ pub struct MeshBuffers {
     pub normals: Vec<f32>,
     pub colors: Vec<f32>,
     pub mat_kind: Vec<f32>,
+    /// Per-vertex ambient factor [~0.4, 1.0] from 3-neighbor corner occlusion (hemisphere term only in shader).
+    pub ao: Vec<f32>,
     pub indices: Vec<u32>,
+}
+
+/// Padded brick (+1 voxel halo) for GPU mesh AO: same row-major layout as [`crate::gpu_brick::GpuVoxelBrick`],
+/// with origin shifted by −1 and dims +2, filled from `map` so in-plane neighbor checks see voxels outside the tight brick.
+pub fn pack_brick_halo_cells(
+    map: &HashMap<VoxelCoord, Voxel>,
+    origin: (i32, i32, i32),
+    dims: (u32, u32, u32),
+) -> Option<((i32, i32, i32), (u32, u32, u32), Vec<u32>)> {
+    let (ox, oy, oz) = origin;
+    let ho = (ox - 1, oy - 1, oz - 1);
+    let hd = (
+        dims.0.checked_add(2)?,
+        dims.1.checked_add(2)?,
+        dims.2.checked_add(2)?,
+    );
+    let n = (hd.0 as usize)
+        .checked_mul(hd.1 as usize)?
+        .checked_mul(hd.2 as usize)?;
+    let mut cells = vec![pack_empty(); n];
+    for ((x, y, z), v) in map {
+        let rx = x - ho.0;
+        let ry = y - ho.1;
+        let rz = z - ho.2;
+        if rx < 0 || ry < 0 || rz < 0 {
+            continue;
+        }
+        let ux = rx as u32;
+        let uy = ry as u32;
+        let uz = rz as u32;
+        if ux >= hd.0 || uy >= hd.1 || uz >= hd.2 {
+            continue;
+        }
+        let idx = (ux as usize)
+            + (uy as usize) * (hd.0 as usize)
+            + (uz as usize) * (hd.0 as usize) * (hd.1 as usize);
+        cells[idx] = pack_cell(v.color, v.material);
+    }
+    Some((ho, hd, cells))
 }
 
 pub fn voxel_map(voxels: &[Voxel]) -> HashMap<VoxelCoord, Voxel> {
@@ -361,6 +429,7 @@ pub fn append_mesh_buffers(dst: &mut MeshBuffers, mut src: MeshBuffers) {
     dst.normals.append(&mut src.normals);
     dst.colors.append(&mut src.colors);
     dst.mat_kind.append(&mut src.mat_kind);
+    dst.ao.append(&mut src.ao);
     dst.indices.append(&mut src.indices);
 }
 
@@ -480,21 +549,37 @@ pub fn mesh_buffers_for_chunk_key(
     build_greedy_mesh_mapped(&core, map)
 }
 
+/// Single pass: [`SpatialMeshCache`] plus per-chunk greedy meshes (one `voxel_map` + bucketing).
+/// Chunk meshes build in parallel across chunks.
+pub fn build_chunk_meshes_and_spatial_cache(
+    voxels: &[Voxel],
+    cs: i32,
+) -> Option<(
+    (i32, i32, i32),
+    BTreeMap<ChunkKey, MeshBuffers>,
+    SpatialMeshCache,
+)> {
+    let cache = SpatialMeshCache::from_voxels(voxels, cs)?;
+    let origin = cache.origin;
+    let keys: Vec<ChunkKey> = cache.buckets.keys().copied().collect();
+    let parts: Vec<(ChunkKey, MeshBuffers)> = keys
+        .par_iter()
+        .filter_map(|&key| {
+            let mesh = mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, key);
+            (!mesh.indices.is_empty()).then_some((key, mesh))
+        })
+        .collect();
+    let meshes: BTreeMap<ChunkKey, MeshBuffers> = parts.into_iter().collect();
+    Some((origin, meshes, cache))
+}
+
 /// Build per-chunk meshes (for GPU upload / incremental updates). Skips empty outputs.
 pub fn build_all_chunk_meshes_btree(
     voxels: &[Voxel],
     cs: i32,
 ) -> Option<((i32, i32, i32), BTreeMap<ChunkKey, MeshBuffers>)> {
-    let (origin, buckets) = voxel_buckets_by_chunk(voxels, cs)?;
-    let map = voxel_map(voxels);
-    let mut out = BTreeMap::new();
-    for &key in buckets.keys() {
-        let mesh = mesh_buffers_for_chunk_key(&buckets, &map, key);
-        if !mesh.indices.is_empty() {
-            out.insert(key, mesh);
-        }
-    }
-    Some((origin, out))
+    let (origin, meshes, _) = build_chunk_meshes_and_spatial_cache(voxels, cs)?;
+    Some((origin, meshes))
 }
 
 /// Full occupancy map + spatial buckets for incremental edits (O(1) add/remove vs full rescans).
@@ -596,6 +681,55 @@ pub fn voxels_by_spatial_chunks(voxels: &[Voxel], cs: i32) -> Vec<(Vec<Voxel>, V
 mod chunk_tests {
     use super::*;
     use crate::voxelle::MaterialId;
+
+    /// Baseline: one spatial cache, sequential per-chunk mesh (must match fused+parallel output).
+    fn sequential_chunk_meshes_and_spatial_cache(
+        voxels: &[Voxel],
+        cs: i32,
+    ) -> Option<(
+        (i32, i32, i32),
+        BTreeMap<ChunkKey, MeshBuffers>,
+        SpatialMeshCache,
+    )> {
+        let cache = SpatialMeshCache::from_voxels(voxels, cs)?;
+        let origin = cache.origin;
+        let mut out = BTreeMap::new();
+        for &key in cache.buckets.keys() {
+            let mesh = mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, key);
+            if !mesh.indices.is_empty() {
+                out.insert(key, mesh);
+            }
+        }
+        Some((origin, out, cache))
+    }
+
+    #[test]
+    fn fused_chunk_meshes_match_sequential() {
+        let mut voxels = Vec::new();
+        for z in 0..10 {
+            for y in 0..10 {
+                for x in 0..10 {
+                    voxels.push(Voxel {
+                        x,
+                        y,
+                        z,
+                        color: 0x112233,
+                        material: MaterialId::Plastic,
+                    });
+                }
+            }
+        }
+        let cs = SPATIAL_CHUNK_SIZE;
+        let fused = build_chunk_meshes_and_spatial_cache(&voxels, cs).expect("fused");
+        let seq = sequential_chunk_meshes_and_spatial_cache(&voxels, cs).expect("sequential");
+        assert_eq!(fused.0, seq.0, "chunk origin");
+        assert_eq!(fused.1.len(), seq.1.len(), "chunk count");
+        for (k, m) in &fused.1 {
+            let m2 = seq.1.get(k).expect("missing chunk");
+            assert_eq!(m.indices.len(), m2.indices.len(), "indices {:?}", k);
+            assert_eq!(sorted_triangle_set(m), sorted_triangle_set(m2), "triangles {:?}", k);
+        }
+    }
 
     #[test]
     fn spatial_chunks_split_distant_voxels() {
@@ -786,6 +920,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
         normals: Vec::new(),
         colors: Vec::new(),
         mat_kind: Vec::new(),
+        ao: Vec::new(),
         indices: Vec::new(),
     };
 
@@ -836,12 +971,24 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &HashMap<VoxelCoord, Voxel>
                 let p11 = quad_corner(axis, sign, depth, u + w, v + h);
                 let p01 = quad_corner(axis, sign, depth, u, v + h);
 
+                let ao00 = corner_ao_factor(map, axis, depth, u, v);
+                let ao10 = corner_ao_factor(map, axis, depth, u + w - 1, v);
+                let ao11 = corner_ao_factor(map, axis, depth, u + w - 1, v + h - 1);
+                let ao01 = corner_ao_factor(map, axis, depth, u, v + h - 1);
+                let ao_face = (ao00 + ao10 + ao11 + ao01) * 0.25;
+
                 let base = (out.positions.len() / 3) as u32;
-                for p in [p00, p10, p11, p01] {
+                for (p, ao_v) in [
+                    (p00, ao_face),
+                    (p10, ao_face),
+                    (p11, ao_face),
+                    (p01, ao_face),
+                ] {
                     out.positions.extend_from_slice(&p.to_array());
                     out.normals.extend_from_slice(&n.to_array());
                     out.colors.extend_from_slice(&col.to_array());
                     out.mat_kind.push(mat_k);
+                    out.ao.push(ao_v);
                 }
 
                 let ccw = if n.x != 0.0 {
@@ -891,6 +1038,7 @@ pub fn preview_cube_mesh(
     let mut normals: Vec<f32> = Vec::with_capacity(24 * 3);
     let mut colors: Vec<f32> = Vec::with_capacity(24 * 3);
     let mut mat_kind: Vec<f32> = Vec::with_capacity(24);
+    let mut ao: Vec<f32> = Vec::with_capacity(24);
     let mut indices: Vec<u32> = Vec::with_capacity(36);
 
     let mut face = |nx: f32, ny: f32, nz: f32, corners: [[f32; 3]; 4]| {
@@ -900,6 +1048,7 @@ pub fn preview_cube_mesh(
             normals.extend_from_slice(&[nx, ny, nz]);
             colors.extend_from_slice(&color);
             mat_kind.push(mat_k);
+            ao.push(1.0);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
@@ -982,6 +1131,7 @@ pub fn preview_cube_mesh(
         normals,
         colors,
         mat_kind,
+        ao,
         indices,
     }
 }
@@ -1002,6 +1152,7 @@ pub fn preview_cube_wireframe_mesh(
     let mut normals: Vec<f32> = Vec::with_capacity(72 * 6 * 3);
     let mut colors: Vec<f32> = Vec::with_capacity(72 * 6 * 3);
     let mut mat_kind: Vec<f32> = Vec::with_capacity(72 * 6);
+    let mut ao: Vec<f32> = Vec::with_capacity(72 * 6);
     let mut indices: Vec<u32> = Vec::with_capacity(72 * 6);
 
     let mut face = |nx: f32, ny: f32, nz: f32, corners: [[f32; 3]; 4]| {
@@ -1011,6 +1162,7 @@ pub fn preview_cube_wireframe_mesh(
             normals.extend_from_slice(&[nx, ny, nz]);
             colors.extend_from_slice(&color);
             mat_kind.push(mat_k);
+            ao.push(1.0);
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
@@ -1192,6 +1344,7 @@ pub fn preview_cube_wireframe_mesh(
         normals,
         colors,
         mat_kind,
+        ao,
         indices,
     }
 }

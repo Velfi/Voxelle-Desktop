@@ -22,6 +22,7 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) mat_kind: f32,
+    @location(4) vertex_ao: f32,
 }
 
 struct ShadowVOut {

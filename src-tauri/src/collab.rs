@@ -434,7 +434,11 @@ fn replace_file_on_main(
     bytes: &[u8],
 ) -> Result<(), String> {
     let file = crate::voxelle::decode_payload(bytes).map_err(|e| e.to_string())?;
-    let prepared = crate::prepare_load_scene_cpu(file.grid_size, &file.voxels)?;
+    let mode = *state
+        .rendering_mode
+        .lock()
+        .map_err(|e| e.to_string())?;
+    let prepared = crate::prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
     let _ = app.emit("voxelle-load-start", "Project from host");
     let _ = app.emit("voxelle-load-progress", 0.35f32);
     let app = app.clone();

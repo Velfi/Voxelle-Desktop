@@ -3,6 +3,8 @@ mod collab;
 mod gpu_brick;
 /// Greedy CPU meshing (public for `cargo bench`).
 pub mod greedy_mesh;
+mod marching_tables;
+mod smooth_mesh;
 #[cfg(target_os = "macos")]
 mod macos_undo;
 mod render;
@@ -71,6 +73,27 @@ impl PreviewMode {
     }
 }
 
+/// Viewport meshing mode (matches web Voxelle `renderingMode`; ray-traced mode is not implemented on desktop).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RenderingMode {
+    #[default]
+    Greedy,
+    MarchingCubes,
+    DualContour,
+    /// Not implemented on desktop — meshed as [`Greedy`](RenderingMode::Greedy).
+    Ray,
+}
+
+impl RenderingMode {
+    fn uses_smooth_surface(self) -> bool {
+        matches!(
+            self,
+            RenderingMode::MarchingCubes | RenderingMode::DualContour
+        )
+    }
+}
+
 /// Millisecond timings for the last successful voxel add/remove (`voxel_edit_at_screen`).
 #[derive(Clone, Debug)]
 pub struct EditPerfBreakdown {
@@ -113,6 +136,7 @@ pub struct ViewerState {
     /// Latest pointer position in physical pixels (for hover preview; updated from UI, read each frame).
     pub preview_cursor: Mutex<Option<(f32, f32)>>,
     pub(crate) preview_mode: Mutex<PreviewMode>,
+    pub rendering_mode: Mutex<RenderingMode>,
     fps: Mutex<FpsCounter>,
     /// Last successful edit timings (updated each time `voxel_edit_at_screen` applies a change).
     pub last_edit_perf: Mutex<Option<EditPerfBreakdown>>,
@@ -221,6 +245,7 @@ pub(crate) struct PreparedLoadScene {
 pub(crate) fn prepare_load_scene_cpu(
     grid_size: i32,
     voxels: &[voxelle::Voxel],
+    mode: RenderingMode,
 ) -> Result<PreparedLoadScene, String> {
     let bounds = if voxels.is_empty() {
         greedy_mesh::mesh_bounds_for_cube_side(grid_size)
@@ -239,15 +264,21 @@ pub(crate) fn prepare_load_scene_cpu(
 
     let opaque = if voxels.is_empty() {
         PreparedOpaqueUpload::Empty
+    } else if mode.uses_smooth_surface() {
+        let mesh = match mode {
+            RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(voxels),
+            RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(voxels),
+            _ => unreachable!(),
+        };
+        if mesh.indices.is_empty() {
+            PreparedOpaqueUpload::Empty
+        } else {
+            PreparedOpaqueUpload::Single(mesh)
+        }
     } else if voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS {
-        match greedy_mesh::build_all_chunk_meshes_btree(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE) {
-            Some((origin, meshes)) if !meshes.is_empty() => {
-                let Some(spatial_cache) = greedy_mesh::SpatialMeshCache::from_voxels(
-                    voxels,
-                    greedy_mesh::SPATIAL_CHUNK_SIZE,
-                ) else {
-                    return Err("spatial mesh cache".into());
-                };
+        match greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE)
+        {
+            Some((origin, meshes, spatial_cache)) if !meshes.is_empty() => {
                 let chunk_origin = glam::IVec3::new(origin.0, origin.1, origin.2);
                 PreparedOpaqueUpload::Chunked {
                     chunk_origin,
@@ -300,7 +331,11 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
                     voxels,
                 };
 
-                let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels)?;
+                let mode = *state
+                    .rendering_mode
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
 
                 if file.voxels.is_empty() {
                     let _ = app.emit("voxelle-load-progress", 0.85f32);
@@ -382,7 +417,11 @@ fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: std::pat
                 let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
                 let _ = app.emit("voxelle-load-progress", 0.2f32);
                 let file = decode_payload(&bytes).map_err(|e| e.to_string())?;
-                let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels)?;
+                let mode = *state
+                    .rendering_mode
+                    .lock()
+                    .map_err(|e| e.to_string())?;
+                let prepared = prepare_load_scene_cpu(file.grid_size, &file.voxels, mode)?;
 
                 if file.version == 3 && !file.voxels.is_empty() {
                     let _ = app.emit("voxelle-load-progress", 0.45f32);
@@ -426,11 +465,14 @@ pub(crate) fn apply_mesh_and_camera(
         brick,
         opaque,
     } = prepared;
+    let fl = file.scene.focal_length_mm.unwrap_or(29.0);
+    let orthographic = file.scene.orthographic;
+    let voxel_map = greedy_mesh::voxel_map_indices(&file.voxels);
     {
         let mut cf = state.current_file.lock().map_err(|e| e.to_string())?;
         let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
-        *cf = Some(file.clone());
-        *vm = Some(greedy_mesh::voxel_map_indices(&file.voxels));
+        *cf = Some(file);
+        *vm = Some(voxel_map);
     }
     let mut v = state.viewer.lock().map_err(|e| e.to_string())?;
     let Some(viewer) = v.as_mut() else {
@@ -441,10 +483,9 @@ pub(crate) fn apply_mesh_and_camera(
     viewer.clear_preview_mesh();
 
     let mut cam = state.camera.lock().map_err(|e| e.to_string())?;
-    let fl = file.scene.focal_length_mm.unwrap_or(29.0);
     cam.fov_y = focal_length_to_fov_y_radians(fl);
-    cam.perspective = !file.scene.orthographic;
-    if file.scene.orthographic {
+    cam.perspective = !orthographic;
+    if orthographic {
         let r = bounds.radius().max(1.0);
         cam.ortho_half_height = r * 1.1;
     }
@@ -553,9 +594,23 @@ pub(crate) fn finish_voxel_edit_gpu(
     let mut mesh_full_chunked_rebuild_ms = 0.0;
     let mut mesh_pipeline_ms = 0.0;
 
+    let rm = *state.rendering_mode.lock().map_err(|e| e.to_string())?;
+
     if file.voxels.is_empty() {
         viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
         viewer.last_mesh_route = "clear".to_string();
+    } else if rm.uses_smooth_surface() {
+        let mesh = match rm {
+            RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
+            RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
+            _ => unreachable!(),
+        };
+        viewer.upload_mesh(&mesh);
+        viewer.last_mesh_route = match rm {
+            RenderingMode::MarchingCubes => "marching_cubes".to_string(),
+            RenderingMode::DualContour => "dual_contour".to_string(),
+            _ => unreachable!(),
+        };
     } else {
         let origin_new = greedy_mesh::voxel_aabb_min_int(&file.voxels).unwrap();
         let origin_iv = glam::IVec3::new(origin_new.0, origin_new.1, origin_new.2);
@@ -620,6 +675,78 @@ pub(crate) fn finish_voxel_edit_gpu(
 
     *state.last_scene_bounds.lock().map_err(|e| e.to_string())? = Some(bounds);
 
+    Ok(())
+}
+
+/// Rebuild opaque mesh from current voxels + [`RenderingMode`] (after switching view mode in the UI).
+pub(crate) fn refresh_opaque_mesh(state: &Arc<ViewerState>) -> Result<(), String> {
+    let rm = *state.rendering_mode.lock().map_err(|e| e.to_string())?;
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Ok(());
+    };
+    let mut v = state.viewer.lock().map_err(|e| e.to_string())?;
+    let Some(viewer) = v.as_mut() else {
+        return Err("viewer not ready".into());
+    };
+    if file.voxels.is_empty() {
+        viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
+        viewer.last_mesh_route = "clear".to_string();
+        return Ok(());
+    }
+    if rm.uses_smooth_surface() {
+        let mesh = match rm {
+            RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
+            RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
+            _ => unreachable!(),
+        };
+        viewer.upload_mesh(&mesh);
+        viewer.last_mesh_route = match rm {
+            RenderingMode::MarchingCubes => "marching_cubes".to_string(),
+            RenderingMode::DualContour => "dual_contour".to_string(),
+            _ => unreachable!(),
+        };
+    } else {
+        let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_rendering_mode(state: State<'_, Arc<ViewerState>>) -> Result<RenderingMode, String> {
+    Ok(*state.rendering_mode.lock().map_err(|e| e.to_string())?)
+}
+
+#[tauri::command]
+fn set_rendering_mode(state: State<'_, Arc<ViewerState>>, mode: RenderingMode) -> Result<(), String> {
+    *state.rendering_mode.lock().map_err(|e| e.to_string())? = mode;
+    refresh_opaque_mesh(state.inner())
+}
+
+#[tauri::command]
+fn get_orthographic(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
+    Ok(!state.camera.lock().map_err(|e| e.to_string())?.perspective)
+}
+
+#[tauri::command]
+fn set_orthographic(state: State<'_, Arc<ViewerState>>, orthographic: bool) -> Result<(), String> {
+    {
+        let mut cam = state.camera.lock().map_err(|e| e.to_string())?;
+        cam.perspective = !orthographic;
+        if orthographic {
+            if let Ok(g) = state.last_scene_bounds.lock() {
+                if let Some(b) = g.as_ref() {
+                    let r = b.radius().max(1.0);
+                    cam.ortho_half_height = r * 1.1;
+                }
+            }
+        }
+    }
+    if let Ok(mut fg) = state.current_file.lock() {
+        if let Some(ref mut file) = *fg {
+            file.scene.orthographic = orthographic;
+        }
+    }
     Ok(())
 }
 
@@ -1750,6 +1877,7 @@ pub fn run() {
         voxel_map: Mutex::new(None),
         preview_cursor: Mutex::new(None),
         preview_mode: Mutex::new(PreviewMode::Navigate),
+        rendering_mode: Mutex::new(RenderingMode::Greedy),
         fps: Mutex::new(FpsCounter {
             period_start: None,
             accum_frames: 0,
@@ -1865,6 +1993,10 @@ pub fn run() {
             collab_send_ping,
             get_autosave_interval_secs,
             set_autosave_interval_secs,
+            get_rendering_mode,
+            set_rendering_mode,
+            get_orthographic,
+            set_orthographic,
         ])
         .build(tauri::generate_context!())
         .expect("error building app")

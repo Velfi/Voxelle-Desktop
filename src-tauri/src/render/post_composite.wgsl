@@ -17,22 +17,32 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> FullscreenOut {
 var t_hdr: texture_2d<f32>;
 
 @group(0) @binding(1)
-var t_ao: texture_2d<f32>;
-
-@group(0) @binding(2)
 var t_bloom: texture_2d<f32>;
 
-@group(0) @binding(3)
+@group(0) @binding(2)
 var samp_linear: sampler;
+
+/// ACES (Narkowicz fit): better shadow/mid contrast than Reinhard; still maps HDR highlights.
+fn aces_tonemap(color: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp(
+        (color * (a * color + b)) / (color * (c * color + d) + e),
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+}
 
 @fragment
 fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(t_hdr, samp_linear, i.uv).rgb;
-    let ao = textureSample(t_ao, samp_linear, i.uv).r;
     let blo = textureSample(t_bloom, samp_linear, i.uv).rgb;
-    let rgb = hdr * ao + blo * 0.88;
-    // Single Reinhard here; scene + sky write linear scene-referred HDR (Rgba16Float).
-    let mapped = rgb / (rgb + vec3<f32>(1.0));
-    // Linear display-referred RGB; sRGB swapchain encodes for the framebuffer.
+    // Bloom is thresholded in extract; keep strength modest so mids stay punchy.
+    let rgb = hdr + blo * 0.42;
+    // Scene + sky are linear scene-referred (Rgba16Float). Display-referred → sRGB swapchain.
+    let mapped = aces_tonemap(rgb);
     return vec4<f32>(mapped, 1.0);
 }

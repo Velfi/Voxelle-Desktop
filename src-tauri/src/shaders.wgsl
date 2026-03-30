@@ -48,6 +48,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         spec = 0.35;
         base = mix(base, vec3<f32>(1.0), 0.15);
     } else {
+        ,,,,
         spec = 0.12;
     }
     let ndl = max(dot(n, l), 0.0);

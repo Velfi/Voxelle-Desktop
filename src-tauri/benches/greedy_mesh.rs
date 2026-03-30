@@ -3,8 +3,30 @@
 //! Large cases can take noticeable time; Criterion will shorten iterations automatically.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use voxelle_desktop_lib::greedy_mesh::{self, ChunkKey, SpatialMeshCache};
+use std::collections::BTreeMap;
+use voxelle_desktop_lib::greedy_mesh::{self, ChunkKey, MeshBuffers, SpatialMeshCache};
 use voxelle_desktop_lib::voxelle::{MaterialId, Voxel};
+
+/// Same spatial cache as the fused loader, then **sequential** per-chunk greedy mesh (baseline before rayon).
+fn sequential_chunk_meshes_after_cache(
+    voxels: &[Voxel],
+    cs: i32,
+) -> Option<(
+    (i32, i32, i32),
+    BTreeMap<ChunkKey, MeshBuffers>,
+    SpatialMeshCache,
+)> {
+    let cache = SpatialMeshCache::from_voxels(voxels, cs)?;
+    let origin = cache.origin;
+    let mut out = BTreeMap::new();
+    for &key in cache.buckets.keys() {
+        let mesh = greedy_mesh::mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, key);
+        if !mesh.indices.is_empty() {
+            out.insert(key, mesh);
+        }
+    }
+    Some((origin, out, cache))
+}
 
 fn solid_box(origin: (i32, i32, i32), edge: i32, color: u32) -> Vec<Voxel> {
     let (ox, oy, oz) = origin;
@@ -89,6 +111,23 @@ fn bench_bucket_scans(c: &mut Criterion) {
     });
 }
 
+/// Fused `SpatialMeshCache` + parallel chunk meshes vs the same cache + sequential chunk meshes.
+fn bench_load_chunk_meshes_fused_vs_sequential(c: &mut Criterion) {
+    // 64³ ≈ 262k voxels; multiple spatial chunks so parallel meshing has work to split.
+    let voxels = solid_box((0, 0, 0), 64, 0x8899aa);
+    let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;
+
+    let mut group = c.benchmark_group("load_chunk_meshes 64³ solid");
+    group.sample_size(15);
+    group.bench_function("fused_parallel", |b| {
+        b.iter(|| greedy_mesh::build_chunk_meshes_and_spatial_cache(black_box(&voxels), cs))
+    });
+    group.bench_function("sequential_chunk_meshes", |b| {
+        b.iter(|| sequential_chunk_meshes_after_cache(black_box(&voxels), cs))
+    });
+    group.finish();
+}
+
 fn bench_dirty_chunk_remesh(c: &mut Criterion) {
     let voxels = solid_box((0, 0, 0), 32, 0x334455);
     let map = greedy_mesh::voxel_map(&voxels);
@@ -118,6 +157,7 @@ criterion_group!(
     bench_mapped_and_chunked,
     bench_spatial_cache,
     bench_bucket_scans,
+    bench_load_chunk_meshes_fused_vs_sequential,
     bench_dirty_chunk_remesh,
 );
 criterion_main!(benches);

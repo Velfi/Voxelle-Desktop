@@ -37,6 +37,8 @@ struct VertexInput {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
     @location(3) mat_kind: f32,
+    /// Baked Minecraft-style corner AO; multiplies ambient hemisphere only.
+    @location(4) vertex_ao: f32,
 }
 
 struct VertexOut {
@@ -46,6 +48,7 @@ struct VertexOut {
     @location(2) color: vec3<f32>,
     @location(3) mat_kind: f32,
     @location(4) uv: vec2<f32>,
+    @location(5) vertex_ao: f32,
 }
 
 fn unpack_mat(packed: u32) -> u32 {
@@ -113,6 +116,7 @@ fn transmission_shade(
     v: vec3<f32>,
     is_water: bool,
     bg: vec3<f32>,
+    vertex_ao: f32,
 ) -> vec3<f32> {
     let slab = march_slab_thickness(world, n);
     let transmission = select(0.96, 0.998, is_water);
@@ -126,7 +130,7 @@ fn transmission_shade(
     let l = normalize(g.light_dir.xyz);
     let ndl = max(dot(n, l), 0.0);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
-    let lit = base * (hemi * 0.28 + 0.55 * ndl * shadow_visibility(world, n));
+    let lit = base * (hemi * 0.28 * vertex_ao + 0.55 * ndl * shadow_visibility(world, n));
     let refr = bg * base * net_t * (vec3<f32>(1.0) - fresnel);
     let spec = pow(max(dot(normalize(l + v), n), 0.0), 48.0) * 0.2;
     return mix(refr, lit + vec3<f32>(spec), 0.15);
@@ -140,6 +144,7 @@ fn vs_main(in: VertexInput) -> VertexOut {
     o.normal = in.normal;
     o.color = in.color;
     o.mat_kind = in.mat_kind;
+    o.vertex_ao = in.vertex_ao;
     let h = o.clip_pos.w;
     o.uv = vec2<f32>(0.5, 0.5) + vec2<f32>(0.5, -0.5) * (o.clip_pos.xy / vec2<f32>(h, h));
     return o;
@@ -170,7 +175,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let ndl = max(dot(n, l), 0.0);
     let sh = shadow_visibility(in.world_pos, n);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
-    var rgb = base * (hemi * 0.38 + 0.72 * ndl * sh) + vec3<f32>(pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh);
+    var rgb = base * (hemi * 0.30 * in.vertex_ao + 0.78 * ndl * sh) + vec3<f32>(pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh);
     rgb = rgb + base * glow;
     let glow_mask = select(0.0, 1.0, in.mat_kind > 0.5 && in.mat_kind < 1.5);
     out.color = vec4<f32>(rgb, glow_mask);
@@ -244,7 +249,7 @@ fn fs_trans(in: VertexOut) -> @location(0) vec4<f32> {
     let v = normalize(g.cam_pos.xyz - in.world_pos);
     let is_water = in.mat_kind > 2.2;
     let bg = textureSample(hdr_bg, samp_linear, in.uv).rgb;
-    let rgb = transmission_shade(in.color, in.world_pos, n, v, is_water, bg);
+    let rgb = transmission_shade(in.color, in.world_pos, n, v, is_water, bg, in.vertex_ao);
     let a = 0.94;
     return vec4<f32>(rgb * a, a);
 }
