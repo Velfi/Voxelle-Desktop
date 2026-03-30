@@ -1,12 +1,15 @@
 mod camera;
 mod gpu_brick;
-mod greedy_mesh;
+/// Greedy CPU meshing (public for `cargo bench`).
+pub mod greedy_mesh;
 mod render;
 mod render_constants;
 mod voxel_edit;
-mod voxelle;
+/// Voxel format / types (public for `cargo bench` and tests).
+pub mod voxelle;
 
 use camera::OrbitCamera;
+use gpu_brick::BrickCellWrite;
 use render::WgpuViewer;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -63,18 +66,53 @@ impl PreviewMode {
     }
 }
 
+/// Millisecond timings for the last successful voxel add/remove (`voxel_edit_at_screen`).
+#[derive(Clone, Debug)]
+pub struct EditPerfBreakdown {
+    pub apply_edit_ms: f64,
+    /// Bounds scan + brick patch args (second `current_file` read, `mesh_bounds_from_voxels`, etc.).
+    pub prepare_ms: f64,
+    /// Time blocked acquiring `viewer` mutex (often competes with the render loop).
+    pub viewer_lock_wait_ms: f64,
+    pub brick_ms: f64,
+    /// Wall time for the mesh section (sub-fields below; excludes `preview_clear_ms`).
+    pub mesh_ms: f64,
+    pub total_ms: f64,
+    /// Opaque mesh rebuild path after the edit (see `WgpuViewer::last_mesh_route`).
+    pub mesh_route: String,
+
+    // --- Mesh sub-phases (zeros when not used; see performance snapshot) ---
+    /// `cpu_chunked_incremental`: O(1) [`WgpuViewer::apply_spatial_cache_edit`].
+    pub mesh_voxel_map_ms: f64,
+    /// `cpu_chunked_incremental`: cold [`greedy_mesh::SpatialMeshCache::from_voxels`] inside remesh (rare).
+    pub mesh_buckets_ms: f64,
+    /// `cpu_chunked_incremental`: CPU greedy per dirty chunk.
+    pub mesh_greedy_ms: f64,
+    /// `cpu_chunked_incremental`: interleaved mesh → `wgpu` chunk buffers.
+    pub mesh_chunk_buffers_ms: f64,
+    /// Full [`WgpuViewer::upload_cpu_mesh_chunked_full`] inside remesh (origin drift).
+    pub mesh_full_chunked_rebuild_ms: f64,
+    /// Non-incremental [`WgpuViewer::rebuild_mesh_gpu_greedy`] wall time (includes internal CPU fallback).
+    pub mesh_pipeline_ms: f64,
+    pub preview_clear_ms: f64,
+}
+
 pub struct ViewerState {
     pub viewer: Mutex<Option<WgpuViewer>>,
     pub camera: Mutex<OrbitCamera>,
     pub file_label: Mutex<String>,
     /// Latest loaded model for CPU-side edits (add/remove voxels).
     pub current_file: Mutex<Option<voxelle::VoxelleFile>>,
-    /// Spatial index for raycasts (kept in sync with `current_file`).
-    pub voxel_map: Mutex<Option<HashMap<greedy_mesh::VoxelCoord, voxelle::Voxel>>>,
+    /// Spatial index: coord → index in `current_file.voxels` (kept in sync; used for raycasts + O(1) remove).
+    pub voxel_map: Mutex<Option<HashMap<greedy_mesh::VoxelCoord, usize>>>,
     /// Latest pointer position in physical pixels (for hover preview; updated from UI, read each frame).
     pub preview_cursor: Mutex<Option<(f32, f32)>>,
     pub(crate) preview_mode: Mutex<PreviewMode>,
     fps: Mutex<FpsCounter>,
+    /// Last successful edit timings (updated each time `voxel_edit_at_screen` applies a change).
+    pub last_edit_perf: Mutex<Option<EditPerfBreakdown>>,
+    /// Last scene AABB used for lighting/brick; drives incremental bounds on edit when possible.
+    pub last_scene_bounds: Mutex<Option<greedy_mesh::MeshBounds>>,
 }
 
 #[tauri::command]
@@ -301,18 +339,17 @@ fn apply_mesh_and_camera(state: &Arc<ViewerState>, file: voxelle::VoxelleFile) -
         let mut cf = state.current_file.lock().map_err(|e| e.to_string())?;
         let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
         *cf = Some(file.clone());
-        *vm = Some(greedy_mesh::voxel_map(&file.voxels));
+        *vm = Some(greedy_mesh::voxel_map_indices(&file.voxels));
     }
     let mut v = state.viewer.lock().map_err(|e| e.to_string())?;
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
-    viewer.upload_scene_data(bounds, &file.voxels);
+    viewer.upload_scene_data(bounds, &file.voxels, None);
     if file.voxels.is_empty() {
         viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
     } else if viewer.rebuild_mesh_gpu_greedy(&file.voxels).is_err() {
-        let (mesh, _) = greedy_mesh::build_greedy_mesh(&file.voxels);
-        viewer.upload_mesh(&mesh);
+        viewer.cpu_mesh_fallback(&file.voxels);
     }
     viewer.clear_preview_mesh();
 
@@ -329,7 +366,42 @@ fn apply_mesh_and_camera(state: &Arc<ViewerState>, file: voxelle::VoxelleFile) -
     let r = bounds.radius().max(1.0);
     let (w, h) = viewer.size;
     cam.fit_sphere(center, r, w as f32, h as f32);
+    *state.last_scene_bounds.lock().map_err(|e| e.to_string())? = Some(bounds);
     Ok(())
+}
+
+fn scene_bounds_for_edit(
+    state: &ViewerState,
+    file: &voxelle::VoxelleFile,
+    delta: &voxel_edit::VoxelEditDelta,
+) -> Result<greedy_mesh::MeshBounds, String> {
+    if file.voxels.is_empty() {
+        return Ok(greedy_mesh::mesh_bounds_for_cube_side(file.grid_size));
+    }
+    let last = state
+        .last_scene_bounds
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone();
+    let Some(prev) = last else {
+        return Ok(
+            greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
+                .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)),
+        );
+    };
+    match delta {
+        voxel_edit::VoxelEditDelta::Added(v) => Ok(greedy_mesh::mesh_bounds_expand_with_voxel(&prev, v)),
+        voxel_edit::VoxelEditDelta::Removed { x, y, z } => {
+            if greedy_mesh::mesh_bounds_remove_is_strict_interior(&prev, *x, *y, *z) {
+                Ok(prev)
+            } else {
+                Ok(
+                    greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
+                        .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)),
+                )
+            }
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -372,6 +444,7 @@ struct VoxelEditAtScreen {
 
 #[tauri::command]
 fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScreen) -> Result<bool, String> {
+    let t_total = Instant::now();
     let (w, h) = {
         let v = state.viewer.lock().map_err(|e| e.to_string())?;
         let Some(viewer) = v.as_ref() else {
@@ -380,7 +453,8 @@ fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScr
         (viewer.size.0 as f32, viewer.size.1 as f32)
     };
 
-    let changed = {
+    let t_apply_start = Instant::now();
+    let edit_delta = {
         let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
         let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
         let Some(file) = fg.as_mut() else {
@@ -392,38 +466,126 @@ fn voxel_edit_at_screen(state: State<'_, Arc<ViewerState>>, args: VoxelEditAtScr
         let cam = state.camera.lock().map_err(|e| e.to_string())?;
         voxel_edit::apply_edit(file, vmap, &cam, w, h, args.x, args.y, args.add)?
     };
+    let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
 
-    if !changed {
+    let Some(delta) = edit_delta else {
         return Ok(false);
-    }
-
-    let file = state
-        .current_file
-        .lock()
-        .map_err(|e| e.to_string())?
-        .as_ref()
-        .ok_or_else(|| "no model loaded".to_string())?
-        .clone();
-
-    let bounds = if file.voxels.is_empty() {
-        greedy_mesh::mesh_bounds_for_cube_side(file.grid_size)
-    } else {
-        greedy_mesh::mesh_bounds_from_voxels(&file.voxels)
-            .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size))
     };
 
+    let t_prep_start = Instant::now();
+    let fg = state.current_file.lock().map_err(|e| e.to_string())?;
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+
+    let bounds = scene_bounds_for_edit(&**state, file, &delta)?;
+
+    let brick_patch = if file.voxels.is_empty() {
+        None
+    } else {
+        Some(match delta {
+            voxel_edit::VoxelEditDelta::Added(v) => BrickCellWrite {
+                x: v.x,
+                y: v.y,
+                z: v.z,
+                packed: gpu_brick::pack_cell(v.color, v.material),
+            },
+            voxel_edit::VoxelEditDelta::Removed { x, y, z } => BrickCellWrite {
+                x,
+                y,
+                z,
+                packed: gpu_brick::pack_empty(),
+            },
+        })
+    };
+    let prepare_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
+
+    let t_lock_start = Instant::now();
     let mut v = state.viewer.lock().map_err(|e| e.to_string())?;
+    let viewer_lock_wait_ms = t_lock_start.elapsed().as_secs_f64() * 1000.0;
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
-    viewer.upload_scene_data(bounds, &file.voxels);
+
+    let t_brick = Instant::now();
+    viewer.upload_scene_data(bounds, &file.voxels, brick_patch);
+    let brick_ms = t_brick.elapsed().as_secs_f64() * 1000.0;
+
+    let t_mesh = Instant::now();
+    let mut mesh_voxel_map_ms = 0.0;
+    let mut mesh_buckets_ms = 0.0;
+    let mut mesh_greedy_ms = 0.0;
+    let mut mesh_chunk_buffers_ms = 0.0;
+    let mut mesh_full_chunked_rebuild_ms = 0.0;
+    let mut mesh_pipeline_ms = 0.0;
+
     if file.voxels.is_empty() {
         viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
-    } else if viewer.rebuild_mesh_gpu_greedy(&file.voxels).is_err() {
-        let (mesh, _) = greedy_mesh::build_greedy_mesh(&file.voxels);
-        viewer.upload_mesh(&mesh);
+        viewer.last_mesh_route = "clear".to_string();
+    } else {
+        let origin_new = greedy_mesh::voxel_aabb_min_int(&file.voxels).unwrap();
+        let origin_iv = glam::IVec3::new(origin_new.0, origin_new.1, origin_new.2);
+        let use_incremental = viewer.opaque_chunked
+            && file.voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS
+            && viewer.chunk_grid_origin == origin_iv;
+
+        if use_incremental {
+            let t_cache = Instant::now();
+            viewer.apply_spatial_cache_edit(&delta);
+            mesh_voxel_map_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
+            let cell = match delta {
+                voxel_edit::VoxelEditDelta::Added(v) => (v.x, v.y, v.z),
+                voxel_edit::VoxelEditDelta::Removed { x, y, z } => (x, y, z),
+            };
+            let center = greedy_mesh::chunk_key_from_world(
+                cell.0,
+                cell.1,
+                cell.2,
+                origin_new,
+                greedy_mesh::SPATIAL_CHUNK_SIZE,
+            );
+            let dirty = greedy_mesh::dirty_chunk_keys_3x3(center);
+            let (ok, rperf) = viewer.remesh_opaque_chunks(&dirty, &file.voxels);
+            mesh_buckets_ms = rperf.buckets_ms;
+            mesh_greedy_ms = rperf.greedy_ms;
+            mesh_chunk_buffers_ms = rperf.chunk_buffers_ms;
+            mesh_full_chunked_rebuild_ms = rperf.full_chunked_rebuild_ms;
+            if ok {
+                viewer.last_mesh_route = "cpu_chunked_incremental".to_string();
+            }
+        } else {
+            let t_pipe = Instant::now();
+            let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels);
+            mesh_pipeline_ms = t_pipe.elapsed().as_secs_f64() * 1000.0;
+        }
     }
+    let mesh_ms = t_mesh.elapsed().as_secs_f64() * 1000.0;
+
+    let t_preview_clear = Instant::now();
     viewer.clear_preview_mesh();
+    let preview_clear_ms = t_preview_clear.elapsed().as_secs_f64() * 1000.0;
+
+    let mesh_route = viewer.last_mesh_route.clone();
+    let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
+    *state.last_edit_perf.lock().map_err(|e| e.to_string())? = Some(EditPerfBreakdown {
+        apply_edit_ms,
+        prepare_ms,
+        viewer_lock_wait_ms,
+        brick_ms,
+        mesh_ms,
+        total_ms,
+        mesh_route,
+        mesh_voxel_map_ms,
+        mesh_buckets_ms,
+        mesh_greedy_ms,
+        mesh_chunk_buffers_ms,
+        mesh_full_chunked_rebuild_ms,
+        mesh_pipeline_ms,
+        preview_clear_ms,
+    });
+
+    *state.last_scene_bounds.lock().map_err(|e| e.to_string())? = Some(bounds);
+
     Ok(true)
 }
 
@@ -497,7 +659,7 @@ fn refresh_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, cam: &Orbi
 
     match key {
         Some((cx, cy, cz, 0)) => {
-            let mesh = greedy_mesh::preview_cube_mesh(
+            let solid = greedy_mesh::preview_cube_mesh(
                 cx as f32,
                 cy as f32,
                 cz as f32,
@@ -505,10 +667,18 @@ fn refresh_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, cam: &Orbi
                 [0.25, 0.92, 0.4],
                 1.0,
             );
-            viewer.upload_preview_mesh(&mesh);
+            let wire = greedy_mesh::preview_cube_wireframe_mesh(
+                cx as f32,
+                cy as f32,
+                cz as f32,
+                0.5,
+                [0.02, 0.09, 0.05],
+                2.0,
+            );
+            viewer.upload_preview_mesh(&solid, &wire);
         }
         Some((cx, cy, cz, 1)) => {
-            let mesh = greedy_mesh::preview_cube_mesh(
+            let solid = greedy_mesh::preview_cube_mesh(
                 cx as f32,
                 cy as f32,
                 cz as f32,
@@ -516,7 +686,15 @@ fn refresh_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, cam: &Orbi
                 [0.95, 0.28, 0.22],
                 1.0,
             );
-            viewer.upload_preview_mesh(&mesh);
+            let wire = greedy_mesh::preview_cube_wireframe_mesh(
+                cx as f32,
+                cy as f32,
+                cz as f32,
+                0.53,
+                [0.14, 0.03, 0.03],
+                2.0,
+            );
+            viewer.upload_preview_mesh(&solid, &wire);
         }
         None | Some(_) => {
             viewer.clear_preview_mesh();
@@ -638,6 +816,45 @@ fn performance_report_text(state: &ViewerState) -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let edit_block = state
+        .last_edit_perf
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .map(|e| {
+            format!(
+                "\nLast voxel edit (ms):\n\
+                 \tapply_edit (ray + data): {:.2}\n\
+                 \tprepare (bounds + brick patch): {:.2}\n\
+                 \tviewer lock wait: {:.2}\n\
+                 \tbrick (upload_scene_data): {:.2}\n\
+                 \tmesh (total): {:.2}\n\
+                 \t  spatial cache delta: {:.2}\n\
+                 \t  spatial cache cold init: {:.2}\n\
+                 \t  greedy (dirty chunks): {:.2}\n\
+                 \t  chunk GPU buffers: {:.2}\n\
+                 \t  full chunked rebuild: {:.2}\n\
+                 \t  pipeline (rebuild_mesh_gpu_greedy): {:.2}\n\
+                 \tpreview clear: {:.2}\n\
+                 \tmesh route: {}\n\
+                 \ttotal: {:.2}\n",
+                e.apply_edit_ms,
+                e.prepare_ms,
+                e.viewer_lock_wait_ms,
+                e.brick_ms,
+                e.mesh_ms,
+                e.mesh_voxel_map_ms,
+                e.mesh_buckets_ms,
+                e.mesh_greedy_ms,
+                e.mesh_chunk_buffers_ms,
+                e.mesh_full_chunked_rebuild_ms,
+                e.mesh_pipeline_ms,
+                e.preview_clear_ms,
+                e.mesh_route,
+                e.total_ms,
+            )
+        })
+        .unwrap_or_else(|| "\nLast voxel edit (ms): (none yet this session)\n".to_string());
     format!(
         "Voxelle Desktop — performance snapshot\n\
          \n\
@@ -647,7 +864,7 @@ fn performance_report_text(state: &ViewerState) -> String {
          Opaque mesh: index count = {idx_count}, vertex buffer slots ≈ {vtx_buf_verts}\n\
          Scene: voxel count = {voxel_n}, grid_size = {grid_size}\n\
          File label: {file_label}\n\
-         Platform: {} / {}\n",
+         Platform: {} / {}{edit_block}",
         std::env::consts::OS,
         std::env::consts::ARCH,
     )
@@ -712,6 +929,8 @@ pub fn run() {
             accum_frames: 0,
             last_fps: 0,
         }),
+        last_edit_perf: Mutex::new(None),
+        last_scene_bounds: Mutex::new(None),
     });
     let vs = viewer_state.clone();
 

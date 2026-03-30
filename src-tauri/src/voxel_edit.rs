@@ -9,22 +9,19 @@ use std::collections::HashMap;
 pub fn screen_to_world_ray(camera: &OrbitCamera, width: f32, height: f32, sx: f32, sy: f32) -> (Vec3, Vec3) {
     let w = width.max(1.0);
     let h = height.max(1.0);
-    let ndc_x = (sx / w) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (sy / h) * 2.0;
+    // Pixel centers: map (sx,sy) through viewport so the ray matches fragment centers (GPU).
+    let ndc_x = ((sx + 0.5) / w) * 2.0 - 1.0;
+    let ndc_y = 1.0 - ((sy + 0.5) / h) * 2.0;
     let proj = camera.proj_matrix(width, height);
     let view = camera.view_matrix();
-    let inv_proj = proj.inverse();
-    let inv_view = view.inverse();
-    let clip_near = Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
-    let clip_far = Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
-    let mut vn = inv_proj * clip_near;
-    let mut vf = inv_proj * clip_far;
-    vn /= vn.w;
-    vf /= vf.w;
-    let world_near = inv_view * Vec4::new(vn.x, vn.y, vn.z, 1.0);
-    let world_far = inv_view * Vec4::new(vf.x, vf.y, vf.z, 1.0);
-    let o = world_near.truncate();
-    let d = (world_far.truncate() - o).normalize();
+    let inv_vp = (proj * view).inverse();
+    // Glam `perspective_rh` uses NDC z in [0,1] (WebGPU); unproject with inverse(view*proj).
+    let mut near_h = inv_vp * Vec4::new(ndc_x, ndc_y, 0.0, 1.0);
+    let mut far_h = inv_vp * Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+    near_h /= near_h.w;
+    far_h /= far_h.w;
+    let o = near_h.truncate();
+    let d = (far_h.truncate() - o).normalize();
     (o, d)
 }
 
@@ -101,7 +98,7 @@ fn exit_t_axis(ox: f32, dx: f32, c: i32, t_min: f32) -> f32 {
 fn ray_first_solid(
     origin: Vec3,
     dir: Vec3,
-    occupied: &HashMap<VoxelCoord, Voxel>,
+    occupied: &HashMap<VoxelCoord, usize>,
     grid_size: i32,
 ) -> Option<((i32, i32, i32), Option<(i32, i32, i32)>)> {
     let (lo, hi) = grid_valid_range(grid_size);
@@ -144,7 +141,7 @@ fn ray_first_solid(
 /// `true` if the ray from the screen point hits any solid voxel before exiting the grid (same test as edit/remove).
 pub fn probe_solid_hit(
     file: &VoxelleFile,
-    voxel_map: &HashMap<VoxelCoord, Voxel>,
+    voxel_map: &HashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -162,7 +159,7 @@ pub fn probe_solid_hit(
 /// Cell where an add would place (empty cell in front of first solid along the ray), if valid.
 pub fn preview_add_cell(
     file: &VoxelleFile,
-    voxel_map: &HashMap<VoxelCoord, Voxel>,
+    voxel_map: &HashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -186,7 +183,7 @@ pub fn preview_add_cell(
 /// Solid voxel the ray would remove, if any.
 pub fn preview_remove_cell(
     file: &VoxelleFile,
-    voxel_map: &HashMap<VoxelCoord, Voxel>,
+    voxel_map: &HashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
@@ -201,16 +198,23 @@ pub fn preview_remove_cell(
     ray_first_solid(origin, dir, voxel_map, grid_size).map(|(h, _)| h)
 }
 
+/// Result of a successful add/remove for GPU incremental brick updates.
+#[derive(Clone, Copy, Debug)]
+pub enum VoxelEditDelta {
+    Added(Voxel),
+    Removed { x: i32, y: i32, z: i32 },
+}
+
 pub fn apply_edit(
     file: &mut VoxelleFile,
-    voxel_map: &mut HashMap<VoxelCoord, Voxel>,
+    voxel_map: &mut HashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
     sx: f32,
     sy: f32,
     add: bool,
-) -> Result<bool, String> {
+) -> Result<Option<VoxelEditDelta>, String> {
     let grid_size = file.grid_size.max(1);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
 
@@ -225,20 +229,34 @@ pub fn apply_edit(
                         color: 0x8899aa,
                         material: MaterialId::Plastic,
                     };
+                    let idx = file.voxels.len();
                     file.voxels.push(nv);
-                    voxel_map.insert((px, py, pz), nv);
-                    return Ok(true);
+                    voxel_map.insert((px, py, pz), idx);
+                    return Ok(Some(VoxelEditDelta::Added(nv)));
                 }
             }
         }
-        Ok(false)
+        Ok(None)
     } else {
         if let Some((hit, _)) = ray_first_solid(origin, dir, &*voxel_map, grid_size) {
-            file.voxels.retain(|v| !(v.x == hit.0 && v.y == hit.1 && v.z == hit.2));
+            let Some(&remove_idx) = voxel_map.get(&hit) else {
+                return Ok(None);
+            };
+            let last = file.voxels.len() - 1;
+            if remove_idx != last {
+                file.voxels.swap(remove_idx, last);
+                let moved = file.voxels[remove_idx];
+                voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+            }
+            file.voxels.pop();
             voxel_map.remove(&hit);
-            return Ok(true);
+            return Ok(Some(VoxelEditDelta::Removed {
+                x: hit.0,
+                y: hit.1,
+                z: hit.2,
+            }));
         }
-        Ok(false)
+        Ok(None)
     }
 }
 
@@ -253,18 +271,35 @@ mod tests {
     }
 
     #[test]
-    fn ray_hits_center_voxel() {
-        let mut m: HashMap<VoxelCoord, Voxel> = HashMap::new();
-        m.insert(
-            (0, 0, 0),
-            Voxel {
-                x: 0,
-                y: 0,
-                z: 0,
-                color: 1,
-                material: crate::voxelle::MaterialId::Plastic,
-            },
+    fn screen_ray_round_trips_through_vp() {
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let w = 1920.0_f32;
+        let h = 1080.0_f32;
+        let proj = cam.proj_matrix(w, h);
+        let view = cam.view_matrix();
+        let vp = proj * view;
+        let world = glam::Vec3::new(1.5, 2.0, -3.0);
+        let clip = vp * world.extend(1.0);
+        let ndc_x = clip.x / clip.w;
+        let ndc_y = clip.y / clip.w;
+        let sx = (ndc_x + 1.0) * 0.5 * w - 0.5;
+        let sy = (1.0 - ndc_y) * 0.5 * h - 0.5;
+        let (o, d) = screen_to_world_ray(&cam, w, h, sx, sy);
+        let t = (world - o).dot(d);
+        let closest = o + d * t;
+        assert!(
+            (closest - world).length() < 5e-3,
+            "ray miss: dist {}",
+            (closest - world).length()
         );
+    }
+
+    #[test]
+    fn ray_hits_center_voxel() {
+        let mut m: HashMap<VoxelCoord, usize> = HashMap::new();
+        m.insert((0, 0, 0), 0);
         let origin = Vec3::new(0.0, 0.0, 5.0);
         let dir = Vec3::new(0.0, 0.0, -1.0);
         let r = ray_first_solid(origin, dir, &m, 32);

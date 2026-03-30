@@ -28,12 +28,26 @@ mod gpu {
 }
 
 use crate::camera::OrbitCamera;
-use crate::gpu_brick::GpuVoxelBrick;
-use crate::greedy_mesh::{self, MeshBounds, MeshBuffers};
+use crate::gpu_brick::{BrickCellWrite, GpuVoxelBrick};
+use crate::greedy_mesh::{self, ChunkKey, MeshBounds, MeshBuffers};
 use crate::render_constants::{SHADOW_MAP_SIZE, BLOOM_STRENGTH};
+use crate::voxel_edit::VoxelEditDelta;
 use crate::voxelle::Voxel;
 use glam::{IVec3, Mat4, Vec3};
+use std::collections::BTreeMap;
+use std::time::Instant;
 use wgpu::util::DeviceExt;
+
+/// Timings from [`WgpuViewer::remesh_opaque_chunks`] (incremental CPU chunked path).
+#[derive(Clone, Debug, Default)]
+pub struct RemeshOpaquePerf {
+    /// Cold [`greedy_mesh::SpatialMeshCache::from_voxels`] when cache was missing.
+    pub buckets_ms: f64,
+    pub greedy_ms: f64,
+    pub chunk_buffers_ms: f64,
+    /// Full [`WgpuViewer::upload_cpu_mesh_chunked_full`] when chunk origin drifted or equivalent.
+    pub full_chunked_rebuild_ms: f64,
+}
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -130,9 +144,20 @@ pub struct WgpuViewer {
     index_buffer: Option<wgpu::Buffer>,
     index_count: u32,
 
+    /// When set, opaque mesh is drawn from [`Self::opaque_chunks`] (multi-draw).
+    pub opaque_chunked: bool,
+    /// Chunk bucketing origin (must match [`greedy_mesh::voxel_buckets_by_chunk`]).
+    pub chunk_grid_origin: IVec3,
+    opaque_chunks: BTreeMap<ChunkKey, OpaqueChunkDraw>,
+    /// Incremental occupancy + buckets; rebuilt on full chunked upload, updated O(1) per edit.
+    spatial_mesh_cache: Option<greedy_mesh::SpatialMeshCache>,
+
     preview_vertex_buffer: Option<wgpu::Buffer>,
     preview_index_buffer: Option<wgpu::Buffer>,
     preview_index_count: u32,
+    preview_wire_vertex_buffer: Option<wgpu::Buffer>,
+    preview_wire_index_buffer: Option<wgpu::Buffer>,
+    preview_wire_index_count: u32,
     /// Dedup CPU mesh rebuild when hover cell unchanged.
     pub preview_cache_key: Option<(i32, i32, i32, u8)>,
 
@@ -143,6 +168,89 @@ pub struct WgpuViewer {
 
     mesh_greedy_pipeline: Option<wgpu::ComputePipeline>,
     mesh_greedy_bind_layout: Option<wgpu::BindGroupLayout>,
+    mesh_greedy_pool: MeshGreedyPool,
+
+    /// Last opaque mesh rebuild path (for perf): `gpu_greedy`, `cpu`, `cpu_chunked`, `clear`, `gpu_no_headers`, etc.
+    pub last_mesh_route: String,
+}
+
+/// GPU buffers for one spatial chunk of opaque greedy mesh.
+struct OpaqueChunkDraw {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+}
+
+/// Reused GPU buffers for greedy mesh compute (grow-only scratch).
+struct MeshGreedyPool {
+    counters: Option<wgpu::Buffer>,
+    readback: Option<wgpu::Buffer>,
+    vtx_scratch: Option<wgpu::Buffer>,
+    idx_scratch: Option<wgpu::Buffer>,
+    vtx_cap: u64,
+    idx_cap: u64,
+}
+
+impl Default for MeshGreedyPool {
+    fn default() -> Self {
+        Self {
+            counters: None,
+            readback: None,
+            vtx_scratch: None,
+            idx_scratch: None,
+            vtx_cap: 0,
+            idx_cap: 0,
+        }
+    }
+}
+
+impl MeshGreedyPool {
+    fn ensure_counters(&mut self, device: &wgpu::Device) {
+        if self.counters.is_none() {
+            self.counters = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_atomic_counts"),
+                contents: &[0u8; 8],
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+            }));
+        }
+    }
+
+    fn ensure_readback(&mut self, device: &wgpu::Device) {
+        if self.readback.is_none() {
+            self.readback = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mesh_counts_rb"),
+                size: 8,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+    }
+
+    fn ensure_vtx_out(&mut self, device: &wgpu::Device, need: u64) {
+        if self.vtx_scratch.is_none() || self.vtx_cap < need {
+            self.vtx_scratch = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mesh_vtx_out"),
+                size: need,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+            self.vtx_cap = need;
+        }
+    }
+
+    fn ensure_idx_out(&mut self, device: &wgpu::Device, need: u64) {
+        if self.idx_scratch.is_none() || self.idx_cap < need {
+            self.idx_scratch = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mesh_idx_out"),
+                size: need,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+            self.idx_cap = need;
+        }
+    }
 }
 
 #[repr(C, align(16))]
@@ -1281,28 +1389,48 @@ impl WgpuViewer {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
+            opaque_chunked: false,
+            chunk_grid_origin: IVec3::ZERO,
+            opaque_chunks: BTreeMap::new(),
+            spatial_mesh_cache: None,
             preview_vertex_buffer: None,
             preview_index_buffer: None,
             preview_index_count: 0,
+            preview_wire_vertex_buffer: None,
+            preview_wire_index_buffer: None,
+            preview_wire_index_count: 0,
             preview_cache_key: None,
             sampler_linear,
             sampler_comparison,
             sampler_nearest,
             mesh_greedy_pipeline: None,
             mesh_greedy_bind_layout: None,
+            mesh_greedy_pool: MeshGreedyPool::default(),
+            last_mesh_route: String::new(),
         })
     }
 
     pub fn opaque_index_count(&self) -> u32 {
-        self.index_count
+        if self.opaque_chunked {
+            self.opaque_chunks.values().map(|c| c.index_count).sum()
+        } else {
+            self.index_count
+        }
     }
 
     /// Vertex buffer size / interleaved stride (40 bytes per vertex).
     pub fn opaque_vertex_buffer_vertices(&self) -> u32 {
-        self.vertex_buffer
-            .as_ref()
-            .map(|b| (b.size() / 40) as u32)
-            .unwrap_or(0)
+        if self.opaque_chunked {
+            self.opaque_chunks
+                .values()
+                .map(|c| (c.vertex_buffer.size() / 40) as u32)
+                .sum()
+        } else {
+            self.vertex_buffer
+                .as_ref()
+                .map(|b| (b.size() / 40) as u32)
+                .unwrap_or(0)
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -1490,7 +1618,71 @@ impl WgpuViewer {
         }));
     }
 
+    fn interleaved_from_mesh(mesh: &MeshBuffers) -> Vec<f32> {
+        let mut interleaved: Vec<f32> = Vec::with_capacity(mesh.positions.len() / 3 * 10);
+        let n = mesh.positions.len() / 3;
+        for i in 0..n {
+            interleaved.push(mesh.positions[i * 3]);
+            interleaved.push(mesh.positions[i * 3 + 1]);
+            interleaved.push(mesh.positions[i * 3 + 2]);
+            interleaved.push(mesh.normals[i * 3]);
+            interleaved.push(mesh.normals[i * 3 + 1]);
+            interleaved.push(mesh.normals[i * 3 + 2]);
+            interleaved.push(mesh.colors[i * 3]);
+            interleaved.push(mesh.colors[i * 3 + 1]);
+            interleaved.push(mesh.colors[i * 3 + 2]);
+            interleaved.push(mesh.mat_kind[i]);
+        }
+        interleaved
+    }
+
+    fn opaque_draw_from_mesh(&self, mesh: &MeshBuffers) -> OpaqueChunkDraw {
+        let interleaved = Self::interleaved_from_mesh(mesh);
+        let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vtx_chunk"),
+            contents: bytemuck::cast_slice(&interleaved),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        });
+        let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("idx_chunk"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        });
+        OpaqueChunkDraw {
+            vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices.len() as u32,
+        }
+    }
+
+    /// If existing chunk buffers are large enough, overwrite with [`queue::write_buffer`]; else allocate new.
+    fn upload_or_replace_chunk_mesh(&mut self, key: ChunkKey, mesh: &MeshBuffers) {
+        let n = mesh.positions.len() / 3;
+        let vtx_need = (n * 40) as u64;
+        let idx_need = (mesh.indices.len() * 4) as u64;
+        let can_reuse = self.opaque_chunks.get(&key).map(|d| {
+            d.vertex_buffer.usage().contains(wgpu::BufferUsages::COPY_DST)
+                && d.index_buffer.usage().contains(wgpu::BufferUsages::COPY_DST)
+                && d.vertex_buffer.size() >= vtx_need
+                && d.index_buffer.size() >= idx_need
+        }) == Some(true);
+        if can_reuse {
+            let interleaved = Self::interleaved_from_mesh(mesh);
+            let draw = self.opaque_chunks.get_mut(&key).expect("reuse");
+            self.queue
+                .write_buffer(&draw.vertex_buffer, 0, bytemuck::cast_slice(&interleaved));
+            self.queue
+                .write_buffer(&draw.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
+            draw.index_count = mesh.indices.len() as u32;
+        } else {
+            self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(mesh));
+        }
+    }
+
     pub fn upload_mesh(&mut self, mesh: &MeshBuffers) {
+        self.opaque_chunked = false;
+        self.opaque_chunks.clear();
+        self.spatial_mesh_cache = None;
         let mut interleaved: Vec<f32> = Vec::with_capacity(mesh.positions.len() / 3 * 10);
         let n = mesh.positions.len() / 3;
         for i in 0..n {
@@ -1518,6 +1710,107 @@ impl WgpuViewer {
         self.index_count = mesh.indices.len() as u32;
     }
 
+    /// Full CPU chunked mesh upload (all spatial chunks). Used on load and when chunk origin shifts.
+    pub fn upload_cpu_mesh_chunked_full(&mut self, voxels: &[Voxel]) {
+        self.vertex_buffer = None;
+        self.index_buffer = None;
+        self.index_count = 0;
+        self.opaque_chunks.clear();
+        let Some((origin, meshes)) =
+            greedy_mesh::build_all_chunk_meshes_btree(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE)
+        else {
+            self.opaque_chunked = false;
+            self.spatial_mesh_cache = None;
+            return;
+        };
+        self.chunk_grid_origin = IVec3::new(origin.0, origin.1, origin.2);
+        if meshes.is_empty() {
+            self.opaque_chunked = false;
+            self.spatial_mesh_cache = None;
+            return;
+        }
+        self.opaque_chunked = true;
+        for (key, mesh) in meshes {
+            self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(&mesh));
+        }
+        self.spatial_mesh_cache =
+            greedy_mesh::SpatialMeshCache::from_voxels(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE);
+        self.last_mesh_route = "cpu_chunked".to_string();
+    }
+
+    /// Apply one edit to [`Self::spatial_mesh_cache`] (must match `current_file.voxels` after `apply_edit`).
+    pub fn apply_spatial_cache_edit(&mut self, delta: &VoxelEditDelta) {
+        let Some(ref mut cache) = self.spatial_mesh_cache else {
+            return;
+        };
+        let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;
+        match delta {
+            VoxelEditDelta::Added(v) => cache.apply_add(*v, cs),
+            VoxelEditDelta::Removed { x, y, z } => cache.apply_remove(*x, *y, *z, cs),
+        }
+    }
+
+    /// Rebuild GPU buffers for `keys` only. Returns `true` if only those chunks were updated; `false` if a full chunked upload ran (origin drift).
+    pub fn remesh_opaque_chunks(
+        &mut self,
+        keys: &[ChunkKey],
+        voxels: &[Voxel],
+    ) -> (bool, RemeshOpaquePerf) {
+        let mut perf = RemeshOpaquePerf::default();
+        let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;
+
+        if self.spatial_mesh_cache.is_none() {
+            let t_cold = Instant::now();
+            self.spatial_mesh_cache = greedy_mesh::SpatialMeshCache::from_voxels(voxels, cs);
+            perf.buckets_ms = t_cold.elapsed().as_secs_f64() * 1000.0;
+        }
+        let Some(cache) = self.spatial_mesh_cache.as_ref() else {
+            self.upload_mesh(&MeshBuffers::default());
+            return (false, perf);
+        };
+        let origin_iv = IVec3::new(cache.origin.0, cache.origin.1, cache.origin.2);
+        if origin_iv != self.chunk_grid_origin {
+            let t_full = Instant::now();
+            self.upload_cpu_mesh_chunked_full(voxels);
+            perf.full_chunked_rebuild_ms = t_full.elapsed().as_secs_f64() * 1000.0;
+            return (false, perf);
+        }
+
+        let mut chunk_meshes: Vec<(ChunkKey, MeshBuffers)> = Vec::with_capacity(keys.len());
+        {
+            let cache = self.spatial_mesh_cache.as_ref().unwrap();
+            for key in keys {
+                let t_g = Instant::now();
+                let mesh =
+                    greedy_mesh::mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, *key);
+                perf.greedy_ms += t_g.elapsed().as_secs_f64() * 1000.0;
+                chunk_meshes.push((*key, mesh));
+            }
+        }
+
+        for (key, mesh) in chunk_meshes {
+            if mesh.indices.is_empty() {
+                self.opaque_chunks.remove(&key);
+            } else {
+                let t_u = Instant::now();
+                self.upload_or_replace_chunk_mesh(key, &mesh);
+                perf.chunk_buffers_ms += t_u.elapsed().as_secs_f64() * 1000.0;
+            }
+        }
+        (true, perf)
+    }
+
+    /// CPU greedy mesh, using chunked construction for very large voxel counts.
+    pub fn cpu_mesh_fallback(&mut self, voxels: &[Voxel]) {
+        if voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS {
+            self.upload_cpu_mesh_chunked_full(voxels);
+        } else {
+            let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels);
+            self.upload_mesh(&mesh);
+            self.last_mesh_route = "cpu".to_string();
+        }
+    }
+
     /// GPU greedy mesh (WGSL) when slice bitmaps fit 64×64; otherwise CPU [`greedy_mesh::build_greedy_mesh`].
     /// Set `VOXELLE_CPU_MESH=1` to force CPU meshing.
     pub fn rebuild_mesh_gpu_greedy(&mut self, voxels: &[Voxel]) -> Result<MeshBounds, String> {
@@ -1525,24 +1818,25 @@ impl WgpuViewer {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
+            self.opaque_chunked = false;
+            self.opaque_chunks.clear();
+            self.spatial_mesh_cache = None;
             return Err("empty voxels".into());
         }
 
         let bounds = greedy_mesh::mesh_bounds_from_voxels(voxels).ok_or("mesh bounds")?;
 
         if std::env::var("VOXELLE_CPU_MESH").is_ok() {
-            let (mesh, b) = greedy_mesh::build_greedy_mesh(voxels);
-            self.upload_mesh(&mesh);
-            return Ok(b);
+            self.cpu_mesh_fallback(voxels);
+            return Ok(bounds);
         }
 
         let map = greedy_mesh::voxel_map(voxels);
         let (headers, bits) = match greedy_mesh::pack_gpu_greedy_slices(&map, voxels) {
             Ok(x) => x,
             Err(()) => {
-                let (mesh, b) = greedy_mesh::build_greedy_mesh(voxels);
-                self.upload_mesh(&mesh);
-                return Ok(b);
+                self.cpu_mesh_fallback(voxels);
+                return Ok(bounds);
             }
         };
 
@@ -1550,6 +1844,10 @@ impl WgpuViewer {
             self.vertex_buffer = None;
             self.index_buffer = None;
             self.index_count = 0;
+            self.opaque_chunked = false;
+            self.opaque_chunks.clear();
+            self.spatial_mesh_cache = None;
+            self.last_mesh_route = "gpu_no_headers".to_string();
             return Ok(bounds);
         }
 
@@ -1570,6 +1868,18 @@ impl WgpuViewer {
         let vtx_storage_size = (max_vertices as u64).saturating_mul(VTX_STRIDE);
         let idx_storage_size = (max_indices as u64).saturating_mul(4);
 
+        // Worst-case scratch scales with slice count × 64×64 per tile; huge scenes exceed max_buffer_size.
+        // `dispatch_workgroups` also has a per-dimension cap (typically 65535).
+        let lim = self.device.limits();
+        let max_wg = lim.max_compute_workgroups_per_dimension as usize;
+        if vtx_storage_size > lim.max_buffer_size
+            || idx_storage_size > lim.max_buffer_size
+            || headers.len() > max_wg
+        {
+            self.cpu_mesh_fallback(voxels);
+            return Ok(bounds);
+        }
+
         let params = GpuMeshParams {
             max_vertices,
             max_indices,
@@ -1577,11 +1887,12 @@ impl WgpuViewer {
             _pad: 0,
         };
 
-        let counters_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mesh_atomic_counts"),
-            contents: &[0u8; 8],
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-        });
+        self.mesh_greedy_pool.ensure_counters(&self.device);
+        self.mesh_greedy_pool.ensure_vtx_out(&self.device, vtx_storage_size);
+        self.mesh_greedy_pool.ensure_idx_out(&self.device, idx_storage_size);
+        self.mesh_greedy_pool.ensure_readback(&self.device);
+        let counters_buf = self.mesh_greedy_pool.counters.as_ref().unwrap();
+        self.queue.write_buffer(counters_buf, 0, &[0u8; 8]);
         let hdr_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh_slice_hdr"),
             contents: bytemuck::cast_slice(&headers),
@@ -1602,18 +1913,8 @@ impl WgpuViewer {
             contents: bytemuck::cast_slice(&idx_prefix),
             usage: wgpu::BufferUsages::STORAGE,
         });
-        let vtx_out = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh_vtx_out"),
-            size: vtx_storage_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-        let idx_out = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh_idx_out"),
-            size: idx_storage_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
+        let vtx_out = self.mesh_greedy_pool.vtx_scratch.as_ref().unwrap();
+        let idx_out = self.mesh_greedy_pool.idx_scratch.as_ref().unwrap();
         let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh_greedy_params"),
             contents: bytemuck::bytes_of(&params),
@@ -1777,6 +2078,8 @@ impl WgpuViewer {
             ],
         });
 
+        let readback = self.mesh_greedy_pool.readback.as_ref().unwrap();
+
         let mut enc = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1791,21 +2094,8 @@ impl WgpuViewer {
             pass.set_bind_group(0, &bind, &[]);
             pass.dispatch_workgroups(headers.len() as u32, 1, 1);
         }
+        enc.copy_buffer_to_buffer(counters_buf, 0, readback, 0, 8);
         self.queue.submit(std::iter::once(enc.finish()));
-
-        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("mesh_counts_rb"),
-            size: 8,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let mut enc2 = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("mesh_copy_counts"),
-            });
-        enc2.copy_buffer_to_buffer(&counters_buf, 0, &readback, 0, 8);
-        self.queue.submit(std::iter::once(enc2.finish()));
         self.device.poll(wgpu::Maintain::Wait);
 
         let slice = readback.slice(..);
@@ -1823,9 +2113,8 @@ impl WgpuViewer {
         readback.unmap();
 
         if v_total == 0 || i_total == 0 || v_total > max_vertices || i_total > max_indices {
-            let (mesh, b) = greedy_mesh::build_greedy_mesh(voxels);
-            self.upload_mesh(&mesh);
-            return Ok(b);
+            self.cpu_mesh_fallback(voxels);
+            return Ok(bounds);
         }
 
         let vb_final = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1850,50 +2139,94 @@ impl WgpuViewer {
         self.queue.submit(std::iter::once(enc3.finish()));
         self.device.poll(wgpu::Maintain::Wait);
 
+        self.opaque_chunked = false;
+        self.opaque_chunks.clear();
+        self.spatial_mesh_cache = None;
         self.vertex_buffer = Some(vb_final);
         self.index_buffer = Some(ib_final);
         self.index_count = i_total;
+        self.last_mesh_route = "gpu_greedy".to_string();
         Ok(bounds)
     }
 
-    pub fn upload_preview_mesh(&mut self, mesh: &MeshBuffers) {
-        let mut interleaved: Vec<f32> = Vec::with_capacity(mesh.positions.len() / 3 * 10);
-        let n = mesh.positions.len() / 3;
-        for i in 0..n {
-            interleaved.push(mesh.positions[i * 3]);
-            interleaved.push(mesh.positions[i * 3 + 1]);
-            interleaved.push(mesh.positions[i * 3 + 2]);
-            interleaved.push(mesh.normals[i * 3]);
-            interleaved.push(mesh.normals[i * 3 + 1]);
-            interleaved.push(mesh.normals[i * 3 + 2]);
-            interleaved.push(mesh.colors[i * 3]);
-            interleaved.push(mesh.colors[i * 3 + 1]);
-            interleaved.push(mesh.colors[i * 3 + 2]);
-            interleaved.push(mesh.mat_kind[i]);
+    pub fn upload_preview_mesh(&mut self, solid: &MeshBuffers, wire: &MeshBuffers) {
+        fn interleave(mesh: &MeshBuffers) -> Vec<f32> {
+            let mut interleaved: Vec<f32> = Vec::with_capacity(mesh.positions.len() / 3 * 10);
+            let n = mesh.positions.len() / 3;
+            for i in 0..n {
+                interleaved.push(mesh.positions[i * 3]);
+                interleaved.push(mesh.positions[i * 3 + 1]);
+                interleaved.push(mesh.positions[i * 3 + 2]);
+                interleaved.push(mesh.normals[i * 3]);
+                interleaved.push(mesh.normals[i * 3 + 1]);
+                interleaved.push(mesh.normals[i * 3 + 2]);
+                interleaved.push(mesh.colors[i * 3]);
+                interleaved.push(mesh.colors[i * 3 + 1]);
+                interleaved.push(mesh.colors[i * 3 + 2]);
+                interleaved.push(mesh.mat_kind[i]);
+            }
+            interleaved
         }
+        let solid_v = interleave(solid);
+        let wire_v = interleave(wire);
         self.preview_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("preview_vtx"),
-            contents: bytemuck::cast_slice(&interleaved),
+            contents: bytemuck::cast_slice(&solid_v),
             usage: wgpu::BufferUsages::VERTEX,
         }));
         self.preview_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("preview_idx"),
-            contents: bytemuck::cast_slice(&mesh.indices),
+            contents: bytemuck::cast_slice(&solid.indices),
             usage: wgpu::BufferUsages::INDEX,
         }));
-        self.preview_index_count = mesh.indices.len() as u32;
+        self.preview_index_count = solid.indices.len() as u32;
+        self.preview_wire_vertex_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("preview_wire_vtx"),
+            contents: bytemuck::cast_slice(&wire_v),
+            usage: wgpu::BufferUsages::VERTEX,
+        }));
+        self.preview_wire_index_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("preview_wire_idx"),
+            contents: bytemuck::cast_slice(&wire.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        }));
+        self.preview_wire_index_count = wire.indices.len() as u32;
     }
 
     pub fn clear_preview_mesh(&mut self) {
         self.preview_vertex_buffer = None;
         self.preview_index_buffer = None;
         self.preview_index_count = 0;
+        self.preview_wire_vertex_buffer = None;
+        self.preview_wire_index_buffer = None;
+        self.preview_wire_index_count = 0;
         self.preview_cache_key = None;
     }
 
-    pub fn upload_scene_data(&mut self, bounds: MeshBounds, voxels: &[Voxel]) {
+    /// Updates GPU voxel brick. When `patch` is set and matches the existing brick layout, only one cell is written.
+    pub fn upload_scene_data(
+        &mut self,
+        bounds: MeshBounds,
+        voxels: &[Voxel],
+        patch: Option<BrickCellWrite>,
+    ) {
         self.scene_bounds = bounds;
-        let brick = GpuVoxelBrick::from_voxels(voxels, 512).unwrap_or(GpuVoxelBrick {
+        const MAX_AXIS: u32 = 512;
+        if let (Some(layout), Some(p)) = (GpuVoxelBrick::layout_from_voxels(voxels, MAX_AXIS), patch)
+        {
+            if layout.origin == self.brick_origin_iv && layout.dims == self.brick_dims_u {
+                if let Some(off) = layout.index_of_world(p.x, p.y, p.z) {
+                    self.queue.write_buffer(
+                        &self.brick_buffer,
+                        (off * std::mem::size_of::<u32>()) as wgpu::BufferAddress,
+                        &p.packed.to_le_bytes(),
+                    );
+                    return;
+                }
+            }
+        }
+
+        let brick = GpuVoxelBrick::from_voxels(voxels, MAX_AXIS).unwrap_or(GpuVoxelBrick {
             origin: IVec3::ZERO,
             dims: (0, 0, 0),
             cells: vec![0u32],
@@ -1947,6 +2280,17 @@ impl WgpuViewer {
     }
 
     fn draw_indexed_mesh(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.opaque_chunked {
+            for ch in self.opaque_chunks.values() {
+                if ch.index_count == 0 {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, ch.vertex_buffer.slice(..));
+                pass.set_index_buffer(ch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..ch.index_count, 0, 0..1);
+            }
+            return;
+        }
         if let (Some(vb), Some(ib)) = (&self.vertex_buffer, &self.index_buffer) {
             if self.index_count > 0 {
                 pass.set_vertex_buffer(0, vb.slice(..));
@@ -1967,6 +2311,19 @@ impl WgpuViewer {
                 pass.set_pipeline(&self.pipeline_preview_front);
                 pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
                 pass.draw_indexed(0..self.preview_index_count, 0, 0..1);
+            }
+        }
+        if let (Some(wvb), Some(wib)) = (&self.preview_wire_vertex_buffer, &self.preview_wire_index_buffer) {
+            if self.preview_wire_index_count > 0 {
+                pass.set_vertex_buffer(0, wvb.slice(..));
+                pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                // Triangle edges (not LineList): same pipelines as solid preview.
+                pass.set_pipeline(&self.pipeline_preview_occluded);
+                pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
+                pass.set_pipeline(&self.pipeline_preview_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
             }
         }
     }

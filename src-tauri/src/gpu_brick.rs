@@ -38,9 +38,50 @@ pub struct GpuVoxelBrick {
     pub cells: Vec<u32>,
 }
 
+/// Tight brick layout (origin + dimensions) without allocating `cells`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BrickLayout {
+    pub origin: IVec3,
+    pub dims: (u32, u32, u32),
+}
+
+/// Single-cell GPU brick update (`packed` from [`pack_cell`] / [`pack_empty`]).
+#[derive(Clone, Copy, Debug)]
+pub struct BrickCellWrite {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub packed: u32,
+}
+
+impl BrickLayout {
+    /// Linear index into row-major `cells` for world integer coords, or `None` if outside dims.
+    #[inline]
+    pub fn index_of_world(self, x: i32, y: i32, z: i32) -> Option<usize> {
+        let ix = x - self.origin.x;
+        let iy = y - self.origin.y;
+        let iz = z - self.origin.z;
+        if ix < 0 || iy < 0 || iz < 0 {
+            return None;
+        }
+        let (sx, sy, sz) = self.dims;
+        let ux = ix as u32;
+        let uy = iy as u32;
+        let uz = iz as u32;
+        if ux >= sx || uy >= sy || uz >= sz {
+            return None;
+        }
+        Some(
+            (ux as usize)
+                + (uy as usize) * (sx as usize)
+                + (uz as usize) * (sx as usize) * (sy as usize),
+        )
+    }
+}
+
 impl GpuVoxelBrick {
-    /// Build from voxel list. Returns `None` if empty. Caps each axis to `max_axis` to bound VRAM.
-    pub fn from_voxels(voxels: &[Voxel], max_axis: u32) -> Option<Self> {
+    /// Min/max and capped dimensions (same as [`Self::from_voxels`] but no allocation).
+    pub fn layout_from_voxels(voxels: &[Voxel], max_axis: u32) -> Option<BrickLayout> {
         if voxels.is_empty() {
             return None;
         }
@@ -57,6 +98,17 @@ impl GpuVoxelBrick {
         sx = sx.min(max_axis);
         sy = sy.min(max_axis);
         sz = sz.min(max_axis);
+        Some(BrickLayout {
+            origin: min,
+            dims: (sx, sy, sz),
+        })
+    }
+
+    /// Build from voxel list. Returns `None` if empty. Caps each axis to `max_axis` to bound VRAM.
+    pub fn from_voxels(voxels: &[Voxel], max_axis: u32) -> Option<Self> {
+        let layout = Self::layout_from_voxels(voxels, max_axis)?;
+        let (sx, sy, sz) = layout.dims;
+        let min = layout.origin;
 
         let n = (sx as usize)
             .saturating_mul(sy as usize)

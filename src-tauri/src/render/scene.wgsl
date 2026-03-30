@@ -171,22 +171,38 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     return out;
 }
 
-/// Web-style hover ghost (Three `MeshBasicMaterial`): unlit base color, no SSAO/bloom contribution.
-const PREVIEW_ALPHA_FRONT: f32 = 0.5;
-const PREVIEW_ALPHA_OCCLUDED: f32 = 0.4;
+/// Hover preview: readable on light scenes — avoid heavy Reinhard (was washing out edges).
+/// `mat_kind` > 1.5 marks edge outline geometry (`preview_cube_wireframe_mesh`); use **dark** vertex colors.
+const PREVIEW_ALPHA_FRONT: f32 = 0.9;
+const PREVIEW_ALPHA_OCCLUDED: f32 = 0.82;
+/// Edge lines: nearly opaque so they read as a wireframe, not more fill.
+const PREVIEW_ALPHA_EDGE: f32 = 0.98;
+const PREVIEW_ALPHA_EDGE_OCCLUDED: f32 = 0.94;
 /// `0x5577ee` — matches web `previewOccludedMaterial` / `applyAddShapeOccludedPreviewTint`.
 const PREVIEW_OCCLUDED_BLUE: vec3<f32> = vec3<f32>(0.333333, 0.466667, 0.933333);
 
 fn preview_tonemap(rgb: vec3<f32>) -> vec3<f32> {
-    return rgb / (rgb + vec3<f32>(1.0));
+    return rgb / (rgb * vec3<f32>(0.42) + vec3<f32>(1.0));
+}
+
+/// Dark outline: lift slightly for HDR without turning into mint fill.
+fn preview_edge_rgb(in_color: vec3<f32>) -> vec3<f32> {
+    let boosted = saturate(in_color * 5.0);
+    return preview_tonemap(boosted);
 }
 
 /// Full-screen overlay (depth test off in pipeline): unlit, semi-transparent.
 @fragment
 fn fs_preview_front_mrt(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
-    let rgb = preview_tonemap(in.color);
-    out.color = vec4<f32>(rgb, PREVIEW_ALPHA_FRONT);
+    let is_edge = in.mat_kind > 1.5;
+    if (is_edge) {
+        let rgb = preview_edge_rgb(in.color);
+        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_EDGE);
+    } else {
+        let rgb = preview_tonemap(saturate(in.color * 1.12));
+        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_FRONT);
+    }
     out.gbuf_n = vec4<f32>(0.0);
     return out;
 }
@@ -195,10 +211,17 @@ fn fs_preview_front_mrt(in: VertexOut) -> OpaqueOut {
 @fragment
 fn fs_preview_occluded_mrt(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
-    let dim = in.color * 0.38;
-    let rgb_lin = mix(dim, PREVIEW_OCCLUDED_BLUE, 0.48);
-    let rgb = preview_tonemap(rgb_lin);
-    out.color = vec4<f32>(rgb, PREVIEW_ALPHA_OCCLUDED);
+    let is_edge = in.mat_kind > 1.5;
+    if (is_edge) {
+        // Do **not** mix occluded blue into outline — that hid edges (same hue as fill).
+        let rgb = preview_edge_rgb(in.color * 0.92);
+        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_EDGE_OCCLUDED);
+    } else {
+        let dim = in.color * 0.62;
+        let rgb_lin = mix(dim, PREVIEW_OCCLUDED_BLUE, 0.4);
+        let rgb = preview_tonemap(rgb_lin);
+        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_OCCLUDED);
+    }
     out.gbuf_n = vec4<f32>(0.0);
     return out;
 }

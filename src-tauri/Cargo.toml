@@ -33,3 +33,9 @@ raw-window-handle = "0.6"
 thiserror = "1"
 arboard = "3"
 
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "greedy_mesh"
+harness = false
