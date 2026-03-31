@@ -382,6 +382,8 @@ pub struct WgpuViewer {
     pipeline_preview_front: wgpu::RenderPipeline,
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
+    /// Voxel grid borders: depth-tested only (no occluded ghost pass), semi-transparent.
+    pipeline_grid_border_lines: wgpu::RenderPipeline,
     pipeline_sky: wgpu::RenderPipeline,
     pipeline_start_screen_bg: wgpu::RenderPipeline,
     pipeline_trans: wgpu::RenderPipeline,
@@ -439,6 +441,11 @@ pub struct WgpuViewer {
     selection_overlay_index_count: u32,
     selection_overlay_line_vertex_buffer: Option<wgpu::Buffer>,
     selection_overlay_line_vertex_count: u32,
+    /// Full-scene grid AABB wireframe (View → Show borders); same format as selection overlay lines.
+    grid_border_line_vertex_buffer: Option<wgpu::Buffer>,
+    grid_border_line_vertex_count: u32,
+    /// Fingerprint of visible voxel set + mesh generation for grid overlay rebuilds.
+    pub(crate) grid_border_cache_key: Option<u64>,
     /// Dedup CPU mesh rebuild when hover cell unchanged.
     pub preview_cache_key: Option<u64>,
     /// `(selection fingerprint, mesh_refresh_generation)` — invalidates when selection or voxels change.
@@ -1370,6 +1377,42 @@ impl WgpuViewer {
                 cache: None,
             });
 
+        let pipeline_grid_border_lines =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("grid_border_lines"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_grid_border_line"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
         let pipeline_sky = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
             layout: Some(&pl_opaque),
@@ -1870,6 +1913,7 @@ impl WgpuViewer {
             pipeline_preview_front,
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
+            pipeline_grid_border_lines,
             pipeline_sky,
             pipeline_start_screen_bg,
             pipeline_trans,
@@ -1915,6 +1959,9 @@ impl WgpuViewer {
             selection_overlay_index_count: 0,
             selection_overlay_line_vertex_buffer: None,
             selection_overlay_line_vertex_count: 0,
+            grid_border_line_vertex_buffer: None,
+            grid_border_line_vertex_count: 0,
+            grid_border_cache_key: None,
             preview_cache_key: None,
             selection_overlay_cache_key: None,
             sampler_linear,
@@ -3221,6 +3268,38 @@ impl WgpuViewer {
         self.selection_overlay_line_vertex_count = vertex_count;
     }
 
+    pub fn upload_grid_border_lines(&mut self, verts: &[f32]) {
+        if verts.is_empty() || verts.len() % 6 != 0 {
+            self.grid_border_line_vertex_buffer = None;
+            self.grid_border_line_vertex_count = 0;
+            return;
+        }
+        let n_floats = verts.len();
+        let vertex_count = (n_floats / 6) as u32;
+        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
+        if let Some(ref buf) = self.grid_border_line_vertex_buffer {
+            if buf.size() == nbytes {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
+                self.grid_border_line_vertex_count = vertex_count;
+                return;
+            }
+        }
+        self.grid_border_line_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("grid_border_lines_vtx"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+        self.grid_border_line_vertex_count = vertex_count;
+    }
+
+    pub fn clear_grid_border_lines(&mut self) {
+        self.grid_border_line_vertex_buffer = None;
+        self.grid_border_line_vertex_count = 0;
+        self.grid_border_cache_key = None;
+    }
+
     pub fn clear_selection_overlay(&mut self) {
         self.selection_overlay_vertex_buffer = None;
         self.selection_overlay_index_buffer = None;
@@ -3621,6 +3700,19 @@ impl WgpuViewer {
         pass.draw(0..self.selection_overlay_line_vertex_count, 0..1);
     }
 
+    fn draw_grid_border_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(ref vb) = self.grid_border_line_vertex_buffer else {
+            return;
+        };
+        if self.grid_border_line_vertex_count < 2 {
+            return;
+        }
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.set_pipeline(&self.pipeline_grid_border_lines);
+        pass.draw(0..self.grid_border_line_vertex_count, 0..1);
+    }
+
     fn draw_indexed_ping(&self, pass: &mut wgpu::RenderPass<'_>) {
         if let (Some(vb), Some(ib)) = (&self.ping_vertex_buffer, &self.ping_index_buffer) {
             if self.ping_index_count > 0 {
@@ -3772,6 +3864,7 @@ impl WgpuViewer {
             self.draw_indexed_selection_overlay_solid(&mut pass);
             self.draw_indexed_preview(&mut pass);
             self.draw_selection_overlay_lines(&mut pass);
+            self.draw_grid_border_lines(&mut pass);
             self.draw_collab_peer_lines(&mut pass);
             self.draw_ping_wave_lines(&mut pass);
             self.draw_indexed_ping(&mut pass);

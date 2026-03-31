@@ -178,9 +178,18 @@ function userFacingUpdaterError(err: unknown): string {
   return raw.length > 0 ? raw : "Update failed (unknown error).";
 }
 
+/** Must match Rust `ONGOING_UNSAVED_PROJECT_LABEL` (`get_last_session_info`). */
+const ONGOING_UNSAVED_PROJECT_LABEL = "An ongoing unsaved project";
+
 /** Optional note when reopening (backup vs file). */
 function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
   if (!info.lastDocumentPath) return null;
+  if (
+    info.lastDocumentPath === ONGOING_UNSAVED_PROJECT_LABEL &&
+    info.autosaveExists
+  ) {
+    return "Restoring unsaved work from backup.";
+  }
   if (!info.documentExists && info.autosaveExists) {
     return "Couldn't find the file — opened your backup instead.";
   }
@@ -443,6 +452,9 @@ function App() {
     useState<ViewportCursorDebugPayload | null>(null);
   const [viewportCursorDebugScreen, setViewportCursorDebugScreen] =
     useState<ViewportCursorDebugScreen | null>(null);
+  /** Synchronous copy for debug ingest (React state can lag behind rAF). */
+  const viewportCursorDebugScreenRef =
+    useRef<ViewportCursorDebugScreen | null>(null);
   const viewportCursorDebugRafRef = useRef<number | null>(null);
   const [matchMaterialSelectColor, setMatchMaterialSelectColor] =
     useState(false);
@@ -770,6 +782,7 @@ function App() {
         if (!on) {
           setViewportCursorDebugJs(null);
           setViewportCursorDebugRust(null);
+          viewportCursorDebugScreenRef.current = null;
           setViewportCursorDebugScreen(null);
         }
         void invoke("debug_menu_sync_viewport_cursor_overlay", {
@@ -1138,6 +1151,7 @@ function App() {
         if (!enabled) {
           setViewportCursorDebugJs(null);
           setViewportCursorDebugRust(null);
+          viewportCursorDebugScreenRef.current = null;
           setViewportCursorDebugScreen(null);
         }
       }),
@@ -1501,7 +1515,9 @@ function App() {
         ),
         matchMaterial: matchMaterialSelectColorRef.current,
       },
-    }).catch(() => { });
+    }).catch((e) => {
+      console.error("[voxelle] voxel_edit_at_screen error", e);
+    });
   }
 
   async function handleStrokeAnchorClick(nx: number, ny: number) {
@@ -2349,7 +2365,14 @@ function App() {
     }
   }, [loading, workBusy, clearPreview]);
 
-  /** Normalized coords (0–1) in `.viewport`; Rust multiplies by `viewer.viewport_size()` so picking matches projection. */
+  /**
+   * Normalized coords (0–1) in the GPU viewport texture. Rust uses `nx * viewportW` texels
+   * ([`viewport_texels_from_norm`]); the viewport image is stretched over the `.viewport` CSS box from
+   * `sendResize`, so the same linear fraction as `(relX/rect.width, relY/rect.height)` with
+   * `getBoundingClientRect()` (AGENTS.md — proportional to `rect.width`/`height`, not `innerWidth`).
+   * Window×surface scaling `(clientX/iw)*sw` drifts when `innerWidth` ≠ pointer coordinate extent or when
+   * `sw/iw` ≠ `viewportW/rect.width`, which shows up as horizontal slope error.
+   */
   const clientToViewportNormalized = useCallback((e: React.PointerEvent) => {
     const el = viewportRef.current;
     if (!el) return { nx: 0.5, ny: 0.5 };
@@ -2357,9 +2380,12 @@ function App() {
     const rw = rect.width;
     const rh = rect.height;
     if (rw <= 0 || rh <= 0) return { nx: 0.5, ny: 0.5 };
+
+    const relX = e.clientX - rect.left;
+    const relY = e.clientY - rect.top;
     return {
-      nx: (e.clientX - rect.left) / rw,
-      ny: (e.clientY - rect.top) / rh,
+      nx: Math.min(1, Math.max(0, relX / rw)),
+      ny: Math.min(1, Math.max(0, relY / rh)),
     };
   }, []);
 
@@ -2559,22 +2585,110 @@ function App() {
     if (viewportCursorDebugEnabled) {
       const el = viewportRef.current;
       const rect = el?.getBoundingClientRect();
-      setViewportCursorDebugScreen(
-        rect
-          ? {
-              clientX: e.clientX,
-              clientY: e.clientY,
-              relX: e.clientX - rect.left,
-              relY: e.clientY - rect.top,
-            }
-          : null,
-      );
+      const scr: ViewportCursorDebugScreen | null = rect
+        ? {
+            clientX: e.clientX,
+            clientY: e.clientY,
+            relX: e.clientX - rect.left,
+            relY: e.clientY - rect.top,
+          }
+        : null;
+      viewportCursorDebugScreenRef.current = scr;
+      setViewportCursorDebugScreen(scr);
       setViewportCursorDebugJs({ nx: px, ny: py });
       if (viewportCursorDebugRafRef.current == null) {
         viewportCursorDebugRafRef.current = requestAnimationFrame(() => {
           viewportCursorDebugRafRef.current = null;
           void invoke<ViewportCursorDebugPayload>("get_viewport_cursor_debug")
-            .then((d) => setViewportCursorDebugRust(d))
+            .then((d) => {
+              setViewportCursorDebugRust(d);
+              // #region agent log
+              const vel = viewportRef.current;
+              const wrap = vel?.parentElement;
+              const rV = vel?.getBoundingClientRect();
+              const rW = wrap?.getBoundingClientRect();
+              const phys = viewportPhysRef.current;
+              const surf = surfacePhysRef.current;
+              const iw = window.innerWidth;
+              const ih = window.innerHeight;
+              fetch(
+                "http://127.0.0.1:7756/ingest/93734617-b27b-4379-bb59-e5971936c3d4",
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-Debug-Session-Id": "215b55",
+                  },
+                  body: JSON.stringify({
+                    sessionId: "215b55",
+                    runId: "post-fix",
+                    hypothesisId: "H_overlay_parent",
+                    location: "App.tsx:viewportDebugRaf",
+                    message: "overlay inside .viewport; rel vs window nx",
+                    data: (() => {
+                      const scr = viewportCursorDebugScreenRef.current;
+                      const pick = lastViewportPickNormRef.current;
+                      let nxFromRel: number | null = null;
+                      let nxWindow: number | null = null;
+                      let deltaWinVsRel: number | null = null;
+                      if (
+                        scr &&
+                        rV &&
+                        rV.width > 0 &&
+                        phys.w > 0 &&
+                        iw > 0 &&
+                        surf.w > 0
+                      ) {
+                        nxFromRel = scr.relX / rV.width;
+                        const ox = Math.max(
+                          0,
+                          Math.round((rV.left / iw) * surf.w),
+                        );
+                        nxWindow =
+                          ((scr.clientX / iw) * surf.w - ox) / phys.w;
+                        deltaWinVsRel = nxWindow - nxFromRel;
+                      }
+                      return {
+                        viewportRw: rV?.width,
+                        viewportRh: rV?.height,
+                        wrapRw: rW?.width,
+                        wrapRh: rW?.height,
+                        rectDeltaW: rV && rW ? rV.width - rW.width : null,
+                        rectDeltaH: rV && rW ? rV.height - rW.height : null,
+                        aspectDom:
+                          rV && rV.height > 0 ? rV.width / rV.height : null,
+                        physW: phys.w,
+                        physH: phys.h,
+                        aspectPhys:
+                          phys.h > 0 ? phys.w / phys.h : null,
+                        rustW: d.viewportWidth,
+                        rustH: d.viewportHeight,
+                        aspectRust:
+                          d.viewportHeight > 0
+                            ? d.viewportWidth / d.viewportHeight
+                            : null,
+                        surfaceW: surf.w,
+                        surfaceH: surf.h,
+                        vwPerRw:
+                          rV && rV.width > 0 ? phys.w / rV.width : null,
+                        swPerIw: iw > 0 ? surf.w / iw : null,
+                        shPerIh: ih > 0 ? surf.h / ih : null,
+                        nxFromRel,
+                        nxWindow,
+                        deltaWinVsRel,
+                        nxPick: pick?.nx ?? null,
+                        deltaPickVsRel:
+                          pick && nxFromRel != null
+                            ? pick.nx - nxFromRel
+                            : null,
+                      };
+                    })(),
+                    timestamp: Date.now(),
+                  }),
+                },
+              ).catch(() => {});
+              // #endregion
+            })
             .catch(() => setViewportCursorDebugRust(null));
         });
       }
@@ -3072,7 +3186,9 @@ function App() {
                   }
                   : {}),
               },
-            }).catch(() => { });
+            }).catch((e) => {
+              console.error("[voxelle] voxel_edit_at_screen error", e);
+            });
           }
         }
         void invoke("voxel_stroke_end").catch(() => { });
@@ -3157,6 +3273,7 @@ function App() {
     if (viewportCursorDebugEnabled) {
       setViewportCursorDebugJs(null);
       setViewportCursorDebugRust(null);
+      viewportCursorDebugScreenRef.current = null;
       setViewportCursorDebugScreen(null);
     }
     if (
@@ -4009,8 +4126,8 @@ function App() {
             onWheel={onWheel}
             role="application"
             aria-label="3D viewport"
-          />
-          {showEditorChrome && viewportCursorDebugEnabled ? (
+          >
+            {showEditorChrome && viewportCursorDebugEnabled ? (
             <div className="viewport-cursor-debug-overlay" aria-hidden>
               {viewportCursorDebugJs ? (
                 <div
@@ -4089,7 +4206,8 @@ function App() {
                 </div>
               </div>
             </div>
-          ) : null}
+            ) : null}
+          </div>
           {showEditorChrome ? (
           <div className="viewport-ping-overlay" aria-hidden>
             {pingLabelCss ? (

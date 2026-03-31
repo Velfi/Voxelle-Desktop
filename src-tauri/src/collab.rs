@@ -12,6 +12,7 @@ use igd_next::{PortMappingProtocol, SearchOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -104,7 +105,8 @@ pub fn record_ping_flash_colored(
     display_name: String,
 ) {
     let now = std::time::Instant::now();
-    if let Ok(mut g) = state.ping_flash.lock() {
+    {
+        let mut g = state.ping_flash.lock();
         *g = Some(PingFlash {
             x,
             y,
@@ -119,12 +121,12 @@ pub fn record_ping_flash_colored(
 
 /// Resolves accent color and display name from the roster. Do **not** call while holding [`ViewerState::collab`].
 pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i32) {
-    let (color_rgb, display_name) = state
-        .collab
-        .lock()
-        .ok()
-        .and_then(|c| {
-            c.roster.iter().find(|r| r.peer_id == peer_id).map(|r| {
+    let (color_rgb, display_name) = {
+        let c = state.collab.lock();
+        c.roster
+            .iter()
+            .find(|r| r.peer_id == peer_id)
+            .map(|r| {
                 (
                     r.color_rgb,
                     if r.display_name.is_empty() {
@@ -134,8 +136,8 @@ pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i
                     },
                 )
             })
-        })
-        .unwrap_or((0xffff44, "Guest".to_string()));
+    }
+    .unwrap_or((0xffff44, "Guest".to_string()));
     record_ping_flash_colored(state, x, y, z, color_rgb, display_name);
 }
 
@@ -322,7 +324,7 @@ pub fn schedule_remove_upnp_mapping(external_tcp_port: u16) {
 
 async fn try_upnp_internet_share<R: Runtime>(
     app: AppHandle<R>,
-    collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
+    collab_mtx: Arc<Mutex<CollabRuntime>>,
     lan_ip: IpAddr,
     port: u16,
 ) {
@@ -381,7 +383,8 @@ async fn try_upnp_internet_share<R: Runtime>(
         return;
     }
     // Record immediately so `collab_leave` can remove the mapping even if we fail below or the user leaves early.
-    if let Ok(mut g) = collab_mtx.lock() {
+    {
+        let mut g = collab_mtx.lock();
         if g.is_host() {
             g.upnp_external_tcp_port = Some(port);
         }
@@ -390,7 +393,8 @@ async fn try_upnp_internet_share<R: Runtime>(
         Ok(ip) => ip,
         Err(e) => {
             let _ = gw.remove_port(PortMappingProtocol::TCP, port).await;
-            if let Ok(mut g) = collab_mtx.lock() {
+            {
+                let mut g = collab_mtx.lock();
                 if g.is_host() {
                     g.upnp_external_tcp_port = None;
                 }
@@ -435,8 +439,8 @@ fn apply_deltas_on_main<R: Runtime>(
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = app_rt.run_on_main_thread(move || {
         let r = (|| {
-            let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
-            let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+            let mut fg = state.current_file.lock();
+            let mut vm = state.voxel_map.lock();
             let Some(file) = fg.as_mut() else {
                 return Err("no model loaded".into());
             };
@@ -470,10 +474,7 @@ fn replace_file_on_main<R: Runtime>(
     bytes: &[u8],
 ) -> Result<(), String> {
     let file = crate::voxelle::decode_payload(bytes).map_err(|e| e.to_string())?;
-    let mode = *state
-        .rendering_mode
-        .lock()
-        .map_err(|e| e.to_string())?;
+    let mode = *state.rendering_mode.lock();
     let _ = app.emit("voxelle-load-start", "Project from host");
     let prepared = crate::prepare_load_scene_cpu(
         file.grid_size,
@@ -537,8 +538,8 @@ pub fn host_undo_peer<R: Runtime>(
         return Ok(None);
     };
     let mesh_refresh: Vec<voxel_edit::VoxelEditDelta> = {
-        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
-        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -576,8 +577,8 @@ pub fn host_redo_peer<R: Runtime>(
         return Ok(None);
     };
     {
-        let mut fg = state.current_file.lock().map_err(|e| e.to_string())?;
-        let mut vm = state.voxel_map.lock().map_err(|e| e.to_string())?;
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -603,20 +604,19 @@ pub fn host_redo_peer<R: Runtime>(
 }
 
 fn emit_and_broadcast<R: Runtime>(
-    collab: &std::sync::Mutex<CollabRuntime>,
+    collab: &Mutex<CollabRuntime>,
     _app: &AppHandle<R>,
     json: &str,
 ) {
-    if let Ok(g) = collab.lock() {
-        if let Some(tx) = &g.host_broadcast {
-            let _ = tx.send(json.to_string());
-        }
+    let g = collab.lock();
+    if let Some(tx) = &g.host_broadcast {
+        let _ = tx.send(json.to_string());
     }
 }
 
 /// Host local edit after GPU sync: notify guests + UI.
 pub fn host_emit_edit_batch<R: Runtime>(
-    collab_mtx: &std::sync::Mutex<CollabRuntime>,
+    collab_mtx: &Mutex<CollabRuntime>,
     app: &AppHandle<R>,
     seq: u64,
     peer_id: u32,
@@ -635,10 +635,7 @@ pub fn host_emit_edit_batch<R: Runtime>(
 /// Pushes the current host scene to all guests (after load, new project, or open file).
 pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
     let bytes: Result<Vec<u8>, String> = (|| {
-        let g = state
-            .current_file
-            .lock()
-            .map_err(|_| "could not read scene".to_string())?;
+        let g = state.current_file.lock();
         let file = g
             .as_ref()
             .cloned()
@@ -652,9 +649,7 @@ pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
         Ok(j) => j,
         Err(_) => return,
     };
-    let Ok(g) = state.collab.lock() else {
-        return;
-    };
+    let g = state.collab.lock();
     if !g.is_host() {
         return;
     }
@@ -664,24 +659,27 @@ pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
 }
 
 /// Host UI: disconnect a guest by peer id (sends [`HostToClient::Kicked`]).
-pub fn host_kick_peer(collab_mtx: &std::sync::Mutex<CollabRuntime>, target_peer: u32) -> Result<(), String> {
-    let c = collab_mtx.lock().map_err(|e| e.to_string())?;
-    if !c.is_host() {
-        return Err("only the host can remove peers".into());
-    }
-    if target_peer == HOST_PEER_ID {
-        return Err("cannot remove the host".into());
-    }
-    let Some(tx) = c.host_peer_kick_tx.get(&target_peer) else {
+pub fn host_kick_peer(collab_mtx: &Mutex<CollabRuntime>, target_peer: u32) -> Result<(), String> {
+    let kick_tx = {
+        let c = collab_mtx.lock();
+        if !c.is_host() {
+            return Err("only the host can remove peers".into());
+        }
+        if target_peer == HOST_PEER_ID {
+            return Err("cannot remove the host".into());
+        }
+        c.host_peer_kick_tx.get(&target_peer).cloned()
+    };
+    let Some(kick_tx) = kick_tx else {
         return Err("peer is not connected".into());
     };
-    let _ = tx.send(Some("removed by host".into()));
+    let _ = kick_tx.send(Some("removed by host".into()));
     Ok(())
 }
 
 pub(crate) fn broadcast_roster_to_guests<R: Runtime>(
     app: &AppHandle<R>,
-    collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
+    collab_mtx: &Arc<Mutex<CollabRuntime>>,
     roster: &[RosterEntry],
 ) {
     let _ = app.emit(
@@ -691,26 +689,22 @@ pub(crate) fn broadcast_roster_to_guests<R: Runtime>(
     let br = HostToClient::Roster {
         roster: roster.to_vec(),
     };
-    if let Ok(g) = collab_mtx.lock() {
-        if let Some(tx) = &g.host_broadcast {
-            if let Ok(json) = serde_json::to_string(&br) {
-                let _ = tx.send(json);
-            }
+    let g = collab_mtx.lock();
+    if let Some(tx) = &g.host_broadcast {
+        if let Ok(json) = serde_json::to_string(&br) {
+            let _ = tx.send(json);
         }
     }
 }
 
 fn host_remove_peer_from_session<R: Runtime>(
     app: &AppHandle<R>,
-    collab_mtx: &Arc<std::sync::Mutex<CollabRuntime>>,
+    collab_mtx: &Arc<Mutex<CollabRuntime>>,
     peer_id: u32,
     notify: Option<CollabPeerLeftKind>,
 ) {
     let roster_vec = {
-        let mut g = match collab_mtx.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
+        let mut g = collab_mtx.lock();
         let Some(display_name) = g
             .roster
             .iter()
@@ -743,13 +737,14 @@ fn host_remove_peer_from_session<R: Runtime>(
     broadcast_roster_to_guests(app, collab_mtx, &roster_vec.0);
 }
 
-fn touch_guest_activity(collab_mtx: &std::sync::Mutex<CollabRuntime>, peer_id: u32) {
+fn touch_guest_activity(collab_mtx: &Mutex<CollabRuntime>, peer_id: u32) {
     if peer_id == HOST_PEER_ID {
         return;
     }
-    if let Ok(mut g) = collab_mtx.lock() {
-        g.guest_last_activity.insert(peer_id, Instant::now());
-    }
+    collab_mtx
+        .lock()
+        .guest_last_activity
+        .insert(peer_id, Instant::now());
 }
 
 async fn handle_host_connection<R: Runtime>(
@@ -757,25 +752,22 @@ async fn handle_host_connection<R: Runtime>(
     mut broadcast_rx: broadcast::Receiver<String>,
     app: AppHandle<R>,
     state: Arc<ViewerState>,
-    collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
+    collab_mtx: Arc<Mutex<CollabRuntime>>,
     peer_id: u32,
     display_name: String,
     color_rgb: u32,
     mut kick_rx: watch::Receiver<Option<String>>,
 ) {
-    let mut roster = collab_mtx.lock().unwrap().roster.clone();
+    let mut roster = collab_mtx.lock().roster.clone();
     if let Some(r) = roster.iter_mut().find(|r| r.peer_id == peer_id) {
         r.display_name = display_name;
         r.color_rgb = color_rgb;
     }
-    collab_mtx.lock().unwrap().roster = roster.clone();
+    collab_mtx.lock().roster = roster.clone();
     broadcast_roster_to_guests(&app, &collab_mtx, &roster);
 
     let snap_result: Result<Vec<u8>, String> = (|| {
-        let g = state
-            .current_file
-            .lock()
-            .map_err(|_| "could not read host scene".to_string())?;
+        let g = state.current_file.lock();
         let file = g
             .as_ref()
             .cloned()
@@ -860,13 +852,10 @@ async fn handle_host_connection<R: Runtime>(
             ClientToHost::Edit { deltas } => {
                 let allowed = collab_mtx
                     .lock()
-                    .ok()
-                    .and_then(|g| {
-                        g.roster
-                            .iter()
-                            .find(|r| r.peer_id == peer_id)
-                            .map(|r| r.can_edit)
-                    })
+                    .roster
+                    .iter()
+                    .find(|r| r.peer_id == peer_id)
+                    .map(|r| r.can_edit)
                     .unwrap_or(false);
                 if !allowed {
                     let _ = ws
@@ -880,7 +869,7 @@ async fn handle_host_connection<R: Runtime>(
                     continue;
                 }
                 let seq = {
-                    let mut c = collab_mtx.lock().unwrap();
+                    let mut c = collab_mtx.lock();
                     if let Err(e) =
                         host_apply_remote_edit(&app, &state, &mut c, peer_id, deltas.clone())
                     {
@@ -900,13 +889,10 @@ async fn handle_host_connection<R: Runtime>(
             ClientToHost::Undo => {
                 let allowed = collab_mtx
                     .lock()
-                    .ok()
-                    .and_then(|g| {
-                        g.roster
-                            .iter()
-                            .find(|r| r.peer_id == peer_id)
-                            .map(|r| r.can_edit)
-                    })
+                    .roster
+                    .iter()
+                    .find(|r| r.peer_id == peer_id)
+                    .map(|r| r.can_edit)
                     .unwrap_or(false);
                 if !allowed {
                     let _ = ws
@@ -920,13 +906,13 @@ async fn handle_host_connection<R: Runtime>(
                     continue;
                 }
                 let mesh = {
-                    let mut c = collab_mtx.lock().unwrap();
+                    let mut c = collab_mtx.lock();
                     host_undo_peer(&app, &state, &mut c, peer_id)
                 };
                 let Ok(Some(d)) = mesh else {
                     continue;
                 };
-                let seq = collab_mtx.lock().unwrap().next_seq;
+                let seq = collab_mtx.lock().next_seq;
                 let json = serde_json::to_string(&HostToClient::Edit {
                     seq,
                     peer_id,
@@ -938,13 +924,10 @@ async fn handle_host_connection<R: Runtime>(
             ClientToHost::Redo => {
                 let allowed = collab_mtx
                     .lock()
-                    .ok()
-                    .and_then(|g| {
-                        g.roster
-                            .iter()
-                            .find(|r| r.peer_id == peer_id)
-                            .map(|r| r.can_edit)
-                    })
+                    .roster
+                    .iter()
+                    .find(|r| r.peer_id == peer_id)
+                    .map(|r| r.can_edit)
                     .unwrap_or(false);
                 if !allowed {
                     let _ = ws
@@ -958,13 +941,13 @@ async fn handle_host_connection<R: Runtime>(
                     continue;
                 }
                 let mesh = {
-                    let mut c = collab_mtx.lock().unwrap();
+                    let mut c = collab_mtx.lock();
                     host_redo_peer(&app, &state, &mut c, peer_id)
                 };
                 let Ok(Some(d)) = mesh else {
                     continue;
                 };
-                let seq = collab_mtx.lock().unwrap().next_seq;
+                let seq = collab_mtx.lock().next_seq;
                 let json = serde_json::to_string(&HostToClient::Edit {
                     seq,
                     peer_id,
@@ -987,7 +970,8 @@ async fn handle_host_connection<R: Runtime>(
                 };
                 let json = serde_json::to_string(&ev).unwrap();
                 let _ = app.emit("collab-chat", &json);
-                if let Ok(g) = collab_mtx.lock() {
+                {
+                    let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
                         let _ = tx.send(json);
                     }
@@ -1003,7 +987,7 @@ async fn handle_host_connection<R: Runtime>(
                         r.color_rgb = color_rgb;
                     }
                 }
-                collab_mtx.lock().unwrap().roster = roster.clone();
+                collab_mtx.lock().roster = roster.clone();
                 broadcast_roster_to_guests(&app, &collab_mtx, &roster);
             }
             ClientToHost::Ping { x, y, z } => {
@@ -1023,22 +1007,20 @@ async fn handle_host_connection<R: Runtime>(
                 };
                 let json = serde_json::to_string(&ping).unwrap();
                 let _ = app.emit("collab-ping", &json);
-                if let Ok(g) = collab_mtx.lock() {
+                {
+                    let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
                         let _ = tx.send(json);
                     }
                 }
             }
             ClientToHost::Camera { presence } => {
-                collab_mtx
-                    .lock()
-                    .unwrap()
-                    .presence
-                    .insert(peer_id, presence);
+                collab_mtx.lock().presence.insert(peer_id, presence);
                 let cam_ev = HostToClient::Camera { peer_id, presence };
                 let json = serde_json::to_string(&cam_ev).unwrap();
                 let _ = app.emit("collab-camera", &json);
-                if let Ok(g) = collab_mtx.lock() {
+                {
+                    let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
                         let _ = tx.send(json);
                     }
@@ -1056,7 +1038,7 @@ async fn handle_host_connection<R: Runtime>(
                         r.can_edit = ce;
                     }
                 }
-                collab_mtx.lock().unwrap().roster = roster.clone();
+                collab_mtx.lock().roster = roster.clone();
                 broadcast_roster_to_guests(&app, &collab_mtx, &roster);
             }
                 }
@@ -1080,13 +1062,13 @@ async fn handle_host_connection<R: Runtime>(
 pub fn start_host<R: Runtime>(
     app: AppHandle<R>,
     state: Arc<ViewerState>,
-    collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
+    collab_mtx: Arc<Mutex<CollabRuntime>>,
     port: u16,
     display_name: String,
     color_rgb: u32,
     enable_upnp: bool,
 ) -> Result<CollabHostStartResponse, String> {
-    let mut c = collab_mtx.lock().map_err(|e| e.to_string())?;
+    let mut c = collab_mtx.lock();
     if c.is_active() {
         return Err("already in a session".into());
     }
@@ -1121,10 +1103,7 @@ pub fn start_host<R: Runtime>(
                 break;
             }
             let stale: Vec<u32> = {
-                let g = match cm_watch.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
+                let g = cm_watch.lock();
                 if !g.is_host() {
                     continue;
                 }
@@ -1138,8 +1117,9 @@ pub fn start_host<R: Runtime>(
             for pid in stale {
                 let tx_opt = cm_watch
                     .lock()
-                    .ok()
-                    .and_then(|g| g.host_peer_kick_tx.get(&pid).cloned());
+                    .host_peer_kick_tx
+                    .get(&pid)
+                    .cloned();
                 if let Some(tx) = tx_opt {
                     let _ = tx.send(Some(GUEST_TIMEOUT_KICK_REASON.to_string()));
                 }
@@ -1160,10 +1140,7 @@ pub fn start_host<R: Runtime>(
                 break;
             }
             let send = {
-                let g = match cm_keep.lock() {
-                    Ok(g) => g,
-                    Err(_) => continue,
-                };
+                let g = cm_keep.lock();
                 if !g.is_host() {
                     break;
                 }
@@ -1187,9 +1164,7 @@ pub fn start_host<R: Runtime>(
         let listener = match TcpListener::bind(("0.0.0.0", port)).await {
             Ok(l) => l,
             Err(e) => {
-                if let Ok(mut g) = cm2.lock() {
-                    g.leave();
-                }
+                cm2.lock().leave();
                 let msg = format!(
                     "Could not listen for collaboration connections on port {port}.\n\n{e}\n\nAnother program may be using this port, or another Voxelle window may already be hosting on it. Try a different port or close the other session."
                 );
@@ -1237,7 +1212,7 @@ pub fn start_host<R: Runtime>(
             let cm3 = Arc::clone(&cm2);
             let (kick_tx, kick_rx) = watch::channel(None);
             {
-                let mut g = cm3.lock().unwrap();
+                let mut g = cm3.lock();
                 g.roster.push(RosterEntry {
                     peer_id: pid,
                     display_name: dname.clone(),
@@ -1250,7 +1225,6 @@ pub fn start_host<R: Runtime>(
             }
             let sub = cm3
                 .lock()
-                .unwrap()
                 .host_broadcast
                 .as_ref()
                 .unwrap()
@@ -1304,7 +1278,7 @@ pub async fn client_connect_blocking<R: Runtime>(
     url: &str,
     app: AppHandle<R>,
     state: Arc<ViewerState>,
-    collab_mtx: Arc<std::sync::Mutex<CollabRuntime>>,
+    collab_mtx: Arc<Mutex<CollabRuntime>>,
     display_name: String,
     color_rgb: u32,
 ) -> Result<(), String> {
@@ -1362,16 +1336,14 @@ pub async fn client_connect_blocking<R: Runtime>(
             roster,
         } => {
             {
-                let mut c = collab_mtx.lock().map_err(|e| e.to_string())?;
+                let mut c = collab_mtx.lock();
                 c.role = CollabRole::Client;
                 c.local_peer_id = peer_id;
                 c.leader_id = leader_id;
                 c.roster = roster;
             }
             if let Err(e) = replace_file_on_main(&app, &state, &snapshot) {
-                if let Ok(mut c) = collab_mtx.lock() {
-                    c.leave();
-                }
+                collab_mtx.lock().leave();
                 return Err(format!(
                     "Connected to the host, but your scene could not be replaced with theirs:\n{e}"
                 ));
@@ -1380,7 +1352,7 @@ pub async fn client_connect_blocking<R: Runtime>(
             let _ = app.emit("collab-local-peer", peer_id);
             let _ = app.emit(
                 "collab-roster",
-                serde_json::to_string(&collab_mtx.lock().unwrap().roster).unwrap(),
+                serde_json::to_string(&collab_mtx.lock().roster).unwrap(),
             );
         }
         _ => {
@@ -1393,7 +1365,7 @@ pub async fn client_connect_blocking<R: Runtime>(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let tx_hb = tx.clone();
-    collab_mtx.lock().map_err(|e| e.to_string())?.client_tx = Some(tx);
+    collab_mtx.lock().client_tx = Some(tx);
     let heartbeat_msg = serde_json::to_string(&ClientToHost::Heartbeat).unwrap();
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(CLIENT_HEARTBEAT_INTERVAL);
@@ -1440,7 +1412,7 @@ pub async fn client_connect_blocking<R: Runtime>(
                         match ev {
                             HostToClient::Keepalive => {}
                             HostToClient::Edit { deltas, peer_id, .. } => {
-                                let local = cm4.lock().unwrap().local_peer_id;
+                                let local = cm4.lock().local_peer_id;
                                 if peer_id == local {
                                     continue;
                                 }
@@ -1448,7 +1420,7 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 let _ = app4.emit("collab-edit", t);
                             }
                             HostToClient::Roster { roster } => {
-                                cm4.lock().unwrap().roster = roster.clone();
+                                cm4.lock().roster = roster.clone();
                                 let _ = app4.emit(
                                     "collab-roster",
                                     serde_json::to_string(&roster).unwrap(),
@@ -1459,12 +1431,10 @@ pub async fn client_connect_blocking<R: Runtime>(
                             }
                             HostToClient::Kicked { reason } => {
                                 {
-                                    let mut c = cm4.lock().unwrap();
+                                    let mut c = cm4.lock();
                                     c.leave();
                                 }
-                                if let Ok(mut g) = st4.ping_flash.lock() {
-                                    *g = None;
-                                }
+                                *st4.ping_flash.lock() = None;
                                 let _ = app4.emit("collab-kicked", reason);
                                 break;
                             }
@@ -1482,7 +1452,7 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 let _ = app4.emit("collab-ping", t);
                             }
                             HostToClient::Camera { peer_id, presence } => {
-                                cm4.lock().unwrap().presence.insert(peer_id, presence);
+                                cm4.lock().presence.insert(peer_id, presence);
                                 let _ = app4.emit("collab-camera", t);
                             }
                             _ => {
@@ -1494,15 +1464,10 @@ pub async fn client_connect_blocking<R: Runtime>(
                 _ => {}
             }
         }
-        let still_client = cm4.lock().map(|c| c.is_client()).unwrap_or(false);
+        let still_client = cm4.lock().is_client();
         if still_client {
-            {
-                let mut c = cm4.lock().unwrap();
-                c.leave();
-            }
-            if let Ok(mut g) = st4.ping_flash.lock() {
-                *g = None;
-            }
+            cm4.lock().leave();
+            *st4.ping_flash.lock() = None;
             let reason = if host_timed_out {
                 "The host stopped responding. Your connection was closed."
             } else {
@@ -1535,8 +1500,8 @@ mod tests {
             .port()
     }
 
-    fn stop_host(cm: &Arc<std::sync::Mutex<CollabRuntime>>) {
-        cm.lock().unwrap().leave();
+    fn stop_host(cm: &Arc<Mutex<CollabRuntime>>) {
+        cm.lock().leave();
     }
 
     async fn ws_join(
@@ -1600,21 +1565,24 @@ mod tests {
         assert_eq!(peer_id, 2);
         host_kick_peer(&cm, peer_id).expect("kick");
 
-        let next = read
-            .next()
-            .await
-            .expect("frame")
-            .expect("ws");
-        let Message::Text(t) = next else {
-            panic!("expected text");
-        };
-        let ev: HostToClient = serde_json::from_str(&t).unwrap();
-        match ev {
-            HostToClient::Kicked { reason } => {
-                assert!(reason.contains("removed by host"), "{}", reason);
+        let mut kicked_reason: Option<String> = None;
+        for _ in 0..32 {
+            let next = read
+                .next()
+                .await
+                .expect("frame")
+                .expect("ws");
+            let Message::Text(t) = next else {
+                continue;
+            };
+            let ev: HostToClient = serde_json::from_str(&t).unwrap();
+            if let HostToClient::Kicked { reason } = ev {
+                kicked_reason = Some(reason);
+                break;
             }
-            other => panic!("expected Kicked: {other:?}"),
         }
+        let reason = kicked_reason.expect("expected a Kicked message after host kick");
+        assert!(reason.contains("removed by host"), "{}", reason);
         stop_host(&cm);
     }
 
@@ -1644,14 +1612,14 @@ mod tests {
 
         for _ in 0..50 {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let g = cm.lock().unwrap();
+            let g = cm.lock();
             if g.roster.iter().all(|r| r.peer_id != 2) {
                 break;
             }
             drop(g);
         }
         {
-            let g = cm.lock().unwrap();
+            let g = cm.lock();
             assert!(
                 g.roster.iter().all(|r| r.peer_id != 2),
                 "roster should not retain disconnected guest: {:?}",
@@ -1662,7 +1630,7 @@ mod tests {
         let (_w2, _r2, id_b) = ws_join(port).await.expect("join b");
         assert_eq!(id_b, 3);
         {
-            let g = cm.lock().unwrap();
+            let g = cm.lock();
             let ids: Vec<u32> = g.roster.iter().map(|r| r.peer_id).collect();
             assert_eq!(ids, vec![HOST_PEER_ID, 3]);
         }
@@ -1707,21 +1675,24 @@ mod tests {
             .await
             .expect("send edit");
 
-        let next = read
-            .next()
-            .await
-            .expect("frame")
-            .expect("ws");
-        let Message::Text(t) = next else {
-            panic!("expected text");
-        };
-        let ev: HostToClient = serde_json::from_str(&t).unwrap();
-        match ev {
-            HostToClient::Deny { reason } => {
-                assert!(reason.contains("editing not allowed"), "{}", reason);
+        let mut deny_reason: Option<String> = None;
+        for _ in 0..32 {
+            let next = read
+                .next()
+                .await
+                .expect("frame")
+                .expect("ws");
+            let Message::Text(t) = next else {
+                continue;
+            };
+            let ev: HostToClient = serde_json::from_str(&t).unwrap();
+            if let HostToClient::Deny { reason } = ev {
+                deny_reason = Some(reason);
+                break;
             }
-            other => panic!("expected Deny: {other:?}"),
         }
+        let reason = deny_reason.expect("expected Deny after edit when can_edit is false");
+        assert!(reason.contains("editing not allowed"), "{}", reason);
         stop_host(&cm);
     }
 
@@ -1747,7 +1718,7 @@ mod tests {
         let (mut write, mut read, peer_id) = ws_join(port).await.expect("join");
         assert_eq!(peer_id, 2);
         {
-            let mut g = cm.lock().unwrap();
+            let mut g = cm.lock();
             if let Some(r) = g.roster.iter_mut().find(|r| r.peer_id == 2) {
                 r.can_edit = true;
             }
@@ -1808,7 +1779,7 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         {
-            let g = cm.lock().unwrap();
+            let g = cm.lock();
             let guest = g.roster.iter().find(|r| r.peer_id == 2).expect("guest");
             assert!(!guest.can_edit);
         }
@@ -1842,7 +1813,7 @@ mod tests {
         let _ = read.next().await;
         tokio::time::sleep(std::time::Duration::from_millis(120)).await;
         {
-            let g = cm.lock().unwrap();
+            let g = cm.lock();
             assert_eq!(g.roster.len(), 1);
             assert_eq!(g.roster[0].peer_id, HOST_PEER_ID);
         }
@@ -1873,7 +1844,7 @@ mod tests {
         assert_eq!(a, 2);
         assert_eq!(b, 3);
         {
-            let g = cm.lock().unwrap();
+            let g = cm.lock();
             assert_eq!(g.roster.len(), 3);
         }
         stop_host(&cm);

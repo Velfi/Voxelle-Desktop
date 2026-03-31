@@ -54,6 +54,8 @@ commands.allow = [
   "set_rendering_mode",
   "get_orthographic",
   "set_orthographic",
+  "get_show_grid_borders",
+  "view_menu_sync_show_borders",
   "selection_menu_sync_match_material",
   "debug_menu_sync_viewport_cursor_overlay",
   "set_tone_mapping",

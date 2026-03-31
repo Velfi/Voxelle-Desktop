@@ -1581,6 +1581,7 @@ body,
 }
 
 .viewport {
+  position: relative;
   height: 100%;
   touch-action: none;
   background: transparent;

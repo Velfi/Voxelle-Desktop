@@ -26,6 +26,7 @@ struct VertexIn {
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) world_pos: vec3<f32>,
 }
 
 struct OpaqueOut {
@@ -42,6 +43,7 @@ fn vs_main(in: VertexIn) -> VertexOut {
     var out: VertexOut;
     out.clip_pos = g.view_proj * vec4<f32>(in.pos, 1.0);
     out.color = in.color;
+    out.world_pos = in.pos;
     return out;
 }
 
@@ -61,6 +63,33 @@ fn fs_collab_line_occluded(in: VertexOut) -> OpaqueOut {
     let c = clamp(in.color, vec3<f32>(0.0), vec3<f32>(1.0));
     let rgb = preview_tonemap(c * 0.72);
     out.color = vec4<f32>(rgb, 0.82);
+    out.gbuf_n = vec4<f32>(0.0);
+    return out;
+}
+
+/// Voxel grid borders: darkening stroke; fades for moiré (screen), grazing view, and **camera distance**
+/// (far + zoomed out → coplanar z-fight with opaque mesh; fade before it reads as shimmer).
+@fragment
+fn fs_grid_border_line(in: VertexOut) -> OpaqueOut {
+    var out: OpaqueOut;
+    let dark = vec3<f32>(0.035, 0.036, 0.04);
+    let rgb = preview_tonemap(dark);
+
+    let inv_w = 1.0 / max(abs(in.clip_pos.w), 1e-5);
+    let ndc = vec2<f32>(in.clip_pos.x * inv_w, in.clip_pos.y * inv_w);
+    let ndc_grad = max(fwidth(ndc.x), fwidth(ndc.y));
+    let screen_fade = smoothstep(0.0001, 0.005, ndc_grad);
+
+    let to_cam = normalize(g.cam_pos.xyz - in.world_pos);
+    let ndotl = abs(dot(to_cam, vec3<f32>(0.0, 1.0, 0.0)));
+    let grazing_fade = smoothstep(0.03, 0.3, ndotl);
+
+    let dist = length(g.cam_pos.xyz - in.world_pos);
+    // Earlier / tighter than before: far camera → thin lines fight the depth buffer.
+    let dist_fade = 1.0 - smoothstep(48.0, 150.0, dist);
+
+    let a = 0.42 * screen_fade * grazing_fade * dist_fade;
+    out.color = vec4<f32>(rgb, a);
     out.gbuf_n = vec4<f32>(0.0);
     return out;
 }

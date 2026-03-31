@@ -44,6 +44,7 @@ impl Spherical {
     }
 }
 
+#[derive(Clone)]
 pub struct OrbitCamera {
     pub target: Vec3,
     pub spherical: Spherical,

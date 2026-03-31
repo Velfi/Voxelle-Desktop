@@ -2063,6 +2063,93 @@ pub fn selection_aabb_line_vertices(
     out
 }
 
+// Matches web `gridLines.ts` (surface lift reduces depth fighting).
+const GRID_SURFACE_LIFT: f32 = 0.01;
+
+const VOXEL_GRID_CUBE_EDGES: [[f32; 6]; 12] = [
+    [-0.5, -0.5, -0.5, 0.5, -0.5, -0.5],
+    [-0.5, -0.5, -0.5, -0.5, 0.5, -0.5],
+    [-0.5, -0.5, -0.5, -0.5, -0.5, 0.5],
+    [0.5, -0.5, -0.5, 0.5, 0.5, -0.5],
+    [0.5, -0.5, -0.5, 0.5, -0.5, 0.5],
+    [-0.5, 0.5, -0.5, 0.5, 0.5, -0.5],
+    [-0.5, 0.5, -0.5, -0.5, 0.5, 0.5],
+    [-0.5, -0.5, 0.5, 0.5, -0.5, 0.5],
+    [-0.5, -0.5, 0.5, -0.5, 0.5, 0.5],
+    [0.5, 0.5, -0.5, 0.5, 0.5, 0.5],
+    [0.5, -0.5, 0.5, 0.5, 0.5, 0.5],
+    [-0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+];
+
+const VOXEL_GRID_EDGE_NEIGHBORS: [[(i32, i32, i32); 2]; 12] = [
+    [(0, -1, 0), (0, 0, -1)],
+    [(-1, 0, 0), (0, 0, -1)],
+    [(-1, 0, 0), (0, -1, 0)],
+    [(1, 0, 0), (0, 0, -1)],
+    [(1, 0, 0), (0, -1, 0)],
+    [(0, 1, 0), (0, 0, -1)],
+    [(-1, 0, 0), (0, 1, 0)],
+    [(0, -1, 0), (0, 0, 1)],
+    [(-1, 0, 0), (0, 0, 1)],
+    [(1, 0, 0), (0, 1, 0)],
+    [(1, 0, 0), (0, 0, 1)],
+    [(0, 1, 0), (0, 0, 1)],
+];
+
+/// Line-list vertices for per-voxel borders (web `gridLines.ts` / `buildGridPositions`); same tint as [`selection_aabb_line_vertices`].
+pub fn voxel_surface_grid_line_vertices(occupancy: &AHashMap<VoxelCoord, Voxel>) -> Vec<f32> {
+    if occupancy.is_empty() {
+        return Vec::new();
+    }
+    let has = |x: i32, y: i32, z: i32| occupancy.contains_key(&coord_key(x, y, z));
+    let r = 0x9f as f32 / 255.0;
+    let g = 0xd8 as f32 / 255.0;
+    let b = 0xff as f32 / 255.0;
+    let cap = occupancy.len().saturating_mul(12).saturating_mul(12);
+    let mut out = Vec::with_capacity(cap);
+    for &(x, y, z) in occupancy.keys() {
+        for i in 0..12 {
+            let [(dx1, dy1, dz1), (dx2, dy2, dz2)] = VOXEL_GRID_EDGE_NEIGHBORS[i];
+            let n1 = has(x + dx1, y + dy1, z + dz1);
+            let n2 = has(x + dx2, y + dy2, z + dz2);
+            if n1 && n2 {
+                continue;
+            }
+            let edge = VOXEL_GRID_CUBE_EDGES[i];
+            let mut ox = 0.0f32;
+            let mut oy = 0.0f32;
+            let mut oz = 0.0f32;
+            if GRID_SURFACE_LIFT > 0.0 {
+                if !n1 {
+                    ox += dx1 as f32;
+                    oy += dy1 as f32;
+                    oz += dz1 as f32;
+                }
+                if !n2 {
+                    ox += dx2 as f32;
+                    oy += dy2 as f32;
+                    oz += dz2 as f32;
+                }
+                let len = (ox * ox + oy * oy + oz * oz).sqrt();
+                if len > 0.0 {
+                    let k = GRID_SURFACE_LIFT / len;
+                    ox *= k;
+                    oy *= k;
+                    oz *= k;
+                }
+            }
+            let xa = x as f32 + edge[0] + ox;
+            let ya = y as f32 + edge[1] + oy;
+            let za = z as f32 + edge[2] + oz;
+            let xb = x as f32 + edge[3] + ox;
+            let yb = y as f32 + edge[4] + oy;
+            let zb = z as f32 + edge[5] + oz;
+            out.extend_from_slice(&[xa, ya, za, r, g, b, xb, yb, zb, r, g, b]);
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod gpu_pack_tests {
     use super::*;
@@ -2120,5 +2207,21 @@ mod gpu_pack_tests {
                 key
             );
         }
+    }
+
+    #[test]
+    fn voxel_surface_grid_line_single_cube_all_twelve_edges() {
+        let v = Voxel {
+            x: 0,
+            y: 0,
+            z: 0,
+            color: 0,
+            material: MaterialId::Plastic,
+            object_id: 0,
+        };
+        let mut m = AHashMap::new();
+        m.insert((0, 0, 0), v);
+        let verts = voxel_surface_grid_line_vertices(&m);
+        assert_eq!(verts.len(), 12 * 2 * 6);
     }
 }
