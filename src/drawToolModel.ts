@@ -26,21 +26,12 @@ export type PlaneAxisApi = "auto" | "x" | "y" | "z" | "camera";
 export type StrokeFamilyVariant = "stroke" | "solid";
 
 /** High-level selection method (sidebar Stroke / Surface / Solid / Spray / Fill). */
-export type SelectionMethod =
-  | "stroke"
-  | "surface"
-  | "solid"
-  | "spray"
-  | "fill";
+export type SelectionMethod = "stroke" | "surface" | "solid" | "spray" | "fill";
 
 export type DrawTool = "add" | "remove" | "paint" | "select";
 
 export function strokeModeSkipsDrag(mode: DrawStrokeModeApi): boolean {
-  return (
-    mode === "fill" ||
-    mode === "polygon" ||
-    mode === "polygonHull"
-  );
+  return mode === "fill" || mode === "polygon" || mode === "polygonHull";
 }
 
 export function deriveSelectionMethod(s: {
@@ -78,9 +69,7 @@ export function deriveSelectionMethod(s: {
 }
 
 /** Sidebar button handlers: set underlying state to match a selection method. */
-export function selectionMethodToState(
-  method: SelectionMethod,
-): {
+export function selectionMethodToState(method: SelectionMethod): {
   drawStrokeMode: DrawStrokeModeApi;
   strokeDrawStyle: StrokeDrawStyle;
   sprayDensity: number;
@@ -136,9 +125,7 @@ export function isNarrowStrokeSelectionMethod(s: {
   return deriveSelectionMethod(s) === "stroke";
 }
 
-export function drawToolFromInteractionMode(
-  mode: string,
-): DrawTool | null {
+export function drawToolFromInteractionMode(mode: string): DrawTool | null {
   if (mode === "add") return "add";
   if (mode === "remove") return "remove";
   if (mode === "paint") return "paint";
@@ -159,4 +146,31 @@ export function isMenubarTemporarySelectMode(mode: string): boolean {
     mode === "selectCoplanar" ||
     mode === "selectCoplanarEmpty"
   );
+}
+
+/**
+ * Stroke dispatch info: determines whether a voxel stroke should route to
+ * the edit commands (`voxel_edit_at_screen`, etc.) or the selection commands
+ * (`selection_stroke_at_screen`, etc.).
+ */
+export type StrokeDispatch =
+  | { kind: "edit"; tool: "add" | "remove" | "paint" }
+  | { kind: "selection"; interaction: string };
+
+/**
+ * Returns the stroke dispatch for an interaction mode, or `null` if the mode
+ * is not a voxel stroke mode (e.g. navigate, sculpt, eyedropper).
+ */
+export function getStrokeDispatch(mode: string): StrokeDispatch | null {
+  if (mode === "add") return { kind: "edit", tool: "add" };
+  if (mode === "remove") return { kind: "edit", tool: "remove" };
+  if (mode === "paint") return { kind: "edit", tool: "paint" };
+  if (mode === "select") return { kind: "selection", interaction: "select" };
+  if (mode === "selectByColor")
+    return { kind: "selection", interaction: "selectByColor" };
+  if (mode === "selectCoplanar")
+    return { kind: "selection", interaction: "selectCoplanar" };
+  if (mode === "selectCoplanarEmpty")
+    return { kind: "selection", interaction: "selectCoplanarEmpty" };
+  return null;
 }

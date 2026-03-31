@@ -192,10 +192,7 @@ body,
 .app-sidebar.is-floating {
   position: fixed;
   z-index: 50;
-  max-height: min(
-    36rem,
-    calc(100vh - var(--app-footer-block) - 0.75rem)
-  );
+  max-height: min(36rem, calc(100vh - var(--app-footer-block) - 0.75rem));
   margin: 0;
   border-radius: 10px;
   border: 1px solid var(--app-border-muted);
@@ -1276,7 +1273,8 @@ body,
   background: transparent;
   box-shadow: none;
   right: max(0.75rem, env(safe-area-inset-right, 0px));
-  padding: 0 max(0.75rem, env(safe-area-inset-right, 0px)) clamp(1rem, 4vh, 2rem) 0;
+  padding: 0 max(0.75rem, env(safe-area-inset-right, 0px))
+    clamp(1rem, 4vh, 2rem) 0;
 }
 
 .viewport-wrap.is-start-screen .viewport-empty-open-stack {
@@ -1319,9 +1317,7 @@ body,
 
 /* Collapsed inspector uses a fixed top-right expander (see `.sidebar-header-right`); inset the gizmo so it does not sit under that control. */
 .viewport-wrap.is-right-sidebar-collapsed .viewport-orbit-gizmo {
-  right: calc(
-    max(0.5rem, env(safe-area-inset-right, 0px)) + 2.35rem + 0.5rem
-  );
+  right: calc(max(0.5rem, env(safe-area-inset-right, 0px)) + 2.35rem + 0.5rem);
 }
 
 .viewport-zoom-controls {
@@ -1864,6 +1860,35 @@ body,
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.viewport-peer-labels-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 4;
+}
+
+.viewport-peer-label {
+  position: absolute;
+  transform: translate(-50%, -130%);
+  max-width: 10rem;
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  line-height: 1.2;
+  color: var(--app-text-strong);
+  background: var(--app-overlay-scrim);
+  border: 1.5px solid var(--peer-color);
+  box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--peer-color) 18%, transparent);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: left 0.12s ease-out, top 0.12s ease-out;
+  will-change: left, top;
 }
 
 .fps-counter {

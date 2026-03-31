@@ -85,7 +85,7 @@ pub fn world_to_viewport_pixels(
 }
 
 #[inline]
-fn world_to_voxel(p: Vec3) -> (i32, i32, i32) {
+pub(crate) fn world_to_voxel(p: Vec3) -> (i32, i32, i32) {
     (
         (p.x + 0.5).floor() as i32,
         (p.y + 0.5).floor() as i32,
@@ -538,6 +538,27 @@ pub enum BrushShape {
     Sphere,
     Cube,
     Pyramid,
+    /// 2D flat rectangle in the face tangent plane (single layer, locked to one world axis).
+    Square,
+    /// 2D flat disk in the face tangent plane (single layer, locked to one world axis).
+    Circle,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtrudeProfile {
+    #[default]
+    Cube,
+    Cylinder,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtrudeEndCap {
+    #[default]
+    Flat,
+    Rounded,
+    Pointed,
 }
 
 #[inline]
@@ -1026,12 +1047,34 @@ fn brush_clip_half_normal_from_screen(
     )
 }
 
+/// Map 2D tangent-plane offsets `(du, dv)` to 3D given the locked (face-normal) axis.
+fn expand_2d_to_3d(locked_axis: u8, du: i32, dv: i32) -> (i32, i32, i32) {
+    match locked_axis {
+        0 => (0, du, dv),
+        1 => (du, 0, dv),
+        _ => (du, dv, 0),
+    }
+}
+
+/// Dominant world axis of an axis-aligned face normal (0=X, 1=Y, 2=Z).
+pub fn face_normal_to_axis(n: (i32, i32, i32)) -> u8 {
+    if n.0.abs() >= n.1.abs() && n.0.abs() >= n.2.abs() {
+        0
+    } else if n.1.abs() >= n.2.abs() {
+        1
+    } else {
+        2
+    }
+}
+
 /// Inclusive brush radius in voxels from the stroke center: `0` = single cell only.
 /// Optional `clip_half_normal`: axis-aligned outward normal — keep offsets with `dx*nx+dy*ny+dz*nz >= 0`.
+/// Optional `face_normal_axis`: for 2D shapes (Square/Circle), the world axis to lock (0=X, 1=Y, 2=Z).
 pub fn brush_offset_cells(
     shape: BrushShape,
     radius: u32,
     clip_half_normal: Option<(i32, i32, i32)>,
+    face_normal_axis: Option<u8>,
 ) -> Vec<(i32, i32, i32)> {
     let r = radius as i32;
     if r <= 0 {
@@ -1071,6 +1114,25 @@ pub fn brush_offset_cells(
                 }
             }
         }
+        BrushShape::Square => {
+            let axis = face_normal_axis.unwrap_or(1);
+            for du in -r..=r {
+                for dv in -r..=r {
+                    out.push(expand_2d_to_3d(axis, du, dv));
+                }
+            }
+        }
+        BrushShape::Circle => {
+            let axis = face_normal_axis.unwrap_or(1);
+            let r2 = r * r;
+            for du in -r..=r {
+                for dv in -r..=r {
+                    if du * du + dv * dv <= r2 {
+                        out.push(expand_2d_to_3d(axis, du, dv));
+                    }
+                }
+            }
+        }
     }
     if let Some(n) = clip_half_normal {
         out.retain(|o| o.0 * n.0 + o.1 * n.1 + o.2 * n.2 >= 0);
@@ -1087,7 +1149,7 @@ fn brush_footprint_extent_toward_solid(
     outward_normal: (i32, i32, i32),
     clip_half_normal: Option<(i32, i32, i32)>,
 ) -> i32 {
-    let offsets = brush_offset_cells(shape, radius, clip_half_normal);
+    let offsets = brush_offset_cells(shape, radius, clip_half_normal, None);
     let mut min_dot = 0i32;
     for o in offsets {
         let d = o.0 * outward_normal.0 + o.1 * outward_normal.1 + o.2 * outward_normal.2;
@@ -1196,7 +1258,7 @@ pub fn apply_edit(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let centers = stroke_anchor_centers_with_mode(
         stroke_mode,
@@ -1494,7 +1556,7 @@ pub fn collect_stroke_preview_targets(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let centers = stroke_anchor_centers_with_mode(
         stroke_mode,
@@ -1687,7 +1749,7 @@ pub fn selection_stroke_sample_coords(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let tool = EditTool::Remove;
     let centers = stroke_anchor_centers_with_mode(
@@ -1766,7 +1828,7 @@ pub fn selection_stroke_sample_empty_coords(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let tool = EditTool::Add;
     let centers = stroke_anchor_centers_with_mode(
@@ -2321,12 +2383,15 @@ pub enum SprayDirection {
     Forward,
 }
 
+/// Edit tool for the spine anchor placement during sculpt. Draw uses `Remove` so the
+/// spine tracks the solid surface (not the empty cell in front), preventing frame-by-frame
+/// stacking along the view ray during replay. The brush offsets still expand into empty space.
 #[inline]
 fn sculpt_edit_tool(mode: SculptStrokeMode) -> EditTool {
     match mode {
-        SculptStrokeMode::Draw
+        SculptStrokeMode::Draw => EditTool::Remove,
+        SculptStrokeMode::Extrude
         | SculptStrokeMode::Wall
-        | SculptStrokeMode::Extrude
         | SculptStrokeMode::Terrain => EditTool::Add,
         SculptStrokeMode::Smooth | SculptStrokeMode::Gouge => EditTool::Remove,
     }
@@ -2521,10 +2586,17 @@ pub fn collect_sculpt_stroke_footprint(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
+    // For 2D shapes (Square/Circle), determine the face-normal axis so offsets stay in the tangent plane.
+    let face_axis = if matches!(brush_shape, BrushShape::Square | BrushShape::Circle) {
+        outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy)
+            .map(|n| face_normal_to_axis(n))
+    } else {
+        None
+    };
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, face_axis);
     let spray = spray_density.clamp(0.0, 1.0);
 
-    let spine = stroke_anchor_centers_sculpt(
+    let mut spine = stroke_anchor_centers_sculpt(
         mode,
         file,
         voxel_map,
@@ -2538,6 +2610,17 @@ pub fn collect_sculpt_stroke_footprint(
     );
     if spine.is_empty() {
         return Vec::new();
+    }
+    // Draw/Extrude spine sits on the solid surface (EditTool::Remove). Nudge it one step
+    // along the outward face normal so the brush footprint layers on top of existing voxels.
+    if matches!(mode, SculptStrokeMode::Draw | SculptStrokeMode::Extrude) {
+        if let Some(n) = outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy) {
+            for c in spine.iter_mut() {
+                c.0 += n.0;
+                c.1 += n.1;
+                c.2 += n.2;
+            }
+        }
     }
     let grid_size = stroke_clip_grid_size(file, &spine, &offsets);
 
@@ -3180,7 +3263,434 @@ pub fn compute_wall_sculpt_footprint(
     )
 }
 
+// ── Extrude cylinder / capsule / taper geometry (web branch parity) ───────────
+
+const BRANCH_R2_EPS: f32 = 1e-8;
+
+fn normalize3_opt(v: [f32; 3]) -> Option<[f32; 3]> {
+    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if len < 1e-9 {
+        None
+    } else {
+        Some([v[0] / len, v[1] / len, v[2] / len])
+    }
+}
+
+fn extrude_tangent_at(positions: &[VoxelCoord], i: usize) -> Option<[f32; 3]> {
+    let n = positions.len();
+    if n == 1 {
+        return Some([0.0, 0.0, 1.0]);
+    }
+    if i == 0 {
+        let (ax, ay, az) = positions[0];
+        let (bx, by, bz) = positions[1];
+        return normalize3_opt([
+            (bx - ax) as f32,
+            (by - ay) as f32,
+            (bz - az) as f32,
+        ]);
+    }
+    if i >= n - 1 {
+        let (ax, ay, az) = positions[n - 2];
+        let (bx, by, bz) = positions[n - 1];
+        return normalize3_opt([
+            (bx - ax) as f32,
+            (by - ay) as f32,
+            (bz - az) as f32,
+        ]);
+    }
+    let (ax, ay, az) = positions[i - 1];
+    let (bx, by, bz) = positions[i + 1];
+    normalize3_opt([
+        (bx - ax) as f32,
+        (by - ay) as f32,
+        (bz - az) as f32,
+    ])
+}
+
+/// Flat-capped cylinder between two points: voxels within radius of the segment axis, clamped to [0, L].
+fn add_flat_cylinder_segment(
+    seen: &mut HashSet<VoxelCoord>,
+    out: &mut Vec<VoxelCoord>,
+    a: VoxelCoord,
+    b: VoxelCoord,
+    r: f32,
+) {
+    let (ax, ay, az) = (a.0 as f32, a.1 as f32, a.2 as f32);
+    let (bx, by, bz) = (b.0 as f32, b.1 as f32, b.2 as f32);
+    let abx = bx - ax;
+    let aby = by - ay;
+    let abz = bz - az;
+    let len = (abx * abx + aby * aby + abz * abz).sqrt();
+    if len < 1e-9 {
+        return;
+    }
+    let tx = abx / len;
+    let ty = aby / len;
+    let tz = abz / len;
+    let r2 = r * r + BRANCH_R2_EPS;
+    let pad = r.ceil() as i32 + 2;
+    let min_x = a.0.min(b.0) - pad;
+    let max_x = a.0.max(b.0) + pad;
+    let min_y = a.1.min(b.1) - pad;
+    let max_y = a.1.max(b.1) + pad;
+    let min_z = a.2.min(b.2) - pad;
+    let max_z = a.2.max(b.2) + pad;
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let qx = x as f32 - ax;
+                let qy = y as f32 - ay;
+                let qz = z as f32 - az;
+                let axial = qx * tx + qy * ty + qz * tz;
+                if axial < 0.0 || axial > len {
+                    continue;
+                }
+                let wx = qx - tx * axial;
+                let wy = qy - ty * axial;
+                let wz = qz - tz * axial;
+                let perp2 = wx * wx + wy * wy + wz * wz;
+                if perp2 <= r2 {
+                    if seen.insert((x, y, z)) {
+                        out.push((x, y, z));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Capsule between two points: voxels within radius of the closest point on the segment (rounded ends).
+fn add_capsule_segment(
+    seen: &mut HashSet<VoxelCoord>,
+    out: &mut Vec<VoxelCoord>,
+    a: VoxelCoord,
+    b: VoxelCoord,
+    r: f32,
+) {
+    let (ax, ay, az) = (a.0 as f32, a.1 as f32, a.2 as f32);
+    let (bx, by, bz) = (b.0 as f32, b.1 as f32, b.2 as f32);
+    let abx = bx - ax;
+    let aby = by - ay;
+    let abz = bz - az;
+    let ab2 = abx * abx + aby * aby + abz * abz;
+    if ab2 < 1e-18 {
+        return;
+    }
+    let r2 = r * r + BRANCH_R2_EPS;
+    let pad = r.ceil() as i32 + 2;
+    let min_x = a.0.min(b.0) - pad;
+    let max_x = a.0.max(b.0) + pad;
+    let min_y = a.1.min(b.1) - pad;
+    let max_y = a.1.max(b.1) + pad;
+    let min_z = a.2.min(b.2) - pad;
+    let max_z = a.2.max(b.2) + pad;
+    for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                let qx = x as f32 - ax;
+                let qy = y as f32 - ay;
+                let qz = z as f32 - az;
+                let mut t = (qx * abx + qy * aby + qz * abz) / ab2;
+                t = t.clamp(0.0, 1.0);
+                let px = ax + t * abx;
+                let py = ay + t * aby;
+                let pz = az + t * abz;
+                let dx = x as f32 - px;
+                let dy = y as f32 - py;
+                let dz = z as f32 - pz;
+                if dx * dx + dy * dy + dz * dz <= r2 {
+                    if seen.insert((x, y, z)) {
+                        out.push((x, y, z));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Disk slab: single-voxel-thick disk perpendicular to tangent direction at center.
+fn add_disk_slab(
+    seen: &mut HashSet<VoxelCoord>,
+    out: &mut Vec<VoxelCoord>,
+    center: VoxelCoord,
+    tangent: [f32; 3],
+    r: f32,
+) {
+    if r <= 0.0 {
+        if seen.insert(center) {
+            out.push(center);
+        }
+        return;
+    }
+    let [tx, ty, tz] = tangent;
+    let r2 = r * r + BRANCH_R2_EPS;
+    let pad = r.ceil() as i32 + 2;
+    let (cx, cy, cz) = center;
+    for x in (cx - pad)..=(cx + pad) {
+        for y in (cy - pad)..=(cy + pad) {
+            for z in (cz - pad)..=(cz + pad) {
+                let wx = (x - cx) as f32;
+                let wy = (y - cy) as f32;
+                let wz = (z - cz) as f32;
+                let axial = wx * tx + wy * ty + wz * tz;
+                if axial.abs() > 0.5001 {
+                    continue;
+                }
+                let px = wx - tx * axial;
+                let py = wy - ty * axial;
+                let pz = wz - tz * axial;
+                if px * px + py * py + pz * pz <= r2 {
+                    if seen.insert((x, y, z)) {
+                        out.push((x, y, z));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Hemisphere cap at a cylinder endpoint.
+fn add_sphere_cap(
+    seen: &mut HashSet<VoxelCoord>,
+    out: &mut Vec<VoxelCoord>,
+    center: VoxelCoord,
+    r: f32,
+    tangent: [f32; 3],
+    outward_dot_positive: bool,
+) {
+    if r <= 0.0 {
+        return;
+    }
+    let [tx, ty, tz] = tangent;
+    let r2 = r * r + BRANCH_R2_EPS;
+    let pad = r.ceil() as i32 + 2;
+    let (cx, cy, cz) = center;
+    for x in (cx - pad)..=(cx + pad) {
+        for y in (cy - pad)..=(cy + pad) {
+            for z in (cz - pad)..=(cz + pad) {
+                let vx = (x - cx) as f32;
+                let vy = (y - cy) as f32;
+                let vz = (z - cz) as f32;
+                let d2 = vx * vx + vy * vy + vz * vz;
+                if d2 > r2 {
+                    continue;
+                }
+                let dot = vx * tx + vy * ty + vz * tz;
+                if outward_dot_positive {
+                    if dot < -BRANCH_R2_EPS {
+                        continue;
+                    }
+                } else if dot > BRANCH_R2_EPS {
+                    continue;
+                }
+                if seen.insert((x, y, z)) {
+                    out.push((x, y, z));
+                }
+            }
+        }
+    }
+}
+
+/// Pointed cone cap: tapered disk slabs extending from the endpoint along tangent.
+fn add_pointed_cone_cap(
+    seen: &mut HashSet<VoxelCoord>,
+    out: &mut Vec<VoxelCoord>,
+    origin: VoxelCoord,
+    dir: [f32; 3],
+    base_radius: f32,
+) {
+    if base_radius <= 0.0 {
+        return;
+    }
+    let Some(t) = normalize3_opt(dir) else {
+        return;
+    };
+    let k_max = base_radius.ceil().max(1.0) as i32;
+    for k in 1..=k_max {
+        let rk = base_radius * (1.0 - k as f32 / (k_max as f32 + 1.0));
+        if rk <= 0.0 {
+            continue;
+        }
+        let cx = origin.0 + (k as f32 * t[0]).round() as i32;
+        let cy = origin.1 + (k as f32 * t[1]).round() as i32;
+        let cz = origin.2 + (k as f32 * t[2]).round() as i32;
+        add_disk_slab(seen, out, (cx, cy, cz), t, rk);
+    }
+}
+
+/// Quantize continuous taper radius to discrete voxel sizes (web `taperRadiusToSize`).
+fn taper_radius_to_size(c: f32) -> f32 {
+    if c <= 0.0 || c < 0.25 {
+        return 0.0;
+    }
+    if c < 0.75 {
+        return 0.5;
+    }
+    if c < 1.25 {
+        return 1.0;
+    }
+    if c < 1.75 {
+        return 1.5;
+    }
+    if c <= 2.0 {
+        return 2.0;
+    }
+    c
+}
+
+/// Compute extrude cylinder footprint from spine positions (web `thickenBranchUniformCylinder`).
+fn extrude_uniform_cylinder_footprint(
+    spine: &[VoxelCoord],
+    r: f32,
+    cap: ExtrudeEndCap,
+) -> Vec<VoxelCoord> {
+    if spine.is_empty() {
+        return Vec::new();
+    }
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let n = spine.len();
+
+    if n == 1 {
+        // Single point: sphere + optional cones
+        let c = spine[0];
+        let ri = r.ceil() as i32;
+        let r2 = r * r + BRANCH_R2_EPS;
+        for dx in -ri..=ri {
+            for dy in -ri..=ri {
+                for dz in -ri..=ri {
+                    if (dx * dx + dy * dy + dz * dz) as f32 <= r2 {
+                        let p = (c.0 + dx, c.1 + dy, c.2 + dz);
+                        if seen.insert(p) {
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        if cap == ExtrudeEndCap::Pointed {
+            add_pointed_cone_cap(&mut seen, &mut out, c, [0.0, 1.0, 0.0], r);
+            add_pointed_cone_cap(&mut seen, &mut out, c, [0.0, -1.0, 0.0], r);
+        }
+        return out;
+    }
+
+    let use_capsule = cap == ExtrudeEndCap::Rounded;
+    for i in 0..n - 1 {
+        if use_capsule {
+            add_capsule_segment(&mut seen, &mut out, spine[i], spine[i + 1], r);
+        } else {
+            add_flat_cylinder_segment(&mut seen, &mut out, spine[i], spine[i + 1], r);
+        }
+    }
+
+    if cap == ExtrudeEndCap::Pointed {
+        if let Some(t0) = extrude_tangent_at(spine, 0) {
+            add_pointed_cone_cap(
+                &mut seen,
+                &mut out,
+                spine[0],
+                [-t0[0], -t0[1], -t0[2]],
+                r,
+            );
+        }
+        if let Some(t1) = extrude_tangent_at(spine, n - 1) {
+            add_pointed_cone_cap(&mut seen, &mut out, spine[n - 1], t1, r);
+        }
+    }
+
+    out
+}
+
+/// Compute extrude tapered cylinder footprint (web `thickenBranchTaperedCylinder`).
+fn extrude_tapered_cylinder_footprint(
+    spine: &[VoxelCoord],
+    base_radius: f32,
+    tip_radius: f32,
+    cap: ExtrudeEndCap,
+) -> Vec<VoxelCoord> {
+    if spine.is_empty() {
+        return Vec::new();
+    }
+    if base_radius <= 0.0 && tip_radius <= 0.0 {
+        return spine.to_vec();
+    }
+    let n = spine.len();
+
+    // Compute per-station radii
+    let radii: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = if n == 1 { 0.0 } else { i as f32 / (n as f32 - 1.0) };
+            taper_radius_to_size((base_radius + t * (tip_radius - base_radius)).max(0.0))
+        })
+        .collect();
+
+    if n == 1 {
+        let r0 = radii[0];
+        if r0 <= 0.0 {
+            return vec![spine[0]];
+        }
+        return extrude_uniform_cylinder_footprint(spine, r0, cap);
+    }
+
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+
+    // Disk slabs at each station with tapered radius
+    for i in 0..n {
+        let ri = radii[i];
+        let p = spine[i];
+        if ri <= 0.0 {
+            if seen.insert(p) {
+                out.push(p);
+            }
+            continue;
+        }
+        if let Some(t) = extrude_tangent_at(spine, i) {
+            add_disk_slab(&mut seen, &mut out, p, t, ri);
+        }
+    }
+
+    // Rounded end caps
+    if cap == ExtrudeEndCap::Rounded {
+        if let Some(t0) = extrude_tangent_at(spine, 0) {
+            if radii[0] > 0.0 {
+                add_sphere_cap(&mut seen, &mut out, spine[0], radii[0], t0, false);
+            }
+        }
+        if let Some(t1) = extrude_tangent_at(spine, n - 1) {
+            if radii[n - 1] > 0.0 {
+                add_sphere_cap(&mut seen, &mut out, spine[n - 1], radii[n - 1], t1, true);
+            }
+        }
+    }
+
+    // Pointed cone caps
+    if cap == ExtrudeEndCap::Pointed {
+        if let Some(t0) = extrude_tangent_at(spine, 0) {
+            if radii[0] > 0.0 {
+                add_pointed_cone_cap(
+                    &mut seen,
+                    &mut out,
+                    spine[0],
+                    [-t0[0], -t0[1], -t0[2]],
+                    radii[0],
+                );
+            }
+        }
+        if let Some(t1) = extrude_tangent_at(spine, n - 1) {
+            if radii[n - 1] > 0.0 {
+                add_pointed_cone_cap(&mut seen, &mut out, spine[n - 1], t1, radii[n - 1]);
+            }
+        }
+    }
+
+    out
+}
+
 /// Brush footprint after web-style strength / falloff thinning. Terrain skips thinning (column ops).
+/// For Extrude with cylinder profile, uses the cylinder/capsule/taper geometry instead of brush offsets.
 pub fn sculpt_stroke_effective_footprint(
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
@@ -3199,7 +3709,47 @@ pub fn sculpt_stroke_effective_footprint(
     brush_falloff: u32,
     stroke_seed: u32,
     brush_clip_bottom_half: bool,
+    extrude_profile: ExtrudeProfile,
+    extrude_end_cap: ExtrudeEndCap,
+    extrude_taper: bool,
+    extrude_taper_start: f32,
+    extrude_taper_end: f32,
 ) -> Vec<VoxelCoord> {
+    // Extrude + cylinder: use dedicated geometry instead of generic brush offsets
+    if mode == SculptStrokeMode::Extrude && extrude_profile == ExtrudeProfile::Cylinder {
+        let spine = stroke_anchor_centers_sculpt(
+            mode,
+            file,
+            voxel_map,
+            camera,
+            width,
+            height,
+            sx,
+            sy,
+            stroke_line_start,
+            stroke_segment_prev,
+        );
+        if spine.is_empty() {
+            return Vec::new();
+        }
+        let r = brush_radius as f32 * 0.5 + 0.5;
+        let footprint = if extrude_taper {
+            let start_r = extrude_taper_start.max(0.0);
+            let end_r = extrude_taper_end.max(0.0);
+            extrude_tapered_cylinder_footprint(&spine, start_r, end_r, extrude_end_cap)
+        } else {
+            extrude_uniform_cylinder_footprint(&spine, r, extrude_end_cap)
+        };
+        return filter_sculpt_footprint_stochastic(
+            footprint,
+            &spine,
+            brush_radius,
+            brush_falloff,
+            brush_strength,
+            stroke_seed,
+        );
+    }
+
     let footprint = collect_sculpt_stroke_footprint(
         file,
         voxel_map,
@@ -3283,6 +3833,11 @@ pub fn apply_sculpt_stroke(
     smooth_laplacian_iterations: u32,
     smooth_laplacian_relax_pct: u32,
     wall_polygon_vertices: Option<Vec<VoxelCoord>>,
+    extrude_profile: ExtrudeProfile,
+    extrude_end_cap: ExtrudeEndCap,
+    extrude_taper: bool,
+    extrude_taper_start: f32,
+    extrude_taper_end: f32,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let footprint = if mode == SculptStrokeMode::Wall {
         compute_wall_sculpt_footprint(
@@ -3326,6 +3881,11 @@ pub fn apply_sculpt_stroke(
             brush_falloff,
             stroke_seed,
             brush_clip_bottom_half,
+            extrude_profile,
+            extrude_end_cap,
+            extrude_taper,
+            extrude_taper_start,
+            extrude_taper_end,
         )
     };
     if footprint.is_empty() {

@@ -13,7 +13,8 @@ export const TONE_MAPPING_OPTIONS = [
   { value: "reinhard" as const, label: "Reinhard" },
 ] as const;
 
-export type ToneMappingPreference = (typeof TONE_MAPPING_OPTIONS)[number]["value"];
+export type ToneMappingPreference =
+  (typeof TONE_MAPPING_OPTIONS)[number]["value"];
 
 export type AppearanceTheme = "auto" | "light" | "dark";
 
@@ -40,7 +41,9 @@ export function toneMappingToGpuMode(t: ToneMappingPreference): number {
   return Math.max(0, TONE_ORDER.indexOf(t));
 }
 
-export function isToneMappingPreference(v: unknown): v is ToneMappingPreference {
+export function isToneMappingPreference(
+  v: unknown,
+): v is ToneMappingPreference {
   return typeof v === "string" && (TONE_ORDER as readonly string[]).includes(v);
 }
 
@@ -94,7 +97,9 @@ export function normalizeCollabDisplayName(raw: string): string {
 }
 
 /** Whether `theme` resolves to the light (paper) UI, including OS preference when `auto`. */
-export function appearanceThemeResolvesToLight(theme: AppearanceTheme): boolean {
+export function appearanceThemeResolvesToLight(
+  theme: AppearanceTheme,
+): boolean {
   if (theme === "light") return true;
   if (theme === "dark") return false;
   if (typeof window === "undefined") return false;
@@ -162,7 +167,8 @@ export function loadPreferences(): VoxelleDesktopPreferences {
     }
     if (!raw) {
       const base = { ...DEFAULTS };
-      if (legacyInterval !== undefined) base.autosaveIntervalSecs = legacyInterval;
+      if (legacyInterval !== undefined)
+        base.autosaveIntervalSecs = legacyInterval;
       try {
         const ln = localStorage.getItem(LEGACY_COLLAB_NAME_KEY);
         const lc = localStorage.getItem(LEGACY_COLLAB_COLOR_KEY);
@@ -229,7 +235,8 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         return DEFAULTS.collabAccentColor;
       })(),
       collabHostPort:
-        typeof o.collabHostPort === "number" && Number.isFinite(o.collabHostPort)
+        typeof o.collabHostPort === "number" &&
+        Number.isFinite(o.collabHostPort)
           ? normalizeCollabHostPort(o.collabHostPort)
           : DEFAULTS.collabHostPort,
       enableUpnp:
@@ -243,7 +250,8 @@ export function loadPreferences(): VoxelleDesktopPreferences {
           : DEFAULTS.autosaveEnabled,
       autosaveIntervalSecs: interval,
       autosaveKeepCount:
-        typeof o.autosaveKeepCount === "number" && Number.isFinite(o.autosaveKeepCount)
+        typeof o.autosaveKeepCount === "number" &&
+        Number.isFinite(o.autosaveKeepCount)
           ? clampInt(o.autosaveKeepCount, 1, 64)
           : DEFAULTS.autosaveKeepCount,
       appearanceTheme: isAppearanceTheme(o.appearanceTheme)
@@ -263,10 +271,8 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     if (prevRaw) {
       try {
         const p = JSON.parse(prevRaw) as unknown;
-        if (p && typeof p === "object") merged = { ...(p as object) } as Record<
-          string,
-          unknown
-        >;
+        if (p && typeof p === "object")
+          merged = { ...(p as object) } as Record<string, unknown>;
       } catch {
         /* ignore */
       }

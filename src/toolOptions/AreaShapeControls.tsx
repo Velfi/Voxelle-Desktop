@@ -1,7 +1,4 @@
-import type {
-  DrawStrokeModeApi,
-  PlaneAxisApi,
-} from "../drawToolModel";
+import type { DrawStrokeModeApi, PlaneAxisApi } from "../drawToolModel";
 
 export type AreaShapeControlsProps = {
   loading: boolean;
@@ -106,9 +103,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             <input
               type="checkbox"
               checked={p.fillRespectsColor}
-              onChange={(ev) =>
-                p.onFillRespectsColorChange(ev.target.checked)
-              }
+              onChange={(ev) => p.onFillRespectsColorChange(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Respect color (stop at different voxel color)</span>
@@ -134,7 +129,8 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             opacity: 0.9,
           }}
         >
-          Cuboid: drag on a face to set the rectangle, then adjust depth and tap Done.
+          Cuboid: drag on a face to set the rectangle, then adjust depth and tap
+          Done.
         </p>
       ) : null}
       {p.drawStrokeMode === "cylinder" ? (
@@ -145,7 +141,8 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             opacity: 0.9,
           }}
         >
-          Cylinder: drag on a face to set the disk, then adjust depth and tap Done.
+          Cylinder: drag on a face to set the disk, then adjust depth and tap
+          Done.
         </p>
       ) : null}
       {showSpraySlider ? (
@@ -157,9 +154,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             max={1}
             step={0.02}
             value={p.sprayDensity}
-            onChange={(ev) =>
-              p.onSprayDensityChange(Number(ev.target.value))
-            }
+            onChange={(ev) => p.onSprayDensityChange(Number(ev.target.value))}
             disabled={p.loading || p.workBusy}
           />
         </label>

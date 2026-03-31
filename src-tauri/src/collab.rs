@@ -21,6 +21,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio::sync::watch;
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message, WebSocketStream};
+use tokio_util::sync::CancellationToken;
 
 type WsTcp = WebSocketStream<TcpStream>;
 
@@ -29,12 +30,21 @@ const GUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
 const GUEST_ACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 /// Clients send this periodically so idle tabs still count as alive.
 const CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+/// Maximum time allowed for the entire client join handshake (connect + send join + receive welcome).
+const CLIENT_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 /// Host → guests: lightweight message so clients can tell the host is still alive (see [`CLIENT_HOST_SILENCE_TIMEOUT`]).
 const HOST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Guest: if no inbound WebSocket frame for this long, treat the host as unresponsive.
 const CLIENT_HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
 
 const GUEST_TIMEOUT_KICK_REASON: &str = "timed out (no activity)";
+
+/// Raw snapshot bytes below this threshold are sent inline in the Welcome message;
+/// above it the host sends a [`HostToClient::WelcomeHeader`] followed by binary
+/// WebSocket frames carrying the raw snapshot data in chunks.
+const SNAPSHOT_CHUNK_THRESHOLD: usize = 2 * 1024 * 1024; // 2 MB
+/// Each binary chunk carries at most this many raw bytes.
+const SNAPSHOT_CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4 MB
 
 /// Response from [`start_host`]: LAN link is always available; UPnP completes asynchronously via [`CollabNatResult`] (`collab-nat-result`).
 #[derive(Clone, Debug, Serialize)]
@@ -223,6 +233,14 @@ pub enum HostToClient {
     Snapshot {
         bytes: Vec<u8>,
     },
+    /// Like [`Welcome`] but without inline snapshot data; followed by binary WebSocket frames.
+    WelcomeHeader {
+        peer_id: u32,
+        leader_id: u32,
+        roster: Vec<RosterEntry>,
+        snapshot_len: u64,
+        chunk_count: u32,
+    },
     /// Broadcast periodically while hosting so guests reset their read timeout during idle sessions.
     Keepalive,
 }
@@ -238,8 +256,9 @@ pub struct CollabRuntime {
     /// Each vec is one logical edit (stroke or click).
     pub host_undo: HashMap<u32, Vec<Vec<voxel_edit::VoxelEditDelta>>>,
     pub host_redo: HashMap<u32, Vec<Vec<voxel_edit::VoxelEditDelta>>>,
-    /// Host → all connected guest websockets.
-    pub host_broadcast: Option<broadcast::Sender<String>>,
+    /// Host → all connected guest websockets.  Carries [`Message`] so we can send both
+    /// JSON text frames and raw binary snapshot chunks.
+    pub host_broadcast: Option<broadcast::Sender<Message>>,
     pub client_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// Per connected guest (peer id ≥ 2): send [`Some`] with kick reason to close the socket.
     pub host_peer_kick_tx: HashMap<u32, watch::Sender<Option<String>>>,
@@ -247,6 +266,8 @@ pub struct CollabRuntime {
     pub guest_last_activity: HashMap<u32, Instant>,
     /// TCP port we opened on the IGD via UPnP (usually same as listen port); cleared when mapping is removed.
     pub upnp_external_tcp_port: Option<u16>,
+    /// Token to cancel an in-flight client join attempt.
+    pub join_cancel: Option<CancellationToken>,
 }
 
 impl Default for CollabRuntime {
@@ -266,6 +287,7 @@ impl Default for CollabRuntime {
             host_peer_kick_tx: HashMap::new(),
             guest_last_activity: HashMap::new(),
             upnp_external_tcp_port: None,
+            join_cancel: None,
         }
     }
 }
@@ -307,6 +329,7 @@ impl CollabRuntime {
         self.host_peer_kick_tx.clear();
         self.guest_last_activity.clear();
         self.upnp_external_tcp_port = None;
+        self.join_cancel = None;
     }
 }
 
@@ -320,6 +343,66 @@ pub fn schedule_remove_upnp_mapping(external_tcp_port: u16) {
             .remove_port(PortMappingProtocol::TCP, external_tcp_port)
             .await;
     });
+}
+
+
+/// Read binary WebSocket frames carrying snapshot chunks and reassemble them.
+/// Emits `voxelle-load-progress` events so the join modal shows download progress.
+async fn receive_snapshot_chunks<R: Runtime, S>(
+    read: &mut S,
+    app: &AppHandle<R>,
+    cancel: &CancellationToken,
+    chunk_count: u32,
+    snapshot_len: u64,
+) -> Result<Vec<u8>, String>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    let mut buf = Vec::with_capacity(snapshot_len as usize);
+
+    let _ = app.emit("voxelle-load-start", "Project from host");
+
+    let mut received: u32 = 0;
+    while received < chunk_count {
+        let _ = app.emit(
+            "voxelle-load-progress",
+            serde_json::json!({
+                "fraction": received as f64 / chunk_count as f64,
+                "phase": format!("Downloading map… ({}/{})", received + 1, chunk_count),
+            }),
+        );
+
+        let frame = tokio::select! {
+            f = read.next() => f,
+            _ = cancel.cancelled() => return Err("Join cancelled.".into()),
+        };
+        let msg = frame
+            .ok_or_else(|| "Host closed the connection while sending map chunks.".to_string())?
+            .map_err(|e| format!("Error receiving map chunk {}/{chunk_count}: {e}", received + 1))?;
+        match msg {
+            Message::Binary(data) => {
+                buf.extend_from_slice(&data);
+                received += 1;
+            }
+            Message::Text(t) => {
+                // A text frame during chunk transfer is an error or denial from the host.
+                if let Ok(HostToClient::Deny { reason }) = serde_json::from_str::<HostToClient>(&t)
+                {
+                    return Err(format!("The host refused the connection:\n{reason}"));
+                }
+                return Err(format!(
+                    "Expected binary map chunk {}/{chunk_count} but got a text message.",
+                    received + 1
+                ));
+            }
+            Message::Close(_) => {
+                return Err("Host closed the connection while sending map chunks.".into());
+            }
+            // Ping/Pong — skip without advancing the chunk counter.
+            _ => {}
+        }
+    }
+    Ok(buf)
 }
 
 async fn try_upnp_internet_share<R: Runtime>(
@@ -610,7 +693,7 @@ fn emit_and_broadcast<R: Runtime>(
 ) {
     let g = collab.lock();
     if let Some(tx) = &g.host_broadcast {
-        let _ = tx.send(json.to_string());
+        let _ = tx.send(Message::Text(json.to_string()));
     }
 }
 
@@ -645,16 +728,38 @@ pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
     let Ok(bytes) = bytes else {
         return;
     };
-    let json = match serde_json::to_string(&HostToClient::Snapshot { bytes }) {
-        Ok(j) => j,
-        Err(_) => return,
-    };
-    let g = state.collab.lock();
-    if !g.is_host() {
-        return;
-    }
-    if let Some(tx) = &g.host_broadcast {
-        let _ = tx.send(json);
+    if bytes.len() <= SNAPSHOT_CHUNK_THRESHOLD {
+        let json = match serde_json::to_string(&HostToClient::Snapshot { bytes }) {
+            Ok(j) => j,
+            Err(_) => return,
+        };
+        let g = state.collab.lock();
+        if !g.is_host() {
+            return;
+        }
+        if let Some(tx) = &g.host_broadcast {
+            let _ = tx.send(Message::Text(json));
+        }
+    } else {
+        let chunk_count = bytes.len().div_ceil(SNAPSHOT_CHUNK_SIZE).max(1) as u32;
+        let header = serde_json::to_string(&HostToClient::WelcomeHeader {
+            peer_id: 0,
+            leader_id: HOST_PEER_ID,
+            roster: Vec::new(),
+            snapshot_len: bytes.len() as u64,
+            chunk_count,
+        })
+        .unwrap();
+        let g = state.collab.lock();
+        if !g.is_host() {
+            return;
+        }
+        if let Some(tx) = &g.host_broadcast {
+            let _ = tx.send(Message::Text(header));
+            for chunk in bytes.chunks(SNAPSHOT_CHUNK_SIZE) {
+                let _ = tx.send(Message::Binary(chunk.to_vec()));
+            }
+        }
     }
 }
 
@@ -692,7 +797,7 @@ pub(crate) fn broadcast_roster_to_guests<R: Runtime>(
     let g = collab_mtx.lock();
     if let Some(tx) = &g.host_broadcast {
         if let Ok(json) = serde_json::to_string(&br) {
-            let _ = tx.send(json);
+            let _ = tx.send(Message::Text(json));
         }
     }
 }
@@ -749,7 +854,7 @@ fn touch_guest_activity(collab_mtx: &Mutex<CollabRuntime>, peer_id: u32) {
 
 async fn handle_host_connection<R: Runtime>(
     mut ws: WsTcp,
-    mut broadcast_rx: broadcast::Receiver<String>,
+    mut broadcast_rx: broadcast::Receiver<Message>,
     app: AppHandle<R>,
     state: Arc<ViewerState>,
     collab_mtx: Arc<Mutex<CollabRuntime>>,
@@ -786,15 +891,34 @@ async fn handle_host_connection<R: Runtime>(
             return;
         }
     };
-    let welcome = HostToClient::Welcome {
-        peer_id,
-        leader_id: HOST_PEER_ID,
-        snapshot: snap,
-        roster: roster.clone(),
-    };
-    let _ = ws
-        .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
-        .await;
+    if snap.len() <= SNAPSHOT_CHUNK_THRESHOLD {
+        // Small map – send inline Welcome (original path).
+        let welcome = HostToClient::Welcome {
+            peer_id,
+            leader_id: HOST_PEER_ID,
+            snapshot: snap,
+            roster: roster.clone(),
+        };
+        let _ = ws
+            .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
+            .await;
+    } else {
+        // Large map – send header then binary chunks (no base64 overhead).
+        let chunk_count = snap.len().div_ceil(SNAPSHOT_CHUNK_SIZE).max(1) as u32;
+        let header = HostToClient::WelcomeHeader {
+            peer_id,
+            leader_id: HOST_PEER_ID,
+            roster: roster.clone(),
+            snapshot_len: snap.len() as u64,
+            chunk_count,
+        };
+        let _ = ws
+            .send(Message::Text(serde_json::to_string(&header).unwrap()))
+            .await;
+        for chunk in snap.chunks(SNAPSHOT_CHUNK_SIZE) {
+            let _ = ws.send(Message::Binary(chunk.to_vec())).await;
+        }
+    }
 
     let mut peer_already_removed = false;
     let mut kicked = false;
@@ -817,8 +941,8 @@ async fn handle_host_connection<R: Runtime>(
                 }
             }
             bmsg = broadcast_rx.recv() => {
-                if let Ok(text) = bmsg {
-                    let _ = ws.send(Message::Text(text)).await;
+                if let Ok(msg) = bmsg {
+                    let _ = ws.send(msg).await;
                 }
             }
             incoming = ws.next() => {
@@ -973,7 +1097,7 @@ async fn handle_host_connection<R: Runtime>(
                 {
                     let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
-                        let _ = tx.send(json);
+                        let _ = tx.send(Message::Text(json));
                     }
                 }
             }
@@ -1010,7 +1134,7 @@ async fn handle_host_connection<R: Runtime>(
                 {
                     let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
-                        let _ = tx.send(json);
+                        let _ = tx.send(Message::Text(json));
                     }
                 }
             }
@@ -1022,7 +1146,7 @@ async fn handle_host_connection<R: Runtime>(
                 {
                     let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
-                        let _ = tx.send(json);
+                        let _ = tx.send(Message::Text(json));
                     }
                 }
             }
@@ -1085,7 +1209,7 @@ pub fn start_host<R: Runtime>(
         is_leader: true,
         can_edit: true,
     }];
-    let (btx, _) = broadcast::channel::<String>(128);
+    let (btx, _) = broadcast::channel::<Message>(128);
     c.host_broadcast = Some(btx.clone());
     let roster_json = serde_json::to_string(&c.roster).unwrap();
     drop(c);
@@ -1146,7 +1270,7 @@ pub fn start_host<R: Runtime>(
                 }
                 g.host_broadcast
                     .as_ref()
-                    .map(|tx| tx.send(keepalive_json.clone()))
+                    .map(|tx| tx.send(Message::Text(keepalive_json.clone())))
             };
             if send.is_none() {
                 break;
@@ -1281,38 +1405,53 @@ pub async fn client_connect_blocking<R: Runtime>(
     collab_mtx: Arc<Mutex<CollabRuntime>>,
     display_name: String,
     color_rgb: u32,
+    cancel: CancellationToken,
 ) -> Result<(), String> {
-    let (ws, _) = connect_async(url)
-        .await
-        .map_err(|e| format_ws_connect_failure(url, e))?;
+    let deadline = tokio::time::Instant::now() + CLIENT_JOIN_TIMEOUT;
+    let timeout_msg = || format!(
+        "Could not reach the host at\n{url}\n\nThe connection timed out after {} seconds.\n\nCheck the address and make sure the host is reachable on your network.",
+        CLIENT_JOIN_TIMEOUT.as_secs()
+    );
+
+    let (ws, _) = tokio::select! {
+        res = connect_async(url) => res.map_err(|e| format_ws_connect_failure(url, e))?,
+        _ = cancel.cancelled() => return Err("Join cancelled.".into()),
+        _ = tokio::time::sleep_until(deadline) => return Err(timeout_msg()),
+    };
     let (mut write, mut read) = ws.split();
     let join = serde_json::to_string(&ClientToHost::Join {
         display_name: display_name.clone(),
         color_rgb,
     })
     .unwrap();
-    write
-        .send(Message::Text(join))
-        .await
-        .map_err(|e| {
-            format!(
-                "Could not send the join request to:\n{url}\n\n{e}\n\nThe connection may have dropped; try again."
-            )
-        })?;
+    tokio::select! {
+        res = write.send(Message::Text(join)) => {
+            res.map_err(|e| {
+                format!(
+                    "Could not send the join request to:\n{url}\n\n{e}\n\nThe connection may have dropped; try again."
+                )
+            })?;
+        }
+        _ = cancel.cancelled() => return Err("Join cancelled.".into()),
+        _ = tokio::time::sleep_until(deadline) => return Err(timeout_msg()),
+    }
 
-    let first = read
-        .next()
-        .await
-        .ok_or_else(|| {
-            format!(
-                "The host at\n{url}\nclosed the connection before replying.\n\nCheck that the URL is a Voxelle collaboration link (ws://…) and that the host is still running."
-            )
-        })?
-        .map_err(|e| {
-            format!(
-                "Error while waiting for the host at\n{url}\n\n{e}\n\nThe connection may have been reset."
-            )
-        })?;
+    let first = tokio::select! {
+        res = read.next() => {
+            res.ok_or_else(|| {
+                format!(
+                    "The host at\n{url}\nclosed the connection before replying.\n\nCheck that the URL is a Voxelle collaboration link (ws://…) and that the host is still running."
+                )
+            })?
+            .map_err(|e| {
+                format!(
+                    "Error while waiting for the host at\n{url}\n\n{e}\n\nThe connection may have been reset."
+                )
+            })?
+        }
+        _ = cancel.cancelled() => return Err("Join cancelled.".into()),
+        _ = tokio::time::sleep_until(deadline) => return Err(timeout_msg()),
+    };
     let Message::Text(t) = first else {
         return Err(format!(
             "The server at\n{url}\nsent a non-text WebSocket frame.\n\nUse a Voxelle collaboration URL (ws://host:port)."
@@ -1355,6 +1494,40 @@ pub async fn client_connect_blocking<R: Runtime>(
                 serde_json::to_string(&collab_mtx.lock().roster).unwrap(),
             );
         }
+        HostToClient::WelcomeHeader {
+            peer_id,
+            leader_id,
+            roster,
+            snapshot_len,
+            chunk_count,
+        } => {
+            {
+                let mut c = collab_mtx.lock();
+                c.role = CollabRole::Client;
+                c.local_peer_id = peer_id;
+                c.leader_id = leader_id;
+                c.roster = roster;
+            }
+            let _ = app.emit("collab-joined", ());
+            let _ = app.emit("collab-local-peer", peer_id);
+            let _ = app.emit(
+                "collab-roster",
+                serde_json::to_string(&collab_mtx.lock().roster).unwrap(),
+            );
+
+            // Receive chunked snapshot.
+            let snapshot = receive_snapshot_chunks(
+                &mut read, &app, &cancel, chunk_count, snapshot_len,
+            )
+            .await?;
+
+            if let Err(e) = replace_file_on_main(&app, &state, &snapshot) {
+                collab_mtx.lock().leave();
+                return Err(format!(
+                    "Connected to the host, but your scene could not be replaced with theirs:\n{e}"
+                ));
+            }
+        }
         _ => {
             return Err(
                 "The server sent an unexpected message instead of a welcome.\n\nCheck that this URL is a Voxelle collaboration host (ws://…)."
@@ -1392,6 +1565,8 @@ pub async fn client_connect_blocking<R: Runtime>(
     let cm4 = Arc::clone(&collab_mtx);
     tauri::async_runtime::spawn(async move {
         let mut host_timed_out = false;
+        // Buffer for reassembling chunked mid-session snapshots (binary frames) from the host.
+        let mut pending_snapshot: Option<(u32, u32, Vec<u8>)> = None; // (chunks_expected, chunks_received, bytes)
         loop {
             let frame =
                 tokio::time::timeout(CLIENT_HOST_SILENCE_TIMEOUT, read.next()).await;
@@ -1406,7 +1581,20 @@ pub async fn client_connect_blocking<R: Runtime>(
             };
             match msg {
                 Message::Close(_) => break,
-                Message::Ping(_) | Message::Pong(_) | Message::Binary(_) => {}
+                Message::Binary(data) => {
+                    // Binary frames are snapshot chunks; accumulate them.
+                    if let Some((expected, ref mut received, ref mut buf)) = pending_snapshot {
+                        buf.extend_from_slice(&data);
+                        *received += 1;
+                        if *received >= expected {
+                            let bytes = std::mem::take(buf);
+                            pending_snapshot = None;
+                            let _ = replace_file_on_main(&app4, &st4, &bytes);
+                        }
+                    }
+                    // Binary frames outside an active chunk transfer are ignored.
+                }
+                Message::Ping(_) | Message::Pong(_) => {}
                 Message::Text(t) => {
                     if let Ok(ev) = serde_json::from_str::<HostToClient>(&t) {
                         match ev {
@@ -1428,6 +1616,15 @@ pub async fn client_connect_blocking<R: Runtime>(
                             }
                             HostToClient::Snapshot { bytes } => {
                                 let _ = replace_file_on_main(&app4, &st4, &bytes);
+                            }
+                            HostToClient::WelcomeHeader {
+                                snapshot_len,
+                                chunk_count,
+                                ..
+                            } => {
+                                // Mid-session chunked snapshot broadcast; start collecting binary frames.
+                                pending_snapshot =
+                                    Some((chunk_count, 0, Vec::with_capacity(snapshot_len as usize)));
                             }
                             HostToClient::Kicked { reason } => {
                                 {

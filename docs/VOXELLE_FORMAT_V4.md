@@ -17,12 +17,12 @@ Legacy **VX3 wire version 3** (20-byte records) and gzip BSON still load. Older 
 
 All v4 **disk** files from Desktop begin with:
 
-| Offset | Size | Content |
-|--------|------|---------|
-| 0 | 4 | Magic: `0x56 0x58 0x34 0x1a` — ASCII **`VX4`** + `0x1a` |
-| 4 | 4 | `inner_len`: `u32` LE — length in bytes of the **uncompressed** inner payload |
-| 8 | 4 | `crc32`: `u32` LE — **CRC32** (algorithm: `crc32fast::hash`) over the **uncompressed** inner bytes |
-| 12 | * | **gzip** stream of the inner payload |
+| Offset | Size | Content                                                                                            |
+| ------ | ---- | -------------------------------------------------------------------------------------------------- |
+| 0      | 4    | Magic: `0x56 0x58 0x34 0x1a` — ASCII **`VX4`** + `0x1a`                                            |
+| 4      | 4    | `inner_len`: `u32` LE — length in bytes of the **uncompressed** inner payload                      |
+| 8      | 4    | `crc32`: `u32` LE — **CRC32** (algorithm: `crc32fast::hash`) over the **uncompressed** inner bytes |
+| 12     | \*   | **gzip** stream of the inner payload                                                               |
 
 Decoding steps:
 
@@ -42,25 +42,25 @@ Used when visible voxel count **&lt;** `V3_WIRE_VOXEL_THRESHOLD` (**50_000**).
 
 Top-level fields (see `build_bson_v4_payload`):
 
-| Field | Type | Meaning |
-|-------|------|---------|
-| `version` | `i32` | **4** |
-| `gridSize` | `i32` | Grid extent; encoder uses `max(|coords|)` and `file.grid_size` (see `grid_size_for_encode`). |
-| `voxels` | array of rows | Each row: `[x, y, z, color, material]` — `color` is 24-bit in an `i32`; `material` is a **string** id (see [Materials](#materials)). |
-| `scene` | document | Camera-related subset and/or full subtree (see [Scene](#scene)). |
-| `fileMeta` | document | Metadata (see [fileMeta](#filemeta)). |
+| Field      | Type          | Meaning                                                                                                                              |
+| ---------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------ | ------------------------------------------------- |
+| `version`  | `i32`         | **4**                                                                                                                                |
+| `gridSize` | `i32`         | Grid extent; encoder uses `max(                                                                                                      | coords | )`and`file.grid_size`(see`grid_size_for_encode`). |
+| `voxels`   | array of rows | Each row: `[x, y, z, color, material]` — `color` is 24-bit in an `i32`; `material` is a **string** id (see [Materials](#materials)). |
+| `scene`    | document      | Camera-related subset and/or full subtree (see [Scene](#scene)).                                                                     |
+| `fileMeta` | document      | Metadata (see [fileMeta](#filemeta)).                                                                                                |
 
 ### B. VX3-style wire (large models)
 
 Used when voxel count **≥** 50_000. Inner layout:
 
-| Offset | Size | Content |
-|--------|------|---------|
-| 0 | 4 | Magic **`VX3`** + `0x1a` |
-| 4 | 4 | `wire_version`: `u32` LE — **3** (legacy 20-byte records) or **4** (v4 dense: 24-byte records + objects in header) |
-| 8 | 4 | `header_len`: `u32` LE |
-| 12 | `header_len` | BSON document (UTF-8 BSON bytes) |
-| … | `voxel_count × record_size` | Dense voxel records (see below) |
+| Offset | Size                        | Content                                                                                                            |
+| ------ | --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| 0      | 4                           | Magic **`VX3`** + `0x1a`                                                                                           |
+| 4      | 4                           | `wire_version`: `u32` LE — **3** (legacy 20-byte records) or **4** (v4 dense: 24-byte records + objects in header) |
+| 8      | 4                           | `header_len`: `u32` LE                                                                                             |
+| 12     | `header_len`                | BSON document (UTF-8 BSON bytes)                                                                                   |
+| …      | `voxel_count × record_size` | Dense voxel records (see below)                                                                                    |
 
 **Wire version 3** (legacy): `record_size = 20`. Header BSON includes at least: `version`, `gridSize`, `scene`, `voxelCount`, `hiddenCount` — no `objects` / `activeObjectId` in the stripped writer path.
 
@@ -68,30 +68,30 @@ Used when voxel count **≥** 50_000. Inner layout:
 
 **Legacy V3 record** (`V3_RECORD_SIZE = 20` bytes), wire version **3** only:
 
-| Bytes | Field |
-|-------|--------|
-| 0–3 | `x` `i32` |
-| 4–7 | `y` `i32` |
-| 8–11 | `z` `i32` |
-| 12–15 | `color` `u32` (lower 24 bits used) |
-| 16 | `material` index `u8` (see [Materials](#materials)) |
-| 17–19 | padding `0` |
+| Bytes | Field                                               |
+| ----- | --------------------------------------------------- |
+| 0–3   | `x` `i32`                                           |
+| 4–7   | `y` `i32`                                           |
+| 8–11  | `z` `i32`                                           |
+| 12–15 | `color` `u32` (lower 24 bits used)                  |
+| 16    | `material` index `u8` (see [Materials](#materials)) |
+| 17–19 | padding `0`                                         |
 
 **V4 dense record** (`V4_WIRE_RECORD_SIZE = 24` bytes), wire version **4**:
 
-| Bytes | Field |
-|-------|--------|
-| 0–19 | Same as legacy V3 record above |
-| 20–23 | `object_id` `u32` LE |
+| Bytes | Field                          |
+| ----- | ------------------------------ |
+| 0–19  | Same as legacy V3 record above |
+| 20–23 | `object_id` `u32` LE           |
 
 ## fileMeta
 
 Present on **BSON inner** path only (`build_bson_v4_payload`):
 
-| Field | Meaning |
-|-------|---------|
-| `savedAt` | RFC3339 UTC timestamp (`chrono::Utc::now().to_rfc3339()`). |
-| `generator` | `voxelle-desktop/<CARGO_PKG_VERSION>`. |
+| Field        | Meaning                                                        |
+| ------------ | -------------------------------------------------------------- |
+| `savedAt`    | RFC3339 UTC timestamp (`chrono::Utc::now().to_rfc3339()`).     |
+| `generator`  | `voxelle-desktop/<CARGO_PKG_VERSION>`.                         |
 | `documentId` | New **UUID v4** string on each save (not stable across saves). |
 
 Optional fields from the broader spec (e.g. `collabSessionId`) are not written by Desktop today.
@@ -117,10 +117,10 @@ String ids in BSON rows and index in v3 wire must match:
 
 ## Compatibility summary
 
-| Source | Detection |
-|--------|-----------|
-| v4 file | First 4 bytes = VX4 magic → parse container → inner BSON or VX3 wire. |
-| Legacy | Not VX4 → optional gzip decompress → VX3 magic at start of payload, else BSON. |
+| Source  | Detection                                                                      |
+| ------- | ------------------------------------------------------------------------------ |
+| v4 file | First 4 bytes = VX4 magic → parse container → inner BSON or VX3 wire.          |
+| Legacy  | Not VX4 → optional gzip decompress → VX3 magic at start of payload, else BSON. |
 
 Wire version **3** (20-byte records) and **4** (24-byte records + object ids) are accepted (`parse_v3`).
 

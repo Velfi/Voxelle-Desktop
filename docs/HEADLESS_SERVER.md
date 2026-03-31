@@ -31,7 +31,7 @@ CLI and env can be combined; the flag forces the mode on. Port can be set indepe
 3. **`GET http://127.0.0.1:<port>/health`** returns `200` with body:
 
    ```json
-   {"ok":true,"mode":"headless-server"}
+   { "ok": true, "mode": "headless-server" }
    ```
 
 4. Any other path returns `404` with a small JSON `not_found` body.

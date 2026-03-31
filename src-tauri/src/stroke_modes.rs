@@ -1,7 +1,7 @@
 //! Draw stroke modes (parity with Voxelle web `StrokeMode` / `strokeGeometry.ts`).
 
 use crate::greedy_mesh::VoxelCoord;
-use crate::voxel_edit::{anchor_for_stroke_edit, voxel_line_dda, EditTool};
+use crate::voxel_edit::{anchor_for_stroke_edit, voxel_line_dda, world_to_voxel, EditTool};
 use crate::voxelle::VoxelleFile;
 use ahash::AHashMap;
 use glam::Vec3;
@@ -995,13 +995,41 @@ fn cylinder_axis_aligned_caps(a: VoxelCoord, b: VoxelCoord, radius: i32) -> Vec<
     seen.into_iter().collect()
 }
 
-#[inline]
-fn snap_world_to_voxel(p: Vec3) -> VoxelCoord {
-    (
-        (p.x + 0.5).floor() as i32,
-        (p.y + 0.5).floor() as i32,
-        (p.z + 0.5).floor() as i32,
-    )
+/// Compute the end-point voxel `b` for a drag-plane operation.
+///
+/// When the start and end screen coordinates are the same (a click with no
+/// drag), we return `a` directly instead of re-deriving via ray–plane
+/// intersection + rounding — the two paths use the same `world_to_voxel`
+/// formula but feed it different inputs (DDA step vs plane intersection),
+/// which can disagree by one voxel on boundaries.
+fn drag_plane_end_voxel(
+    a: VoxelCoord,
+    plane_ax: usize,
+    camera: &crate::camera::OrbitCamera,
+    width: f32,
+    height: f32,
+    lsx: f32,
+    lsy: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<VoxelCoord> {
+    if (sx - lsx).abs() < 1e-6 && (sy - lsy).abs() < 1e-6 {
+        return Some(a);
+    }
+    let (origin1, dir1) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
+    let plane_coord = match plane_ax {
+        0 => a.0 as f32 + 0.5,
+        1 => a.1 as f32 + 0.5,
+        _ => a.2 as f32 + 0.5,
+    };
+    let p = intersect_ray_axis_aligned_plane(origin1, dir1, plane_ax, plane_coord)?;
+    let mut b = world_to_voxel(p);
+    match plane_ax {
+        0 => b.0 = a.0,
+        1 => b.1 = a.1,
+        _ => b.2 = a.2,
+    }
+    Some(b)
 }
 
 fn intersect_ray_axis_aligned_plane(
@@ -1451,19 +1479,7 @@ fn cuboid_drag_plane_geometry(
         lsx,
         lsy,
     )?;
-    let (origin1, dir1) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
-    let plane_coord = match plane_ax {
-        0 => a.0 as f32 + 0.5,
-        1 => a.1 as f32 + 0.5,
-        _ => a.2 as f32 + 0.5,
-    };
-    let p = intersect_ray_axis_aligned_plane(origin1, dir1, plane_ax, plane_coord)?;
-    let mut b = snap_world_to_voxel(p);
-    match plane_ax {
-        0 => b.0 = a.0,
-        1 => b.1 = a.1,
-        _ => b.2 = a.2,
-    }
+    let b = drag_plane_end_voxel(a, plane_ax, camera, width, height, lsx, lsy, sx, sy)?;
     Some((a, b, plane_ax, hit0, prev0))
 }
 
@@ -1501,19 +1517,7 @@ fn axis_aligned_drag_plane_rectangle(
         lsx,
         lsy,
     )?;
-    let (origin1, dir1) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
-    let plane_coord = match plane_ax {
-        0 => a.0 as f32 + 0.5,
-        1 => a.1 as f32 + 0.5,
-        _ => a.2 as f32 + 0.5,
-    };
-    let p = intersect_ray_axis_aligned_plane(origin1, dir1, plane_ax, plane_coord)?;
-    let mut b = snap_world_to_voxel(p);
-    match plane_ax {
-        0 => b.0 = a.0,
-        1 => b.1 = a.1,
-        _ => b.2 = a.2,
-    }
+    let b = drag_plane_end_voxel(a, plane_ax, camera, width, height, lsx, lsy, sx, sy)?;
     Some(if plane_hollow {
         hollow_plane_rectangle_frame(a, b, plane_ax, 1)
     } else {
@@ -1555,19 +1559,7 @@ fn axis_aligned_drag_plane_circle(
         lsx,
         lsy,
     )?;
-    let (origin1, dir1) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
-    let plane_coord = match plane_ax {
-        0 => a.0 as f32 + 0.5,
-        1 => a.1 as f32 + 0.5,
-        _ => a.2 as f32 + 0.5,
-    };
-    let p = intersect_ray_axis_aligned_plane(origin1, dir1, plane_ax, plane_coord)?;
-    let mut b = snap_world_to_voxel(p);
-    match plane_ax {
-        0 => b.0 = a.0,
-        1 => b.1 = a.1,
-        _ => b.2 = a.2,
-    }
+    let b = drag_plane_end_voxel(a, plane_ax, camera, width, height, lsx, lsy, sx, sy)?;
     let cc = [a.0, a.1, a.2];
     let ce = [b.0, b.1, b.2];
     let r = circle_radius_in_plane(cc, ce, plane_ax);

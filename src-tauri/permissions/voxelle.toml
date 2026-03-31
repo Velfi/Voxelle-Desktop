@@ -27,6 +27,7 @@ commands.allow = [
   "voxel_stroke_anchor_coord_at_screen",
   "ping_cursor_pick",
   "world_to_viewport_pixels",
+  "collab_peer_labels",
   "sync_preview_input",
   "voxel_stroke_begin",
   "voxel_stroke_preview_reset",

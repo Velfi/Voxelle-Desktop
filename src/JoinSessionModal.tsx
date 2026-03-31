@@ -31,9 +31,7 @@ export function JoinSessionModal({
       aria-modal="true"
       aria-labelledby="join-session-title"
       tabIndex={-1}
-      onClick={(e) =>
-        e.target === e.currentTarget && !connecting && onClose()
-      }
+      onClick={(e) => e.target === e.currentTarget && !connecting && onClose()}
       onKeyDown={(e) => e.key === "Escape" && !connecting && onClose()}
     >
       <div className="modal modal--join-session">

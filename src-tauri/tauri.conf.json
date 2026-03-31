@@ -35,9 +35,7 @@
       "icons/icon.ico"
     ],
     "createUpdaterArtifacts": true,
-    "resources": [
-      "../public/Logo.voxelle"
-    ]
+    "resources": ["../public/Logo.voxelle"]
   },
   "plugins": {
     "updater": {

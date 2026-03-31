@@ -8,6 +8,8 @@ pub mod greedy_mesh;
 mod marching_tables;
 mod smooth_mesh;
 #[cfg(target_os = "macos")]
+mod macos_titlebar;
+#[cfg(target_os = "macos")]
 mod macos_undo;
 mod render;
 mod render_constants;
@@ -471,6 +473,16 @@ struct SculptStrokeAtScreenArgs {
     smooth_laplacian_relax_pct: u32,
     #[serde(default)]
     wall_polygon_vertices: Option<Vec<[i32; 3]>>,
+    #[serde(default)]
+    extrude_profile: voxel_edit::ExtrudeProfile,
+    #[serde(default)]
+    extrude_end_cap: voxel_edit::ExtrudeEndCap,
+    #[serde(default)]
+    extrude_taper: bool,
+    #[serde(default)]
+    extrude_taper_start: f32,
+    #[serde(default)]
+    extrude_taper_end: f32,
 }
 
 /// Hover preview uses the same brush/stroke inputs as [`voxel_edit_at_screen`] / [`voxel_stroke_preview_at_screen`].
@@ -695,6 +707,8 @@ pub struct ViewerState {
     /// Throttled sculpt samples during drag; replayed on pointer up as one undo step.
     pub(crate) sculpt_stroke_replay: Mutex<Vec<SculptStrokeAtScreenArgs>>,
     pub collab: Arc<Mutex<collab::CollabRuntime>>,
+    /// Smoothed peer camera presence for frustum rendering (lerped each frame).
+    pub smooth_presence: Mutex<HashMap<u32, collab::CameraPresence>>,
     /// Short-lived voxel highlight when a peer sends a world ping (see [`collab::record_ping_flash`]).
     pub ping_flash: Mutex<Option<collab::PingFlash>>,
     /// Host-only autosave to app-local backups (`0` = never when disabled or interval 0).
@@ -3481,6 +3495,61 @@ fn world_to_viewport_pixels(
     ))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerLabel {
+    name: String,
+    color_rgb: u32,
+    left_pct: f32,
+    top_pct: f32,
+}
+
+#[tauri::command]
+fn collab_peer_labels(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<Vec<PeerLabel>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(vec![]);
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    if w <= 0.0 || h <= 0.0 {
+        return Ok(vec![]);
+    }
+    let cam = state.camera.lock();
+    let c = state.collab.lock();
+    if !c.is_active() {
+        return Ok(vec![]);
+    }
+    let local_id = c.local_peer_id;
+    let smooth = state.smooth_presence.lock();
+    let mut labels = Vec::new();
+    for (pid, pr) in smooth.iter() {
+        if *pid == local_id {
+            continue;
+        }
+        let eye = collab::presence_eye(pr);
+        let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(&cam, w, h, eye.x, eye.y, eye.z) else {
+            continue;
+        };
+        let entry = c.roster.iter().find(|r| r.peer_id == *pid);
+        let name = entry
+            .map(|r| r.display_name.clone())
+            .unwrap_or_default();
+        let color_rgb = entry.map(|r| r.color_rgb).unwrap_or(0x888888);
+        labels.push(PeerLabel {
+            name,
+            color_rgb,
+            left_pct: (sx / w) * 100.0,
+            top_pct: (sy / h) * 100.0,
+        });
+    }
+    Ok(labels)
+}
+
 fn push_solo_undo_step(
     state: &Arc<ViewerState>,
     app: &AppHandle,
@@ -4032,6 +4101,70 @@ fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Resul
     }
 
     if !sculpt_replay.is_empty() {
+        // For Draw/Gouge/Extrude: commit the accumulated preview union as a single batch
+        // instead of replaying frame-by-frame (which caused view-ray stacking artifacts).
+        // Smooth/Terrain/Wall still need per-frame replay for their complex per-sample logic.
+        let mode = sculpt_replay[0].sculpt_mode;
+        let use_union_commit = matches!(
+            mode,
+            voxel_edit::SculptStrokeMode::Draw
+                | voxel_edit::SculptStrokeMode::Gouge
+                | voxel_edit::SculptStrokeMode::Extrude
+        );
+        if use_union_commit && !union.is_empty() {
+            let first = &sculpt_replay[0];
+            let material = voxelle::MaterialId::from_str_id(&first.material);
+            let color = first.color;
+            let deltas = {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let Some(file) = fg.as_mut() else {
+                    return Ok(());
+                };
+                let Some(vmap) = vm.as_mut() else {
+                    return Ok(());
+                };
+                voxel_edit::ensure_grid_fits_coords(file, union.iter().copied());
+                let mut out: Vec<voxel_edit::VoxelEditDelta> = Vec::new();
+                if mode == voxel_edit::SculptStrokeMode::Gouge {
+                    for (x, y, z) in &union {
+                        let Some(&idx) = vmap.get(&(*x, *y, *z)) else {
+                            continue;
+                        };
+                        let removed = file.voxels.swap_remove(idx);
+                        vmap.remove(&(*x, *y, *z));
+                        if idx < file.voxels.len() {
+                            let moved = &file.voxels[idx];
+                            vmap.insert((moved.x, moved.y, moved.z), idx);
+                        }
+                        out.push(voxel_edit::VoxelEditDelta::Removed { voxel: removed });
+                    }
+                } else {
+                    for &(x, y, z) in &union {
+                        if vmap.contains_key(&(x, y, z)) {
+                            continue;
+                        }
+                        let nv = voxelle::Voxel {
+                            x,
+                            y,
+                            z,
+                            color,
+                            material,
+                            object_id: file.active_object_id,
+                        };
+                        let idx = file.voxels.len();
+                        file.voxels.push(nv);
+                        vmap.insert((x, y, z), idx);
+                        out.push(voxel_edit::VoxelEditDelta::Added(nv));
+                    }
+                }
+                out
+            };
+            if !deltas.is_empty() {
+                commit_voxel_edits(&state, &app, deltas)?;
+            }
+            return Ok(());
+        }
         commit_sculpt_stroke_replay(&state, &app, sculpt_replay)?;
         return Ok(());
     }
@@ -5683,6 +5816,11 @@ fn voxel_sculpt_stroke_at_screen(
             args.smooth_laplacian_iterations,
             args.smooth_laplacian_relax_pct,
             wall_poly,
+            args.extrude_profile,
+            args.extrude_end_cap,
+            args.extrude_taper,
+            args.extrude_taper_start,
+            args.extrude_taper_end,
         )?
     };
     let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
@@ -5813,6 +5951,11 @@ fn commit_sculpt_stroke_replay(
                 args.smooth_laplacian_iterations,
                 args.smooth_laplacian_relax_pct,
                 wall_poly,
+                args.extrude_profile,
+                args.extrude_end_cap,
+                args.extrude_taper,
+                args.extrude_taper_start,
+                args.extrude_taper_end,
             )?
         };
         all_deltas.extend(deltas);
@@ -5922,16 +6065,30 @@ fn voxel_sculpt_stroke_preview_at_screen(
                 args.brush_falloff,
                 args.stroke_seed,
                 args.brush_clip_bottom_half,
+                args.extrude_profile,
+                args.extrude_end_cap,
+                args.extrude_taper,
+                args.extrude_taper_start,
+                args.extrude_taper_end,
             )
         }
     };
 
     {
         let mut union = state.stroke_preview_union.lock();
-        let accumulate = voxel_edit::stroke_preview_accumulates_samples(
-            stroke_modes::DrawStrokeMode::Line,
-            stroke_line_start_meta,
+        // Sculpt Draw/Gouge/Extrude: always accumulate so the full stroke footprint is
+        // available at pointer-up for single-batch commit (avoids frame-by-frame stacking).
+        let sculpt_accumulate = matches!(
+            args.sculpt_mode,
+            voxel_edit::SculptStrokeMode::Draw
+                | voxel_edit::SculptStrokeMode::Gouge
+                | voxel_edit::SculptStrokeMode::Extrude
         );
+        let accumulate = sculpt_accumulate
+            || voxel_edit::stroke_preview_accumulates_samples(
+                stroke_modes::DrawStrokeMode::Line,
+                stroke_line_start_meta,
+            );
         if accumulate {
             for c in footprint {
                 union.insert(c);
@@ -5975,6 +6132,146 @@ fn voxel_sculpt_stroke_preview_at_screen(
             state
                 .stroke_preview_suppresses_hover
                 .store(true, Ordering::Relaxed);
+        }
+    }
+
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+// ── Extrude phase: recompute preview with new settings ────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtrudeRecomputeArgs {
+    extrude_profile: voxel_edit::ExtrudeProfile,
+    extrude_end_cap: voxel_edit::ExtrudeEndCap,
+    extrude_taper: bool,
+    #[serde(default)]
+    extrude_taper_start: f32,
+    #[serde(default)]
+    extrude_taper_end: f32,
+}
+
+#[tauri::command]
+fn extrude_recompute_preview(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: ExtrudeRecomputeArgs,
+) -> Result<(), String> {
+    // Re-run the stored sculpt replay with overridden extrude settings.
+    let replay = state.sculpt_stroke_replay.lock().clone();
+    if replay.is_empty() {
+        return Ok(());
+    }
+    let color = replay[0].color;
+
+    // Re-generate footprint from each replay sample with new extrude params.
+    let mut union: ahash::AHashSet<greedy_mesh::VoxelCoord> = ahash::AHashSet::new();
+    {
+        let fg = state.current_file.lock();
+        let vm = state.voxel_map.lock();
+        let Some(file) = fg.as_ref() else {
+            return Ok(());
+        };
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(());
+        };
+        let cam = state.camera.lock();
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Ok(());
+            };
+            viewer.viewport_size()
+        };
+        let w = w as f32;
+        let h = h as f32;
+
+        for sample in &replay {
+            let (sx, sy) = viewport_texels_from_norm(sample.nx, sample.ny, w, h);
+            let line = match (sample.stroke_line_start_nx, sample.stroke_line_start_ny) {
+                (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
+                _ => None,
+            };
+            let seg = match (sample.stroke_segment_prev_nx, sample.stroke_segment_prev_ny) {
+                (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
+                _ => None,
+            };
+            let footprint = voxel_edit::sculpt_stroke_effective_footprint(
+                file,
+                vmap,
+                &cam,
+                w,
+                h,
+                sx,
+                sy,
+                sample.sculpt_mode,
+                sample.brush_radius,
+                sample.brush_shape,
+                sample.spray_density,
+                line,
+                seg,
+                sample.brush_strength,
+                sample.brush_falloff,
+                sample.stroke_seed,
+                sample.brush_clip_bottom_half,
+                args.extrude_profile,
+                args.extrude_end_cap,
+                args.extrude_taper,
+                args.extrude_taper_start,
+                args.extrude_taper_end,
+            );
+            for c in footprint {
+                union.insert(c);
+            }
+        }
+    }
+
+    // Also update the stored replay args with new extrude settings so commit uses them.
+    {
+        let mut replay_mut = state.sculpt_stroke_replay.lock();
+        for sample in replay_mut.iter_mut() {
+            sample.extrude_profile = args.extrude_profile;
+            sample.extrude_end_cap = args.extrude_end_cap;
+            sample.extrude_taper = args.extrude_taper;
+            sample.extrude_taper_start = args.extrude_taper_start;
+            sample.extrude_taper_end = args.extrude_taper_end;
+        }
+    }
+
+    // Replace the preview union and re-render.
+    {
+        let mut preview_union = state.stroke_preview_union.lock();
+        preview_union.clear();
+        for c in &union {
+            preview_union.insert(*c);
+        }
+    }
+
+    let (solid, wire) = {
+        let fg = state.current_file.lock();
+        let vm = state.voxel_map.lock();
+        let Some(file) = fg.as_ref() else {
+            return Ok(());
+        };
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(());
+        };
+        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, color)
+    };
+
+    {
+        let mut v = state.viewer.lock();
+        let Some(viewer) = v.as_mut() else {
+            return Ok(());
+        };
+        if solid.positions.is_empty() {
+            clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
+        } else {
+            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.preview_cache_key = None;
+            *state.preview_overlay_cache_key.lock() = None;
         }
     }
 
@@ -6333,6 +6630,705 @@ fn generator_squishy_metaball_at_screen(
             sx,
             sy,
             args.radius,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+// ── Ashlar generator ──────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorAshlarArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default)]
+    seed: i32,
+    #[serde(default = "default_rock_size")]
+    size: i32,
+    #[serde(default = "default_roughness")]
+    roughness: f32,
+    color: u32,
+    material: String,
+    #[serde(default)]
+    thickness: Option<i32>,
+    #[serde(default)]
+    thickness_axis: Option<i32>,
+}
+
+#[tauri::command]
+fn generator_ashlar_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorAshlarArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        crate::generators::generator_ashlar_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.seed,
+            args.size,
+            args.roughness,
+            args.color,
+            material,
+            args.thickness,
+            args.thickness_axis,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+// ── Flora generator ───────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorFloraArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default)]
+    seed: i32,
+    #[serde(default = "default_flora_height")]
+    height: i32,
+    #[serde(default)]
+    girth: i32,
+    #[serde(default = "default_flora_wobble")]
+    wobble: f32,
+    #[serde(default = "default_flora_taper")]
+    taper: f32,
+    #[serde(default = "default_one_i32")]
+    stem_count: i32,
+    #[serde(default)]
+    cluster_radius: i32,
+    #[serde(default)]
+    branch_count: i32,
+    #[serde(default = "default_one_i32")]
+    branch_depth: i32,
+    #[serde(default = "default_flora_branch_start")]
+    branch_start: f32,
+    #[serde(default = "default_one_f32_flora")]
+    branch_spread: f32,
+    #[serde(default = "default_one_i32")]
+    braid_strands: i32,
+    #[serde(default = "default_flora_braid_twist")]
+    braid_twist: f32,
+    #[serde(default)]
+    canopy: f32,
+    color: u32,
+    material: String,
+}
+
+fn default_flora_height() -> i32 { 14 }
+fn default_flora_wobble() -> f32 { 0.12 }
+fn default_flora_taper() -> f32 { 0.12 }
+fn default_one_i32() -> i32 { 1 }
+fn default_flora_branch_start() -> f32 { 0.5 }
+fn default_flora_braid_twist() -> f32 { 0.35 }
+fn default_one_f32_flora() -> f32 { 1.0 }
+
+#[tauri::command]
+fn generator_flora_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorFloraArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        crate::generators::generator_flora_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.seed,
+            args.height,
+            args.girth,
+            args.wobble,
+            args.taper,
+            args.stem_count,
+            args.cluster_radius,
+            args.branch_count,
+            args.branch_depth,
+            args.branch_start,
+            args.branch_spread,
+            args.braid_strands,
+            args.braid_twist,
+            args.canopy,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+// ── Roof generator ────────────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorRoofArgs {
+    pins: Vec<[i32; 3]>,
+    #[serde(default = "default_roof_style")]
+    style: String,
+    #[serde(default = "default_roof_height")]
+    height: i32,
+    #[serde(default = "default_one_i32")]
+    thickness: i32,
+    #[serde(default)]
+    shed_edge_index: i32,
+    #[serde(default)]
+    gable_orientation: i32,
+    #[serde(default = "default_roof_break_ratio")]
+    break_ratio: f32,
+    #[serde(default = "default_roof_wall_height")]
+    wall_height: i32,
+    #[serde(default = "default_roof_parapet_height")]
+    parapet_height: i32,
+    #[serde(default)]
+    salt_skew: f32,
+    #[serde(default)]
+    hollow: bool,
+    color: u32,
+    material: String,
+}
+
+fn default_roof_style() -> String { "gable".into() }
+fn default_roof_height() -> i32 { 6 }
+fn default_roof_break_ratio() -> f32 { 0.5 }
+fn default_roof_wall_height() -> i32 { 3 }
+fn default_roof_parapet_height() -> i32 { 2 }
+
+#[tauri::command]
+fn generator_roof_from_pins_cmd(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorRoofArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    if args.pins.len() < 3 {
+        return Err("roof needs at least 3 pins".into());
+    }
+    let deltas = {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        crate::generators::generate_roof_from_pins(
+            file,
+            vmap,
+            &args.pins,
+            &args.style,
+            args.height,
+            args.thickness,
+            args.shed_edge_index,
+            args.gable_orientation,
+            args.break_ratio,
+            args.wall_height,
+            args.parapet_height,
+            args.salt_skew,
+            args.hollow,
+            args.color,
+            material,
+        )
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+// ── Piscina (fish) generator ──────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorPiscinaArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default)]
+    seed: i32,
+    #[serde(default = "default_piscina_species")]
+    species: String,
+    #[serde(default = "default_piscina_length")]
+    length: i32,
+    #[serde(default = "default_piscina_width")]
+    width_param: i32,
+    #[serde(default = "default_piscina_thickness")]
+    thickness: i32,
+    #[serde(default)]
+    spine_bend: f32,
+    #[serde(default)]
+    spine_s_curve: f32,
+    #[serde(default = "default_piscina_fin")]
+    fin_dorsal: i32,
+    #[serde(default = "default_piscina_fin")]
+    fin_anal: i32,
+    #[serde(default = "default_piscina_fin")]
+    fin_caudal: i32,
+    #[serde(default = "default_piscina_fin")]
+    fin_pectoral: i32,
+    #[serde(default = "default_piscina_fin")]
+    fin_pelvic: i32,
+    #[serde(default = "default_piscina_fin")]
+    fin_adipose: i32,
+    #[serde(default = "default_true")]
+    show_fin_dorsal: bool,
+    #[serde(default = "default_true")]
+    show_fin_anal: bool,
+    #[serde(default = "default_true")]
+    show_fin_caudal: bool,
+    #[serde(default = "default_true")]
+    show_fin_pectoral: bool,
+    #[serde(default = "default_true")]
+    show_fin_pelvic: bool,
+    #[serde(default = "default_true")]
+    show_fin_adipose: bool,
+    #[serde(default)]
+    anchor_offset_u: i32,
+    #[serde(default)]
+    anchor_offset_v: i32,
+    color: u32,
+    material: String,
+}
+
+fn default_piscina_species() -> String { "trout".into() }
+fn default_piscina_length() -> i32 { 16 }
+fn default_piscina_width() -> i32 { 4 }
+fn default_piscina_thickness() -> i32 { 3 }
+fn default_piscina_fin() -> i32 { 3 }
+
+#[tauri::command]
+fn generator_piscina_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorPiscinaArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        crate::generators::generator_piscina_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.seed,
+            &args.species,
+            args.length,
+            args.width_param,
+            args.thickness,
+            args.spine_bend,
+            args.spine_s_curve,
+            args.fin_dorsal,
+            args.fin_anal,
+            args.fin_caudal,
+            args.fin_pectoral,
+            args.fin_pelvic,
+            args.fin_adipose,
+            args.show_fin_dorsal,
+            args.show_fin_anal,
+            args.show_fin_caudal,
+            args.show_fin_pectoral,
+            args.show_fin_pelvic,
+            args.show_fin_adipose,
+            args.anchor_offset_u,
+            args.anchor_offset_v,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+// ── Insecta (insect) generator ────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorInsectaArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default = "default_insecta_species")]
+    species: String,
+    #[serde(default = "default_insecta_length")]
+    total_length: i32,
+    #[serde(default = "default_one_f32")]
+    head_ratio: f32,
+    #[serde(default = "default_insecta_thorax_ratio")]
+    thorax_ratio: f32,
+    #[serde(default = "default_insecta_abdomen_ratio")]
+    abdomen_ratio: f32,
+    #[serde(default = "default_insecta_body_half_width")]
+    body_half_width: i32,
+    #[serde(default = "default_insecta_body_half_height")]
+    body_half_height: i32,
+    #[serde(default = "default_insecta_abdomen_taper")]
+    abdomen_taper: f32,
+    #[serde(default = "default_insecta_head_shape")]
+    head_shape: i32,
+    #[serde(default)]
+    anchor_offset_u: i32,
+    #[serde(default)]
+    anchor_offset_v: i32,
+    #[serde(default)]
+    body_yaw: f32,
+    #[serde(default)]
+    body_arch: f32,
+    #[serde(default = "default_insecta_antenna_length")]
+    antenna_length: i32,
+    #[serde(default = "default_insecta_antenna_spread")]
+    antenna_spread: f32,
+    #[serde(default = "default_insecta_antenna_pitch")]
+    antenna_pitch: f32,
+    #[serde(default)]
+    antenna_root: i32,
+    #[serde(default)]
+    mandible_length: i32,
+    #[serde(default)]
+    mandible_spread: f32,
+    #[serde(default)]
+    mandible_forward: i32,
+    #[serde(default = "default_insecta_wing_shape")]
+    wing_shape: i32,
+    #[serde(default = "default_true")]
+    show_wing_fore: bool,
+    #[serde(default = "default_insecta_wing_fore_length")]
+    wing_fore_length: i32,
+    #[serde(default = "default_insecta_wing_fore_width")]
+    wing_fore_width: i32,
+    #[serde(default = "default_insecta_wing_spread")]
+    wing_fore_spread: f32,
+    #[serde(default)]
+    wing_fore_pitch: f32,
+    #[serde(default)]
+    wing_fore_offset: i32,
+    #[serde(default)]
+    wing_fore_forward_cant: f32,
+    #[serde(default)]
+    show_wing_hind: bool,
+    #[serde(default = "default_insecta_wing_hind_length")]
+    wing_hind_length: i32,
+    #[serde(default = "default_insecta_wing_hind_width")]
+    wing_hind_width: i32,
+    #[serde(default = "default_insecta_wing_spread")]
+    wing_hind_spread: f32,
+    #[serde(default)]
+    wing_hind_pitch: f32,
+    #[serde(default)]
+    wing_hind_offset: i32,
+    color: u32,
+    material: String,
+}
+
+fn default_insecta_species() -> String { "bee".into() }
+fn default_insecta_length() -> i32 { 24 }
+fn default_one_f32() -> f32 { 1.0 }
+fn default_insecta_thorax_ratio() -> f32 { 1.2 }
+fn default_insecta_abdomen_ratio() -> f32 { 2.0 }
+fn default_insecta_body_half_width() -> i32 { 3 }
+fn default_insecta_body_half_height() -> i32 { 3 }
+fn default_insecta_abdomen_taper() -> f32 { 0.6 }
+fn default_insecta_head_shape() -> i32 { 60 }
+fn default_insecta_antenna_length() -> i32 { 6 }
+fn default_insecta_antenna_spread() -> f32 { 20.0 }
+fn default_insecta_antenna_pitch() -> f32 { 30.0 }
+fn default_insecta_wing_shape() -> i32 { 85 }
+fn default_insecta_wing_fore_length() -> i32 { 12 }
+fn default_insecta_wing_fore_width() -> i32 { 3 }
+fn default_insecta_wing_spread() -> f32 { 15.0 }
+fn default_insecta_wing_hind_length() -> i32 { 8 }
+fn default_insecta_wing_hind_width() -> i32 { 2 }
+
+#[tauri::command]
+fn generator_insecta_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorInsectaArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        crate::generators::generator_insecta_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            &args.species,
+            args.total_length,
+            args.head_ratio,
+            args.thorax_ratio,
+            args.abdomen_ratio,
+            args.body_half_width,
+            args.body_half_height,
+            args.abdomen_taper,
+            args.head_shape,
+            args.anchor_offset_u,
+            args.anchor_offset_v,
+            args.body_yaw,
+            args.body_arch,
+            args.antenna_length,
+            args.antenna_spread,
+            args.antenna_pitch,
+            args.antenna_root,
+            args.mandible_length,
+            args.mandible_spread,
+            args.mandible_forward,
+            args.wing_shape,
+            args.show_wing_fore,
+            args.wing_fore_length,
+            args.wing_fore_width,
+            args.wing_fore_spread,
+            args.wing_fore_pitch,
+            args.wing_fore_offset,
+            args.wing_fore_forward_cant,
+            args.show_wing_hind,
+            args.wing_hind_length,
+            args.wing_hind_width,
+            args.wing_hind_spread,
+            args.wing_hind_pitch,
+            args.wing_hind_offset,
+            args.color,
+            material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+// ── Fauna (creature) generator ────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorFaunaArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default = "default_fauna_stance")]
+    stance: String,
+    #[serde(default = "default_fauna_archetype")]
+    archetype: String,
+    #[serde(default)]
+    anchor_offset_u: i32,
+    #[serde(default)]
+    anchor_offset_v: i32,
+    #[serde(default)]
+    body_yaw: f32,
+    #[serde(default)]
+    body_arch: f32,
+    #[serde(default = "default_fauna_spine_segments")]
+    spine_segments: i32,
+    #[serde(default = "default_fauna_body_length")]
+    body_length: i32,
+    #[serde(default = "default_fauna_body_half")]
+    body_half_width: i32,
+    #[serde(default = "default_fauna_body_half_height")]
+    body_half_height: i32,
+    #[serde(default = "default_fauna_neck_length")]
+    neck_length: i32,
+    #[serde(default = "default_fauna_neck_half")]
+    neck_half_width: i32,
+    #[serde(default = "default_fauna_neck_half")]
+    neck_half_height: i32,
+    #[serde(default = "default_fauna_head_length")]
+    head_length: i32,
+    #[serde(default = "default_fauna_head_half")]
+    head_half_width: i32,
+    #[serde(default = "default_fauna_head_half")]
+    head_half_height: i32,
+    #[serde(default = "default_one_i32")]
+    tail_length: i32,
+    #[serde(default = "default_fauna_shoulder_offset")]
+    shoulder_offset_forward: i32,
+    #[serde(default = "default_fauna_hip_offset")]
+    hip_offset_forward: i32,
+    #[serde(default = "default_fauna_upper_length")]
+    front_upper_length: i32,
+    #[serde(default = "default_fauna_upper_length")]
+    front_lower_length: i32,
+    #[serde(default = "default_fauna_hind_upper")]
+    hind_upper_length: i32,
+    #[serde(default = "default_fauna_hind_upper")]
+    hind_lower_length: i32,
+    #[serde(default = "default_fauna_limb_targets")]
+    limb_targets: [[f32; 3]; 4],
+    #[serde(default = "default_fauna_limb_poles")]
+    limb_poles: [[f32; 3]; 4],
+    #[serde(default)]
+    spine_pose_chest: [f32; 3],
+    #[serde(default)]
+    spine_pose_neck: [f32; 3],
+    #[serde(default)]
+    spine_pose_head: [f32; 3],
+    #[serde(default)]
+    auto_foot_placement: bool,
+    color: u32,
+    material: String,
+}
+
+fn default_fauna_stance() -> String { "quadruped".into() }
+fn default_fauna_archetype() -> String { "ungulate".into() }
+fn default_fauna_spine_segments() -> i32 { 7 }
+fn default_fauna_body_length() -> i32 { 17 }
+fn default_fauna_body_half() -> i32 { 2 }
+fn default_fauna_body_half_height() -> i32 { 3 }
+fn default_fauna_neck_length() -> i32 { 8 }
+fn default_fauna_neck_half() -> i32 { 2 }
+fn default_fauna_head_length() -> i32 { 6 }
+fn default_fauna_head_half() -> i32 { 2 }
+fn default_fauna_shoulder_offset() -> i32 { 3 }
+fn default_fauna_hip_offset() -> i32 { -3 }
+fn default_fauna_upper_length() -> i32 { 7 }
+fn default_fauna_hind_upper() -> i32 { 8 }
+fn default_fauna_limb_targets() -> [[f32; 3]; 4] {
+    [[20.0, -2.1, -19.0], [20.0, 2.1, -19.0], [-3.5, -2.2, -20.0], [-3.5, 2.2, -20.0]]
+}
+fn default_fauna_limb_poles() -> [[f32; 3]; 4] {
+    [[20.0, -2.4, 0.6], [20.0, 2.4, 0.6], [1.8, -2.8, 1.2], [1.8, 2.8, 1.2]]
+}
+
+#[tauri::command]
+fn generator_fauna_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorFaunaArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        crate::generators::generator_fauna_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            &args.stance,
+            &args.archetype,
+            args.anchor_offset_u,
+            args.anchor_offset_v,
+            args.body_yaw,
+            args.body_arch,
+            args.spine_segments,
+            args.body_length,
+            args.body_half_width,
+            args.body_half_height,
+            args.neck_length,
+            args.neck_half_width,
+            args.neck_half_height,
+            args.head_length,
+            args.head_half_width,
+            args.head_half_height,
+            args.tail_length,
+            args.shoulder_offset_forward,
+            args.hip_offset_forward,
+            args.front_upper_length,
+            args.front_lower_length,
+            args.hind_upper_length,
+            args.hind_lower_length,
+            &args.limb_targets,
+            &args.limb_poles,
+            args.spine_pose_chest,
+            args.spine_pose_neck,
+            args.spine_pose_head,
+            args.auto_foot_placement,
             args.color,
             material,
         )?
@@ -7563,17 +8559,63 @@ fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
     viewer.upload_ping_wave_lines(&wave_verts);
 }
 
+fn lerp_presence(
+    smooth: &collab::CameraPresence,
+    target: &collab::CameraPresence,
+    t: f32,
+) -> collab::CameraPresence {
+    fn lerp(a: f32, b: f32, t: f32) -> f32 {
+        a + (b - a) * t
+    }
+    collab::CameraPresence {
+        target: [
+            lerp(smooth.target[0], target.target[0], t),
+            lerp(smooth.target[1], target.target[1], t),
+            lerp(smooth.target[2], target.target[2], t),
+        ],
+        radius: lerp(smooth.radius, target.radius, t),
+        theta: lerp(smooth.theta, target.theta, t),
+        phi: lerp(smooth.phi, target.phi, t),
+        perspective: target.perspective,
+        fov_y: lerp(smooth.fov_y, target.fov_y, t),
+        ortho_half_height: lerp(smooth.ortho_half_height, target.ortho_half_height, t),
+    }
+}
+
 fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
+    const NEAR_DIST: f32 = 0.3;
+    const FAR_DIST: f32 = 12.0;
+    const ASPECT: f32 = 16.0 / 9.0;
+    const NEAR_ALPHA: f32 = 1.0;
+    const FAR_ALPHA: f32 = 0.05;
+    const SMOOTH_T: f32 = 0.12;
+
     let (local_id, roster, presence) = {
         let c = state.collab.lock();
         if !c.is_active() {
-            viewer.clear_collab_peer_lines();
+            viewer.clear_collab_frustum_lines();
+            state.smooth_presence.lock().clear();
             return;
         }
         (c.local_peer_id, c.roster.clone(), c.presence.clone())
     };
-    let mut verts: Vec<f32> = Vec::with_capacity(presence.len().saturating_mul(12));
-    for (pid, pr) in presence {
+
+    // Lerp smooth presence toward raw presence each frame
+    let mut smooth = state.smooth_presence.lock();
+    // Remove peers that left
+    smooth.retain(|pid, _| presence.contains_key(pid));
+    // Update / insert smoothed values
+    for (&pid, raw) in &presence {
+        let entry = smooth.entry(pid).or_insert(*raw);
+        *entry = lerp_presence(entry, raw, SMOOTH_T);
+    }
+
+    // Lines: 24 vertices × 7 floats = 168 floats per peer
+    // Tris:  4 side faces × 2 triangles × 3 verts × 7 floats = 168 floats per peer
+    let peer_count = smooth.len();
+    let mut line_verts: Vec<f32> = Vec::with_capacity(peer_count.saturating_mul(168));
+    let mut tri_verts: Vec<f32> = Vec::with_capacity(peer_count.saturating_mul(168));
+    for (&pid, pr) in smooth.iter() {
         if pid == local_id {
             continue;
         }
@@ -7590,10 +8632,86 @@ fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
         if (target - eye).length_squared() < 1e-8 {
             continue;
         }
-        verts.extend_from_slice(&[eye.x, eye.y, eye.z, rf, gf, bf]);
-        verts.extend_from_slice(&[target.x, target.y, target.z, rf, gf, bf]);
+        let forward = (target - eye).normalize();
+        // Avoid degenerate cross product when looking straight up/down
+        let ref_up = if forward.y.abs() > 0.999 {
+            glam::Vec3::Z
+        } else {
+            glam::Vec3::Y
+        };
+        let right = forward.cross(ref_up).normalize();
+        let up = right.cross(forward);
+
+        let (near_half_h, near_half_w, far_half_h, far_half_w) = if pr.perspective {
+            let half_fov_tan = (pr.fov_y * 0.5).tan();
+            let nh = NEAR_DIST * half_fov_tan;
+            let fh = FAR_DIST * half_fov_tan;
+            (nh, nh * ASPECT, fh, fh * ASPECT)
+        } else {
+            let hh = pr.ortho_half_height;
+            let hw = hh * ASPECT;
+            (hh, hw, hh, hw)
+        };
+
+        let near_center = eye + forward * NEAR_DIST;
+        let far_center = eye + forward * FAR_DIST;
+
+        // Near plane corners: top-left, top-right, bottom-right, bottom-left
+        let ntl = near_center + up * near_half_h - right * near_half_w;
+        let ntr = near_center + up * near_half_h + right * near_half_w;
+        let nbr = near_center - up * near_half_h + right * near_half_w;
+        let nbl = near_center - up * near_half_h - right * near_half_w;
+
+        // Far plane corners
+        let ftl = far_center + up * far_half_h - right * far_half_w;
+        let ftr = far_center + up * far_half_h + right * far_half_w;
+        let fbr = far_center - up * far_half_h + right * far_half_w;
+        let fbl = far_center - up * far_half_h - right * far_half_w;
+
+        // --- Wireframe edges ---
+        let mut push_line = |p: glam::Vec3, a: f32| {
+            line_verts.extend_from_slice(&[p.x, p.y, p.z, rf, gf, bf, a]);
+        };
+
+        // Near rectangle (4 edges)
+        push_line(ntl, NEAR_ALPHA); push_line(ntr, NEAR_ALPHA);
+        push_line(ntr, NEAR_ALPHA); push_line(nbr, NEAR_ALPHA);
+        push_line(nbr, NEAR_ALPHA); push_line(nbl, NEAR_ALPHA);
+        push_line(nbl, NEAR_ALPHA); push_line(ntl, NEAR_ALPHA);
+
+        // Far rectangle (4 edges)
+        push_line(ftl, FAR_ALPHA); push_line(ftr, FAR_ALPHA);
+        push_line(ftr, FAR_ALPHA); push_line(fbr, FAR_ALPHA);
+        push_line(fbr, FAR_ALPHA); push_line(fbl, FAR_ALPHA);
+        push_line(fbl, FAR_ALPHA); push_line(ftl, FAR_ALPHA);
+
+        // Connecting edges (near→far)
+        push_line(ntl, NEAR_ALPHA); push_line(ftl, FAR_ALPHA);
+        push_line(ntr, NEAR_ALPHA); push_line(ftr, FAR_ALPHA);
+        push_line(nbr, NEAR_ALPHA); push_line(fbr, FAR_ALPHA);
+        push_line(nbl, NEAR_ALPHA); push_line(fbl, FAR_ALPHA);
+
+        // --- Filled side faces (2 triangles per quad, 4 faces) ---
+        let mut push_tri = |p: glam::Vec3, a: f32| {
+            tri_verts.extend_from_slice(&[p.x, p.y, p.z, rf, gf, bf, a]);
+        };
+
+        // Each side face: near_a, near_b → far_a, far_b (quad as 2 tris)
+        let sides: [(glam::Vec3, glam::Vec3, glam::Vec3, glam::Vec3); 4] = [
+            (ntl, ntr, ftl, ftr), // top
+            (ntr, nbr, ftr, fbr), // right
+            (nbr, nbl, fbr, fbl), // bottom
+            (nbl, ntl, fbl, ftl), // left
+        ];
+        for (na, nb, fa, fb) in sides {
+            // Triangle 1: na, fa, nb
+            push_tri(na, NEAR_ALPHA); push_tri(fa, FAR_ALPHA); push_tri(nb, NEAR_ALPHA);
+            // Triangle 2: nb, fa, fb
+            push_tri(nb, NEAR_ALPHA); push_tri(fa, FAR_ALPHA); push_tri(fb, FAR_ALPHA);
+        }
     }
-    viewer.upload_collab_peer_lines(&verts);
+    viewer.upload_collab_frustum_lines(&line_verts);
+    viewer.upload_collab_frustum_tris(&tri_verts);
 }
 
 fn selection_overlay_cache_fingerprint(
@@ -7780,6 +8898,8 @@ fn brush_shape_tag(s: voxel_edit::BrushShape) -> u8 {
         voxel_edit::BrushShape::Sphere => 0,
         voxel_edit::BrushShape::Cube => 1,
         voxel_edit::BrushShape::Pyramid => 2,
+        voxel_edit::BrushShape::Square => 3,
+        voxel_edit::BrushShape::Circle => 4,
     }
 }
 
@@ -8347,6 +9467,47 @@ fn apply_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, prep: Previe
 /// window (spinner) on macOS while the sheet is open.
 fn open_voxelle_file_dialog(app: AppHandle, state: Arc<ViewerState>) {
     let state = Arc::clone(&state);
+    let is_guest = state.collab.lock().is_client();
+
+    if is_guest {
+        // Warn the guest that opening a file will disconnect them from the session.
+        let app_confirm = app.clone();
+        let state_confirm = Arc::clone(&state);
+        app.dialog()
+            .message("Opening a file will disconnect you from the current collaboration session.")
+            .title("Leave session?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "Open File".into(),
+                "Cancel".into(),
+            ))
+            .show(move |confirmed| {
+                if confirmed {
+                    leave_collab_guest(&state_confirm, &app_confirm);
+                    show_file_picker(app_confirm, state_confirm);
+                }
+            });
+    } else {
+        show_file_picker(app, state);
+    }
+}
+
+/// Disconnect a guest from the current collab session.
+fn leave_collab_guest(state: &Arc<ViewerState>, app: &AppHandle) {
+    let mut c = state.collab.lock();
+    if c.is_client() {
+        if let Some(tx) = &c.client_tx {
+            let msg = serde_json::to_string(&collab::ClientToHost::Leave).unwrap();
+            let _ = tx.send(msg);
+        }
+        c.leave();
+        drop(c);
+        *state.ping_flash.lock() = None;
+        let _ = app.emit("collab-ended", "You left the collaboration session.");
+    }
+}
+
+fn show_file_picker(app: AppHandle, state: Arc<ViewerState>) {
     let app_cb = app.clone();
     let mut builder = app.dialog().file().add_filter("Voxelle", &["voxelle"]);
     if let Some(window) = app.get_webview_window("main") {
@@ -9238,15 +10399,26 @@ fn collab_join(
 ) -> Result<(), String> {
     let vs = Arc::clone(&*state);
     let cm = Arc::clone(&vs.collab);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    cm.lock().join_cancel = Some(cancel.clone());
     tauri::async_runtime::spawn(async move {
-        if let Err(e) =
-            collab::client_connect_blocking(&url, app.clone(), vs, cm, display_name, color_rgb)
-                .await
-        {
+        let result =
+            collab::client_connect_blocking(&url, app.clone(), vs, cm.clone(), display_name, color_rgb, cancel)
+                .await;
+        cm.lock().join_cancel = None;
+        if let Err(e) = result {
             let _ = app.emit("collab-error", e);
         }
     });
     Ok(())
+}
+
+#[tauri::command]
+fn collab_cancel_join(state: State<'_, Arc<ViewerState>>) {
+    let token = state.collab.lock().join_cancel.take();
+    if let Some(t) = token {
+        t.cancel();
+    }
 }
 
 #[tauri::command]
@@ -9388,7 +10560,7 @@ fn collab_push_camera(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Res
         let json = serde_json::to_string(&cam_ev).unwrap();
         let _ = app.emit("collab-camera", &json);
         if let Some(tx) = &c.host_broadcast {
-            let _ = tx.send(json);
+            let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(json));
         }
     }
     Ok(())
@@ -9439,7 +10611,7 @@ fn collab_send_chat(
         let json = serde_json::to_string(&ev).unwrap();
         let _ = app.emit("collab-chat", &json);
         if let Some(tx) = &c.host_broadcast {
-            let _ = tx.send(json);
+            let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(json));
         }
         return Ok(());
     }
@@ -9493,7 +10665,7 @@ fn collab_send_ping(
         let json = serde_json::to_string(&ping).unwrap();
         let _ = app.emit("collab-ping", &json);
         if let Some(tx) = &c.host_broadcast {
-            let _ = tx.send(json);
+            let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(json));
         }
         return Ok(());
     }
@@ -9612,6 +10784,7 @@ pub fn run() {
         stroke_preview_suppresses_hover: AtomicBool::new(false),
         sculpt_stroke_replay: Mutex::new(Vec::new()),
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
+        smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
         autosave_interval_secs: Mutex::new(120),
         last_autosave: Mutex::new(None),
@@ -9938,6 +11111,10 @@ pub fn run() {
             }
 
             let window = app.get_webview_window("main").expect("main window");
+            #[cfg(target_os = "macos")]
+            if let Err(e) = macos_titlebar::apply_transparent_titlebar(&window) {
+                eprintln!("macos_titlebar: {e}");
+            }
             if headless_server_port.is_some() {
                 let _ = window.hide();
             }
@@ -9987,6 +11164,7 @@ pub fn run() {
             voxel_stroke_anchor_coord_at_screen,
             ping_cursor_pick,
             world_to_viewport_pixels,
+            collab_peer_labels,
             sync_preview_input,
             voxel_stroke_begin,
             voxel_stroke_preview_reset,
@@ -10001,6 +11179,7 @@ pub fn run() {
             save_voxelle_as,
             collab_host_start,
             collab_join,
+            collab_cancel_join,
             collab_leave,
             collab_local_peer_id,
             collab_kick_peer,
@@ -10059,10 +11238,17 @@ pub fn run() {
             voxel_sculpt_raise_at_screen,
             voxel_sculpt_stroke_at_screen,
             voxel_sculpt_stroke_preview_at_screen,
+            extrude_recompute_preview,
             generator_rocks_at_screen,
             generator_grass_at_screen,
             generator_rope_at_screen,
             generator_cloth_from_pins_cmd,
+            generator_ashlar_at_screen,
+            generator_flora_at_screen,
+            generator_roof_from_pins_cmd,
+            generator_piscina_at_screen,
+            generator_insecta_at_screen,
+            generator_fauna_at_screen,
             generator_squishy_metaball_at_screen,
             squishy_session_get,
             squishy_session_set_mode,
@@ -10273,6 +11459,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         stroke_preview_suppresses_hover: AtomicBool::new(false),
         sculpt_stroke_replay: Mutex::new(Vec::new()),
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
+        smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
         autosave_interval_secs: Mutex::new(120),
         last_autosave: Mutex::new(None),

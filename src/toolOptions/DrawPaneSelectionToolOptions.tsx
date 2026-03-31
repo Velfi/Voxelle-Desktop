@@ -7,7 +7,7 @@ import type {
   StrokeFamilyVariant,
 } from "../drawToolModel";
 
-type BrushShape = "sphere" | "cube" | "pyramid";
+type BrushShape = "sphere" | "cube" | "pyramid" | "square" | "circle";
 
 export type DrawPaneSelectionToolOptionsProps = {
   loading: boolean;
@@ -57,7 +57,9 @@ export type DrawPaneSelectionToolOptionsProps = {
  * Fill: constrain + diagonals + respect color.
  * Other methods: Brush + stroke line/brush + full area shape dropdown.
  */
-export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProps) {
+export function DrawPaneSelectionToolOptions(
+  p: DrawPaneSelectionToolOptionsProps,
+) {
   const narrowStroke = p.selectionMethod === "stroke";
   const narrowSurface = p.selectionMethod === "surface";
   const narrowSolid = p.selectionMethod === "solid";
@@ -162,30 +164,33 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
-              onChange={(ev) =>
-                p.setBrushClipBottomHalf(ev.target.checked)
-              }
+              onChange={(ev) => p.setBrushClipBottomHalf(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
-            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+              Outer half (face)
+            </span>
           </label>
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
           >
-            Brush size
+            Brush diameter
           </div>
           <label className="tool-options-range-label tool-options-range-with-value">
             <input
               type="range"
-              min={0}
-              max={32}
-              value={p.brushRadius}
-              onChange={(ev) => p.setBrushRadius(Number(ev.target.value))}
+              min={1}
+              max={65}
+              step={2}
+              value={p.brushRadius * 2 + 1}
+              onChange={(ev) =>
+                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
+              }
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius}
+              {p.brushRadius * 2 + 1}
             </span>
           </label>
         </div>
@@ -314,30 +319,33 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
-              onChange={(ev) =>
-                p.setBrushClipBottomHalf(ev.target.checked)
-              }
+              onChange={(ev) => p.setBrushClipBottomHalf(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
-            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+              Outer half (face)
+            </span>
           </label>
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
           >
-            Brush size
+            Brush diameter
           </div>
           <label className="tool-options-range-label tool-options-range-with-value">
             <input
               type="range"
-              min={0}
-              max={32}
-              value={p.brushRadius}
-              onChange={(ev) => p.setBrushRadius(Number(ev.target.value))}
+              min={1}
+              max={65}
+              step={2}
+              value={p.brushRadius * 2 + 1}
+              onChange={(ev) =>
+                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
+              }
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius}
+              {p.brushRadius * 2 + 1}
             </span>
           </label>
           <label
@@ -394,9 +402,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               <input
                 type="checkbox"
                 checked={p.surfacePlaneHollow}
-                onChange={(ev) =>
-                  p.setSurfacePlaneHollow(ev.target.checked)
-                }
+                onChange={(ev) => p.setSurfacePlaneHollow(ev.target.checked)}
                 disabled={p.loading || p.workBusy}
               />
               <span>Hollow</span>
@@ -515,30 +521,33 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
-              onChange={(ev) =>
-                p.setBrushClipBottomHalf(ev.target.checked)
-              }
+              onChange={(ev) => p.setBrushClipBottomHalf(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
-            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+              Outer half (face)
+            </span>
           </label>
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
           >
-            Brush size
+            Brush diameter
           </div>
           <label className="tool-options-range-label tool-options-range-with-value">
             <input
               type="range"
-              min={0}
-              max={32}
-              value={p.brushRadius}
-              onChange={(ev) => p.setBrushRadius(Number(ev.target.value))}
+              min={1}
+              max={65}
+              step={2}
+              value={p.brushRadius * 2 + 1}
+              onChange={(ev) =>
+                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
+              }
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius}
+              {p.brushRadius * 2 + 1}
             </span>
           </label>
           <label
@@ -593,9 +602,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.surfacePlaneHollow}
-              onChange={(ev) =>
-                p.setSurfacePlaneHollow(ev.target.checked)
-              }
+              onChange={(ev) => p.setSurfacePlaneHollow(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Hollow</span>
@@ -607,7 +614,8 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               className="tool-options-hint"
               style={{ margin: 0, fontSize: "0.85rem", opacity: 0.9 }}
             >
-              Cuboid: drag on a face, set depth, Done.
+              Cuboid: Click and drag, set a depth, and then click "Done" when
+              you're ready to commit.
             </p>
           </div>
         ) : null}
@@ -617,7 +625,8 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               className="tool-options-hint"
               style={{ margin: 0, fontSize: "0.85rem", opacity: 0.9 }}
             >
-              Cylinder: drag on a face, set depth, Done.
+              Cylinder: Click and drag, set a depth, and then click "Done" when
+              you're ready to commit.
             </p>
           </div>
         ) : null}
@@ -633,9 +642,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.fillConstrainToPlane}
-              onChange={(ev) =>
-                p.setFillConstrainToPlane(ev.target.checked)
-              }
+              onChange={(ev) => p.setFillConstrainToPlane(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Constrain to plane</span>
@@ -674,9 +681,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.fillSelectDiagonals}
-              onChange={(ev) =>
-                p.setFillSelectDiagonals(ev.target.checked)
-              }
+              onChange={(ev) => p.setFillSelectDiagonals(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Include diagonals</span>
@@ -688,9 +693,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.fillRespectsColor}
-              onChange={(ev) =>
-                p.setFillRespectsColor(ev.target.checked)
-              }
+              onChange={(ev) => p.setFillRespectsColor(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Respect color</span>
@@ -712,9 +715,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.sprayConstrainToPlane}
-              onChange={(ev) =>
-                p.setSprayConstrainToPlane(ev.target.checked)
-              }
+              onChange={(ev) => p.setSprayConstrainToPlane(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Constrain to plane</span>
@@ -763,12 +764,12 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
-              onChange={(ev) =>
-                p.setBrushClipBottomHalf(ev.target.checked)
-              }
+              onChange={(ev) => p.setBrushClipBottomHalf(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
-            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+              Outer half (face)
+            </span>
           </label>
           <label
             className="tool-options-checkbox-row"
@@ -777,9 +778,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="checkbox"
               checked={p.spraySizeRange}
-              onChange={(ev) =>
-                p.setSpraySizeRange(ev.target.checked)
-              }
+              onChange={(ev) => p.setSpraySizeRange(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Size range</span>
@@ -788,21 +787,22 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
           >
-            Size
+            Diameter
           </div>
           <label className="tool-options-range-label tool-options-range-with-value">
             <input
               type="range"
-              min={0}
-              max={32}
-              value={p.brushRadius}
+              min={1}
+              max={65}
+              step={2}
+              value={p.brushRadius * 2 + 1}
               onChange={(ev) =>
-                p.setBrushRadius(Number(ev.target.value))
+                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
               }
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius}
+              {p.brushRadius * 2 + 1}
             </span>
           </label>
           <div
@@ -818,9 +818,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               max={1}
               step={0.02}
               value={p.sprayDensity}
-              onChange={(ev) =>
-                p.setSprayDensity(Number(ev.target.value))
-              }
+              onChange={(ev) => p.setSprayDensity(Number(ev.target.value))}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
@@ -884,21 +882,24 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
           <input
             type="checkbox"
             checked={p.brushClipBottomHalf}
-            onChange={(ev) =>
-              p.setBrushClipBottomHalf(ev.target.checked)
-            }
+            onChange={(ev) => p.setBrushClipBottomHalf(ev.target.checked)}
             disabled={p.loading || p.workBusy}
           />
-          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+            Outer half (face)
+          </span>
         </label>
         <label className="tool-options-range-label">
-          <span>Size</span>
+          <span>Diameter</span>
           <input
             type="range"
-            min={0}
-            max={32}
-            value={p.brushRadius}
-            onChange={(ev) => p.setBrushRadius(Number(ev.target.value))}
+            min={1}
+            max={65}
+            step={2}
+            value={p.brushRadius * 2 + 1}
+            onChange={(ev) =>
+              p.setBrushRadius((Number(ev.target.value) - 1) / 2)
+            }
             disabled={p.loading || p.workBusy}
           />
         </label>

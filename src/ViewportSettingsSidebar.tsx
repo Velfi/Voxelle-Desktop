@@ -152,7 +152,8 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
   const disabled = loading || workBusy;
   const [orthographic, setOrthographic] = useState(false);
   const [focalMm, setFocalMm] = useState(29);
-  const [lighting, setLighting] = useState<SceneLightingPayload>(defaultLighting);
+  const [lighting, setLighting] =
+    useState<SceneLightingPayload>(defaultLighting);
 
   const refreshFromNative = useCallback(() => {
     void invoke<boolean>("get_orthographic")
@@ -207,24 +208,32 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
     <div className="sidebar-viewport-settings" aria-label="Viewport">
       <div className="sidebar-section-label">Camera</div>
       {!orthographic ? (
-        <label className="tool-options-range-label tool-options-range-with-value">
-          <span>Focal length</span>
+        <div className="tool-options-range-label tool-options-range-with-value">
+          <span>Zoom</span>
           <input
             type="range"
             min={15}
             max={200}
             step={1}
+            list="focal-notches"
             value={Math.round(focalMm)}
             disabled={disabled}
             onChange={(e) => {
               void onFocalChange(Number(e.target.value));
             }}
           />
-          <span className="tool-options-range-value">{Math.round(focalMm)} mm</span>
-        </label>
+          <datalist id="focal-notches">
+            {[24, 35, 50, 85, 105, 135, 200].map((mm) => (
+              <option key={mm} value={mm} label={`${mm}mm`} />
+            ))}
+          </datalist>
+          <span className="tool-options-range-value">
+            {Math.round(focalMm)}mm
+          </span>
+        </div>
       ) : (
         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-          Focal length applies in perspective mode only.
+          Zoom applies in perspective mode only.
         </p>
       )}
 
@@ -253,8 +262,14 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
       </label>
 
       <div className="sidebar-viewport-preset-row">
-        <span className="sidebar-section-label sidebar-section-label-inline">Light</span>
-        <div className="sidebar-preset-toolbar" role="toolbar" aria-label="Lighting presets">
+        <span className="sidebar-section-label sidebar-section-label-inline">
+          Light
+        </span>
+        <div
+          className="sidebar-preset-toolbar"
+          role="toolbar"
+          aria-label="Lighting presets"
+        >
           {LIGHT_PRESETS.map((p) => (
             <button
               key={p.id}
@@ -406,7 +421,9 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
             });
           }}
         />
-        <span className="tool-options-range-value">{Math.round(lighting.lightAngle)}°</span>
+        <span className="tool-options-range-value">
+          {Math.round(lighting.lightAngle)}°
+        </span>
       </label>
       <label className="tool-options-range-label tool-options-range-with-value">
         <span>Elevation</span>
@@ -424,7 +441,9 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
             });
           }}
         />
-        <span className="tool-options-range-value">{Math.round(lighting.lightElevation)}°</span>
+        <span className="tool-options-range-value">
+          {Math.round(lighting.lightElevation)}°
+        </span>
       </label>
       <label className="tool-options-checkbox-row">
         <input

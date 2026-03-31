@@ -36,7 +36,8 @@ export function PreferencesModal({
   onCollabHostPortChange,
   collabHosting = false,
 }: Props) {
-  const [prefs, setPrefs] = useState<VoxelleDesktopPreferences>(loadPreferences);
+  const [prefs, setPrefs] =
+    useState<VoxelleDesktopPreferences>(loadPreferences);
 
   useEffect(() => {
     if (open) setPrefs(loadPreferences());
@@ -89,7 +90,11 @@ export function PreferencesModal({
 
   const onCollabName = (raw: string) => {
     const clipped = raw.slice(0, 32);
-    const toSave = preferencesWithCollabIdentity(prefs, clipped, prefs.collabAccentColor);
+    const toSave = preferencesWithCollabIdentity(
+      prefs,
+      clipped,
+      prefs.collabAccentColor,
+    );
     setPrefs({
       ...prefs,
       collabDisplayName: toSave.collabDisplayName,
@@ -100,7 +105,11 @@ export function PreferencesModal({
   };
 
   const onCollabColor = (raw: string) => {
-    const toSave = preferencesWithCollabIdentity(prefs, prefs.collabDisplayName, raw);
+    const toSave = preferencesWithCollabIdentity(
+      prefs,
+      prefs.collabDisplayName,
+      raw,
+    );
     setPrefs({
       ...prefs,
       collabDisplayName: toSave.collabDisplayName,
@@ -119,9 +128,10 @@ export function PreferencesModal({
   };
 
   const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
-    void invoke("set_autosave_settings", autosaveSettingsInvokeArgs(next)).catch(
-      () => {},
-    );
+    void invoke(
+      "set_autosave_settings",
+      autosaveSettingsInvokeArgs(next),
+    ).catch(() => {});
   };
 
   const onAutosaveEnabled = (checked: boolean) => {
@@ -232,8 +242,8 @@ export function PreferencesModal({
           </label>
           {collabHosting ? (
             <p className="prefs-field-hint prefs-section-hint">
-              Port and internet sharing are locked while you host. End the session
-              to change them.
+              Port and internet sharing are locked while you host. End the
+              session to change them.
             </p>
           ) : null}
           <label
@@ -254,8 +264,8 @@ export function PreferencesModal({
           <p
             className={`prefs-field-hint prefs-section-hint${collabHosting ? " is-disabled" : ""}`}
           >
-            Lets friends online join without manual router setup. Leave off unless
-            you need it.
+            Lets friends online join without manual router setup. Leave off
+            unless you need it.
           </p>
           <label
             className={`prefs-checkbox-label${collabHosting ? " is-disabled" : ""}`}
@@ -308,16 +318,16 @@ export function PreferencesModal({
               value={prefs.autosaveKeepCount}
               onChange={(e) => onAutosaveKeep(Number(e.target.value))}
             />
-            <span className="prefs-field-hint">Per project; oldest drops first.</span>
+            <span className="prefs-field-hint">
+              Per project; oldest drops first.
+            </span>
           </label>
           <label className="prefs-select-label">
             <span className="prefs-select-label-text">Display look</span>
             <select
               className="prefs-tone-select"
               value={prefs.toneMapping}
-              onChange={(e) =>
-                onTone(e.target.value as ToneMappingPreference)
-              }
+              onChange={(e) => onTone(e.target.value as ToneMappingPreference)}
             >
               {TONE_MAPPING_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>

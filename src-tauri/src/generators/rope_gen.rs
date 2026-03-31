@@ -55,7 +55,7 @@ fn brush_offset_list(r: i32, shape: BrushShape) -> Vec<(i32, i32, i32)> {
                 }
             }
         }
-        BrushShape::Cube | BrushShape::Pyramid => {
+        BrushShape::Cube | BrushShape::Pyramid | BrushShape::Square | BrushShape::Circle => {
             for dz in -r..=r {
                 for dy in -r..=r {
                     for dx in -r..=r {

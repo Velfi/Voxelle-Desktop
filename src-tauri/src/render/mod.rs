@@ -31,6 +31,9 @@ mod gpu {
     pub mod collab_peer_lines {
         pub const WGSL: &str = include_str!("collab_peer_lines.wgsl");
     }
+    pub mod collab_frustum {
+        pub const WGSL: &str = include_str!("collab_frustum.wgsl");
+    }
 }
 
 use crate::camera::OrbitCamera;
@@ -398,6 +401,10 @@ pub struct WgpuViewer {
     pipeline_preview_front_wire: wgpu::RenderPipeline,
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
+    pipeline_collab_frustum_occluded: wgpu::RenderPipeline,
+    pipeline_collab_frustum_front: wgpu::RenderPipeline,
+    pipeline_collab_frustum_tri_occluded: wgpu::RenderPipeline,
+    pipeline_collab_frustum_tri_front: wgpu::RenderPipeline,
     /// Voxel grid borders: depth-tested only (no occluded ghost pass), semi-transparent.
     pipeline_grid_border_lines: wgpu::RenderPipeline,
     pipeline_sky: wgpu::RenderPipeline,
@@ -444,6 +451,10 @@ pub struct WgpuViewer {
     preview_wire_index_count: u32,
     collab_line_vertex_buffer: Option<wgpu::Buffer>,
     collab_line_vertex_count: u32,
+    collab_frustum_vertex_buffer: Option<wgpu::Buffer>,
+    collab_frustum_vertex_count: u32,
+    collab_frustum_tri_vertex_buffer: Option<wgpu::Buffer>,
+    collab_frustum_tri_vertex_count: u32,
     ping_wave_line_vertex_buffer: Option<wgpu::Buffer>,
     ping_wave_line_vertex_count: u32,
     ping_vertex_buffer: Option<wgpu::Buffer>,
@@ -676,6 +687,30 @@ fn vertex_layout_collab_lines() -> wgpu::VertexBufferLayout<'static> {
                 offset: 12,
                 shader_location: 1,
                 format: wgpu::VertexFormat::Float32x3,
+            },
+        ],
+    }
+}
+
+fn vertex_layout_collab_frustum() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: (3 + 3 + 1) * 4, // 28 bytes: pos + color + alpha
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 24,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32,
             },
         ],
     }
@@ -932,7 +967,11 @@ impl WgpuViewer {
             width: size.0.max(1),
             height: size.1.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else {
+                caps.alpha_modes[0]
+            },
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -1160,6 +1199,10 @@ impl WgpuViewer {
         let shader_collab_lines = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("collab_peer_lines"),
             source: wgpu::ShaderSource::Wgsl(gpu::collab_peer_lines::WGSL.into()),
+        });
+        let shader_collab_frustum = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("collab_frustum"),
+            source: wgpu::ShaderSource::Wgsl(gpu::collab_frustum::WGSL.into()),
         });
 
         let pl_opaque = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1442,6 +1485,150 @@ impl WgpuViewer {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        let pipeline_collab_frustum_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("collab_frustum_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_frustum()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("fs_frustum_occluded"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_collab_frustum_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("collab_frustum_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_frustum()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("fs_frustum_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        let pipeline_collab_frustum_tri_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("collab_frustum_tri_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_frustum()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("fs_frustum_occluded"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_collab_frustum_tri_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("collab_frustum_tri_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_frustum()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_frustum,
+                    entry_point: Some("fs_frustum_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -1961,6 +2148,10 @@ impl WgpuViewer {
             pipeline_preview_front_wire,
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
+            pipeline_collab_frustum_occluded,
+            pipeline_collab_frustum_front,
+            pipeline_collab_frustum_tri_occluded,
+            pipeline_collab_frustum_tri_front,
             pipeline_grid_border_lines,
             pipeline_sky,
             pipeline_start_screen_bg,
@@ -1994,6 +2185,10 @@ impl WgpuViewer {
             preview_wire_index_count: 0,
             collab_line_vertex_buffer: None,
             collab_line_vertex_count: 0,
+            collab_frustum_vertex_buffer: None,
+            collab_frustum_vertex_count: 0,
+            collab_frustum_tri_vertex_buffer: None,
+            collab_frustum_tri_vertex_count: 0,
             ping_wave_line_vertex_buffer: None,
             ping_wave_line_vertex_count: 0,
             ping_vertex_buffer: None,
@@ -2157,8 +2352,11 @@ impl WgpuViewer {
     }
 
     fn sync_composite_exposure_ev(&mut self) {
+        // Positive bias compensates for tonemapper compression that darkens the
+        // mid-range; without it, autoexposure at user-bias +0 renders too dark.
+        const AUTO_EV_BIAS: f32 = 1.0;
         self.post_composite_opts.exposure_ev = if self.auto_exposure_enabled {
-            (self.auto_exposure_smoothed + self.exposure_user_ev).clamp(-5.0, 5.0)
+            (self.auto_exposure_smoothed + self.exposure_user_ev + AUTO_EV_BIAS).clamp(-5.0, 5.0)
         } else {
             self.exposure_user_ev
         };
@@ -3431,6 +3629,67 @@ impl WgpuViewer {
         self.collab_line_vertex_count = 0;
     }
 
+    /// Frustum wireframe: each vertex is `[x,y,z, r,g,b, a]` (7 floats); line-list pairs.
+    pub fn upload_collab_frustum_lines(&mut self, verts: &[f32]) {
+        if verts.is_empty() || verts.len() % 7 != 0 {
+            self.collab_frustum_vertex_buffer = None;
+            self.collab_frustum_vertex_count = 0;
+            return;
+        }
+        let n_floats = verts.len();
+        let vertex_count = (n_floats / 7) as u32;
+        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
+        if let Some(ref buf) = self.collab_frustum_vertex_buffer {
+            if buf.size() == nbytes {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
+                self.collab_frustum_vertex_count = vertex_count;
+                return;
+            }
+        }
+        self.collab_frustum_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("collab_frustum_vtx"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+        self.collab_frustum_vertex_count = vertex_count;
+    }
+
+    pub fn clear_collab_frustum_lines(&mut self) {
+        self.collab_frustum_vertex_buffer = None;
+        self.collab_frustum_vertex_count = 0;
+        self.collab_frustum_tri_vertex_buffer = None;
+        self.collab_frustum_tri_vertex_count = 0;
+    }
+
+    /// Frustum side faces: each vertex is `[x,y,z, r,g,b, a]` (7 floats); triangle-list.
+    pub fn upload_collab_frustum_tris(&mut self, verts: &[f32]) {
+        if verts.is_empty() || verts.len() % 7 != 0 {
+            self.collab_frustum_tri_vertex_buffer = None;
+            self.collab_frustum_tri_vertex_count = 0;
+            return;
+        }
+        let n_floats = verts.len();
+        let vertex_count = (n_floats / 7) as u32;
+        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
+        if let Some(ref buf) = self.collab_frustum_tri_vertex_buffer {
+            if buf.size() == nbytes {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
+                self.collab_frustum_tri_vertex_count = vertex_count;
+                return;
+            }
+        }
+        self.collab_frustum_tri_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("collab_frustum_tri_vtx"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+        self.collab_frustum_tri_vertex_count = vertex_count;
+    }
+
     pub fn upload_ping_mesh(&mut self, solid: &MeshBuffers, wire: &MeshBuffers) {
         let solid_v = Self::interleaved_from_mesh(solid);
         let wire_v = Self::interleaved_from_mesh(wire);
@@ -3828,20 +4087,33 @@ impl WgpuViewer {
         }
     }
 
-    fn draw_collab_peer_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
-        let Some(ref vb) = self.collab_line_vertex_buffer else {
+    fn draw_collab_frustum_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        // Draw filled side faces first (triangles behind wireframe)
+        if let Some(ref tb) = self.collab_frustum_tri_vertex_buffer {
+            if self.collab_frustum_tri_vertex_count >= 3 {
+                pass.set_vertex_buffer(0, tb.slice(..));
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_collab_frustum_tri_occluded);
+                pass.draw(0..self.collab_frustum_tri_vertex_count, 0..1);
+                pass.set_pipeline(&self.pipeline_collab_frustum_tri_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw(0..self.collab_frustum_tri_vertex_count, 0..1);
+            }
+        }
+        // Draw wireframe edges on top
+        let Some(ref vb) = self.collab_frustum_vertex_buffer else {
             return;
         };
-        if self.collab_line_vertex_count < 2 {
+        if self.collab_frustum_vertex_count < 2 {
             return;
         }
         pass.set_vertex_buffer(0, vb.slice(..));
         pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-        pass.set_pipeline(&self.pipeline_collab_lines_occluded);
-        pass.draw(0..self.collab_line_vertex_count, 0..1);
-        pass.set_pipeline(&self.pipeline_collab_lines_front);
+        pass.set_pipeline(&self.pipeline_collab_frustum_occluded);
+        pass.draw(0..self.collab_frustum_vertex_count, 0..1);
+        pass.set_pipeline(&self.pipeline_collab_frustum_front);
         pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-        pass.draw(0..self.collab_line_vertex_count, 0..1);
+        pass.draw(0..self.collab_frustum_vertex_count, 0..1);
     }
 
     fn draw_ping_wave_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -3951,7 +4223,7 @@ impl WgpuViewer {
             self.draw_indexed_preview(&mut pass);
             self.draw_selection_overlay_lines(&mut pass);
             self.draw_grid_border_lines(&mut pass);
-            self.draw_collab_peer_lines(&mut pass);
+            self.draw_collab_frustum_lines(&mut pass);
             self.draw_ping_wave_lines(&mut pass);
             self.draw_indexed_ping(&mut pass);
         }

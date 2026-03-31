@@ -28,6 +28,7 @@ import {
 import "./App.css";
 import {
   deriveSelectionMethod,
+  getStrokeDispatch,
   selectionMethodToState,
   strokeModeSkipsDrag,
   type DrawStrokeModeApi,
@@ -38,6 +39,13 @@ import {
 import { DrawPaneSelectionToolOptions } from "./toolOptions/DrawPaneSelectionToolOptions";
 import { MATERIAL_BUILTIN_PALETTE_HEX } from "./materialBuiltinPalette";
 import { ViewportCameraHud } from "./ViewportCameraHud";
+import { useStrokePhase } from "./useStrokePhase";
+
+/** Data carried through the cuboid/cylinder solid depth phase. */
+interface DepthPhaseData {
+  lineStart: { nx: number; ny: number };
+  endNorm: { nx: number; ny: number };
+}
 import { ViewportSettingsSidebar } from "./ViewportSettingsSidebar";
 import packageJson from "../package.json";
 
@@ -60,8 +68,7 @@ const LS_FULL_SURFACE_VIEWPORT = "voxelleFullSurfaceViewport";
 /**
  * CSS layout viewport size for mapping `clientX`/`clientY` and layout fractions to the native surface.
  * Prefer `document.documentElement.clientWidth/Height` over `window.inner*` so the denominator matches
- * the pointer coordinate span (inner includes scrollbar gutter; client does not). That mismatch shows up
- * as edge drift on macOS windowed WebKit and often disappears in fullscreen where inner ≈ client.
+ * the pointer coordinate span (inner includes scrollbar gutter; client does not).
  */
 function layoutViewportCssSize(): { w: number; h: number } {
   const de = document.documentElement;
@@ -141,11 +148,7 @@ type ViewportCursorDebugScreen = {
 /** Avoid duplicate `load_start_screen_logo` in React Strict Mode (dev). */
 let startScreenLogoInvokeSent = false;
 
-type RenderingMode =
-  | "greedy"
-  | "marchingCubes"
-  | "dualContour"
-  | "ray";
+type RenderingMode = "greedy" | "marchingCubes" | "dualContour" | "ray";
 
 type StartShape =
   | "cube"
@@ -195,7 +198,7 @@ function playPingSound() {
   try {
     const a = new Audio(PING_MP3_URL);
     a.volume = 0.85;
-    void a.play().catch(() => { });
+    void a.play().catch(() => {});
   } catch {
     /* ignore */
   }
@@ -305,7 +308,17 @@ type SculptStrokeModeApi =
 /** Matches Rust `TerrainSculptOp`. */
 type TerrainSculptOpApi = "raise" | "lower" | "smooth";
 
-type GeneratorKindId = "rocks" | "grass" | "rope" | "cloth";
+type GeneratorKindId =
+  | "rocks"
+  | "grass"
+  | "rope"
+  | "cloth"
+  | "ashlar"
+  | "flora"
+  | "roof"
+  | "piscina"
+  | "insecta"
+  | "fauna";
 type ClothGravityDirectionId =
   | "down"
   | "up"
@@ -314,17 +327,16 @@ type ClothGravityDirectionId =
   | "forward"
   | "back";
 
-type BrushShape = "sphere" | "cube" | "pyramid";
+type BrushShape = "sphere" | "cube" | "pyramid" | "square" | "circle";
 
-/** Web `SculptBrushShape`; engine uses `sculptBrushShapeToRust`. */
+/** Web `SculptBrushShape`; Rust now accepts all four names directly. */
 type SculptBrushShapeUi = "square" | "circle" | "cube" | "sphere";
 
 /** Web `MAX_BRUSH_SIZE - 1` (slider index 0..63 → display 1..64). */
 const SCULPT_BRUSH_MAX_INDEX = 63;
 
 function sculptBrushShapeToRust(s: SculptBrushShapeUi): BrushShape {
-  if (s === "circle" || s === "sphere") return "sphere";
-  return "cube";
+  return s;
 }
 
 /** Web `WallAreaShape` / `SprayDirection` (Rust serde camelCase). */
@@ -400,7 +412,9 @@ function SymmetryColorSidebarSections(props: {
           <button
             type="button"
             className={
-              interactionMode === "eyedropper" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
+              interactionMode === "eyedropper"
+                ? "sidebar-mode-btn is-active"
+                : "sidebar-mode-btn"
             }
             disabled={loading || workBusy}
             onClick={() => setInteractionMode("eyedropper")}
@@ -421,7 +435,9 @@ function SymmetryColorSidebarSections(props: {
                 key={hex}
                 type="button"
                 className={
-                  isActive ? "sidebar-palette-swatch is-active" : "sidebar-palette-swatch"
+                  isActive
+                    ? "sidebar-palette-swatch is-active"
+                    : "sidebar-palette-swatch"
                 }
                 style={{ backgroundColor: hex }}
                 title={hex}
@@ -475,7 +491,9 @@ function App() {
   const planeAxisRef = useRef<PlaneAxisApi>("auto");
   const sprayDensityRef = useRef(0);
   /** Normalized viewport start of stroke (for line stroke); matches Rust `viewport_texels_from_norm`. */
-  const strokeViewportStartRef = useRef<{ nx: number; ny: number } | null>(null);
+  const strokeViewportStartRef = useRef<{ nx: number; ny: number } | null>(
+    null,
+  );
   /** Previous brush sample (normalized viewport). */
   const lastStrokeNormRef = useRef<{ nx: number; ny: number } | null>(null);
   const lastStrokeEditMsRef = useRef(0);
@@ -484,8 +502,8 @@ function App() {
   const interactionBlockedRef = useRef(false);
   const pendingJoinUrlRef = useRef<string | null>(null);
   const collabActiveMenuRef = useRef(false);
-  const startHostMenuRef = useRef<() => void>(() => { });
-  const leaveSessionMenuRef = useRef<() => void>(() => { });
+  const startHostMenuRef = useRef<() => void>(() => {});
+  const leaveSessionMenuRef = useRef<() => void>(() => {});
   const keysDownRef = useRef<Set<string>>(new Set());
   const flyRafRef = useRef<number>(0);
   /** True while fly mouse-look is active (pointer capture + Tauri grab / cursor warp for infinite look). */
@@ -525,8 +543,9 @@ function App() {
   const [viewportCursorDebugScreen, setViewportCursorDebugScreen] =
     useState<ViewportCursorDebugScreen | null>(null);
   /** Synchronous copy for debug ingest (React state can lag behind rAF). */
-  const viewportCursorDebugScreenRef =
-    useRef<ViewportCursorDebugScreen | null>(null);
+  const viewportCursorDebugScreenRef = useRef<ViewportCursorDebugScreen | null>(
+    null,
+  );
   const viewportCursorDebugRafRef = useRef<number | null>(null);
   const [fullSurfaceViewportEnabled, setFullSurfaceViewportEnabled] = useState(
     readFullSurfaceViewportEnabled,
@@ -552,11 +571,7 @@ function App() {
   /** Selection fill (web `fillSelectDiagonals` / `fillRespectsColor`). */
   const [fillSelectDiagonals, setFillSelectDiagonals] = useState(false);
   const [fillRespectsColor, setFillRespectsColor] = useState(true);
-  type SelectionCombineModeApi =
-    | "replace"
-    | "add"
-    | "subtract"
-    | "intersect";
+  type SelectionCombineModeApi = "replace" | "add" | "subtract" | "intersect";
   const [selectionCombineMode, setSelectionCombineMode] =
     useState<SelectionCombineModeApi>("replace");
   const fillSelectDiagonalsRef = useRef(false);
@@ -580,8 +595,7 @@ function App() {
   const selectionStrokeAxisAlignRef = useRef(true);
   const [surfacePlaneHollow, setSurfacePlaneHollow] = useState(false);
   const surfacePlaneHollowRef = useRef(false);
-  const [sprayConstrainToPlane, setSprayConstrainToPlane] =
-    useState(false);
+  const [sprayConstrainToPlane, setSprayConstrainToPlane] = useState(false);
   const sprayConstrainToPlaneRef = useRef(false);
   const [spraySizeRange, setSpraySizeRange] = useState(false);
   const spraySizeRangeRef = useRef(false);
@@ -599,21 +613,40 @@ function App() {
     circleCenter: null,
   });
   /** Solid cuboid depth phase (web parity): plane drag done; adjust depth then Done. */
-  const [cuboidDepthPhase, setCuboidDepthPhase] = useState<{
-    lineStart: { nx: number; ny: number };
-    endNorm: { nx: number; ny: number };
-  } | null>(null);
-  const cuboidDepthPhaseRef = useRef(cuboidDepthPhase);
+  const cuboidPhase = useStrokePhase<DepthPhaseData>({
+    phases: ["depth"],
+    onCancel: () => {
+      cuboidDepthRef.current = 1;
+      setCuboidDepthUi(1);
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
+    onCommit: () => void commitCuboidSolidAtScreen(),
+  });
   const [cuboidDepthUi, setCuboidDepthUi] = useState(1);
   const cuboidDepthRef = useRef(1);
   /** Solid cylinder: disk drag done; adjust depth then Done (same flow as cuboid). */
-  const [cylinderDepthPhase, setCylinderDepthPhase] = useState<{
-    lineStart: { nx: number; ny: number };
-    endNorm: { nx: number; ny: number };
-  } | null>(null);
-  const cylinderDepthPhaseRef = useRef(cylinderDepthPhase);
+  const cylinderPhase = useStrokePhase<DepthPhaseData>({
+    phases: ["depth"],
+    onCancel: () => {
+      cylinderDepthRef.current = 1;
+      setCylinderDepthUi(1);
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
+    onCommit: () => void commitCylinderSolidAtScreen(),
+  });
   const [cylinderDepthUi, setCylinderDepthUi] = useState(1);
   const cylinderDepthRef = useRef(1);
+  /** Extrude phased tool: drag creates preview, adjust settings, then commit. */
+  const extrudePhase = useStrokePhase<Record<string, never>>({
+    phases: ["settings"],
+    onCancel: () => {
+      void invoke("voxel_stroke_end").catch(() => {});
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
+    onCommit: () => {
+      void invoke("voxel_stroke_end").catch(() => {});
+    },
+  });
   /** Inline depth field: draft while focused; +/- still updates value + draft when editing. */
   const [extrusionDepthEditing, setExtrusionDepthEditing] = useState(false);
   const [extrusionDepthDraft, setExtrusionDepthDraft] = useState("");
@@ -628,8 +661,9 @@ function App() {
   /** 0 = loose, 1 = taut (web ropeTension). */
   const [ropeTension, setRopeTension] = useState(0.5);
   const [ropeBrushRadiusIndex, setRopeBrushRadiusIndex] = useState(2);
-  const [ropeBrushShapeUi, setRopeBrushShapeUi] =
-    useState<"sphere" | "cube">("sphere");
+  const [ropeBrushShapeUi, setRopeBrushShapeUi] = useState<"sphere" | "cube">(
+    "sphere",
+  );
   /** Cloth: corner pins (surface picks), then Apply in tool options. */
   const [clothPins, setClothPins] = useState<[number, number, number][]>([]);
   const clothPinsRef = useRef<[number, number, number][]>([]);
@@ -643,6 +677,27 @@ function App() {
   const [rockRoughness, setRockRoughness] = useState(0.45);
   const [grassDensity, setGrassDensity] = useState(4);
   const [grassMaxHeight, setGrassMaxHeight] = useState(3);
+  // Flora params
+  const [floraHeight, setFloraHeight] = useState(14);
+  const [floraGirth, setFloraGirth] = useState(0);
+  const [floraStemCount, setFloraStemCount] = useState(1);
+  const [floraBranchCount, setFloraBranchCount] = useState(0);
+  const [floraCanopy, setFloraCanopy] = useState(0.18);
+  // Piscina params
+  const [piscinaSpecies, setPiscinaSpecies] = useState<string>("trout");
+  const [piscinaLength, setPiscinaLength] = useState(16);
+  // Insecta params
+  const [insectaSpecies, setInsectaSpecies] = useState<string>("bee");
+  const [insectaTotalLength, setInsectaTotalLength] = useState(24);
+  // Fauna params
+  const [faunaStance, setFaunaStance] = useState<string>("quadruped");
+  const [faunaArchetype, setFaunaArchetype] = useState<string>("ungulate");
+  // Roof params
+  const [roofStyle, setRoofStyle] = useState<string>("gable");
+  const [roofHeight, setRoofHeight] = useState(6);
+  const [roofHollow, setRoofHollow] = useState(false);
+  const [roofPins, setRoofPins] = useState<[number, number, number][]>([]);
+  const roofPinsRef = useRef<[number, number, number][]>([]);
   const [sculptStrokeMode, setSculptStrokeMode] =
     useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] =
@@ -656,7 +711,17 @@ function App() {
   const [sculptBrushStrength, setSculptBrushStrength] = useState(100);
   const [sculptBrushFalloff, setSculptBrushFalloff] = useState(0);
   const [sculptBrushShapeUi, setSculptBrushShapeUi] =
-    useState<SculptBrushShapeUi>("square");
+    useState<SculptBrushShapeUi>("circle");
+  // Extrude-specific params
+  const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">(
+    "cube",
+  );
+  const [extrudeEndCap, setExtrudeEndCap] = useState<
+    "flat" | "rounded" | "pointed"
+  >("flat");
+  const [extrudeTaper, setExtrudeTaper] = useState(false);
+  const [extrudeTaperStart, setExtrudeTaperStart] = useState(3);
+  const [extrudeTaperEnd, setExtrudeTaperEnd] = useState(0);
   const [wallAreaShape, setWallAreaShape] = useState<WallAreaShapeApi>("brush");
   const [sprayDirection, setSprayDirection] =
     useState<SprayDirectionApi>("auto");
@@ -776,6 +841,9 @@ function App() {
     leftPct: number;
     topPct: number;
   } | null>(null);
+  const [peerLabels, setPeerLabels] = useState<
+    { name: string; colorRgb: number; leftPct: number; topPct: number }[]
+  >([]);
   const collabActiveRef = useRef(false);
   const localPeerIdRef = useRef(0);
   const [hostPort, setHostPort] = useState(
@@ -789,9 +857,8 @@ function App() {
   const [hostWanUrl, setHostWanUrl] = useState<string | null>(null);
   const [natPending, setNatPending] = useState(false);
   const [natError, setNatError] = useState<string | null>(null);
-  const [lastSessionInfo, setLastSessionInfo] = useState<LastSessionInfo | null>(
-    null,
-  );
+  const [lastSessionInfo, setLastSessionInfo] =
+    useState<LastSessionInfo | null>(null);
   const [lastSessionReady, setLastSessionReady] = useState(false);
   const [collabActive, setCollabActive] = useState(false);
   /** Set when hosting or after welcome; 0 when solo. */
@@ -818,7 +885,15 @@ function App() {
 
   const hexToRgb = (hex: string): number => {
     const h = hex.replace("#", "");
-    const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+    const n = parseInt(
+      h.length === 3
+        ? h
+            .split("")
+            .map((c) => c + c)
+            .join("")
+        : h,
+      16,
+    );
     return n & 0xffffff;
   };
 
@@ -843,10 +918,12 @@ function App() {
     const surf = surfacePhysRef.current;
     // Height-first bootstrap matches typical swapchain rounding and pairs with viewport math below.
     const bootstrapH = Math.max(1, Math.round(layoutH * dpr));
-    const bootstrapW = Math.max(1, Math.round(bootstrapH * (layoutW / layoutH)));
+    const bootstrapW = Math.max(
+      1,
+      Math.round(bootstrapH * (layoutW / layoutH)),
+    );
     // After a window resize, native size is unknown until the next frame — use bootstrap for configure + origin.
-    const useNativeSurface =
-      surf.w > 0 && surf.h > 0 && !innerChanged;
+    const useNativeSurface = surf.w > 0 && surf.h > 0 && !innerChanged;
     const surfaceWidth = useNativeSurface ? surf.w : bootstrapW;
     const surfaceHeight = useNativeSurface ? surf.h : bootstrapH;
 
@@ -892,7 +969,7 @@ function App() {
         viewportPhysRef.current = { w: sz.width, h: sz.height };
         surfacePhysRef.current = { w: sz.surfaceWidth, h: sz.surfaceHeight };
       })
-      .catch(() => { });
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -944,7 +1021,7 @@ function App() {
         }
         void invoke("debug_menu_sync_viewport_cursor_overlay", {
           enabled: on,
-        }).catch(() => { });
+        }).catch(() => {});
       } catch {
         /* ignore */
       }
@@ -962,7 +1039,7 @@ function App() {
       const enabled = localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) === "1";
       void invoke("debug_menu_sync_viewport_cursor_overlay", {
         enabled,
-      }).catch(() => { });
+      }).catch(() => {});
     } catch {
       /* ignore */
     }
@@ -1002,28 +1079,34 @@ function App() {
         setLoadProgress(0);
         setLoadPhase("");
       }),
-      listen<{ fraction: number; phase: string }>("voxelle-load-progress", (e) => {
-        const p = e.payload;
-        setLoadProgress(p.fraction);
-        setLoadPhase(p.phase);
-        if (p.fraction >= 1) {
-          setLoading(false);
-          setLoadPhase("");
-        }
-      }),
-      listen<{ fraction: number; phase: string }>("voxelle-work-progress", (e) => {
-        const p = e.payload;
-        setWorkProgress(p.fraction);
-        setWorkPhase(p.phase);
-        if (p.fraction >= 1) {
-          setWorkBusy(false);
-          setWorkPhase("");
-          fillOperationPendingRef.current = false;
-          setFillOperationPending(false);
-        } else {
-          setWorkBusy(true);
-        }
-      }),
+      listen<{ fraction: number; phase: string }>(
+        "voxelle-load-progress",
+        (e) => {
+          const p = e.payload;
+          setLoadProgress(p.fraction);
+          setLoadPhase(p.phase);
+          if (p.fraction >= 1) {
+            setLoading(false);
+            setLoadPhase("");
+          }
+        },
+      ),
+      listen<{ fraction: number; phase: string }>(
+        "voxelle-work-progress",
+        (e) => {
+          const p = e.payload;
+          setWorkProgress(p.fraction);
+          setWorkPhase(p.phase);
+          if (p.fraction >= 1) {
+            setWorkBusy(false);
+            setWorkPhase("");
+            fillOperationPendingRef.current = false;
+            setFillOperationPending(false);
+          } else {
+            setWorkBusy(true);
+          }
+        },
+      ),
       listen<unknown>("voxelle-loaded", (e) => {
         setLoadError(null);
         const p = e.payload;
@@ -1155,8 +1238,7 @@ function App() {
         const showToast =
           collabActiveRef.current &&
           !chatPanelOpenRef.current &&
-          (fromPeerId === undefined ||
-            fromPeerId !== localPeerIdRef.current);
+          (fromPeerId === undefined || fromPeerId !== localPeerIdRef.current);
         if (showToast) {
           setChatToasts((prev) => {
             const id = ++chatToastIdRef.current;
@@ -1220,9 +1302,9 @@ function App() {
           const j =
             typeof raw === "string"
               ? (JSON.parse(raw) as {
-                wanUrl?: string | null;
-                error?: string | null;
-              })
+                  wanUrl?: string | null;
+                  error?: string | null;
+                })
               : (raw as { wanUrl?: string | null; error?: string | null });
           setNatPending(false);
           setNatError(
@@ -1299,10 +1381,7 @@ function App() {
       listen<boolean>("voxelle-debug-viewport-cursor-overlay", (e) => {
         const enabled = e.payload;
         try {
-          localStorage.setItem(
-            LS_VIEWPORT_CURSOR_DEBUG,
-            enabled ? "1" : "0",
-          );
+          localStorage.setItem(LS_VIEWPORT_CURSOR_DEBUG, enabled ? "1" : "0");
         } catch {
           /* ignore */
         }
@@ -1317,10 +1396,7 @@ function App() {
       listen<boolean>("voxelle-full-surface-viewport", (e) => {
         const enabled = e.payload;
         try {
-          localStorage.setItem(
-            LS_FULL_SURFACE_VIEWPORT,
-            enabled ? "1" : "0",
-          );
+          localStorage.setItem(LS_FULL_SURFACE_VIEWPORT, enabled ? "1" : "0");
         } catch {
           /* ignore */
         }
@@ -1404,14 +1480,17 @@ function App() {
     });
   }, []);
 
-  const onToolPaneDragEnd = useCallback((e: PointerEvent) => {
-    const d = toolPaneDragRef.current;
-    if (!d || e.pointerId !== d.pid) return;
-    toolPaneDragRef.current = null;
-    window.removeEventListener("pointermove", onToolPaneDragMove);
-    window.removeEventListener("pointerup", onToolPaneDragEnd);
-    window.removeEventListener("pointercancel", onToolPaneDragEnd);
-  }, [onToolPaneDragMove]);
+  const onToolPaneDragEnd = useCallback(
+    (e: PointerEvent) => {
+      const d = toolPaneDragRef.current;
+      if (!d || e.pointerId !== d.pid) return;
+      toolPaneDragRef.current = null;
+      window.removeEventListener("pointermove", onToolPaneDragMove);
+      window.removeEventListener("pointerup", onToolPaneDragEnd);
+      window.removeEventListener("pointercancel", onToolPaneDragEnd);
+    },
+    [onToolPaneDragMove],
+  );
 
   const onToolPaneDragDown = useCallback(
     (e: React.PointerEvent) => {
@@ -1460,7 +1539,7 @@ function App() {
             topPct: (sy / h) * 100,
           });
         })
-        .catch(() => { });
+        .catch(() => {});
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -1469,6 +1548,32 @@ function App() {
       cancelAnimationFrame(raf);
     };
   }, [pingHudTick]);
+
+  // Poll peer label screen positions while collab is active
+  useEffect(() => {
+    if (!collabActive) {
+      setPeerLabels([]);
+      return;
+    }
+    let cancelled = false;
+    let raf = 0;
+    const tick = () => {
+      if (cancelled) return;
+      void invoke<
+        { name: string; colorRgb: number; leftPct: number; topPct: number }[]
+      >("collab_peer_labels")
+        .then((labels) => {
+          if (!cancelled) setPeerLabels(labels);
+        })
+        .catch(() => {});
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelled = true;
+      cancelAnimationFrame(raf);
+    };
+  }, [collabActive]);
 
   useEffect(() => {
     interactionModeRef.current = interactionMode;
@@ -1523,7 +1628,12 @@ function App() {
   const sculptBrushRadiusRef = useRef(2);
   const sculptBrushStrengthRef = useRef(100);
   const sculptBrushFalloffRef = useRef(0);
-  const sculptBrushShapeUiRef = useRef<SculptBrushShapeUi>("square");
+  const sculptBrushShapeUiRef = useRef<SculptBrushShapeUi>("circle");
+  const extrudeProfileRef = useRef<"cube" | "cylinder">("cube");
+  const extrudeEndCapRef = useRef<"flat" | "rounded" | "pointed">("flat");
+  const extrudeTaperRef = useRef(false);
+  const extrudeTaperStartRef = useRef(3);
+  const extrudeTaperEndRef = useRef(0);
   const wallAreaShapeRef = useRef<WallAreaShapeApi>("brush");
   const sprayDirectionRef = useRef<SprayDirectionApi>("auto");
   const wallWidthIndexRef = useRef(0);
@@ -1572,6 +1682,21 @@ function App() {
   useEffect(() => {
     sculptBrushShapeUiRef.current = sculptBrushShapeUi;
   }, [sculptBrushShapeUi]);
+  useEffect(() => {
+    extrudeProfileRef.current = extrudeProfile;
+  }, [extrudeProfile]);
+  useEffect(() => {
+    extrudeEndCapRef.current = extrudeEndCap;
+  }, [extrudeEndCap]);
+  useEffect(() => {
+    extrudeTaperRef.current = extrudeTaper;
+  }, [extrudeTaper]);
+  useEffect(() => {
+    extrudeTaperStartRef.current = extrudeTaperStart;
+  }, [extrudeTaperStart]);
+  useEffect(() => {
+    extrudeTaperEndRef.current = extrudeTaperEnd;
+  }, [extrudeTaperEnd]);
   useEffect(() => {
     wallAreaShapeRef.current = wallAreaShape;
   }, [wallAreaShape]);
@@ -1627,17 +1752,11 @@ function App() {
   }, [strokeFamilyVariant]);
   useEffect(() => {
     drawStrokeModeRef.current = drawStrokeMode;
-    if (drawStrokeMode !== "cuboid") {
-      setCuboidDepthPhase(null);
-      cuboidDepthPhaseRef.current = null;
-      cuboidDepthRef.current = 1;
-      setCuboidDepthUi(1);
+    if (drawStrokeMode !== "cuboid" && cuboidPhase.active) {
+      cuboidPhase.cancel();
     }
-    if (drawStrokeMode !== "cylinder") {
-      setCylinderDepthPhase(null);
-      cylinderDepthPhaseRef.current = null;
-      cylinderDepthRef.current = 1;
-      setCylinderDepthUi(1);
+    if (drawStrokeMode !== "cylinder" && cylinderPhase.active) {
+      cylinderPhase.cancel();
     }
   }, [drawStrokeMode]);
   useEffect(() => {
@@ -1711,7 +1830,7 @@ function App() {
         addSnapToSurface: squishySnapToSurface,
         wallThickness: Math.max(1, squishyWallThickness | 0),
       },
-    }).catch(() => { });
+    }).catch(() => {});
   }, [squishyHollow, squishySnapToSurface, squishyWallThickness]);
 
   function mergedStrokeAux(
@@ -1742,11 +1861,11 @@ function App() {
         ? { polygonVertices }
         : {}),
     };
-    if (sm === "cuboid" && cuboidDepthPhaseRef.current) {
+    if (sm === "cuboid" && cuboidPhase.ref.current) {
       out.cuboidDepth = cuboidDepthRef.current;
       out.cuboidHollowWallThickness = 1;
     }
-    if (sm === "cylinder" && cylinderDepthPhaseRef.current) {
+    if (sm === "cylinder" && cylinderPhase.ref.current) {
       out.cylinderDepth = cylinderDepthRef.current;
       out.cylinderTaperPct = 0;
       out.cuboidHollowWallThickness = 1;
@@ -1755,26 +1874,20 @@ function App() {
   }
 
   useEffect(() => {
-    cuboidDepthPhaseRef.current = cuboidDepthPhase;
-  }, [cuboidDepthPhase]);
-
-  useEffect(() => {
     cuboidDepthRef.current = cuboidDepthUi;
   }, [cuboidDepthUi]);
-
-  useEffect(() => {
-    cylinderDepthPhaseRef.current = cylinderDepthPhase;
-  }, [cylinderDepthPhase]);
 
   useEffect(() => {
     cylinderDepthRef.current = cylinderDepthUi;
   }, [cylinderDepthUi]);
 
+  // Cuboid depth preview: re-invoke when phase data or depth changes.
   useEffect(() => {
-    if (!cuboidDepthPhase || loading || workBusy) return;
+    const snap = cuboidPhase.snapshot;
+    if (!snap || loading || workBusy) return;
     const im = interactionModeRef.current;
     if (im !== "add" && im !== "remove" && im !== "paint") return;
-    const { lineStart, endNorm } = cuboidDepthPhase;
+    const { lineStart, endNorm } = snap.data;
     const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
     void invoke("voxel_stroke_preview_at_screen", {
       args: {
@@ -1794,13 +1907,15 @@ function App() {
         strokeLineStartNy: lineStart.ny,
       },
     }).catch(() => {});
-  }, [cuboidDepthPhase, cuboidDepthUi, loading, workBusy, interactionMode]);
+  }, [cuboidPhase.snapshot, cuboidDepthUi, loading, workBusy, interactionMode]);
 
+  // Cylinder depth preview: re-invoke when phase data or depth changes.
   useEffect(() => {
-    if (!cylinderDepthPhase || loading || workBusy) return;
+    const snap = cylinderPhase.snapshot;
+    if (!snap || loading || workBusy) return;
     const im = interactionModeRef.current;
     if (im !== "add" && im !== "remove" && im !== "paint") return;
-    const { lineStart, endNorm } = cylinderDepthPhase;
+    const { lineStart, endNorm } = snap.data;
     const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
     void invoke("voxel_stroke_preview_at_screen", {
       args: {
@@ -1820,43 +1935,49 @@ function App() {
         strokeLineStartNy: lineStart.ny,
       },
     }).catch(() => {});
-  }, [cylinderDepthPhase, cylinderDepthUi, loading, workBusy, interactionMode]);
+  }, [
+    cylinderPhase.snapshot,
+    cylinderDepthUi,
+    loading,
+    workBusy,
+    interactionMode,
+  ]);
 
-  function cancelCuboidDepthPhase() {
-    setCuboidDepthPhase(null);
-    cuboidDepthPhaseRef.current = null;
-    cuboidDepthRef.current = 1;
-    setCuboidDepthUi(1);
-    void invoke("voxel_stroke_preview_reset").catch(() => {});
-  }
-
-  function cancelCylinderDepthPhase() {
-    setCylinderDepthPhase(null);
-    cylinderDepthPhaseRef.current = null;
-    cylinderDepthRef.current = 1;
-    setCylinderDepthUi(1);
-    void invoke("voxel_stroke_preview_reset").catch(() => {});
-  }
-
+  // Cancel extrude phase if interaction mode changes
   useEffect(() => {
-    if (!cuboidDepthPhase && !cylinderDepthPhase) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        if (cuboidDepthPhaseRef.current) cancelCuboidDepthPhase();
-        if (cylinderDepthPhaseRef.current) cancelCylinderDepthPhase();
-        e.preventDefault();
-      } else if (e.key === "Enter" && !e.repeat) {
-        e.preventDefault();
-        if (cuboidDepthPhaseRef.current) commitCuboidSolidAtScreen();
-        else if (cylinderDepthPhaseRef.current) commitCylinderSolidAtScreen();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [cuboidDepthPhase, cylinderDepthPhase]);
+    if (extrudePhase.active && interactionMode !== "sculpt") {
+      extrudePhase.cancel();
+    }
+  }, [extrudePhase.active, interactionMode]);
 
+  // Live-update extrude preview when settings change during the phase.
   useEffect(() => {
-    if (!cuboidDepthPhase && !cylinderDepthPhase) return;
+    if (!extrudePhase.active) return;
+    void invoke("extrude_recompute_preview", {
+      args: {
+        extrudeProfile: extrudeProfileRef.current,
+        extrudeEndCap: extrudeEndCapRef.current,
+        extrudeTaper: extrudeTaperRef.current,
+        extrudeTaperStart: extrudeTaperRef.current
+          ? extrudeTaperStartRef.current
+          : 0,
+        extrudeTaperEnd: extrudeTaperRef.current
+          ? extrudeTaperEndRef.current
+          : 0,
+      },
+    }).catch(() => {});
+  }, [
+    extrudePhase.active,
+    extrudeProfile,
+    extrudeEndCap,
+    extrudeTaper,
+    extrudeTaperStart,
+    extrudeTaperEnd,
+  ]);
+
+  // Cancel cuboid/cylinder depth phase if interaction mode becomes incompatible.
+  useEffect(() => {
+    if (!cuboidPhase.active && !cylinderPhase.active) return;
     const im = interactionMode;
     if (
       im !== "add" &&
@@ -1867,139 +1988,26 @@ function App() {
       im !== "selectCoplanar" &&
       im !== "selectCoplanarEmpty"
     ) {
-      if (cuboidDepthPhase) cancelCuboidDepthPhase();
-      if (cylinderDepthPhase) cancelCylinderDepthPhase();
+      if (cuboidPhase.active) cuboidPhase.cancel();
+      if (cylinderPhase.active) cylinderPhase.cancel();
     }
-  }, [interactionMode, cuboidDepthPhase, cylinderDepthPhase]);
+  }, [interactionMode, cuboidPhase.active, cylinderPhase.active]);
 
-  async function commitCuboidSolidAtScreen() {
-    const phase = cuboidDepthPhaseRef.current;
-    if (!phase) return;
-    const im = interactionModeRef.current;
-    const { lineStart, endNorm } = phase;
-    const strokeAuxSnapshot = mergedStrokeAux({});
-    try {
-      if (im === "add" || im === "remove" || im === "paint") {
-        const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
-        await invoke("voxel_edit_at_screen", {
-          args: {
-            nx: endNorm.nx,
-            ny: endNorm.ny,
-            tool,
-            color: activeColorRef.current,
-            material: activeMaterialRef.current,
-            brushRadius: brushRadiusRef.current,
-            brushShape: brushShapeRef.current,
-            sprayDensity: sprayDensityRef.current,
-            strokeMode: "cuboid",
-            planeAxis: planeAxisRef.current,
-            strokeAux: strokeAuxSnapshot,
-            matchMaterial: matchMaterialSelectColorRef.current,
-            fillSelectDiagonals: fillSelectDiagonalsRef.current,
-            fillRespectsColor: fillRespectsColorRef.current,
-            strokeLineStartNx: lineStart.nx,
-            strokeLineStartNy: lineStart.ny,
-          },
-        });
-      } else if (
-        im === "select" ||
-        im === "selectByColor" ||
-        im === "selectCoplanar" ||
-        im === "selectCoplanarEmpty"
-      ) {
-        const n = await invoke<number>("selection_stroke_at_screen", {
-          args: {
-            nx: endNorm.nx,
-            ny: endNorm.ny,
-            brushRadius: brushRadiusRef.current,
-            brushShape: brushShapeRef.current,
-            sprayDensity: sprayDensityRef.current,
-            strokeMode: drawStrokeModeRef.current,
-            planeAxis: planeAxisRef.current,
-            strokeAux: strokeAuxSnapshot,
-            fillSelectDiagonals: fillSelectDiagonalsRef.current,
-            fillRespectsColor: fillRespectsColorRef.current,
-            matchMaterial: matchMaterialSelectColorRef.current,
-            interaction: selectionInteractionArg(im),
-            strokeLineStartNx: lineStart.nx,
-            strokeLineStartNy: lineStart.ny,
-          },
-        });
-        if (n > 0) {
-          const c = await invoke<number>("selection_get_count");
-          setSelectionCount(c);
-        }
-      }
-    } catch (e) {
-      console.error("[voxelle] commit cuboid depth phase", e);
-    } finally {
-      cancelCuboidDepthPhase();
-    }
+  function commitDepthPhaseAtScreen(shape: "cuboid" | "cylinder") {
+    const phase = shape === "cuboid" ? cuboidPhase : cylinderPhase;
+    const snap = phase.ref.current;
+    if (!snap) return;
+    const { lineStart, endNorm } = snap.data;
+    runStrokeAtScreen(endNorm.nx, endNorm.ny, {}, { lineStart });
+    phase.cancel();
   }
 
-  async function commitCylinderSolidAtScreen() {
-    const phase = cylinderDepthPhaseRef.current;
-    if (!phase) return;
-    const im = interactionModeRef.current;
-    const { lineStart, endNorm } = phase;
-    const strokeAuxSnapshot = mergedStrokeAux({});
-    try {
-      if (im === "add" || im === "remove" || im === "paint") {
-        const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
-        await invoke("voxel_edit_at_screen", {
-          args: {
-            nx: endNorm.nx,
-            ny: endNorm.ny,
-            tool,
-            color: activeColorRef.current,
-            material: activeMaterialRef.current,
-            brushRadius: brushRadiusRef.current,
-            brushShape: brushShapeRef.current,
-            sprayDensity: sprayDensityRef.current,
-            strokeMode: "cylinder",
-            planeAxis: planeAxisRef.current,
-            strokeAux: strokeAuxSnapshot,
-            matchMaterial: matchMaterialSelectColorRef.current,
-            fillSelectDiagonals: fillSelectDiagonalsRef.current,
-            fillRespectsColor: fillRespectsColorRef.current,
-            strokeLineStartNx: lineStart.nx,
-            strokeLineStartNy: lineStart.ny,
-          },
-        });
-      } else if (
-        im === "select" ||
-        im === "selectByColor" ||
-        im === "selectCoplanar" ||
-        im === "selectCoplanarEmpty"
-      ) {
-        const n = await invoke<number>("selection_stroke_at_screen", {
-          args: {
-            nx: endNorm.nx,
-            ny: endNorm.ny,
-            brushRadius: brushRadiusRef.current,
-            brushShape: brushShapeRef.current,
-            sprayDensity: sprayDensityRef.current,
-            strokeMode: drawStrokeModeRef.current,
-            planeAxis: planeAxisRef.current,
-            strokeAux: strokeAuxSnapshot,
-            fillSelectDiagonals: fillSelectDiagonalsRef.current,
-            fillRespectsColor: fillRespectsColorRef.current,
-            matchMaterial: matchMaterialSelectColorRef.current,
-            interaction: selectionInteractionArg(im),
-            strokeLineStartNx: lineStart.nx,
-            strokeLineStartNy: lineStart.ny,
-          },
-        });
-        if (n > 0) {
-          const c = await invoke<number>("selection_get_count");
-          setSelectionCount(c);
-        }
-      }
-    } catch (e) {
-      console.error("[voxelle] commit cylinder depth phase", e);
-    } finally {
-      cancelCylinderDepthPhase();
-    }
+  function commitCuboidSolidAtScreen() {
+    commitDepthPhaseAtScreen("cuboid");
+  }
+
+  function commitCylinderSolidAtScreen() {
+    commitDepthPhaseAtScreen("cylinder");
   }
 
   /** Payload for `sync_preview_input` — must match Rust `SyncPreviewInput` (camelCase). */
@@ -2059,54 +2067,120 @@ function App() {
     };
   }
 
-  function runVoxelEditAtScreen(
+  /**
+   * Unified stroke dispatch: calls `voxel_edit_at_screen` for edits or
+   * `selection_stroke_at_screen` for selection, building shared args once.
+   */
+  function runStrokeAtScreen(
     nx: number,
     ny: number,
-    strokeAux: {
-      polygonVertices?: [number, number, number][];
-      circleCenter?: [number, number, number];
-      circleEdge?: [number, number, number];
-      cylinderA?: [number, number, number];
-      cylinderB?: [number, number, number];
+    strokeAux: Record<string, unknown>,
+    opts?: {
+      lineStart?: { nx: number; ny: number } | null;
+      brushPrev?: { nx: number; ny: number } | null;
     },
   ) {
-    const im = interactionModeRef.current;
-    if (im !== "add" && im !== "remove" && im !== "paint") return;
-    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    const dispatch = getStrokeDispatch(interactionModeRef.current);
+    if (!dispatch) return;
+    const lineStart = opts?.lineStart;
+    const brushPrev = opts?.brushPrev;
     const isFill = drawStrokeModeRef.current === "fill";
     if (isFill) beginFillOperation();
-    void invoke("voxel_edit_at_screen", {
-      args: {
-        nx,
-        ny,
-        tool,
-        color: activeColorRef.current,
-        material: activeMaterialRef.current,
-        brushRadius: brushRadiusRef.current,
-        brushShape: brushShapeRef.current,
-        sprayDensity: sprayDensityRef.current,
-        strokeMode: drawStrokeModeRef.current,
-        planeAxis: planeAxisRef.current,
-        strokeAux: mergedStrokeAux(
-          strokeAux as Record<string, unknown>,
-        ),
-        matchMaterial: matchMaterialSelectColorRef.current,
-        fillSelectDiagonals: fillSelectDiagonalsRef.current,
-        fillRespectsColor: fillRespectsColorRef.current,
-      },
-    })
-      .catch((e) => {
-        console.error("[voxelle] voxel_edit_at_screen error", e);
+    const sharedArgs: Record<string, unknown> = {
+      nx,
+      ny,
+      brushRadius: brushRadiusRef.current,
+      brushShape: brushShapeRef.current,
+      sprayDensity: sprayDensityRef.current,
+      strokeMode: drawStrokeModeRef.current,
+      planeAxis: planeAxisRef.current,
+      strokeAux: mergedStrokeAux(strokeAux),
+      matchMaterial: matchMaterialSelectColorRef.current,
+      fillSelectDiagonals: fillSelectDiagonalsRef.current,
+      fillRespectsColor: fillRespectsColorRef.current,
+      ...(lineStart
+        ? {
+            strokeLineStartNx: lineStart.nx,
+            strokeLineStartNy: lineStart.ny,
+          }
+        : {}),
+      ...(!lineStart && brushPrev
+        ? {
+            strokeSegmentPrevNx: brushPrev.nx,
+            strokeSegmentPrevNy: brushPrev.ny,
+          }
+        : {}),
+    };
+    if (dispatch.kind === "edit") {
+      void invoke("voxel_edit_at_screen", {
+        args: {
+          ...sharedArgs,
+          tool: dispatch.tool,
+          color: activeColorRef.current,
+          material: activeMaterialRef.current,
+        },
       })
-      .finally(() => {
-        if (isFill) endFillOperation();
-      });
+        .catch((e) => {
+          console.error("[voxelle] voxel_edit_at_screen error", e);
+        })
+        .finally(() => {
+          if (isFill) endFillOperation();
+        });
+    } else {
+      void invoke<number>("selection_stroke_at_screen", {
+        args: {
+          ...sharedArgs,
+          interaction: dispatch.interaction,
+        },
+      })
+        .then((n) => {
+          if (n > 0) {
+            void invoke<number>("selection_get_count").then((c) =>
+              setSelectionCount(c),
+            );
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (isFill) endFillOperation();
+        });
+    }
+  }
+
+  /** Specialized selection single-click commands (selectByColor, selectCoplanar, selectCoplanarEmpty). */
+  function invokeSelectionSpecialClick(
+    interaction: string,
+    nx: number,
+    ny: number,
+  ) {
+    const cmd =
+      interaction === "selectByColor"
+        ? "selection_add_by_color_at_screen"
+        : interaction === "selectCoplanar"
+          ? "selection_add_coplanar_at_screen"
+          : interaction === "selectCoplanarEmpty"
+            ? "selection_add_coplanar_empty_at_screen"
+            : null;
+    if (!cmd) return;
+    const args: Record<string, unknown> = { nx, ny };
+    if (interaction === "selectByColor") {
+      args.matchMaterial = matchMaterialSelectColorRef.current;
+    }
+    void invoke<number>(cmd, { args })
+      .then((n) => {
+        if (n > 0) {
+          void invoke<number>("selection_get_count").then((c) =>
+            setSelectionCount(c),
+          );
+        }
+      })
+      .catch(() => {});
   }
 
   async function handleStrokeAnchorClick(nx: number, ny: number) {
-    const im = interactionModeRef.current;
-    if (im !== "add" && im !== "remove" && im !== "paint") return;
-    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    const dispatch = getStrokeDispatch(interactionModeRef.current);
+    if (!dispatch) return;
+    const tool = dispatch.kind === "edit" ? dispatch.tool : "remove";
     const c = await invoke<[number, number, number] | null>(
       "voxel_stroke_anchor_coord_at_screen",
       {
@@ -2121,7 +2195,7 @@ function App() {
     if (!c) return;
     const sm = drawStrokeModeRef.current;
     if (sm === "fill") {
-      runVoxelEditAtScreen(nx, ny, {});
+      runStrokeAtScreen(nx, ny, {});
       return;
     }
     if (sm === "polygon" || sm === "polygonHull") {
@@ -2129,8 +2203,7 @@ function App() {
         const idx = v.findIndex(
           (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
         );
-        const next =
-          idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+        const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
         strokePolygonVertsRef.current = next;
         return next;
       });
@@ -2151,7 +2224,7 @@ function App() {
       if (!r.circleCenter) {
         r.circleCenter = c;
       } else {
-        runVoxelEditAtScreen(nx, ny, {
+        runStrokeAtScreen(nx, ny, {
           circleCenter: r.circleCenter,
           circleEdge: c,
         });
@@ -2178,8 +2251,7 @@ function App() {
       const idx = v.findIndex(
         (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
       );
-      const next =
-        idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+      const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
       wallSculptPolygonVertsRef.current = next;
       return next;
     });
@@ -2202,8 +2274,7 @@ function App() {
       const idx = v.findIndex(
         (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
       );
-      const next =
-        idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+      const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
       clothPinsRef.current = next;
       return next;
     });
@@ -2236,77 +2307,9 @@ function App() {
       strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
     const nx = scr?.nx ?? 0;
     const ny = scr?.ny ?? 0;
-    runVoxelEditAtScreen(nx, ny, {
+    runStrokeAtScreen(nx, ny, {
       polygonVertices: strokePolygonVerts.map((v) => [v[0], v[1], v[2]]),
     });
-  }
-
-  function applyPolygonSelectionStrokeFill() {
-    if (strokePolygonVerts.length < 3) return;
-    const scr =
-      strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
-    const nx = scr?.nx ?? 0;
-    const ny = scr?.ny ?? 0;
-    runSelectionStrokeAtScreen(nx, ny, {
-      polygonVertices: strokePolygonVerts.map((v) => [v[0], v[1], v[2]]),
-    });
-  }
-
-  async function handleSelectionStrokeAnchorClick(nx: number, ny: number) {
-    const im = interactionModeRef.current;
-    if (
-      im !== "select" &&
-      im !== "selectByColor" &&
-      im !== "selectCoplanar" &&
-      im !== "selectCoplanarEmpty"
-    ) {
-      return;
-    }
-    const c = await invoke<[number, number, number] | null>(
-      "voxel_stroke_anchor_coord_at_screen",
-      { args: { nx, ny, tool: "remove" } },
-    );
-    if (!c) return;
-    const sm = drawStrokeModeRef.current;
-    if (sm === "fill") {
-      runSelectionStrokeAtScreen(nx, ny, {});
-      return;
-    }
-    if (sm === "polygon" || sm === "polygonHull") {
-      setStrokePolygonVerts((v) => {
-        const idx = v.findIndex(
-          (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
-        );
-        const next =
-          idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
-        strokePolygonVertsRef.current = next;
-        return next;
-      });
-      strokePolygonLastScreenRef.current = { nx, ny };
-      queueMicrotask(() => {
-        void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(
-            nx,
-            ny,
-            previewModeForSync(interactionModeRef.current),
-          ),
-        }).catch(() => {});
-      });
-      return;
-    }
-    if (sm === "circle") {
-      const r = strokeClickRef.current;
-      if (!r.circleCenter) {
-        r.circleCenter = c;
-      } else {
-        runSelectionStrokeAtScreen(nx, ny, {
-          circleCenter: r.circleCenter,
-          circleEdge: c,
-        });
-        r.circleCenter = null;
-      }
-      return;
-    }
   }
 
   useEffect(() => {
@@ -2395,13 +2398,6 @@ function App() {
     return "navigate";
   };
 
-  function selectionInteractionArg(im: InteractionMode): string {
-    if (im === "selectByColor") return "selectByColor";
-    if (im === "selectCoplanar") return "selectCoplanar";
-    if (im === "selectCoplanarEmpty") return "selectCoplanarEmpty";
-    return "select";
-  }
-
   /**
    * Normalized viewport coords of pointer down for strokes that need a drag origin.
    * Line style always; brush style for plane/circle/cuboid/etc. (Surface/Solid), but not Spray
@@ -2430,69 +2426,6 @@ function App() {
     setFillOperationPending(false);
   }
 
-  function runSelectionStrokeAtScreen(
-    nx: number,
-    ny: number,
-    strokeAux: Record<string, unknown>,
-    opts?: {
-      lineStart?: { nx: number; ny: number } | null;
-      brushPrev?: { nx: number; ny: number } | null;
-    },
-  ) {
-    const im = interactionModeRef.current;
-    if (
-      im !== "select" &&
-      im !== "selectByColor" &&
-      im !== "selectCoplanar" &&
-      im !== "selectCoplanarEmpty"
-    ) {
-      return;
-    }
-    const lineStart = opts?.lineStart;
-    const brushPrev = opts?.brushPrev;
-    const isFill = drawStrokeModeRef.current === "fill";
-    if (isFill) beginFillOperation();
-    void invoke<number>("selection_stroke_at_screen", {
-      args: {
-        nx,
-        ny,
-        brushRadius: brushRadiusRef.current,
-        brushShape: brushShapeRef.current,
-        sprayDensity: sprayDensityRef.current,
-        strokeMode: drawStrokeModeRef.current,
-        planeAxis: planeAxisRef.current,
-        strokeAux: mergedStrokeAux(strokeAux),
-        fillSelectDiagonals: fillSelectDiagonalsRef.current,
-        fillRespectsColor: fillRespectsColorRef.current,
-        matchMaterial: matchMaterialSelectColorRef.current,
-        interaction: selectionInteractionArg(im),
-        ...(lineStart
-          ? {
-            strokeLineStartNx: lineStart.nx,
-            strokeLineStartNy: lineStart.ny,
-          }
-          : {}),
-        ...(!lineStart && brushPrev
-          ? {
-            strokeSegmentPrevNx: brushPrev.nx,
-            strokeSegmentPrevNy: brushPrev.ny,
-          }
-          : {}),
-      },
-    })
-      .then((n) => {
-        if (n > 0) {
-          void invoke<number>("selection_get_count").then((c) =>
-            setSelectionCount(c),
-          );
-        }
-      })
-      .catch(() => {})
-      .finally(() => {
-        if (isFill) endFillOperation();
-      });
-  }
-
   useLayoutEffect(() => {
     applyAppearanceToDocument(loadPreferences().appearanceTheme);
   }, []);
@@ -2510,8 +2443,7 @@ function App() {
 
   useEffect(() => {
     loadingRef.current = loading;
-    interactionBlockedRef.current =
-      loading || workBusy || fillOperationPending;
+    interactionBlockedRef.current = loading || workBusy || fillOperationPending;
   }, [loading, workBusy, fillOperationPending]);
 
   /** Escape cancels in-progress flood fill (Rust BFS checks `fill_operation_cancel`). */
@@ -2562,7 +2494,7 @@ function App() {
     void invoke("collab_update_profile", {
       displayName: normalizeCollabDisplayName(displayName),
       colorRgb: rgb,
-    }).catch(() => { });
+    }).catch(() => {});
   }, [displayName, accentColor, collabActive]);
 
   useEffect(() => {
@@ -2594,7 +2526,7 @@ function App() {
   useEffect(() => {
     const p = loadPreferences();
     void invoke("set_autosave_settings", autosaveSettingsInvokeArgs(p)).catch(
-      () => { },
+      () => {},
     );
   }, []);
 
@@ -2609,27 +2541,29 @@ function App() {
     const p = loadPreferences();
     void invoke("set_tone_mapping", {
       mode: toneMappingToGpuMode(p.toneMapping),
-    }).catch(() => { });
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem(LS_RENDERING_MODE) as RenderingMode | null;
+    const saved = localStorage.getItem(
+      LS_RENDERING_MODE,
+    ) as RenderingMode | null;
     const valid =
       saved &&
       ["greedy", "marchingCubes", "dualContour", "ray"].includes(saved);
     void invoke<RenderingMode>("get_rendering_mode")
       .then((m) => {
         if (valid && saved !== m) {
-          void invoke("set_rendering_mode", { mode: saved }).catch(() => { });
+          void invoke("set_rendering_mode", { mode: saved }).catch(() => {});
         }
       })
-      .catch(() => { });
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!collabActive) return;
     const id = window.setInterval(() => {
-      void invoke("collab_push_camera").catch(() => { });
+      void invoke("collab_push_camera").catch(() => {});
     }, 150);
     return () => clearInterval(id);
   }, [collabActive]);
@@ -2649,16 +2583,16 @@ function App() {
       if (meta && e.key === "z") {
         e.preventDefault();
         if (e.shiftKey) {
-          void invoke("voxel_redo").catch(() => { });
+          void invoke("voxel_redo").catch(() => {});
         } else {
-          void invoke("voxel_undo").catch(() => { });
+          void invoke("voxel_undo").catch(() => {});
         }
         return;
       }
       if (meta && e.key === "s") {
         e.preventDefault();
         void invoke("save_voxelle").catch(() => {
-          void invoke("save_voxelle_as").catch(() => { });
+          void invoke("save_voxelle_as").catch(() => {});
         });
         return;
       }
@@ -2711,7 +2645,7 @@ function App() {
             z: r.z,
           }).catch(() => {});
         })
-        .catch(() => { });
+        .catch(() => {});
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -2760,7 +2694,7 @@ function App() {
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
       args: buildSyncPreviewPayload(-1, 0, "navigate"),
-    }).catch(() => { });
+    }).catch(() => {});
     void invoke("squishy_gizmo_pointer_up").catch(() => {});
   }, []);
 
@@ -2832,7 +2766,7 @@ function App() {
   useEffect(() => {
     void invoke("sync_preview_input", {
       args: buildSyncPreviewPayload(-1, 0, previewModeForSync(interactionMode)),
-    }).catch(() => { });
+    }).catch(() => {});
   }, [interactionMode]);
 
   /** Re-push brush/stroke params so hover preview updates when sliders change without moving the pointer. */
@@ -2946,17 +2880,23 @@ function App() {
         atmosphere: moodAtmosphere,
         sunShafts: moodSunShafts,
       },
-    }).catch(() => { });
-  }, [moodGrain, moodVignette, moodDistanceTint, moodAtmosphere, moodSunShafts]);
+    }).catch(() => {});
+  }, [
+    moodGrain,
+    moodVignette,
+    moodDistanceTint,
+    moodAtmosphere,
+    moodSunShafts,
+  ]);
 
   useEffect(() => {
     if (interactionMode !== "fly") {
-      void invoke("set_fly_mode", { enabled: false }).catch(() => { });
+      void invoke("set_fly_mode", { enabled: false }).catch(() => {});
       keysDownRef.current.clear();
       void releaseFlyMouseLook();
       return;
     }
-    void invoke("set_fly_mode", { enabled: true }).catch(() => { });
+    void invoke("set_fly_mode", { enabled: true }).catch(() => {});
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.code === "Escape" && flyMouseLookActiveRef.current) {
@@ -3031,7 +2971,7 @@ function App() {
           flySkipNextFlyMoveRef.current = true;
           flyLastClientRef.current = { x: cx, y: cy };
         })
-        .catch(() => { });
+        .catch(() => {});
     };
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
@@ -3044,7 +2984,7 @@ function App() {
       if (pdx !== 0 || pdy !== 0) {
         void invoke("camera_fly_look", {
           args: { dx: pdx, dy: pdy },
-        }).catch(() => { });
+        }).catch(() => {});
       }
       const k = keysDownRef.current;
       let forward = 0;
@@ -3060,7 +3000,7 @@ function App() {
       const speedScale = slow ? 1 / 8 : 1;
       void invoke("sync_fly_input", {
         args: { forward, right, up, speedScale },
-      }).catch(() => { });
+      }).catch(() => {});
       flyRafRef.current = requestAnimationFrame(tick);
     };
     flyRafRef.current = requestAnimationFrame(tick);
@@ -3069,7 +3009,7 @@ function App() {
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
       document.removeEventListener("pointermove", onFlyPointerMove, true);
-      void invoke("set_fly_mode", { enabled: false }).catch(() => { });
+      void invoke("set_fly_mode", { enabled: false }).catch(() => {});
       void releaseFlyMouseLook();
     };
   }, [interactionMode, releaseFlyMouseLook]);
@@ -3084,7 +3024,7 @@ function App() {
       return;
     void invoke<number>("selection_get_count")
       .then((n) => setSelectionCount(n))
-      .catch(() => { });
+      .catch(() => {});
   }, [interactionMode]);
 
   useEffect(() => {
@@ -3132,7 +3072,12 @@ function App() {
       if (!planeStrokeDebugEnabledRef.current) return;
       const mode = interactionModeRef.current;
       const sm = drawStrokeModeRef.current;
-      if (!(sm === "plane" && (mode === "add" || mode === "remove" || mode === "paint"))) {
+      if (
+        !(
+          sm === "plane" &&
+          (mode === "add" || mode === "remove" || mode === "paint")
+        )
+      ) {
         return;
       }
       const g = gestureRef.current;
@@ -3230,6 +3175,11 @@ function App() {
     probingRef.current = true;
     gestureRef.current = null;
 
+    // Cancel extrude phase on any new viewport click.
+    if (extrudePhase.ref.current) {
+      extrudePhase.cancel();
+    }
+
     const { nx, ny } = clientToViewportNormalized(e);
     const pointerId = e.pointerId;
     const middleButton = e.button === 1;
@@ -3281,7 +3231,7 @@ function App() {
     }
 
     let hitSolid = false;
-    if (
+    const isDrawOrSelect =
       !logoSplashPointer &&
       !loading &&
       !workBusy &&
@@ -3300,8 +3250,15 @@ function App() {
         mode === "sculpt" ||
         mode === "generator" ||
         mode === "squishy") &&
-      e.button === 0
-    ) {
+      e.button === 0;
+    // Fill mode skips drag entirely and commits on pointer-up via a screen
+    // coordinate alone, so it never needs the async pick probe.  Skipping the
+    // probe avoids a race where onPointerUp fires while the probe is still
+    // in-flight, causing the click to be silently discarded (the "click twice
+    // to fill" bug).
+    const skipProbeForFill =
+      isDrawOrSelect && drawStrokeModeRef.current === "fill";
+    if (isDrawOrSelect && !skipProbeForFill) {
       try {
         hitSolid = await invoke<boolean>("voxel_pick_probe", {
           args: { nx, ny },
@@ -3309,6 +3266,9 @@ function App() {
       } catch {
         hitSolid = false;
       }
+    }
+    if (skipProbeForFill) {
+      hitSolid = true;
     }
 
     probingRef.current = false;
@@ -3329,43 +3289,29 @@ function App() {
     });
     lastRef.current = { x: e.clientX, y: e.clientY };
 
-    if (
-      gestureRef.current.mode === "voxel" &&
-      (mode === "add" ||
-        mode === "remove" ||
-        mode === "paint" ||
-        mode === "sculpt")
-    ) {
-      if (drawStrokeModeRef.current === "cuboid" && cuboidDepthPhaseRef.current) {
-        cancelCuboidDepthPhase();
+    if (gestureRef.current.mode === "voxel") {
+      const dispatch = getStrokeDispatch(mode);
+      const isSculptOrDispatch = dispatch || mode === "sculpt";
+      if (isSculptOrDispatch) {
+        if (drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current) {
+          cuboidPhase.cancel();
+        }
+        if (
+          drawStrokeModeRef.current === "cylinder" &&
+          cylinderPhase.ref.current
+        ) {
+          cylinderPhase.cancel();
+        }
+        dragDidEditRef.current = false;
+        strokeViewportStartRef.current = { nx, ny };
+        lastStrokeNormRef.current = { nx, ny };
+        if (dispatch?.kind === "selection") {
+          selectionStrokeBegunRef.current = true;
+          void invoke("selection_stroke_begin").catch(() => {});
+        } else {
+          void invoke("voxel_stroke_begin").catch(() => {});
+        }
       }
-      if (drawStrokeModeRef.current === "cylinder" && cylinderDepthPhaseRef.current) {
-        cancelCylinderDepthPhase();
-      }
-      dragDidEditRef.current = false;
-      strokeViewportStartRef.current = { nx, ny };
-      lastStrokeNormRef.current = { nx, ny };
-      void invoke("voxel_stroke_begin").catch(() => { });
-    }
-
-    if (
-      gestureRef.current.mode === "voxel" &&
-      (mode === "select" ||
-        mode === "selectByColor" ||
-        mode === "selectCoplanar" ||
-        mode === "selectCoplanarEmpty")
-    ) {
-      if (drawStrokeModeRef.current === "cuboid" && cuboidDepthPhaseRef.current) {
-        cancelCuboidDepthPhase();
-      }
-      if (drawStrokeModeRef.current === "cylinder" && cylinderDepthPhaseRef.current) {
-        cancelCylinderDepthPhase();
-      }
-      dragDidEditRef.current = false;
-      strokeViewportStartRef.current = { nx, ny };
-      lastStrokeNormRef.current = { nx, ny };
-      selectionStrokeBegunRef.current = true;
-      void invoke("selection_stroke_begin").catch(() => { });
     }
 
     if (gestureRef.current.mode === "camera" && mode !== "fly") {
@@ -3450,7 +3396,7 @@ function App() {
       brushFalloff: sculptBrushFalloffRef.current,
       ...(includeStrokeSeed
         ? {
-            strokeSeed: (Math.floor(Math.random() * 0x1_0000_0000) >>> 0),
+            strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
           }
         : {}),
       wallAreaShape: wallAreaShapeRef.current,
@@ -3464,6 +3410,13 @@ function App() {
       smoothAggressiveness: smoothAggressivenessRef.current,
       smoothLaplacianIterations: smoothLaplacianIterationsRef.current,
       smoothLaplacianRelaxPct: smoothLaplacianRelaxPctRef.current,
+      extrudeProfile: extrudeProfileRef.current,
+      extrudeEndCap: extrudeEndCapRef.current,
+      extrudeTaper: extrudeTaperRef.current,
+      extrudeTaperStart: extrudeTaperRef.current
+        ? extrudeTaperStartRef.current
+        : 0,
+      extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
       ...lineStart,
       ...wallPoly,
     };
@@ -3536,7 +3489,8 @@ function App() {
                     runId: "rect-mapping",
                     hypothesisId: "H_innerY_vs_relY",
                     location: "App.tsx:viewportDebugRaf",
-                    message: "pick uses rel/rect; compare inner*surface−origin Y vs relY/rh",
+                    message:
+                      "pick uses rel/rect; compare inner*surface−origin Y vs relY/rh",
                     data: (() => {
                       const scr = viewportCursorDebugScreenRef.current;
                       const pick = lastViewportPickNormRef.current;
@@ -3568,8 +3522,7 @@ function App() {
                           0,
                           Math.round((rV.top / ih) * surf.h),
                         );
-                        nxWindow =
-                          ((scr.clientX / iw) * surf.w - ox) / phys.w;
+                        nxWindow = ((scr.clientX / iw) * surf.w - ox) / phys.w;
                         deltaWinVsRel = nxWindow - nxFromRel;
                         nyFromInner =
                           ((scr.clientY / ih) * surf.h - oy) / phys.h;
@@ -3586,8 +3539,7 @@ function App() {
                           rV && rV.height > 0 ? rV.width / rV.height : null,
                         physW: phys.w,
                         physH: phys.h,
-                        aspectPhys:
-                          phys.h > 0 ? phys.w / phys.h : null,
+                        aspectPhys: phys.h > 0 ? phys.w / phys.h : null,
                         rustW: d.viewportWidth,
                         rustH: d.viewportHeight,
                         aspectRust:
@@ -3596,8 +3548,7 @@ function App() {
                             : null,
                         surfaceW: surf.w,
                         surfaceH: surf.h,
-                        vwPerRw:
-                          rV && rV.width > 0 ? phys.w / rV.width : null,
+                        vwPerRw: rV && rV.width > 0 ? phys.w / rV.width : null,
                         swPerIw: iw > 0 ? surf.w / iw : null,
                         shPerIh: ih > 0 ? surf.h / ih : null,
                         nxFromRel,
@@ -3654,7 +3605,7 @@ function App() {
       const m = previewModeForSync(interactionModeRef.current);
       void invoke("sync_preview_input", {
         args: buildSyncPreviewPayload(px, py, m),
-      }).catch(() => { });
+      }).catch(() => {});
     }
 
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
@@ -3674,100 +3625,81 @@ function App() {
         );
       }
       const m = interactionModeRef.current;
-      if (
-        e.buttons &&
-        (m === "add" || m === "remove" || m === "paint") &&
-        !loading &&
-        !workBusy &&
-        !fillOperationPending &&
-        !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
-        !(
-          drawStrokeModeRef.current === "cuboid" &&
-          cuboidDepthPhaseRef.current
-        ) &&
-        !(
-          drawStrokeModeRef.current === "cylinder" &&
-          cylinderDepthPhaseRef.current
-        )
-      ) {
-        const now = Date.now();
-        if (now - lastStrokeEditMsRef.current >= 24) {
-          lastStrokeEditMsRef.current = now;
-          dragDidEditRef.current = true;
-          const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
-          const lineStart = strokeViewportLineStartNorm();
-          const brushPrev =
-            strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
-              ? lastStrokeNormRef.current
-              : null;
-          void invoke("voxel_stroke_preview_at_screen", {
-            args: {
-              nx: px,
-              ny: py,
-              tool,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-              brushRadius: brushRadiusRef.current,
-              brushShape: brushShapeRef.current,
-              sprayDensity: sprayDensityRef.current,
-              strokeMode: drawStrokeModeRef.current,
-              planeAxis: planeAxisRef.current,
-              strokeAux: mergedStrokeAux({}),
-              matchMaterial: matchMaterialSelectColorRef.current,
-              ...(lineStart
-                ? {
-                  strokeLineStartNx: lineStart.nx,
-                  strokeLineStartNy: lineStart.ny,
-                }
-                : {}),
-              ...(!lineStart && brushPrev
-                ? {
-                  strokeSegmentPrevNx: brushPrev.nx,
-                  strokeSegmentPrevNy: brushPrev.ny,
-                }
-                : {}),
-            },
-          })
-            .finally(() => {
+      {
+        const dispatch = getStrokeDispatch(m);
+        if (
+          e.buttons &&
+          dispatch &&
+          !loading &&
+          !workBusy &&
+          !fillOperationPending &&
+          !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
+          !(
+            drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current
+          ) &&
+          !(
+            drawStrokeModeRef.current === "cylinder" &&
+            cylinderPhase.ref.current
+          )
+        ) {
+          const now = Date.now();
+          if (now - lastStrokeEditMsRef.current >= 24) {
+            lastStrokeEditMsRef.current = now;
+            dragDidEditRef.current = true;
+            const lineStart = strokeViewportLineStartNorm();
+            const brushPrev =
+              strokeDrawStyleRef.current === "brush" &&
+              lastStrokeNormRef.current
+                ? lastStrokeNormRef.current
+                : null;
+            if (dispatch.kind === "edit") {
+              void invoke("voxel_stroke_preview_at_screen", {
+                args: {
+                  nx: px,
+                  ny: py,
+                  tool: dispatch.tool,
+                  color: activeColorRef.current,
+                  material: activeMaterialRef.current,
+                  brushRadius: brushRadiusRef.current,
+                  brushShape: brushShapeRef.current,
+                  sprayDensity: sprayDensityRef.current,
+                  strokeMode: drawStrokeModeRef.current,
+                  planeAxis: planeAxisRef.current,
+                  strokeAux: mergedStrokeAux({}),
+                  matchMaterial: matchMaterialSelectColorRef.current,
+                  ...(lineStart
+                    ? {
+                        strokeLineStartNx: lineStart.nx,
+                        strokeLineStartNy: lineStart.ny,
+                      }
+                    : {}),
+                  ...(!lineStart && brushPrev
+                    ? {
+                        strokeSegmentPrevNx: brushPrev.nx,
+                        strokeSegmentPrevNy: brushPrev.ny,
+                      }
+                    : {}),
+                },
+              })
+                .finally(() => {
+                  if (strokeDrawStyleRef.current === "brush") {
+                    lastStrokeNormRef.current = { nx: px, ny: py };
+                  }
+                })
+                .catch(() => {});
+              logPlaneStrokeDebug("move:preview", e, {
+                nx: px,
+                ny: py,
+                tool: dispatch.tool,
+                lineStart: lineStart ?? null,
+                brushPrev: brushPrev ?? null,
+              });
+            } else {
+              runStrokeAtScreen(px, py, {}, { lineStart, brushPrev });
               if (strokeDrawStyleRef.current === "brush") {
                 lastStrokeNormRef.current = { nx: px, ny: py };
               }
-            })
-            .catch(() => { });
-          logPlaneStrokeDebug("move:preview", e, {
-            nx: px,
-            ny: py,
-            tool,
-            lineStart: lineStart ?? null,
-            brushPrev: brushPrev ?? null,
-          });
-        }
-      }
-      if (
-        e.buttons &&
-        (m === "select" ||
-          m === "selectByColor" ||
-          m === "selectCoplanar" ||
-          m === "selectCoplanarEmpty") &&
-        !loading &&
-        !workBusy &&
-        !fillOperationPending &&
-        !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
-        drawStrokeModeRef.current !== "cuboid" &&
-        drawStrokeModeRef.current !== "cylinder"
-      ) {
-        const now = Date.now();
-        if (now - lastStrokeEditMsRef.current >= 24) {
-          lastStrokeEditMsRef.current = now;
-          dragDidEditRef.current = true;
-          const lineStart = strokeViewportLineStartNorm();
-          const brushPrev =
-            strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
-              ? lastStrokeNormRef.current
-              : null;
-          runSelectionStrokeAtScreen(px, py, {}, { lineStart, brushPrev });
-          if (strokeDrawStyleRef.current === "brush") {
-            lastStrokeNormRef.current = { nx: px, ny: py };
+            }
           }
         }
       }
@@ -3791,7 +3723,7 @@ function App() {
             .finally(() => {
               lastStrokeNormRef.current = { nx: px, ny: py };
             })
-            .catch(() => { });
+            .catch(() => {});
         }
       }
       return;
@@ -3871,7 +3803,9 @@ function App() {
     let hasPointerCaptureForUp = capturedPointerIdRef.current === e.pointerId;
     if (!hasPointerCaptureForUp && viewportRef.current) {
       try {
-        hasPointerCaptureForUp = viewportRef.current.hasPointerCapture(e.pointerId);
+        hasPointerCaptureForUp = viewportRef.current.hasPointerCapture(
+          e.pointerId,
+        );
       } catch {
         hasPointerCaptureForUp = false;
       }
@@ -3890,78 +3824,7 @@ function App() {
       const { nx, ny } = clientToViewportNormalized(e);
       const m = interactionModeRef.current;
       if (moved < 5) {
-        if (
-          m === "select" ||
-          m === "selectByColor" ||
-          m === "selectCoplanar" ||
-          m === "selectCoplanarEmpty"
-        ) {
-          const sm = drawStrokeModeRef.current;
-          if (strokeModeSkipsDrag(sm)) {
-            void handleSelectionStrokeAnchorClick(nx, ny);
-          } else {
-            const dm = drawStrokeModeRef.current;
-            if (m === "select") {
-              if (dm === "fill") {
-                runSelectionStrokeAtScreen(nx, ny, {});
-              } else {
-                runSelectionStrokeAtScreen(nx, ny, {});
-              }
-            } else if (m === "selectByColor") {
-              if (dm === "fill") {
-                runSelectionStrokeAtScreen(nx, ny, {});
-              } else {
-                void invoke<number>("selection_add_by_color_at_screen", {
-                  args: {
-                    nx,
-                    ny,
-                    matchMaterial: matchMaterialSelectColorRef.current,
-                  },
-                })
-                  .then((n) => {
-                    if (n > 0) {
-                      void invoke<number>("selection_get_count").then((c) =>
-                        setSelectionCount(c),
-                      );
-                    }
-                  })
-                  .catch(() => {});
-              }
-            } else if (m === "selectCoplanar") {
-              if (dm === "fill") {
-                runSelectionStrokeAtScreen(nx, ny, {});
-              } else {
-                void invoke<number>("selection_add_coplanar_at_screen", {
-                  args: { nx, ny },
-                })
-                  .then((n) => {
-                    if (n > 0) {
-                      void invoke<number>("selection_get_count").then((c) =>
-                        setSelectionCount(c),
-                      );
-                    }
-                  })
-                  .catch(() => {});
-              }
-            } else if (m === "selectCoplanarEmpty") {
-              if (dm === "fill") {
-                runSelectionStrokeAtScreen(nx, ny, {});
-              } else {
-                void invoke<number>("selection_add_coplanar_empty_at_screen", {
-                  args: { nx, ny },
-                })
-                  .then((n) => {
-                    if (n > 0) {
-                      void invoke<number>("selection_get_count").then((c) =>
-                        setSelectionCount(c),
-                      );
-                    }
-                  })
-                  .catch(() => {});
-              }
-            }
-          }
-        } else if (m === "stamp") {
+        if (m === "stamp") {
           void invoke("clipboard_stamp_at_screen", {
             args: {
               nx,
@@ -3969,10 +3832,10 @@ function App() {
               color: activeColorRef.current,
               material: activeMaterialRef.current,
             },
-          }).catch(() => { });
+          }).catch(() => {});
         } else if (m === "punch") {
           void invoke("clipboard_punch_at_screen", { args: { nx, ny } }).catch(
-            () => { },
+            () => {},
           );
         } else if (m === "generator") {
           const gk = generatorKindRef.current;
@@ -3987,7 +3850,7 @@ function App() {
                 color: activeColorRef.current,
                 material: activeMaterialRef.current,
               },
-            }).catch(() => { });
+            }).catch(() => {});
           } else if (gk === "grass") {
             void invoke("generator_grass_at_screen", {
               args: {
@@ -3999,7 +3862,7 @@ function App() {
                 color: activeColorRef.current,
                 material: activeMaterialRef.current,
               },
-            }).catch(() => { });
+            }).catch(() => {});
           } else if (gk === "cloth") {
             void handleClothPinClick(nx, ny);
           } else if (gk === "rope") {
@@ -4019,9 +3882,187 @@ function App() {
                   color: activeColorRef.current,
                   material: activeMaterialRef.current,
                 },
-              }).catch(() => { });
+              }).catch(() => {});
               setRopeFirstScreen(null);
             }
+          } else if (gk === "ashlar") {
+            void invoke("generator_ashlar_at_screen", {
+              args: {
+                nx,
+                ny,
+                seed: (Math.random() * 1e9) | 0,
+                size: Math.max(1, generatorSphereRadiusRef.current),
+                roughness: rockRoughness,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => {});
+          } else if (gk === "flora") {
+            void invoke("generator_flora_at_screen", {
+              args: {
+                nx,
+                ny,
+                seed: (Math.random() * 1e9) | 0,
+                height: floraHeight,
+                girth: floraGirth,
+                wobble: 0.12,
+                taper: 0.12,
+                stemCount: floraStemCount,
+                clusterRadius: 0,
+                branchCount: floraBranchCount,
+                branchDepth: 1,
+                branchStart: 0.5,
+                branchSpread: 1.0,
+                braidStrands: 1,
+                braidTwist: 0.35,
+                canopy: floraCanopy,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => {});
+          } else if (gk === "roof") {
+            // Roof uses pin-based input like cloth
+            void invoke<[number, number, number] | null>(
+              "voxel_stroke_anchor_coord_at_screen",
+              {
+                args: {
+                  nx,
+                  ny,
+                  tool: "add",
+                  strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+                },
+              },
+            )
+              .then((c) => {
+                if (!c) return;
+                setRoofPins((v) => {
+                  const next = [...v, c];
+                  roofPinsRef.current = next;
+                  return next;
+                });
+              })
+              .catch(() => {});
+          } else if (gk === "piscina") {
+            void invoke("generator_piscina_at_screen", {
+              args: {
+                nx,
+                ny,
+                seed: (Math.random() * 1e9) | 0,
+                species: piscinaSpecies,
+                length: piscinaLength,
+                widthParam: 4,
+                thickness: 3,
+                spineBend: 0,
+                spineSCurve: 0,
+                finDorsal: 3,
+                finAnal: 3,
+                finCaudal: 3,
+                finPectoral: 3,
+                finPelvic: 3,
+                finAdipose: 3,
+                showFinDorsal: true,
+                showFinAnal: true,
+                showFinCaudal: true,
+                showFinPectoral: true,
+                showFinPelvic: true,
+                showFinAdipose: true,
+                anchorOffsetU: 0,
+                anchorOffsetV: 0,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => {});
+          } else if (gk === "insecta") {
+            void invoke("generator_insecta_at_screen", {
+              args: {
+                nx,
+                ny,
+                species: insectaSpecies,
+                totalLength: insectaTotalLength,
+                headRatio: 1.0,
+                thoraxRatio: 1.2,
+                abdomenRatio: 2.0,
+                bodyHalfWidth: 3,
+                bodyHalfHeight: 3,
+                abdomenTaper: 0.6,
+                headShape: 60,
+                anchorOffsetU: 0,
+                anchorOffsetV: 0,
+                bodyYaw: 0,
+                bodyArch: 0,
+                antennaLength: 6,
+                antennaSpread: 20,
+                antennaPitch: 30,
+                antennaRoot: 0,
+                mandibleLength: 0,
+                mandibleSpread: 0,
+                mandibleForward: 0,
+                wingShape: 85,
+                showWingFore: true,
+                wingForeLength: 12,
+                wingForeWidth: 3,
+                wingForeSpread: 15,
+                wingForePitch: 0,
+                wingForeOffset: 0,
+                wingForeForwardCant: 0,
+                showWingHind: false,
+                wingHindLength: 8,
+                wingHindWidth: 2,
+                wingHindSpread: 15,
+                wingHindPitch: 0,
+                wingHindOffset: 0,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => {});
+          } else if (gk === "fauna") {
+            void invoke("generator_fauna_at_screen", {
+              args: {
+                nx,
+                ny,
+                stance: faunaStance,
+                archetype: faunaArchetype,
+                anchorOffsetU: 0,
+                anchorOffsetV: 0,
+                bodyYaw: 0,
+                bodyArch: 0.02,
+                spineSegments: 7,
+                bodyLength: 17,
+                bodyHalfWidth: 2,
+                bodyHalfHeight: 3,
+                neckLength: 8,
+                neckHalfWidth: 2,
+                neckHalfHeight: 3,
+                headLength: 6,
+                headHalfWidth: 2,
+                headHalfHeight: 3,
+                tailLength: 1,
+                shoulderOffsetForward: 3,
+                hipOffsetForward: -3,
+                frontUpperLength: 7,
+                frontLowerLength: 7,
+                hindUpperLength: 8,
+                hindLowerLength: 8,
+                limbTargets: [
+                  [20, -2.1, -19],
+                  [20, 2.1, -19],
+                  [-3.5, -2.2, -20],
+                  [-3.5, 2.2, -20],
+                ],
+                limbPoles: [
+                  [20, -2.4, 0.6],
+                  [20, 2.4, 0.6],
+                  [1.8, -2.8, 1.2],
+                  [1.8, 2.8, 1.2],
+                ],
+                spinePoseChest: [0, 0, 0],
+                spinePoseNeck: [0, 0, 0],
+                spinePoseHead: [0, 0, 0],
+                autoFootPlacement: false,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch(() => {});
           }
         } else if (m === "squishy") {
           const mode = squishyModeRef.current;
@@ -4050,7 +4091,7 @@ function App() {
               invoke<{ balls: { id: number }[] }>("squishy_session_get"),
             )
             .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-            .catch(() => { });
+            .catch(() => {});
         }
       }
       if (m === "eyedropper") {
@@ -4079,146 +4120,112 @@ function App() {
                 }
               }
             })
-            .catch(() => { });
+            .catch(() => {});
         }
-      } else if (m === "add" || m === "remove" || m === "paint") {
+      } else if (getStrokeDispatch(m)) {
+        const dispatch = getStrokeDispatch(m)!;
         const sm = drawStrokeModeRef.current;
+        // Depth phase activation after drag (cuboid/cylinder)
         if (
-          sm === "cuboid" &&
+          (sm === "cuboid" || sm === "cylinder") &&
           (dragDidEditRef.current || moved >= 5) &&
           strokeViewportStartRef.current
         ) {
-          cuboidDepthRef.current = 1;
-          setCuboidDepthUi(1);
-          const phase = {
+          const phase = sm === "cuboid" ? cuboidPhase : cylinderPhase;
+          const depthRef = sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
+          const setDepthUi =
+            sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
+          depthRef.current = 1;
+          setDepthUi(1);
+          phase.enter("depth", {
             lineStart: { ...strokeViewportStartRef.current },
             endNorm: { nx, ny },
-          };
-          cuboidDepthPhaseRef.current = phase;
-          setCuboidDepthPhase(phase);
+          });
         }
-        if (
-          sm === "cylinder" &&
-          (dragDidEditRef.current || moved >= 5) &&
-          strokeViewportStartRef.current
-        ) {
-          cylinderDepthRef.current = 1;
-          setCylinderDepthUi(1);
-          const phase = {
-            lineStart: { ...strokeViewportStartRef.current },
-            endNorm: { nx, ny },
-          };
-          cylinderDepthPhaseRef.current = phase;
-          setCylinderDepthPhase(phase);
-        }
+        // Single-click handling (no drag)
         if (!dragDidEditRef.current && moved < 5) {
-          if (strokeModeSkipsDrag(sm)) {
+          if (
+            (sm === "cuboid" || sm === "cylinder") &&
+            strokeViewportStartRef.current
+          ) {
+            // Single-click cuboid/cylinder: enter depth phase
+            const phase = sm === "cuboid" ? cuboidPhase : cylinderPhase;
+            const depthRef =
+              sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
+            const setDepthUi =
+              sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
+            depthRef.current = 1;
+            setDepthUi(1);
+            phase.enter("depth", {
+              lineStart: { ...strokeViewportStartRef.current },
+              endNorm: { nx, ny },
+            });
+          } else if (strokeModeSkipsDrag(sm)) {
             void handleStrokeAnchorClick(nx, ny);
+          } else if (
+            dispatch.kind === "selection" &&
+            dispatch.interaction !== "select" &&
+            sm !== "fill"
+          ) {
+            // Specialized selection click commands (selectByColor, etc.)
+            void invokeSelectionSpecialClick(dispatch.interaction, nx, ny);
           } else {
-            const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
             const lineStart = strokeViewportLineStartNorm();
-            const isFillStroke = drawStrokeModeRef.current === "fill";
-            if (isFillStroke) beginFillOperation();
-            void invoke("voxel_edit_at_screen", {
-              args: {
-                nx,
-                ny,
-                tool,
-                color: activeColorRef.current,
-                material: activeMaterialRef.current,
-                brushRadius: brushRadiusRef.current,
-                brushShape: brushShapeRef.current,
-                sprayDensity: sprayDensityRef.current,
-                strokeMode: drawStrokeModeRef.current,
-                planeAxis: planeAxisRef.current,
-                strokeAux: mergedStrokeAux({}),
-                matchMaterial: matchMaterialSelectColorRef.current,
-                fillSelectDiagonals: fillSelectDiagonalsRef.current,
-                fillRespectsColor: fillRespectsColorRef.current,
-                ...(lineStart
-                  ? {
-                    strokeLineStartNx: lineStart.nx,
-                    strokeLineStartNy: lineStart.ny,
-                  }
-                  : {}),
-              },
-            })
-              .catch((e) => {
-                console.error("[voxelle] voxel_edit_at_screen error", e);
-              })
-              .finally(() => {
-                if (isFillStroke) endFillOperation();
-              });
+            runStrokeAtScreen(nx, ny, {}, { lineStart });
           }
         }
-        logPlaneStrokeDebug("up:voxel-stroke-end", e, {
+        logPlaneStrokeDebug("up:stroke-end", e, {
           moved,
           dragDidEdit: dragDidEditRef.current,
           strokeMode: sm,
           interactionMode: m,
         });
-        void invoke("voxel_stroke_end").catch(() => { });
-        lastStrokeNormRef.current = null;
-      } else if (
-        m === "select" ||
-        m === "selectByColor" ||
-        m === "selectCoplanar" ||
-        m === "selectCoplanarEmpty"
-      ) {
-        const sm = drawStrokeModeRef.current;
-        if (
-          sm === "cuboid" &&
-          (dragDidEditRef.current || moved >= 5) &&
-          strokeViewportStartRef.current
-        ) {
-          cuboidDepthRef.current = 1;
-          setCuboidDepthUi(1);
-          const phase = {
-            lineStart: { ...strokeViewportStartRef.current },
-            endNorm: { nx, ny },
-          };
-          cuboidDepthPhaseRef.current = phase;
-          setCuboidDepthPhase(phase);
+        if (dispatch.kind === "edit") {
+          void invoke("voxel_stroke_end").catch(() => {});
+        } else {
+          void invoke("selection_stroke_end").catch(() => {});
+          selectionStrokeBegunRef.current = false;
         }
-        if (
-          sm === "cylinder" &&
-          (dragDidEditRef.current || moved >= 5) &&
-          strokeViewportStartRef.current
-        ) {
-          cylinderDepthRef.current = 1;
-          setCylinderDepthUi(1);
-          const phase = {
-            lineStart: { ...strokeViewportStartRef.current },
-            endNorm: { nx, ny },
-          };
-          cylinderDepthPhaseRef.current = phase;
-          setCylinderDepthPhase(phase);
-        }
-        void invoke("selection_stroke_end").catch(() => {});
-        selectionStrokeBegunRef.current = false;
         lastStrokeNormRef.current = null;
       } else if (m === "sculpt") {
-        if (!dragDidEditRef.current && moved < 5) {
-          const sm = sculptStrokeModeRef.current;
-          const wa = wallAreaShapeRef.current;
-          if (sm === "wall" && wa === "polygon") {
-            void handleWallSculptPolygonClick(nx, ny);
-          } else {
-            void invoke("voxel_sculpt_stroke_at_screen", {
-              args: buildSculptStrokeInvokeArgs(nx, ny),
-            }).catch(() => {});
+        const sm = sculptStrokeModeRef.current;
+        if (sm === "extrude" && (dragDidEditRef.current || moved >= 5)) {
+          // Extrude phased tool: enter settings phase instead of committing.
+          // The preview union is already accumulated from the drag. Keep it visible.
+          extrudePhase.enter("settings", {} as Record<string, never>);
+          lastStrokeNormRef.current = null;
+          // Do NOT call voxel_stroke_end — preview must stay.
+        } else {
+          if (!dragDidEditRef.current && moved < 5) {
+            const wa = wallAreaShapeRef.current;
+            if (sm === "wall" && wa === "polygon") {
+              void handleWallSculptPolygonClick(nx, ny);
+            } else {
+              void invoke("voxel_sculpt_stroke_at_screen", {
+                args: buildSculptStrokeInvokeArgs(nx, ny),
+              }).catch(() => {});
+            }
           }
+          void invoke("voxel_stroke_end").catch(() => {});
+          lastStrokeNormRef.current = null;
         }
-        void invoke("voxel_stroke_end").catch(() => { });
-        lastStrokeNormRef.current = null;
       }
-    } else if (isThisPointer && g?.mode === "voxel" && e.button === 0 && !hasPointerCaptureForUp) {
+    } else if (
+      isThisPointer &&
+      g?.mode === "voxel" &&
+      e.button === 0 &&
+      !hasPointerCaptureForUp
+    ) {
       logPlaneStrokeDebug("up:ignored-no-capture", e, {
         moved,
       });
     }
 
-    if (isThisPointer && g?.mode === "camera" && interactionModeRef.current !== "fly") {
+    if (
+      isThisPointer &&
+      g?.mode === "camera" &&
+      interactionModeRef.current !== "fly"
+    ) {
       const { nx, ny } = clientToViewportNormalized(e);
       void invoke("viewport_pointer", {
         ev: {
@@ -4244,7 +4251,16 @@ function App() {
 
   const onPointerLeave = (e: React.PointerEvent) => {
     logPlaneStrokeDebug("leave", e);
-    clearPreview();
+    // Keep the select preview visible when the pointer moves to the sidebar / tool panel.
+    const im = interactionModeRef.current;
+    if (
+      im !== "select" &&
+      im !== "selectByColor" &&
+      im !== "selectCoplanar" &&
+      im !== "selectCoplanarEmpty"
+    ) {
+      clearPreview();
+    }
     if (viewportCursorDebugEnabled) {
       setViewportCursorDebugJs(null);
       setViewportCursorDebugRust(null);
@@ -4335,8 +4351,12 @@ function App() {
     });
   };
 
+  const cancelJoin = () => {
+    void invoke("collab_cancel_join").catch(() => {});
+  };
+
   const leaveSession = () => {
-    void invoke("collab_leave").catch(() => { });
+    void invoke("collab_leave").catch(() => {});
   };
 
   collabActiveMenuRef.current = collabActive;
@@ -4351,13 +4371,11 @@ function App() {
         setHostingCopied(true);
         window.setTimeout(() => setHostingCopied(false), 2000);
       },
-      () => { },
+      () => {},
     );
   };
 
-  const amLeader = roster.some(
-    (r) => r.peerId === localPeerId && r.isLeader,
-  );
+  const amLeader = roster.some((r) => r.peerId === localPeerId && r.isLeader);
 
   /** Solo or host: can open files. Guests (session without hosting) cannot. */
   const collabGuest = collabActive && !hostWsUrl;
@@ -4401,9 +4419,7 @@ function App() {
   }, [lastSessionInfo]);
 
   const lastProjectBlurb =
-    lastSessionInfo != null
-      ? lastProjectReopenBlurb(lastSessionInfo)
-      : null;
+    lastSessionInfo != null ? lastProjectReopenBlurb(lastSessionInfo) : null;
 
   /** Phase + progress for the top-center viewport HUD (load / mesh / fill / etc.). */
   const viewportTopCenterHud = (() => {
@@ -4426,12 +4442,9 @@ function App() {
     if (workBusy || fillOperationPending) {
       const pct = Math.round(Math.min(1, Math.max(0, workProgress)) * 100);
       const phase = workPhase.trim();
-      const showFillCancel =
-        fillOperationPending || /fill/i.test(workPhase);
+      const showFillCancel = fillOperationPending || /fill/i.test(workPhase);
       return {
-        label:
-          phase ||
-          (fillOperationPending ? "Fill…" : "Working…"),
+        label: phase || (fillOperationPending ? "Fill…" : "Working…"),
         pct,
         showFillCancel,
       };
@@ -4477,17 +4490,17 @@ function App() {
   const sendChat = () => {
     const t = chatInput.trim();
     if (!t) return;
-    void invoke("collab_send_chat", { text: t }).catch(() => { });
+    void invoke("collab_send_chat", { text: t }).catch(() => {});
     setChatInput("");
   };
 
   const onRosterSnapCamera = (peerId: number) => {
-    void invoke("collab_snap_camera", { peerId }).catch(() => { });
+    void invoke("collab_snap_camera", { peerId }).catch(() => {});
   };
 
   const setCanEdit = (peerId: number, canEdit: boolean) => {
     void invoke("collab_set_can_edit", { targetPeer: peerId, canEdit }).catch(
-      () => { },
+      () => {},
     );
   };
 
@@ -4503,8 +4516,7 @@ function App() {
     interactionMode === "paint";
 
   const showDrawPaneToolMatrix =
-    toolsPane === "draw" &&
-    (isDrawVoxelEditMode || isSelectionInteractionMode);
+    toolsPane === "draw" && (isDrawVoxelEditMode || isSelectionInteractionMode);
 
   const showPolygonPhaseHud =
     showEditorChrome &&
@@ -4527,8 +4539,8 @@ function App() {
   const showViewportTopCenterStack =
     showEditorChrome &&
     (viewportTopCenterHud != null ||
-      cuboidDepthPhase ||
-      cylinderDepthPhase ||
+      cuboidPhase.active ||
+      cylinderPhase.active ||
       showPolygonPhaseHud ||
       showWallSculptPolygonHud ||
       showClothGeneratorHud);
@@ -4558,573 +4570,713 @@ function App() {
           isSelectionInteractionMode)));
 
   return (
-    <div
-      className={`app${loading && !loadError ? " app-loading-cursor" : ""}`}
-    >
+    <div className={`app${loading && !loadError ? " app-loading-cursor" : ""}`}>
       <div className="app-main">
         {toolsPaneFloating && showEditorChrome ? (
           <div className="app-sidebar-spacer" aria-hidden />
         ) : null}
         {showEditorChrome ? (
-        <aside
-          className={`${sidebarExpanded
-              ? "app-sidebar is-expanded"
-              : "app-sidebar is-collapsed"
+          <aside
+            className={`${
+              sidebarExpanded
+                ? "app-sidebar is-expanded"
+                : "app-sidebar is-collapsed"
             }${toolsPaneFloating ? " is-floating" : ""}`}
-          style={
-            toolsPaneFloating
-              ? { left: toolPanePos.x, top: toolPanePos.y }
-              : undefined
-          }
-          aria-label="Tools"
-        >
-          <div
-            className={
+            style={
               toolsPaneFloating
-                ? "sidebar-header sidebar-header-floating"
-                : "sidebar-header"
+                ? { left: toolPanePos.x, top: toolPanePos.y }
+                : undefined
             }
+            aria-label="Tools"
           >
-            {toolsPaneFloating ? (
-              <>
-                <div
-                  className="floating-tools-drag-handle"
-                  onPointerDown={onToolPaneDragDown}
-                  aria-label="Drag to move tools"
-                >
-                  <span className="floating-tools-grip" aria-hidden>
-                    ⋮⋮
-                  </span>
-                  {sidebarExpanded ? (
-                    <span className="floating-tools-title">Tools</span>
-                  ) : null}
-                </div>
-                <div className="floating-tools-header-actions">
-                  <button
-                    type="button"
-                    className="floating-tools-dock-btn"
-                    onClick={() => setToolsPaneFloating(false)}
-                    title="Dock tools to the left edge"
+            <div
+              className={
+                toolsPaneFloating
+                  ? "sidebar-header sidebar-header-floating"
+                  : "sidebar-header"
+              }
+            >
+              {toolsPaneFloating ? (
+                <>
+                  <div
+                    className="floating-tools-drag-handle"
+                    onPointerDown={onToolPaneDragDown}
+                    aria-label="Drag to move tools"
                   >
-                    Dock
-                  </button>
+                    <span className="floating-tools-grip" aria-hidden>
+                      ⋮⋮
+                    </span>
+                    {sidebarExpanded ? (
+                      <span className="floating-tools-title">Tools</span>
+                    ) : null}
+                  </div>
+                  <div className="floating-tools-header-actions">
+                    <button
+                      type="button"
+                      className="floating-tools-dock-btn"
+                      onClick={() => setToolsPaneFloating(false)}
+                      title="Dock tools to the left edge"
+                    >
+                      Dock
+                    </button>
+                    <button
+                      type="button"
+                      className="sidebar-expand-toggle floating-tools-collapse-toggle"
+                      onClick={() => setSidebarExpanded((v) => !v)}
+                      aria-expanded={sidebarExpanded}
+                      title={
+                        sidebarExpanded ? "Collapse tools" : "Expand tools"
+                      }
+                    >
+                      <span className="sidebar-expand-toggle-icon" aria-hidden>
+                        {sidebarExpanded ? "«" : "»"}
+                      </span>
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <div className="sidebar-tools-header-row">
                   <button
                     type="button"
-                    className="sidebar-expand-toggle floating-tools-collapse-toggle"
+                    className="sidebar-expand-toggle"
                     onClick={() => setSidebarExpanded((v) => !v)}
                     aria-expanded={sidebarExpanded}
-                    title={
-                      sidebarExpanded ? "Collapse tools" : "Expand tools"
-                    }
+                    title={sidebarExpanded ? "Collapse tools" : "Expand tools"}
                   >
                     <span className="sidebar-expand-toggle-icon" aria-hidden>
                       {sidebarExpanded ? "«" : "»"}
                     </span>
+                    {sidebarExpanded ? (
+                      <span className="sidebar-expand-toggle-label">Tools</span>
+                    ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    className="sidebar-float-btn"
+                    onClick={() => setToolsPaneFloating(true)}
+                    title="Float tools panel"
+                    aria-label="Float tools panel"
+                  >
+                    ⧉
                   </button>
                 </div>
-              </>
-            ) : (
-              <div className="sidebar-tools-header-row">
-                <button
-                  type="button"
-                  className="sidebar-expand-toggle"
-                  onClick={() => setSidebarExpanded((v) => !v)}
-                  aria-expanded={sidebarExpanded}
-                  title={
-                    sidebarExpanded ? "Collapse tools" : "Expand tools"
-                  }
-                >
-                  <span className="sidebar-expand-toggle-icon" aria-hidden>
-                    {sidebarExpanded ? "«" : "»"}
-                  </span>
-                  {sidebarExpanded ? (
-                    <span className="sidebar-expand-toggle-label">Tools</span>
-                  ) : null}
-                </button>
-                <button
-                  type="button"
-                  className="sidebar-float-btn"
-                  onClick={() => setToolsPaneFloating(true)}
-                  title="Float tools panel"
-                  aria-label="Float tools panel"
-                >
-                  ⧉
-                </button>
-              </div>
-            )}
-          </div>
-          <div className="sidebar-scroll">
-            {sidebarExpanded ? (
-              <>
-                <div className="sidebar-toolpane-tabs" role="tablist" aria-label="Tool panes">
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "hand" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "hand"}
-                    disabled={loading || workBusy}
-                    onClick={() => {
-                      setToolsPane("hand");
-                      setInteractionMode("navigate");
-                    }}
+              )}
+            </div>
+            <div className="sidebar-scroll">
+              {sidebarExpanded ? (
+                <>
+                  <div
+                    className="sidebar-toolpane-tabs"
+                    role="tablist"
+                    aria-label="Tool panes"
                   >
-                    ✋
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "draw" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "draw"}
-                    disabled={loading || workBusy}
-                    onClick={() => {
-                      setToolsPane("draw");
-                      setInteractionMode("add");
-                    }}
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "hand"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "hand"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("hand");
+                        setInteractionMode("navigate");
+                      }}
+                    >
+                      ✋
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "draw"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "draw"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("draw");
+                        setInteractionMode("add");
+                      }}
+                    >
+                      Draw
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "sculpt"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "sculpt"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("sculpt");
+                        setInteractionMode("sculpt");
+                      }}
+                    >
+                      Sculpt
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "generators"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "generators"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("generators");
+                        setInteractionMode("generator");
+                      }}
+                    >
+                      Generators
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "squishy"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "squishy"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("squishy");
+                        setInteractionMode("squishy");
+                      }}
+                    >
+                      Squishy
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "mood"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "mood"}
+                      disabled={loading || workBusy}
+                      onClick={() => setToolsPane("mood")}
+                    >
+                      Mood
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "fly"
+                          ? "sidebar-pane-tab is-active"
+                          : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "fly"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("fly");
+                        setInteractionMode("fly");
+                      }}
+                    >
+                      Fly
+                    </button>
+                  </div>
+                  <div
+                    className="sidebar-expanded-slot"
+                    aria-label="Tool pane options"
                   >
-                    Draw
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "sculpt" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "sculpt"}
-                    disabled={loading || workBusy}
-                    onClick={() => {
-                      setToolsPane("sculpt");
-                      setInteractionMode("sculpt");
-                    }}
-                  >
-                    Sculpt
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "generators" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "generators"}
-                    disabled={loading || workBusy}
-                    onClick={() => {
-                      setToolsPane("generators");
-                      setInteractionMode("generator");
-                    }}
-                  >
-                    Generators
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "squishy" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "squishy"}
-                    disabled={loading || workBusy}
-                    onClick={() => {
-                      setToolsPane("squishy");
-                      setInteractionMode("squishy");
-                    }}
-                  >
-                    Squishy
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "mood" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "mood"}
-                    disabled={loading || workBusy}
-                    onClick={() => setToolsPane("mood")}
-                  >
-                    Mood
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    className={toolsPane === "fly" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
-                    aria-selected={toolsPane === "fly"}
-                    disabled={loading || workBusy}
-                    onClick={() => {
-                      setToolsPane("fly");
-                      setInteractionMode("fly");
-                    }}
-                  >
-                    Fly
-                  </button>
-                </div>
-                <div className="sidebar-expanded-slot" aria-label="Tool pane options">
-                  {toolsPane === "hand" ? (
-                    <p className="sidebar-pane-hint">Drag in viewport to orbit/pan.</p>
-                  ) : null}
-
-                  {toolsPane === "fly" ? (
-                    <p className="sidebar-pane-hint">
-                      Click viewport to capture pointer. WASD move, E/Q up/down, Shift slow. Mouse
-                      looks. Esc releases pointer.
-                    </p>
-                  ) : null}
-
-                  {toolsPane === "draw" ? (
-                    <>
-                      <div
-                        className="sidebar-tool-selection-row"
-                        role="group"
-                        aria-label="Tool and selection"
-                      >
-                        <div className="sidebar-tool-selection-col">
-                          <div className="sidebar-section-label">Tool</div>
-                          <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
-                            {(["add", "remove", "paint"] as const).map((m) => (
-                              <button
-                                key={m}
-                                type="button"
-                                className={interactionMode === m ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                                disabled={loading || workBusy}
-                                onClick={() => setInteractionMode(m)}
-                              >
-                                <span className="sidebar-mode-label">{m[0].toUpperCase() + m.slice(1)}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="sidebar-tool-selection-col">
-                          <div className="sidebar-section-label">Selection</div>
-                          <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
-                            <button
-                              type="button"
-                              className={interactionMode === "select" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                              disabled={loading || workBusy}
-                              onClick={() => setInteractionMode("select")}
-                            >
-                              <span className="sidebar-mode-label">Select</span>
-                            </button>
-                            <button
-                              type="button"
-                              className={interactionMode === "stamp" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                              disabled={loading || workBusy || selectionCount === 0}
-                              onClick={() => setInteractionMode("stamp")}
-                            >
-                              <span className="sidebar-mode-label">Stamp</span>
-                            </button>
-                            <button
-                              type="button"
-                              className={interactionMode === "punch" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                              disabled={loading || workBusy || selectionCount === 0}
-                              onClick={() => setInteractionMode("punch")}
-                            >
-                              <span className="sidebar-mode-label">Punch</span>
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="sidebar-section-label">Selection method</div>
-                      <div className="sidebar-mode-grid sidebar-mode-grid-3">
-                        <button
-                          type="button"
-                          className={
-                            selectionMethod === "stroke"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState("stroke");
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                          title="Line from pointer down to cursor (web Stroke)"
-                        >
-                          <span className="sidebar-mode-label">Stroke</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={
-                            selectionMethod === "surface"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState("surface");
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                          title="Plane / circle / polygon in the face plane (web Surface)"
-                        >
-                          <span className="sidebar-mode-label">Surface</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={
-                            selectionMethod === "solid"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState("solid");
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                          title="Solid volume: cube/cylinder/polygon (web Solid)"
-                        >
-                          <span className="sidebar-mode-label">Solid</span>
-                        </button>
-                      </div>
-                      <div
-                        className="sidebar-mode-grid sidebar-mode-grid-2"
-                        style={{ marginTop: "0.35rem" }}
-                      >
-                        <button
-                          type="button"
-                          className={
-                            selectionMethod === "spray"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState("spray");
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                          title="Spray density along brush path"
-                        >
-                          <span className="sidebar-mode-label">Spray</span>
-                        </button>
-                        <button
-                          type="button"
-                          className={
-                            selectionMethod === "fill"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState("fill");
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                          title="Fill connected region (add / remove / paint / selection)"
-                        >
-                          <span className="sidebar-mode-label">Fill</span>
-                        </button>
-                      </div>
-
-                      <SymmetryColorSidebarSections
-                        loading={loading}
-                        workBusy={workBusy}
-                        activeColor={activeColor}
-                        setActiveColor={setActiveColor}
-                        interactionMode={interactionMode}
-                        setInteractionMode={setInteractionMode}
-                      />
-
-                      <div className="sidebar-section-label">Material</div>
-                      <select
-                        className="sidebar-material-select"
-                        value={activeMaterial}
-                        onChange={(ev) => setActiveMaterial(ev.target.value)}
-                        disabled={loading || workBusy}
-                        aria-label="Material"
-                      >
-                        {MATERIAL_OPTIONS.map((o) => (
-                          <option key={o.id} value={o.id}>
-                            {o.label}
-                          </option>
-                        ))}
-                      </select>
-                    </>
-                  ) : null}
-
-                  {toolsPane === "sculpt" ? (
-                    <>
-                      <div className="sidebar-section-label">Sculpt mode</div>
-                      <div className="sidebar-mode-grid">
-                        {(
-                          [
-                            ["draw", "Draw"],
-                            ["gouge", "Scrape"],
-                            ["smooth", "Smooth"],
-                            ["wall", "Wall"],
-                            ["extrude", "Extrude"],
-                            ["terrain", "Terrain"],
-                          ] as const
-                        ).map(([id, label]) => (
-                          <button
-                            key={id}
-                            type="button"
-                            className={
-                              sculptStrokeMode === id
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy || interactionMode !== "sculpt"}
-                            onClick={() => setSculptStrokeMode(id)}
-                          >
-                            <span className="sidebar-mode-label">{label}</span>
-                          </button>
-                        ))}
-                      </div>
-                      <SymmetryColorSidebarSections
-                        loading={loading}
-                        workBusy={workBusy}
-                        activeColor={activeColor}
-                        setActiveColor={setActiveColor}
-                        interactionMode={interactionMode}
-                        setInteractionMode={setInteractionMode}
-                      />
-                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Brush and terrain options are in the tool options panel.
+                    {toolsPane === "hand" ? (
+                      <p className="sidebar-pane-hint">
+                        Drag in viewport to orbit/pan.
                       </p>
-                    </>
-                  ) : null}
+                    ) : null}
 
-                  {toolsPane === "generators" ? (
-                    <>
-                      <div className="sidebar-section-label">Generators</div>
-                      <button
-                        type="button"
-                        className={interactionMode === "generator" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("generator")}
-                      >
-                        <span className="sidebar-mode-label">Place</span>
-                      </button>
-                      <div className="sidebar-section-label">Tool</div>
-                      <div className="sidebar-mode-grid sidebar-mode-grid-2">
-                        {(
-                          [
-                            ["rocks", "Rocks"],
-                            ["grass", "Grass"],
-                            ["rope", "Rope"],
-                            ["cloth", "Cloth"],
-                          ] as const
-                        ).map(([id, label]) => (
+                    {toolsPane === "fly" ? (
+                      <p className="sidebar-pane-hint">
+                        Click viewport to capture pointer. WASD move, E/Q
+                        up/down, Shift slow. Mouse looks. Esc releases pointer.
+                      </p>
+                    ) : null}
+
+                    {toolsPane === "draw" ? (
+                      <>
+                        <div
+                          className="sidebar-tool-selection-row"
+                          role="group"
+                          aria-label="Tool and selection"
+                        >
+                          <div className="sidebar-tool-selection-col">
+                            <div className="sidebar-section-label">Tool</div>
+                            <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
+                              {(["add", "remove", "paint"] as const).map(
+                                (m) => (
+                                  <button
+                                    key={m}
+                                    type="button"
+                                    className={
+                                      interactionMode === m
+                                        ? "sidebar-mode-btn is-active"
+                                        : "sidebar-mode-btn"
+                                    }
+                                    disabled={loading || workBusy}
+                                    onClick={() => setInteractionMode(m)}
+                                  >
+                                    <span className="sidebar-mode-label">
+                                      {m[0].toUpperCase() + m.slice(1)}
+                                    </span>
+                                  </button>
+                                ),
+                              )}
+                            </div>
+                          </div>
+                          <div className="sidebar-tool-selection-col">
+                            <div className="sidebar-section-label">
+                              Selection
+                            </div>
+                            <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
+                              <button
+                                type="button"
+                                className={
+                                  interactionMode === "select"
+                                    ? "sidebar-mode-btn is-active"
+                                    : "sidebar-mode-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() => setInteractionMode("select")}
+                              >
+                                <span className="sidebar-mode-label">
+                                  Select
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className={
+                                  interactionMode === "stamp"
+                                    ? "sidebar-mode-btn is-active"
+                                    : "sidebar-mode-btn"
+                                }
+                                disabled={
+                                  loading || workBusy || selectionCount === 0
+                                }
+                                onClick={() => setInteractionMode("stamp")}
+                              >
+                                <span className="sidebar-mode-label">
+                                  Stamp
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                className={
+                                  interactionMode === "punch"
+                                    ? "sidebar-mode-btn is-active"
+                                    : "sidebar-mode-btn"
+                                }
+                                disabled={
+                                  loading || workBusy || selectionCount === 0
+                                }
+                                onClick={() => setInteractionMode("punch")}
+                              >
+                                <span className="sidebar-mode-label">
+                                  Punch
+                                </span>
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="sidebar-section-label">
+                          Selection method
+                        </div>
+                        <div className="sidebar-mode-grid sidebar-mode-grid-3">
                           <button
-                            key={id}
                             type="button"
                             className={
-                              generatorKind === id
+                              selectionMethod === "stroke"
                                 ? "sidebar-mode-btn is-active"
                                 : "sidebar-mode-btn"
                             }
                             disabled={loading || workBusy}
                             onClick={() => {
-                              setGeneratorKind(id);
-                              setRopeFirstScreen(null);
-                              setClothPins([]);
+                              const s = selectionMethodToState("stroke");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
                             }}
+                            title="Line from pointer down to cursor (web Stroke)"
                           >
-                            <span className="sidebar-mode-label">{label}</span>
+                            <span className="sidebar-mode-label">Stroke</span>
                           </button>
-                        ))}
-                      </div>
-                      <SymmetryColorSidebarSections
-                        loading={loading}
-                        workBusy={workBusy}
-                        activeColor={activeColor}
-                        setActiveColor={setActiveColor}
-                        interactionMode={interactionMode}
-                        setInteractionMode={setInteractionMode}
-                      />
-                      {generatorKind === "rope" && ropeFirstScreen ? (
-                        <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                          Click second point to finish rope.
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "surface"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("surface");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Plane / circle / polygon in the face plane (web Surface)"
+                          >
+                            <span className="sidebar-mode-label">Surface</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "solid"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("solid");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Solid volume: cube/cylinder/polygon (web Solid)"
+                          >
+                            <span className="sidebar-mode-label">Solid</span>
+                          </button>
+                        </div>
+                        <div
+                          className="sidebar-mode-grid sidebar-mode-grid-2"
+                          style={{ marginTop: "0.35rem" }}
+                        >
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "spray"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("spray");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Spray density along brush path"
+                          >
+                            <span className="sidebar-mode-label">Spray</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "fill"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("fill");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Fill connected region (add / remove / paint / selection)"
+                          >
+                            <span className="sidebar-mode-label">Fill</span>
+                          </button>
+                        </div>
+
+                        <SymmetryColorSidebarSections
+                          loading={loading}
+                          workBusy={workBusy}
+                          activeColor={activeColor}
+                          setActiveColor={setActiveColor}
+                          interactionMode={interactionMode}
+                          setInteractionMode={setInteractionMode}
+                        />
+
+                        <div className="sidebar-section-label">Material</div>
+                        <select
+                          className="sidebar-material-select"
+                          value={activeMaterial}
+                          onChange={(ev) => setActiveMaterial(ev.target.value)}
+                          disabled={loading || workBusy}
+                          aria-label="Material"
+                        >
+                          {MATERIAL_OPTIONS.map((o) => (
+                            <option key={o.id} value={o.id}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                      </>
+                    ) : null}
+
+                    {toolsPane === "sculpt" ? (
+                      <>
+                        <div className="sidebar-section-label">Sculpt mode</div>
+                        <div className="sidebar-mode-grid">
+                          {(
+                            [
+                              ["draw", "Draw"],
+                              ["gouge", "Scrape"],
+                              ["smooth", "Smooth"],
+                              ["wall", "Wall"],
+                              ["extrude", "Extrude"],
+                              ["terrain", "Terrain"],
+                            ] as const
+                          ).map(([id, label]) => (
+                            <button
+                              key={id}
+                              type="button"
+                              className={
+                                sculptStrokeMode === id
+                                  ? "sidebar-mode-btn is-active"
+                                  : "sidebar-mode-btn"
+                              }
+                              disabled={
+                                loading ||
+                                workBusy ||
+                                interactionMode !== "sculpt"
+                              }
+                              onClick={() => setSculptStrokeMode(id)}
+                            >
+                              <span className="sidebar-mode-label">
+                                {label}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                        <SymmetryColorSidebarSections
+                          loading={loading}
+                          workBusy={workBusy}
+                          activeColor={activeColor}
+                          setActiveColor={setActiveColor}
+                          interactionMode={interactionMode}
+                          setInteractionMode={setInteractionMode}
+                        />
+                        <p className="sidebar-pane-hint sidebar-toolpanel-hint">
+                          Brush and terrain options are in the tool options
+                          panel.
                         </p>
-                      ) : null}
-                      {generatorKind === "cloth" ? (
-                        <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                          Cloth: click the surface to add pins (3+ corners), then Apply in tool options.
+                      </>
+                    ) : null}
+
+                    {toolsPane === "generators" ? (
+                      <>
+                        <div className="sidebar-section-label">Generators</div>
+                        <button
+                          type="button"
+                          className={
+                            interactionMode === "generator"
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setInteractionMode("generator")}
+                        >
+                          <span className="sidebar-mode-label">Place</span>
+                        </button>
+                        <div className="sidebar-section-label">Tool</div>
+                        <div className="sidebar-mode-grid sidebar-mode-grid-2">
+                          {(
+                            [
+                              ["rocks", "Rocks"],
+                              ["grass", "Grass"],
+                              ["rope", "Rope"],
+                              ["cloth", "Cloth"],
+                              ["ashlar", "Ashlar"],
+                              ["flora", "Flora"],
+                              ["roof", "Roof"],
+                              ["piscina", "Fish"],
+                              ["insecta", "Insect"],
+                              ["fauna", "Creature"],
+                            ] as const
+                          ).map(([id, label]) => (
+                            <button
+                              key={id}
+                              type="button"
+                              className={
+                                generatorKind === id
+                                  ? "sidebar-mode-btn is-active"
+                                  : "sidebar-mode-btn"
+                              }
+                              disabled={loading || workBusy}
+                              onClick={() => {
+                                setGeneratorKind(id);
+                                setRopeFirstScreen(null);
+                                setClothPins([]);
+                              }}
+                            >
+                              <span className="sidebar-mode-label">
+                                {label}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                        <SymmetryColorSidebarSections
+                          loading={loading}
+                          workBusy={workBusy}
+                          activeColor={activeColor}
+                          setActiveColor={setActiveColor}
+                          interactionMode={interactionMode}
+                          setInteractionMode={setInteractionMode}
+                        />
+                        {generatorKind === "rope" && ropeFirstScreen ? (
+                          <p
+                            className="sidebar-pane-hint sidebar-toolpanel-hint"
+                            role="status"
+                          >
+                            Click second point to finish rope.
+                          </p>
+                        ) : null}
+                        {generatorKind === "cloth" ? (
+                          <p
+                            className="sidebar-pane-hint sidebar-toolpanel-hint"
+                            role="status"
+                          >
+                            Cloth: click the surface to add pins (3+ corners),
+                            then Apply in tool options.
+                          </p>
+                        ) : null}
+                        {generatorKind === "roof" ? (
+                          <p
+                            className="sidebar-pane-hint sidebar-toolpanel-hint"
+                            role="status"
+                          >
+                            Roof: click the surface to add pins (3+ corners),
+                            then Apply in tool options.
+                          </p>
+                        ) : null}
+                        <p className="sidebar-pane-hint sidebar-toolpanel-hint">
+                          Size and shape in the tool options panel. Rope: two
+                          clicks. Cloth: multi-pin + Apply.
                         </p>
-                      ) : null}
+                      </>
+                    ) : null}
+
+                    {toolsPane === "squishy" ? (
+                      <>
+                        <div className="sidebar-section-label">Squishy</div>
+                        <button
+                          type="button"
+                          className={
+                            interactionMode === "squishy"
+                              ? "sidebar-mode-btn is-active"
+                              : "sidebar-mode-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setInteractionMode("squishy")}
+                        >
+                          <span className="sidebar-mode-label">Metaballs</span>
+                        </button>
+                        <SymmetryColorSidebarSections
+                          loading={loading}
+                          workBusy={workBusy}
+                          activeColor={activeColor}
+                          setActiveColor={setActiveColor}
+                          interactionMode={interactionMode}
+                          setInteractionMode={setInteractionMode}
+                        />
+                        <p className="sidebar-pane-hint sidebar-toolpanel-hint">
+                          Add / pick / delete blobs in the viewport; commit in
+                          tool options.
+                        </p>
+                      </>
+                    ) : null}
+
+                    {toolsPane === "mood" ? (
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Size and shape in the tool options panel. Rope: two clicks. Cloth: multi-pin + Apply.
+                        Mood sliders are in the tool options panel.
                       </p>
-                    </>
-                  ) : null}
+                    ) : null}
 
-                  {toolsPane === "squishy" ? (
-                    <>
-                      <div className="sidebar-section-label">Squishy</div>
-                      <button
-                        type="button"
-                        className={interactionMode === "squishy" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("squishy")}
-                      >
-                        <span className="sidebar-mode-label">Metaballs</span>
-                      </button>
-                      <SymmetryColorSidebarSections
-                        loading={loading}
-                        workBusy={workBusy}
-                        activeColor={activeColor}
-                        setActiveColor={setActiveColor}
-                        interactionMode={interactionMode}
-                        setInteractionMode={setInteractionMode}
-                      />
-                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Add / pick / delete blobs in the viewport; commit in tool options.
-                      </p>
-                    </>
-                  ) : null}
-
-                  {toolsPane === "mood" ? (
-                    <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                      Mood sliders are in the tool options panel.
-                    </p>
-                  ) : null}
-
-                  <ViewportSettingsSidebar loading={loading} workBusy={workBusy} />
+                    <ViewportSettingsSidebar
+                      loading={loading}
+                      workBusy={workBusy}
+                    />
+                  </div>
+                </>
+              ) : (
+                <div
+                  className="sidebar-mode-group"
+                  role="group"
+                  aria-label="Interaction mode"
+                >
+                  <button
+                    type="button"
+                    className={
+                      interactionMode === "navigate"
+                        ? "sidebar-mode-btn is-active"
+                        : "sidebar-mode-btn"
+                    }
+                    disabled={loading || workBusy}
+                    onClick={() => setInteractionMode("navigate")}
+                    title="Navigate"
+                  >
+                    <span className="sidebar-mode-icon" aria-hidden>
+                      ✋
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      interactionMode === "add"
+                        ? "sidebar-mode-btn is-active"
+                        : "sidebar-mode-btn"
+                    }
+                    disabled={loading || workBusy}
+                    onClick={() => setInteractionMode("add")}
+                    title="Add"
+                  >
+                    <span className="sidebar-mode-icon" aria-hidden>
+                      👇
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      interactionMode === "sculpt"
+                        ? "sidebar-mode-btn is-active"
+                        : "sidebar-mode-btn"
+                    }
+                    disabled={loading || workBusy}
+                    onClick={() => setInteractionMode("sculpt")}
+                    title="Sculpt"
+                  >
+                    <span className="sidebar-mode-icon" aria-hidden>
+                      ∧
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className={
+                      interactionMode === "fly"
+                        ? "sidebar-mode-btn is-active"
+                        : "sidebar-mode-btn"
+                    }
+                    disabled={loading || workBusy}
+                    onClick={() => setInteractionMode("fly")}
+                    title="Fly"
+                  >
+                    <span className="sidebar-mode-icon" aria-hidden>
+                      ✈
+                    </span>
+                  </button>
                 </div>
-              </>
-            ) : (
-              <div className="sidebar-mode-group" role="group" aria-label="Interaction mode">
-                <button
-                  type="button"
-                  className={interactionMode === "navigate" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                  disabled={loading || workBusy}
-                  onClick={() => setInteractionMode("navigate")}
-                  title="Navigate"
-                >
-                  <span className="sidebar-mode-icon" aria-hidden>✋</span>
-                </button>
-                <button
-                  type="button"
-                  className={interactionMode === "add" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                  disabled={loading || workBusy}
-                  onClick={() => setInteractionMode("add")}
-                  title="Add"
-                >
-                  <span className="sidebar-mode-icon" aria-hidden>👇</span>
-                </button>
-                <button
-                  type="button"
-                  className={interactionMode === "sculpt" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                  disabled={loading || workBusy}
-                  onClick={() => setInteractionMode("sculpt")}
-                  title="Sculpt"
-                >
-                  <span className="sidebar-mode-icon" aria-hidden>∧</span>
-                </button>
-                <button
-                  type="button"
-                  className={interactionMode === "fly" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                  disabled={loading || workBusy}
-                  onClick={() => setInteractionMode("fly")}
-                  title="Fly"
-                >
-                  <span className="sidebar-mode-icon" aria-hidden>✈</span>
-                </button>
-              </div>
-            )}
-          </div>
-        </aside>
+              )}
+            </div>
+          </aside>
         ) : null}
         <div
           className={`viewport-wrap${showStartScreen ? " is-start-screen" : ""}${
@@ -5139,8 +5291,10 @@ function App() {
                 className="load-bar-fill"
                 style={{
                   width: `${Math.round(
-                    Math.min(1, Math.max(0, loading ? loadProgress : workProgress)) *
-                    100,
+                    Math.min(
+                      1,
+                      Math.max(0, loading ? loadProgress : workProgress),
+                    ) * 100,
                   )}%`,
                 }}
               />
@@ -5177,440 +5331,499 @@ function App() {
             aria-label="3D viewport"
           >
             {showEditorChrome && viewportCursorDebugEnabled ? (
-            <div className="viewport-cursor-debug-overlay" aria-hidden>
-              {(() => {
-                const overlayRect =
-                  viewportRef.current?.getBoundingClientRect() ?? null;
-                const jsPct = viewportCursorDebugJs
-                  ? viewportCursorOverlayPercent(
-                      fullSurfaceViewportEnabled,
-                      viewportCursorDebugJs.nx,
-                      viewportCursorDebugJs.ny,
-                      overlayRect,
-                    )
-                  : null;
-                const rustPct =
-                  viewportCursorDebugRust?.previewNx != null &&
-                  viewportCursorDebugRust.previewNy != null
+              <div className="viewport-cursor-debug-overlay" aria-hidden>
+                {(() => {
+                  const overlayRect =
+                    viewportRef.current?.getBoundingClientRect() ?? null;
+                  const jsPct = viewportCursorDebugJs
                     ? viewportCursorOverlayPercent(
                         fullSurfaceViewportEnabled,
-                        viewportCursorDebugRust.previewNx,
-                        viewportCursorDebugRust.previewNy,
+                        viewportCursorDebugJs.nx,
+                        viewportCursorDebugJs.ny,
                         overlayRect,
                       )
                     : null;
-                return (
-                  <>
-                    {jsPct ? (
-                      <div
-                        className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
-                        style={{
-                          left: `${jsPct.leftPct}%`,
-                          top: `${jsPct.topPct}%`,
-                        }}
-                      />
-                    ) : null}
-                    {rustPct ? (
-                      <div
-                        className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
-                        style={{
-                          left: `${rustPct.leftPct}%`,
-                          top: `${rustPct.topPct}%`,
-                        }}
-                      />
-                    ) : null}
-                  </>
-                );
-              })()}
-              <div className="viewport-cursor-debug-legend">
-                <div>
-                  Full-window GPU (experimental){" "}
-                  {fullSurfaceViewportEnabled ? "on" : "off"}
-                </div>
-                <div>
-                  JS{" "}
-                  {viewportCursorDebugJs
-                    ? `${viewportCursorDebugJs.nx.toFixed(5)}, ${viewportCursorDebugJs.ny.toFixed(5)}`
-                    : "—"}
-                </div>
-                <div>
-                  Rust preview{" "}
-                  {viewportCursorDebugRust?.previewNx != null &&
-                  viewportCursorDebugRust.previewNy != null
-                    ? `${viewportCursorDebugRust.previewNx.toFixed(5)}, ${viewportCursorDebugRust.previewNy.toFixed(5)}`
-                    : "—"}
-                </div>
-                <div>
-                  Δn{" "}
-                  {viewportCursorDebugJs &&
-                  viewportCursorDebugRust?.previewNx != null &&
-                  viewportCursorDebugRust.previewNy != null
-                    ? `${(viewportCursorDebugJs.nx - viewportCursorDebugRust.previewNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.previewNy).toFixed(5)}`
-                    : "—"}
-                </div>
-                <div>
-                  proj cube (face hit){" "}
-                  {viewportCursorDebugRust?.projCubeNx != null &&
-                  viewportCursorDebugRust.projCubeNy != null
-                    ? `${viewportCursorDebugRust.projCubeNx.toFixed(5)}, ${viewportCursorDebugRust.projCubeNy.toFixed(5)}`
-                    : "—"}
-                  {viewportCursorDebugJs &&
-                  viewportCursorDebugRust?.projCubeNx != null &&
-                  viewportCursorDebugRust.projCubeNy != null
-                    ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCubeNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCubeNy).toFixed(5)}`
-                    : ""}
-                </div>
-                <div>
-                  proj center (voxel ctr, debug){" "}
-                  {viewportCursorDebugRust?.projCenterNx != null &&
-                  viewportCursorDebugRust.projCenterNy != null
-                    ? `${viewportCursorDebugRust.projCenterNx.toFixed(5)}, ${viewportCursorDebugRust.projCenterNy.toFixed(5)}`
-                    : "—"}
-                  {viewportCursorDebugJs &&
-                  viewportCursorDebugRust?.projCenterNx != null &&
-                  viewportCursorDebugRust.projCenterNy != null
-                    ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCenterNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCenterNy).toFixed(5)}`
-                    : ""}
-                </div>
-                <div>
-                  viewport{" "}
-                  {viewportCursorDebugRust
-                    ? `${viewportCursorDebugRust.viewportWidth}×${viewportCursorDebugRust.viewportHeight}`
-                    : "—"}
-                  {viewportCursorDebugRust?.texelSx != null &&
-                  viewportCursorDebugRust.texelSy != null
-                    ? ` · texel ${viewportCursorDebugRust.texelSx.toFixed(2)}, ${viewportCursorDebugRust.texelSy.toFixed(2)}`
-                    : ""}
-                </div>
-                <div>
-                  screen client{" "}
-                  {viewportCursorDebugScreen
-                    ? `${viewportCursorDebugScreen.clientX.toFixed(1)}, ${viewportCursorDebugScreen.clientY.toFixed(1)}`
-                    : "—"}
-                  {" · rel "}
-                  {viewportCursorDebugScreen
-                    ? `${viewportCursorDebugScreen.relX.toFixed(2)}, ${viewportCursorDebugScreen.relY.toFixed(2)}`
-                    : "—"}
-                </div>
-                <div>
-                  layout→surface origin{" "}
-                  {viewportCursorDebugRust &&
-                  viewportCursorDebugScreen &&
-                  viewportCursorDebugScreen.layoutWidth > 0 &&
-                  viewportCursorDebugScreen.layoutHeight > 0
-                    ? (() => {
-                        const s = viewportCursorDebugScreen;
-                        const r = viewportCursorDebugRust;
-                        const expX = Math.round(
-                          (s.rectLeft / s.layoutWidth) * r.surfaceWidth,
-                        );
-                        const expY = Math.round(
-                          (s.rectTop / s.layoutHeight) * r.surfaceHeight,
-                        );
-                        const dx = expX - r.viewportOriginX;
-                        const dy = expY - r.viewportOriginY;
-                        return `expect (${expX}, ${expY}) · Rust (${r.viewportOriginX}, ${r.viewportOriginY}) · Δ (${dx}, ${dy}) · surface ${r.surfaceWidth}×${r.surfaceHeight} · layout ${s.layoutWidth}×${s.layoutHeight} · inner ${s.innerWidth}×${s.innerHeight} · rect @ ${s.rectLeft.toFixed(0)},${s.rectTop.toFixed(0)}`;
-                      })()
-                    : "—"}
-                </div>
-                <div>
-                  world ray (Rust, preview texels) o{" "}
-                  {viewportCursorDebugRust?.rayOriginX != null &&
-                  viewportCursorDebugRust.rayOriginY != null &&
-                  viewportCursorDebugRust.rayOriginZ != null
-                    ? `${viewportCursorDebugRust.rayOriginX.toFixed(4)}, ${viewportCursorDebugRust.rayOriginY.toFixed(4)}, ${viewportCursorDebugRust.rayOriginZ.toFixed(4)}`
-                    : "—"}
-                  {" d "}
-                  {viewportCursorDebugRust?.rayDirX != null &&
-                  viewportCursorDebugRust.rayDirY != null &&
-                  viewportCursorDebugRust.rayDirZ != null
-                    ? `${viewportCursorDebugRust.rayDirX.toFixed(4)}, ${viewportCursorDebugRust.rayDirY.toFixed(4)}, ${viewportCursorDebugRust.rayDirZ.toFixed(4)}`
-                    : "—"}
+                  const rustPct =
+                    viewportCursorDebugRust?.previewNx != null &&
+                    viewportCursorDebugRust.previewNy != null
+                      ? viewportCursorOverlayPercent(
+                          fullSurfaceViewportEnabled,
+                          viewportCursorDebugRust.previewNx,
+                          viewportCursorDebugRust.previewNy,
+                          overlayRect,
+                        )
+                      : null;
+                  return (
+                    <>
+                      {jsPct ? (
+                        <div
+                          className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
+                          style={{
+                            left: `${jsPct.leftPct}%`,
+                            top: `${jsPct.topPct}%`,
+                          }}
+                        />
+                      ) : null}
+                      {rustPct ? (
+                        <div
+                          className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
+                          style={{
+                            left: `${rustPct.leftPct}%`,
+                            top: `${rustPct.topPct}%`,
+                          }}
+                        />
+                      ) : null}
+                    </>
+                  );
+                })()}
+                <div className="viewport-cursor-debug-legend">
+                  <div>
+                    Full-window GPU (experimental){" "}
+                    {fullSurfaceViewportEnabled ? "on" : "off"}
+                  </div>
+                  <div>
+                    JS{" "}
+                    {viewportCursorDebugJs
+                      ? `${viewportCursorDebugJs.nx.toFixed(5)}, ${viewportCursorDebugJs.ny.toFixed(5)}`
+                      : "—"}
+                  </div>
+                  <div>
+                    Rust preview{" "}
+                    {viewportCursorDebugRust?.previewNx != null &&
+                    viewportCursorDebugRust.previewNy != null
+                      ? `${viewportCursorDebugRust.previewNx.toFixed(5)}, ${viewportCursorDebugRust.previewNy.toFixed(5)}`
+                      : "—"}
+                  </div>
+                  <div>
+                    Δn{" "}
+                    {viewportCursorDebugJs &&
+                    viewportCursorDebugRust?.previewNx != null &&
+                    viewportCursorDebugRust.previewNy != null
+                      ? `${(viewportCursorDebugJs.nx - viewportCursorDebugRust.previewNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.previewNy).toFixed(5)}`
+                      : "—"}
+                  </div>
+                  <div>
+                    proj cube (face hit){" "}
+                    {viewportCursorDebugRust?.projCubeNx != null &&
+                    viewportCursorDebugRust.projCubeNy != null
+                      ? `${viewportCursorDebugRust.projCubeNx.toFixed(5)}, ${viewportCursorDebugRust.projCubeNy.toFixed(5)}`
+                      : "—"}
+                    {viewportCursorDebugJs &&
+                    viewportCursorDebugRust?.projCubeNx != null &&
+                    viewportCursorDebugRust.projCubeNy != null
+                      ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCubeNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCubeNy).toFixed(5)}`
+                      : ""}
+                  </div>
+                  <div>
+                    proj center (voxel ctr, debug){" "}
+                    {viewportCursorDebugRust?.projCenterNx != null &&
+                    viewportCursorDebugRust.projCenterNy != null
+                      ? `${viewportCursorDebugRust.projCenterNx.toFixed(5)}, ${viewportCursorDebugRust.projCenterNy.toFixed(5)}`
+                      : "—"}
+                    {viewportCursorDebugJs &&
+                    viewportCursorDebugRust?.projCenterNx != null &&
+                    viewportCursorDebugRust.projCenterNy != null
+                      ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCenterNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCenterNy).toFixed(5)}`
+                      : ""}
+                  </div>
+                  <div>
+                    viewport{" "}
+                    {viewportCursorDebugRust
+                      ? `${viewportCursorDebugRust.viewportWidth}×${viewportCursorDebugRust.viewportHeight}`
+                      : "—"}
+                    {viewportCursorDebugRust?.texelSx != null &&
+                    viewportCursorDebugRust.texelSy != null
+                      ? ` · texel ${viewportCursorDebugRust.texelSx.toFixed(2)}, ${viewportCursorDebugRust.texelSy.toFixed(2)}`
+                      : ""}
+                  </div>
+                  <div>
+                    screen client{" "}
+                    {viewportCursorDebugScreen
+                      ? `${viewportCursorDebugScreen.clientX.toFixed(1)}, ${viewportCursorDebugScreen.clientY.toFixed(1)}`
+                      : "—"}
+                    {" · rel "}
+                    {viewportCursorDebugScreen
+                      ? `${viewportCursorDebugScreen.relX.toFixed(2)}, ${viewportCursorDebugScreen.relY.toFixed(2)}`
+                      : "—"}
+                  </div>
+                  <div>
+                    layout→surface origin{" "}
+                    {viewportCursorDebugRust &&
+                    viewportCursorDebugScreen &&
+                    viewportCursorDebugScreen.layoutWidth > 0 &&
+                    viewportCursorDebugScreen.layoutHeight > 0
+                      ? (() => {
+                          const s = viewportCursorDebugScreen;
+                          const r = viewportCursorDebugRust;
+                          const expX = Math.round(
+                            (s.rectLeft / s.layoutWidth) * r.surfaceWidth,
+                          );
+                          const expY = Math.round(
+                            (s.rectTop / s.layoutHeight) * r.surfaceHeight,
+                          );
+                          const dx = expX - r.viewportOriginX;
+                          const dy = expY - r.viewportOriginY;
+                          return `expect (${expX}, ${expY}) · Rust (${r.viewportOriginX}, ${r.viewportOriginY}) · Δ (${dx}, ${dy}) · surface ${r.surfaceWidth}×${r.surfaceHeight} · layout ${s.layoutWidth}×${s.layoutHeight} · inner ${s.innerWidth}×${s.innerHeight} · rect @ ${s.rectLeft.toFixed(0)},${s.rectTop.toFixed(0)}`;
+                        })()
+                      : "—"}
+                  </div>
+                  <div>
+                    world ray (Rust, preview texels) o{" "}
+                    {viewportCursorDebugRust?.rayOriginX != null &&
+                    viewportCursorDebugRust.rayOriginY != null &&
+                    viewportCursorDebugRust.rayOriginZ != null
+                      ? `${viewportCursorDebugRust.rayOriginX.toFixed(4)}, ${viewportCursorDebugRust.rayOriginY.toFixed(4)}, ${viewportCursorDebugRust.rayOriginZ.toFixed(4)}`
+                      : "—"}
+                    {" d "}
+                    {viewportCursorDebugRust?.rayDirX != null &&
+                    viewportCursorDebugRust.rayDirY != null &&
+                    viewportCursorDebugRust.rayDirZ != null
+                      ? `${viewportCursorDebugRust.rayDirX.toFixed(4)}, ${viewportCursorDebugRust.rayDirY.toFixed(4)}, ${viewportCursorDebugRust.rayDirZ.toFixed(4)}`
+                      : "—"}
+                  </div>
                 </div>
               </div>
-            </div>
             ) : null}
-          {showViewportTopCenterStack ? (
-            <div
-              className="viewport-top-center-hud"
-              onPointerDown={(e) => e.stopPropagation()}
-            >
-              {viewportTopCenterHud ? (
-                <div
-                  className="viewport-work-phase-chip"
-                  role="status"
-                  aria-live="polite"
-                >
-                  <span className="viewport-work-phase-text">
-                    {viewportTopCenterHud.label}
-                  </span>
-                  <span className="viewport-work-phase-pct">
-                    {viewportTopCenterHud.pct}%
-                  </span>
-                  {viewportTopCenterHud.showFillCancel ? (
+            {showViewportTopCenterStack ? (
+              <div
+                className="viewport-top-center-hud"
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                {viewportTopCenterHud ? (
+                  <div
+                    className="viewport-work-phase-chip"
+                    role="status"
+                    aria-live="polite"
+                  >
+                    <span className="viewport-work-phase-text">
+                      {viewportTopCenterHud.label}
+                    </span>
+                    <span className="viewport-work-phase-pct">
+                      {viewportTopCenterHud.pct}%
+                    </span>
+                    {viewportTopCenterHud.showFillCancel ? (
+                      <button
+                        type="button"
+                        className="viewport-work-phase-cancel"
+                        onClick={() =>
+                          void invoke("voxel_fill_cancel").catch(() => {})
+                        }
+                      >
+                        Cancel
+                      </button>
+                    ) : null}
+                  </div>
+                ) : null}
+                {cuboidPhase.active || cylinderPhase.active ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label={
+                      cuboidPhase.active
+                        ? "Cuboid extrusion depth"
+                        : "Cylinder extrusion depth"
+                    }
+                  >
+                    <span>Depth</span>
                     <button
                       type="button"
-                      className="viewport-work-phase-cancel"
-                      onClick={() =>
-                        void invoke("voxel_fill_cancel").catch(() => {})
+                      className="tool-options-shape-btn"
+                      onClick={() => {
+                        if (cuboidPhase.active) {
+                          const n = Math.max(-256, cuboidDepthUi - 1);
+                          cuboidDepthRef.current = n;
+                          setCuboidDepthUi(n);
+                          if (extrusionDepthEditing)
+                            setExtrusionDepthDraft(String(n));
+                        } else {
+                          const n = Math.max(-256, cylinderDepthUi - 1);
+                          cylinderDepthRef.current = n;
+                          setCylinderDepthUi(n);
+                          if (extrusionDepthEditing)
+                            setExtrusionDepthDraft(String(n));
+                        }
+                      }}
+                    >
+                      −
+                    </button>
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      className="viewport-cuboid-depth-input"
+                      aria-label="Extrusion depth"
+                      autoComplete="off"
+                      value={
+                        extrusionDepthEditing
+                          ? extrusionDepthDraft
+                          : String(
+                              cuboidPhase.active
+                                ? cuboidDepthUi
+                                : cylinderDepthUi,
+                            )
                       }
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v === "" || /^-?\d*$/.test(v)) {
+                          setExtrusionDepthDraft(v);
+                        }
+                      }}
+                      onFocus={(e) => {
+                        const cur = cuboidPhase.active
+                          ? cuboidDepthUi
+                          : cylinderDepthUi;
+                        setExtrusionDepthEditing(true);
+                        setExtrusionDepthDraft(String(cur));
+                        e.target.select();
+                      }}
+                      onBlur={() => {
+                        const current = cuboidPhase.active
+                          ? cuboidDepthUi
+                          : cylinderDepthUi;
+                        let n = parseInt(extrusionDepthDraft, 10);
+                        if (Number.isNaN(n)) n = current;
+                        n = Math.max(-256, Math.min(256, n));
+                        if (cuboidPhase.active) {
+                          setCuboidDepthUi(n);
+                          cuboidDepthRef.current = n;
+                        } else {
+                          setCylinderDepthUi(n);
+                          cylinderDepthRef.current = n;
+                        }
+                        setExtrusionDepthEditing(false);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          (e.target as HTMLInputElement).blur();
+                        }
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => {
+                        if (cuboidPhase.active) {
+                          const n = Math.min(256, cuboidDepthUi + 1);
+                          cuboidDepthRef.current = n;
+                          setCuboidDepthUi(n);
+                          if (extrusionDepthEditing)
+                            setExtrusionDepthDraft(String(n));
+                        } else {
+                          const n = Math.min(256, cylinderDepthUi + 1);
+                          cylinderDepthRef.current = n;
+                          setCylinderDepthUi(n);
+                          if (extrusionDepthEditing)
+                            setExtrusionDepthDraft(String(n));
+                        }
+                      }}
+                    >
+                      +
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => {
+                        if (cuboidPhase.active)
+                          void commitCuboidSolidAtScreen();
+                        else void commitCylinderSolidAtScreen();
+                      }}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ) : null}
+                {extrudePhase.active ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Extrude settings"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
+                      Extrude
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--app-text-muted)",
+                      }}
+                    >
+                      {extrudeProfile === "cylinder" ? "Cylinder" : "Cube"}
+                      {extrudeTaper ? " tapered" : ""}
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => extrudePhase.cancel()}
                     >
                       Cancel
                     </button>
-                  ) : null}
-                </div>
-              ) : null}
-              {cuboidDepthPhase || cylinderDepthPhase ? (
-                <div
-                  className="viewport-cuboid-depth-bar"
-                  role="dialog"
-                  aria-label={
-                    cuboidDepthPhase
-                      ? "Cuboid extrusion depth"
-                      : "Cylinder extrusion depth"
-                  }
-                >
-                  <span>Depth</span>
-                  <button
-                    type="button"
-                    className="tool-options-shape-btn"
-                    onClick={() => {
-                      if (cuboidDepthPhase) {
-                        const n = Math.max(-256, cuboidDepthUi - 1);
-                        cuboidDepthRef.current = n;
-                        setCuboidDepthUi(n);
-                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                      } else {
-                        const n = Math.max(-256, cylinderDepthUi - 1);
-                        cylinderDepthRef.current = n;
-                        setCylinderDepthUi(n);
-                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                      }
-                    }}
-                  >
-                    −
-                  </button>
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    className="viewport-cuboid-depth-input"
-                    aria-label="Extrusion depth"
-                    autoComplete="off"
-                    value={
-                      extrusionDepthEditing
-                        ? extrusionDepthDraft
-                        : String(
-                            cuboidDepthPhase ? cuboidDepthUi : cylinderDepthUi,
-                          )
-                    }
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      if (v === "" || /^-?\d*$/.test(v)) {
-                        setExtrusionDepthDraft(v);
-                      }
-                    }}
-                    onFocus={(e) => {
-                      const cur = cuboidDepthPhase
-                        ? cuboidDepthUi
-                        : cylinderDepthUi;
-                      setExtrusionDepthEditing(true);
-                      setExtrusionDepthDraft(String(cur));
-                      e.target.select();
-                    }}
-                    onBlur={() => {
-                      const current = cuboidDepthPhase
-                        ? cuboidDepthUi
-                        : cylinderDepthUi;
-                      let n = parseInt(extrusionDepthDraft, 10);
-                      if (Number.isNaN(n)) n = current;
-                      n = Math.max(-256, Math.min(256, n));
-                      if (cuboidDepthPhase) {
-                        setCuboidDepthUi(n);
-                        cuboidDepthRef.current = n;
-                      } else {
-                        setCylinderDepthUi(n);
-                        cylinderDepthRef.current = n;
-                      }
-                      setExtrusionDepthEditing(false);
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        (e.target as HTMLInputElement).blur();
-                      }
-                    }}
-                  />
-                  <button
-                    type="button"
-                    className="tool-options-shape-btn"
-                    onClick={() => {
-                      if (cuboidDepthPhase) {
-                        const n = Math.min(256, cuboidDepthUi + 1);
-                        cuboidDepthRef.current = n;
-                        setCuboidDepthUi(n);
-                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                      } else {
-                        const n = Math.min(256, cylinderDepthUi + 1);
-                        cylinderDepthRef.current = n;
-                        setCylinderDepthUi(n);
-                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                      }
-                    }}
-                  >
-                    +
-                  </button>
-                  <button
-                    type="button"
-                    className="tool-options-shape-btn"
-                    onClick={() => {
-                      if (cuboidDepthPhase) void commitCuboidSolidAtScreen();
-                      else void commitCylinderSolidAtScreen();
-                    }}
-                  >
-                    Done
-                  </button>
-                </div>
-              ) : null}
-              {showWallSculptPolygonHud ? (
-                <div
-                  className="viewport-polygon-phase-bar"
-                  role="dialog"
-                  aria-label="Wall polygon outline"
-                >
-                  <p className="viewport-polygon-phase-hint">
-                    Wall outline: {wallSculptPolygonVerts.length} corners. Click
-                    the surface to add; Done applies (min 2 corners).
-                  </p>
-                  <div className="viewport-polygon-phase-actions">
                     <button
                       type="button"
                       className="tool-options-shape-btn"
-                      disabled={loading || workBusy}
-                      onClick={() => setWallSculptPolygonVerts([])}
+                      onClick={() => extrudePhase.commit()}
                     >
-                      Clear
-                    </button>
-                        <button
-                          type="button"
-                          className="tool-options-shape-btn"
-                          disabled={
-                            loading ||
-                            workBusy ||
-                            wallSculptPolygonVerts.length < 2
-                          }
-                          onClick={() => commitWallSculptPolygonStroke()}
-                        >
-                          Done
-                        </button>
-                  </div>
-                </div>
-              ) : null}
-              {showClothGeneratorHud ? (
-                <div
-                  className="viewport-polygon-phase-bar"
-                  role="dialog"
-                  aria-label="Cloth pins"
-                >
-                  <p className="viewport-polygon-phase-hint">
-                    Cloth: {clothPins.length} pin
-                    {clothPins.length === 1 ? "" : "s"}. Click surface to add
-                    or toggle; need 3+ for Apply (tool options).
-                  </p>
-                  <div className="viewport-polygon-phase-actions">
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={loading || workBusy}
-                      onClick={() => setClothPins([])}
-                    >
-                      Clear
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={
-                        loading || workBusy || clothPins.length < 3
-                      }
-                      onClick={() => commitClothGenerator()}
-                    >
-                      Apply
+                      Done
                     </button>
                   </div>
-                </div>
-              ) : null}
-              {showPolygonPhaseHud ? (
-                <div
-                  className="viewport-polygon-phase-bar"
-                  role="dialog"
-                  aria-label="Polygon area"
-                >
-                  <p className="viewport-polygon-phase-hint">
-                    Vertices: {strokePolygonVerts.length}. Click to add
-                    corners; Apply with three or more.
-                  </p>
-                  <div className="viewport-polygon-phase-actions">
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setStrokePolygonVerts([]);
-                        strokePolygonLastScreenRef.current = null;
-                      }}
-                    >
-                      Clear
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={
-                        loading ||
-                        workBusy ||
-                        strokePolygonVerts.length < 3
-                      }
-                      onClick={() => {
-                        if (isDrawVoxelEditMode) applyPolygonStrokeFill();
-                        else applyPolygonSelectionStrokeFill();
-                      }}
-                    >
-                      Apply
-                    </button>
+                ) : null}
+                {showWallSculptPolygonHud ? (
+                  <div
+                    className="viewport-polygon-phase-bar"
+                    role="dialog"
+                    aria-label="Wall polygon outline"
+                  >
+                    <p className="viewport-polygon-phase-hint">
+                      Wall outline: {wallSculptPolygonVerts.length} corners.
+                      Click the surface to add; Done applies (min 2 corners).
+                    </p>
+                    <div className="viewport-polygon-phase-actions">
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={loading || workBusy}
+                        onClick={() => setWallSculptPolygonVerts([])}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={
+                          loading ||
+                          workBusy ||
+                          wallSculptPolygonVerts.length < 2
+                        }
+                        onClick={() => commitWallSculptPolygonStroke()}
+                      >
+                        Done
+                      </button>
+                    </div>
                   </div>
+                ) : null}
+                {showClothGeneratorHud ? (
+                  <div
+                    className="viewport-polygon-phase-bar"
+                    role="dialog"
+                    aria-label="Cloth pins"
+                  >
+                    <p className="viewport-polygon-phase-hint">
+                      Cloth: {clothPins.length} pin
+                      {clothPins.length === 1 ? "" : "s"}. Click surface to add
+                      or toggle; need 3+ for Apply (tool options).
+                    </p>
+                    <div className="viewport-polygon-phase-actions">
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={loading || workBusy}
+                        onClick={() => setClothPins([])}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={loading || workBusy || clothPins.length < 3}
+                        onClick={() => commitClothGenerator()}
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+                {showPolygonPhaseHud ? (
+                  <div
+                    className="viewport-polygon-phase-bar"
+                    role="dialog"
+                    aria-label="Polygon area"
+                  >
+                    <p className="viewport-polygon-phase-hint">
+                      Vertices: {strokePolygonVerts.length}. Click to add
+                      corners; Apply with three or more.
+                    </p>
+                    <div className="viewport-polygon-phase-actions">
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={loading || workBusy}
+                        onClick={() => {
+                          setStrokePolygonVerts([]);
+                          strokePolygonLastScreenRef.current = null;
+                        }}
+                      >
+                        Clear
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={
+                          loading || workBusy || strokePolygonVerts.length < 3
+                        }
+                        onClick={() => {
+                          if (isDrawVoxelEditMode) applyPolygonStrokeFill();
+                          else applyPolygonStrokeFill();
+                        }}
+                      >
+                        Apply
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          {showEditorChrome ? (
+            <div className="viewport-ping-overlay" aria-hidden>
+              {pingLabelCss ? (
+                <div
+                  className="viewport-ping-label"
+                  style={{
+                    left: `${pingLabelCss.leftPct}%`,
+                    top: `${pingLabelCss.topPct}%`,
+                  }}
+                >
+                  {pingLabelCss.name}
                 </div>
               ) : null}
             </div>
           ) : null}
-          </div>
-          {showEditorChrome ? (
-          <div className="viewport-ping-overlay" aria-hidden>
-            {pingLabelCss ? (
-              <div
-                className="viewport-ping-label"
-                style={{
-                  left: `${pingLabelCss.leftPct}%`,
-                  top: `${pingLabelCss.topPct}%`,
-                }}
-              >
-                {pingLabelCss.name}
-              </div>
-            ) : null}
-          </div>
+          {peerLabels.length > 0 ? (
+            <div className="viewport-peer-labels-overlay" aria-hidden>
+              {peerLabels.map((pl, i) => (
+                <div
+                  key={i}
+                  className="viewport-peer-label"
+                  style={
+                    {
+                      left: `${pl.leftPct}%`,
+                      top: `${pl.topPct}%`,
+                      "--peer-color": `#${pl.colorRgb.toString(16).padStart(6, "0")}`,
+                    } as React.CSSProperties
+                  }
+                >
+                  {pl.name}
+                </div>
+              ))}
+            </div>
           ) : null}
           {showEditorChrome ? (
-          <ViewportCameraHud
-            flyMode={interactionMode === "fly"}
-            loadingOrBusy={loading || workBusy}
-          />
+            <ViewportCameraHud
+              flyMode={interactionMode === "fly"}
+              loadingOrBusy={loading || workBusy}
+            />
           ) : null}
           {showToolOptionsPanel ? (
             <div
-              className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""
-                }${!toolsPaneFloating && sidebarExpanded
+              className={`tool-options-panel${
+                toolsPaneFloating ? " is-tools-floating" : ""
+              }${
+                !toolsPaneFloating && sidebarExpanded
                   ? " is-sidebar-expanded"
                   : ""
-                }${!toolsPaneFloating && !sidebarExpanded
+              }${
+                !toolsPaneFloating && !sidebarExpanded
                   ? " is-sidebar-collapsed"
                   : ""
-                }`}
+              }`}
               role="dialog"
               aria-label="Tool options"
               onPointerDown={(e) => e.stopPropagation()}
@@ -5656,9 +5869,9 @@ function App() {
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Fill</div>
                   <p className="tool-options-hint">
-                    Click a solid voxel. The connected region is filled, recolored,
-                    or added to the selection per your current tool and the options
-                    below.
+                    Click a solid voxel. The connected region is filled,
+                    recolored, or added to the selection per your current tool
+                    and the options below.
                   </p>
                 </div>
               ) : null}
@@ -5749,7 +5962,8 @@ function App() {
                     <div className="tool-options-section">
                       <div className="tool-options-heading">By color</div>
                       <p className="tool-options-hint">
-                        Click a voxel to select all connected voxels of the same color.
+                        Click a voxel to select all connected voxels of the same
+                        color.
                       </p>
                       <label
                         className="tool-options-range-label"
@@ -5775,8 +5989,8 @@ function App() {
                     <div className="tool-options-section">
                       <div className="tool-options-heading">Coplanar</div>
                       <p className="tool-options-hint">
-                        Click a solid voxel to extend the selection along the same
-                        face plane.
+                        Click a solid voxel to extend the selection along the
+                        same face plane.
                       </p>
                     </div>
                   ) : null}
@@ -5784,8 +5998,8 @@ function App() {
                     <div className="tool-options-section">
                       <div className="tool-options-heading">Coplanar void</div>
                       <p className="tool-options-hint">
-                        Click empty space on a plane to select the coplanar empty
-                        region.
+                        Click empty space on a plane to select the coplanar
+                        empty region.
                       </p>
                     </div>
                   ) : null}
@@ -5793,11 +6007,11 @@ function App() {
               ) : null}
               {toolsPane === "sculpt" && interactionMode === "sculpt" ? (
                 <>
-                  {(sculptStrokeMode === "draw" ||
-                    sculptStrokeMode === "smooth" ||
-                    sculptStrokeMode === "gouge" ||
-                    sculptStrokeMode === "extrude" ||
-                    sculptStrokeMode === "terrain") ? (
+                  {sculptStrokeMode === "draw" ||
+                  sculptStrokeMode === "smooth" ||
+                  sculptStrokeMode === "gouge" ||
+                  sculptStrokeMode === "extrude" ||
+                  sculptStrokeMode === "terrain" ? (
                     <div className="tool-options-section" aria-label="Sculpt">
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Brush</span>
@@ -5850,11 +6064,11 @@ function App() {
                           {sculptBrushFalloff}
                         </span>
                       </label>
-                      {(sculptStrokeMode === "draw" ||
-                        sculptStrokeMode === "smooth" ||
-                        sculptStrokeMode === "gouge" ||
-                        sculptStrokeMode === "extrude" ||
-                        sculptStrokeMode === "terrain") ? (
+                      {sculptStrokeMode === "draw" ||
+                      sculptStrokeMode === "smooth" ||
+                      sculptStrokeMode === "gouge" ||
+                      sculptStrokeMode === "extrude" ||
+                      sculptStrokeMode === "terrain" ? (
                         <label
                           className="tool-options-checkbox-row"
                           style={{ marginTop: "0.35rem" }}
@@ -5867,12 +6081,14 @@ function App() {
                             }
                             disabled={loading || workBusy}
                           />
-                          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+                          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+                            Outer half (face)
+                          </span>
                         </label>
                       ) : null}
-                      {(sculptStrokeMode === "draw" ||
-                        sculptStrokeMode === "smooth" ||
-                        sculptStrokeMode === "gouge") ? (
+                      {sculptStrokeMode === "draw" ||
+                      sculptStrokeMode === "smooth" ||
+                      sculptStrokeMode === "gouge" ? (
                         <>
                           <div
                             className="tool-options-heading"
@@ -5887,8 +6103,8 @@ function App() {
                           >
                             {(
                               [
-                                ["square", "Square"],
                                 ["circle", "Circle"],
+                                ["square", "Square"],
                               ] as const
                             ).map(([id, label]) => (
                               <button
@@ -5900,9 +6116,7 @@ function App() {
                                     : "tool-options-shape-btn"
                                 }
                                 disabled={loading || workBusy}
-                                onClick={() =>
-                                  setSculptBrushShapeUi(id)
-                                }
+                                onClick={() => setSculptBrushShapeUi(id)}
                               >
                                 {label}
                               </button>
@@ -5915,8 +6129,8 @@ function App() {
                           >
                             {(
                               [
-                                ["cube", "Cube"],
                                 ["sphere", "Sphere"],
+                                ["cube", "Cube"],
                               ] as const
                             ).map(([id, label]) => (
                               <button
@@ -5928,14 +6142,142 @@ function App() {
                                     : "tool-options-shape-btn"
                                 }
                                 disabled={loading || workBusy}
-                                onClick={() =>
-                                  setSculptBrushShapeUi(id)
-                                }
+                                onClick={() => setSculptBrushShapeUi(id)}
                               >
                                 {label}
                               </button>
                             ))}
                           </div>
+                        </>
+                      ) : null}
+                      {sculptStrokeMode === "extrude" ? (
+                        <>
+                          <div
+                            className="tool-options-heading"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            Profile
+                          </div>
+                          <div
+                            className="tool-options-shape-row tool-options-shape-row-two"
+                            role="group"
+                            aria-label="Extrude profile"
+                          >
+                            {(
+                              [
+                                ["cube", "Cube"],
+                                ["cylinder", "Cylinder"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  extrudeProfile === id
+                                    ? "tool-options-shape-btn is-active"
+                                    : "tool-options-shape-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() => setExtrudeProfile(id)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          {extrudeProfile === "cylinder" ? (
+                            <>
+                              <div
+                                className="tool-options-heading"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                End caps
+                              </div>
+                              <div
+                                className="tool-options-shape-row"
+                                role="group"
+                                aria-label="Extrude end cap"
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "1fr 1fr 1fr",
+                                  gap: "0.25rem",
+                                }}
+                              >
+                                {(
+                                  [
+                                    ["flat", "Flat"],
+                                    ["rounded", "Rounded"],
+                                    ["pointed", "Pointed"],
+                                  ] as const
+                                ).map(([id, label]) => (
+                                  <button
+                                    key={id}
+                                    type="button"
+                                    className={
+                                      extrudeEndCap === id
+                                        ? "tool-options-shape-btn is-active"
+                                        : "tool-options-shape-btn"
+                                    }
+                                    disabled={loading || workBusy}
+                                    onClick={() => setExtrudeEndCap(id)}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                            </>
+                          ) : null}
+                          <label
+                            className="tool-options-checkbox-row"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={extrudeTaper}
+                              onChange={(ev) =>
+                                setExtrudeTaper(ev.target.checked)
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span>Taper</span>
+                          </label>
+                          {extrudeTaper ? (
+                            <>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>Start</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={24}
+                                  value={extrudeTaperStart}
+                                  onChange={(ev) =>
+                                    setExtrudeTaperStart(
+                                      Number(ev.target.value),
+                                    )
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span className="tool-options-range-value">
+                                  {extrudeTaperStart + 1}
+                                </span>
+                              </label>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>End</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={24}
+                                  value={extrudeTaperEnd}
+                                  onChange={(ev) =>
+                                    setExtrudeTaperEnd(Number(ev.target.value))
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span className="tool-options-range-value">
+                                  {extrudeTaperEnd + 1}
+                                </span>
+                              </label>
+                            </>
+                          ) : null}
                         </>
                       ) : null}
                       {sculptStrokeMode === "terrain" ? (
@@ -5954,20 +6296,6 @@ function App() {
                             <button
                               type="button"
                               className={
-                                sculptBrushShapeUi === "square" ||
-                                sculptBrushShapeUi === "cube"
-                                  ? "tool-options-shape-btn is-active"
-                                  : "tool-options-shape-btn"
-                              }
-                              disabled={loading || workBusy}
-                              onClick={() => setSculptBrushShapeUi("square")}
-                              title="Square footprint in XZ"
-                            >
-                              Square
-                            </button>
-                            <button
-                              type="button"
-                              className={
                                 sculptBrushShapeUi === "circle" ||
                                 sculptBrushShapeUi === "sphere"
                                   ? "tool-options-shape-btn is-active"
@@ -5976,6 +6304,20 @@ function App() {
                               disabled={loading || workBusy}
                               onClick={() => setSculptBrushShapeUi("circle")}
                               title="Circular footprint in XZ"
+                            >
+                              Circle
+                            </button>
+                            <button
+                              type="button"
+                              className={
+                                sculptBrushShapeUi === "square" ||
+                                sculptBrushShapeUi === "cube"
+                                  ? "tool-options-shape-btn is-active"
+                                  : "tool-options-shape-btn"
+                              }
+                              disabled={loading || workBusy}
+                              onClick={() => setSculptBrushShapeUi("square")}
+                              title="Square footprint in XZ"
                             >
                               Circle
                             </button>
@@ -6032,13 +6374,15 @@ function App() {
                               onChange={(ev) => {
                                 const n = Number(ev.target.value);
                                 if (Number.isNaN(n)) return;
-                                setTerrainBaseY(Math.max(-512, Math.min(512, n)));
+                                setTerrainBaseY(
+                                  Math.max(-512, Math.min(512, n)),
+                                );
                               }}
                               disabled={loading || workBusy}
                             />
                           </label>
-                          {(terrainSculptOp === "raise" ||
-                            terrainSculptOp === "lower") ? (
+                          {terrainSculptOp === "raise" ||
+                          terrainSculptOp === "lower" ? (
                             <label className="tool-options-range-label tool-options-range-with-value">
                               <span>Strength</span>
                               <input
@@ -6065,7 +6409,9 @@ function App() {
                                 max={8}
                                 value={terrainSmoothRadius}
                                 onChange={(ev) =>
-                                  setTerrainSmoothRadius(Number(ev.target.value))
+                                  setTerrainSmoothRadius(
+                                    Number(ev.target.value),
+                                  )
                                 }
                                 disabled={loading || workBusy}
                               />
@@ -6107,9 +6453,7 @@ function App() {
                                 : "tool-options-shape-btn"
                             }
                             disabled={loading || workBusy}
-                            onClick={() =>
-                              setSculptSmoothVariant(id)
-                            }
+                            onClick={() => setSculptSmoothVariant(id)}
                           >
                             {label}
                           </button>
@@ -6243,7 +6587,10 @@ function App() {
                     </div>
                   ) : null}
                   {sculptStrokeMode === "wall" ? (
-                    <div className="tool-options-section" aria-label="Sculpt wall">
+                    <div
+                      className="tool-options-section"
+                      aria-label="Sculpt wall"
+                    >
                       <div className="tool-options-heading">Area shape</div>
                       <div
                         className="tool-options-shape-row"
@@ -6299,7 +6646,9 @@ function App() {
                           style={{ flex: 1, maxWidth: "12rem" }}
                           value={sprayDirection}
                           onChange={(ev) =>
-                            setSprayDirection(ev.target.value as SprayDirectionApi)
+                            setSprayDirection(
+                              ev.target.value as SprayDirectionApi,
+                            )
                           }
                           disabled={loading || workBusy}
                           title="Auto = face normal; or pick a world axis"
@@ -6349,7 +6698,10 @@ function App() {
                           {wallHeightVox}
                         </span>
                       </label>
-                      <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
+                      <label
+                        className="tool-options-checkbox-row"
+                        style={{ marginTop: "0.35rem" }}
+                      >
                         <input
                           type="checkbox"
                           checked={wallLockStartHeight}
@@ -6374,7 +6726,9 @@ function App() {
                 </>
               ) : toolsPane === "sculpt" ? (
                 <div className="tool-options-section">
-                  <p className="tool-options-hint">Select Sculpt mode in the sidebar.</p>
+                  <p className="tool-options-hint">
+                    Select Sculpt mode in the sidebar.
+                  </p>
                 </div>
               ) : null}
               {toolsPane === "generators" ? (
@@ -6689,9 +7043,7 @@ function App() {
                           step={1}
                           value={clothSimConstraintPasses}
                           onChange={(ev) =>
-                            setClothSimConstraintPasses(
-                              Number(ev.target.value),
-                            )
+                            setClothSimConstraintPasses(Number(ev.target.value))
                           }
                           disabled={loading || workBusy}
                         />
@@ -6703,13 +7055,302 @@ function App() {
                         type="button"
                         className="tool-options-shape-btn"
                         style={{ marginTop: "0.5rem", width: "100%" }}
-                        disabled={
-                          loading || workBusy || clothPins.length < 3
-                        }
+                        disabled={loading || workBusy || clothPins.length < 3}
                         onClick={() => commitClothGenerator()}
                       >
                         Apply cloth
                       </button>
+                    </>
+                  ) : null}
+                  {generatorKind === "ashlar" ? (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Size</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={12}
+                          value={Math.min(12, generatorSphereRadius)}
+                          onChange={(ev) =>
+                            setGeneratorSphereRadius(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Roughness</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={rockRoughness}
+                          onChange={(ev) =>
+                            setRockRoughness(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  {generatorKind === "flora" ? (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Height</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={96}
+                          value={floraHeight}
+                          onChange={(ev) =>
+                            setFloraHeight(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Girth</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={20}
+                          value={floraGirth}
+                          onChange={(ev) =>
+                            setFloraGirth(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Stems</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={8}
+                          value={floraStemCount}
+                          onChange={(ev) =>
+                            setFloraStemCount(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Branches</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={6}
+                          value={floraBranchCount}
+                          onChange={(ev) =>
+                            setFloraBranchCount(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Canopy</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={floraCanopy}
+                          onChange={(ev) =>
+                            setFloraCanopy(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  {generatorKind === "roof" ? (
+                    <>
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
+                        <span>Style</span>
+                        <select
+                          value={roofStyle}
+                          onChange={(ev) => setRoofStyle(ev.target.value)}
+                          disabled={loading || workBusy}
+                        >
+                          <option value="flat">Flat</option>
+                          <option value="flat_parapet">Flat Parapet</option>
+                          <option value="pyramid">Pyramid</option>
+                          <option value="cone">Cone</option>
+                          <option value="shed">Shed</option>
+                          <option value="gable">Gable</option>
+                          <option value="saltbox">Saltbox</option>
+                          <option value="hip">Hip</option>
+                          <option value="barrel">Barrel</option>
+                          <option value="mansard">Mansard</option>
+                          <option value="gambrel">Gambrel</option>
+                          <option value="pavilion">Pavilion</option>
+                          <option value="dutch_gable">Dutch Gable</option>
+                        </select>
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Height</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={32}
+                          value={roofHeight}
+                          onChange={(ev) =>
+                            setRoofHeight(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={roofHollow}
+                          onChange={(ev) => setRoofHollow(ev.target.checked)}
+                          disabled={loading || workBusy}
+                        />
+                        <span>Hollow</span>
+                      </label>
+                      <p
+                        className="sidebar-pane-hint"
+                        style={{ marginTop: "0.25rem" }}
+                      >
+                        Click surface to add pins ({roofPins.length} placed).
+                      </p>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        style={{ marginTop: "0.5rem", width: "100%" }}
+                        disabled={loading || workBusy || roofPins.length < 3}
+                        onClick={() => {
+                          void invoke("generator_roof_from_pins_cmd", {
+                            args: {
+                              pins: roofPins,
+                              style: roofStyle,
+                              height: roofHeight,
+                              thickness: 1,
+                              shedEdgeIndex: 0,
+                              gableOrientation: 0,
+                              breakRatio: 0.5,
+                              wallHeight: 3,
+                              parapetHeight: 2,
+                              saltSkew: 0,
+                              hollow: roofHollow,
+                              color: activeColor,
+                              material: activeMaterialRef.current,
+                            },
+                          })
+                            .then(() => {
+                              setRoofPins([]);
+                              roofPinsRef.current = [];
+                            })
+                            .catch(() => {});
+                        }}
+                      >
+                        Apply roof
+                      </button>
+                    </>
+                  ) : null}
+                  {generatorKind === "piscina" ? (
+                    <>
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
+                        <span>Species</span>
+                        <select
+                          value={piscinaSpecies}
+                          onChange={(ev) => setPiscinaSpecies(ev.target.value)}
+                          disabled={loading || workBusy}
+                        >
+                          <option value="trout">Trout</option>
+                          <option value="bass">Bass</option>
+                          <option value="goldfish">Goldfish</option>
+                          <option value="tuna">Tuna</option>
+                          <option value="eel">Eel</option>
+                        </select>
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Length</span>
+                        <input
+                          type="range"
+                          min={4}
+                          max={72}
+                          value={piscinaLength}
+                          onChange={(ev) =>
+                            setPiscinaLength(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  {generatorKind === "insecta" ? (
+                    <>
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
+                        <span>Species</span>
+                        <select
+                          value={insectaSpecies}
+                          onChange={(ev) => setInsectaSpecies(ev.target.value)}
+                          disabled={loading || workBusy}
+                        >
+                          <option value="bee">Bee</option>
+                          <option value="dragonfly">Dragonfly</option>
+                          <option value="grasshopper">Grasshopper</option>
+                          <option value="fly">Fly</option>
+                          <option value="junebug">June Bug</option>
+                        </select>
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Length</span>
+                        <input
+                          type="range"
+                          min={12}
+                          max={72}
+                          value={insectaTotalLength}
+                          onChange={(ev) =>
+                            setInsectaTotalLength(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  ) : null}
+                  {generatorKind === "fauna" ? (
+                    <>
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
+                        <span>Stance</span>
+                        <select
+                          value={faunaStance}
+                          onChange={(ev) => setFaunaStance(ev.target.value)}
+                          disabled={loading || workBusy}
+                        >
+                          <option value="quadruped">Quadruped</option>
+                          <option value="biped">Biped</option>
+                        </select>
+                      </label>
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.25rem" }}
+                      >
+                        <span>Archetype</span>
+                        <select
+                          value={faunaArchetype}
+                          onChange={(ev) => setFaunaArchetype(ev.target.value)}
+                          disabled={loading || workBusy}
+                        >
+                          <option value="plantigrade">Plantigrade</option>
+                          <option value="digitigrade">Digitigrade</option>
+                          <option value="ungulate">Ungulate</option>
+                        </select>
+                      </label>
                     </>
                   ) : null}
                 </div>
@@ -6717,7 +7358,11 @@ function App() {
               {toolsPane === "squishy" && interactionMode === "squishy" ? (
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Squishy session</div>
-                  <div className="tool-options-shape-row" role="group" aria-label="Squishy mode">
+                  <div
+                    className="tool-options-shape-row"
+                    role="group"
+                    aria-label="Squishy mode"
+                  >
                     <button
                       type="button"
                       className={
@@ -6755,8 +7400,15 @@ function App() {
                       Delete
                     </button>
                   </div>
-                  <p style={{ fontSize: "0.85rem", opacity: 0.85, margin: "0.25rem 0" }}>
-                    Metaballs: {squishyBallCount}. Click viewport to add/pick/delete; Commit voxelizes the combined field.
+                  <p
+                    style={{
+                      fontSize: "0.85rem",
+                      opacity: 0.85,
+                      margin: "0.25rem 0",
+                    }}
+                  >
+                    Metaballs: {squishyBallCount}. Click viewport to
+                    add/pick/delete; Commit voxelizes the combined field.
                   </p>
                   <label className="tool-options-range-label">
                     <span>Blob radius (add)</span>
@@ -6771,7 +7423,14 @@ function App() {
                       disabled={loading || workBusy}
                     />
                   </label>
-                  <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                  <label
+                    className="tool-options-range-label"
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
                     <input
                       type="checkbox"
                       checked={squishyHollow}
@@ -6796,16 +7455,28 @@ function App() {
                       />
                     </label>
                   ) : null}
-                  <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                  <label
+                    className="tool-options-range-label"
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
                     <input
                       type="checkbox"
                       checked={squishySnapToSurface}
-                      onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
+                      onChange={(ev) =>
+                        setSquishySnapToSurface(ev.target.checked)
+                      }
                       disabled={loading || workBusy}
                     />
                     <span>Snap add to surface</span>
                   </label>
-                  <div className="tool-options-shape-row" style={{ marginTop: "0.35rem" }}>
+                  <div
+                    className="tool-options-shape-row"
+                    style={{ marginTop: "0.35rem" }}
+                  >
                     <button
                       type="button"
                       className="tool-options-shape-btn"
@@ -6825,7 +7496,7 @@ function App() {
                           .then((s) =>
                             setSquishyBallCount(s.balls?.length ?? 0),
                           )
-                          .catch(() => { });
+                          .catch(() => {});
                       }}
                     >
                       Commit to voxels
@@ -6837,7 +7508,7 @@ function App() {
                       onClick={() => {
                         void invoke("squishy_session_clear")
                           .then(() => setSquishyBallCount(0))
-                          .catch(() => { });
+                          .catch(() => {});
                       }}
                     >
                       Clear session
@@ -6846,7 +7517,9 @@ function App() {
                 </div>
               ) : toolsPane === "squishy" ? (
                 <div className="tool-options-section">
-                  <p className="tool-options-hint">Select Squishy mode in the sidebar.</p>
+                  <p className="tool-options-hint">
+                    Select Squishy mode in the sidebar.
+                  </p>
                 </div>
               ) : null}
               {toolsPane === "mood" ? (
@@ -6860,9 +7533,7 @@ function App() {
                       max={1}
                       step={0.02}
                       value={moodGrain}
-                      onChange={(ev) =>
-                        setMoodGrain(Number(ev.target.value))
-                      }
+                      onChange={(ev) => setMoodGrain(Number(ev.target.value))}
                       disabled={loading || workBusy}
                     />
                   </label>
@@ -6934,15 +7605,17 @@ function App() {
             >
               <div className="viewport-empty-open-stack">
                 {lastSessionReady &&
-                  lastSessionInfo?.lastDocumentPath &&
-                  (lastSessionInfo.documentExists ||
-                    lastSessionInfo.autosaveExists) ? (
+                lastSessionInfo?.lastDocumentPath &&
+                (lastSessionInfo.documentExists ||
+                  lastSessionInfo.autosaveExists) ? (
                   <div
                     className="viewport-empty-last"
                     role="group"
                     aria-label="Continue last project"
                   >
-                    <div className="viewport-empty-last-title">Continue where you left off</div>
+                    <div className="viewport-empty-last-title">
+                      Continue where you left off
+                    </div>
                     {lastSessionInfo.documentBasename ? (
                       <div
                         className="viewport-empty-last-filename"
@@ -6974,7 +7647,9 @@ function App() {
                         onClick={reopenLastProject}
                         disabled={loading || workBusy}
                         aria-describedby={
-                          lastProjectBlurb ? "viewport-empty-last-desc" : undefined
+                          lastProjectBlurb
+                            ? "viewport-empty-last-desc"
+                            : undefined
                         }
                       >
                         Reopen last project
@@ -6986,7 +7661,7 @@ function App() {
                   type="button"
                   className="viewport-empty-open-btn is-secondary"
                   onClick={() =>
-                    void invoke("open_voxelle_dialog").catch(() => { })
+                    void invoke("open_voxelle_dialog").catch(() => {})
                   }
                 >
                   Open file…
@@ -7081,7 +7756,9 @@ function App() {
                     aria-label="Dismiss notification"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
+                      setChatToasts((prev) =>
+                        prev.filter((x) => x.id !== t.id),
+                      );
                     }}
                   >
                     ×
@@ -7126,7 +7803,11 @@ function App() {
                     collabActive && e.key === "Enter" && sendChat()
                   }
                 />
-                <button type="button" onClick={sendChat} disabled={!collabActive}>
+                <button
+                  type="button"
+                  onClick={sendChat}
+                  disabled={!collabActive}
+                >
                   Send
                 </button>
               </div>
@@ -7134,205 +7815,216 @@ function App() {
           ) : null}
         </div>
         {showEditorChrome ? (
-        <aside
-          className={
-            rightSidebarExpanded
-              ? "app-sidebar app-sidebar-right is-expanded"
-              : "app-sidebar app-sidebar-right is-collapsed"
-          }
-          aria-label="Inspector"
-        >
-          <div className="sidebar-header sidebar-header-right">
-            <button
-              type="button"
-              className="sidebar-expand-toggle sidebar-expand-toggle-right"
-              onClick={() => setRightSidebarExpanded((v) => !v)}
-              aria-expanded={rightSidebarExpanded}
-              title={
-                rightSidebarExpanded
-                  ? "Collapse inspector"
-                  : "Expand inspector"
-              }
-            >
-              {rightSidebarExpanded ? (
-                <>
-                  <span className="sidebar-expand-toggle-label">Inspector</span>
-                  <span className="sidebar-expand-toggle-icon" aria-hidden>
-                    »
-                  </span>
-                </>
-              ) : (
-                <span className="sidebar-expand-toggle-icon" aria-hidden>
-                  «
-                </span>
-              )}
-            </button>
-          </div>
-          {rightSidebarExpanded ? (
-            <div className="sidebar-scroll">
-              <div
-                className="sidebar-expanded-slot sidebar-expanded-slot-right"
-                aria-label="Inspector content"
+          <aside
+            className={
+              rightSidebarExpanded
+                ? "app-sidebar app-sidebar-right is-expanded"
+                : "app-sidebar app-sidebar-right is-collapsed"
+            }
+            aria-label="Inspector"
+          >
+            <div className="sidebar-header sidebar-header-right">
+              <button
+                type="button"
+                className="sidebar-expand-toggle sidebar-expand-toggle-right"
+                onClick={() => setRightSidebarExpanded((v) => !v)}
+                aria-expanded={rightSidebarExpanded}
+                title={
+                  rightSidebarExpanded
+                    ? "Collapse inspector"
+                    : "Expand inspector"
+                }
               >
-                <div className="inspector-objects">
-                  <h4 className="inspector-heading">Objects</h4>
-                  {sceneObjectsErr ? (
-                    <p className="inspector-hint">{sceneObjectsErr}</p>
-                  ) : null}
-                  <ul className="inspector-object-list">
-                    {sceneObjects
-                      .slice()
-                      .sort(
-                        (a, b) => a.sortOrder - b.sortOrder || a.id - b.id,
-                      )
-                      .map((o) => (
-                        <li key={o.id} className="inspector-object-row">
-                          <label className="inspector-active">
-                            <input
-                              type="radio"
-                              name="activeObject"
-                              checked={activeObjectId === o.id}
-                              onChange={() => {
-                                void invoke("set_active_object", {
-                                  id: o.id,
-                                }).then(() => {
-                                  setActiveObjectId(o.id);
-                                  refreshSceneObjects();
-                                });
-                              }}
-                            />
-                            <span className="inspector-object-name">
-                              {o.name}
-                            </span>
-                          </label>
-                          <label className="inspector-visible">
-                            <input
-                              type="checkbox"
-                              checked={o.visible}
-                              onChange={(e) => {
-                                void invoke("set_object_visible", {
-                                  id: o.id,
-                                  visible: e.target.checked,
-                                }).then(() => refreshSceneObjects());
-                              }}
-                            />
-                            Visible
-                          </label>
-                        </li>
-                      ))}
-                  </ul>
-                  <button
-                    type="button"
-                    className="inspector-new-object"
-                    onClick={() => {
-                      void invoke<number>("create_scene_object", {
-                        name: "",
-                      }).then(() => refreshSceneObjects());
-                    }}
-                  >
-                    New object
-                  </button>
-                </div>
-                {collabActive ? (
-                  <div className="inspector-collaboration">
-                    <h4 className="inspector-heading">Session</h4>
-                    <p
-                      className={`inspector-session-status${hostWsUrl ? " is-live" : ""}`}
-                      role="status"
-                      aria-live="polite"
-                    >
-                      {hostWsUrl
-                        ? "Guests can use the link in the status bar."
-                        : "You're a guest."}
-                    </p>
-                    {hostWsUrl ? (
-                      <>
-                        <p className="collab-hint inspector-collab-hint">
-                          Nearby: <code>{hostWsUrl}</code>
-                        </p>
-                        {prefsEnableUpnp && natPending ? (
-                          <p
-                            className="collab-hint collab-hint-muted inspector-collab-hint"
-                            role="status"
-                          >
-                            Checking your router…
-                          </p>
-                        ) : null}
-                        {hostWanUrl ? (
-                          <p className="collab-hint inspector-collab-hint">
-                            Internet: <code>{hostWanUrl}</code>
-                          </p>
-                        ) : null}
-                        {natError ? (
-                          <p
-                            className="collab-hint collab-hint-warn inspector-collab-hint"
-                            role="alert"
-                          >
-                            {natError} You can forward port {hostPort} in your
-                            router settings. Some networks won&apos;t allow guests
-                            over the internet.
-                          </p>
-                        ) : null}
-                      </>
+                {rightSidebarExpanded ? (
+                  <>
+                    <span className="sidebar-expand-toggle-label">
+                      Inspector
+                    </span>
+                    <span className="sidebar-expand-toggle-icon" aria-hidden>
+                      »
+                    </span>
+                  </>
+                ) : (
+                  <span className="sidebar-expand-toggle-icon" aria-hidden>
+                    «
+                  </span>
+                )}
+              </button>
+            </div>
+            {rightSidebarExpanded ? (
+              <div className="sidebar-scroll">
+                <div
+                  className="sidebar-expanded-slot sidebar-expanded-slot-right"
+                  aria-label="Inspector content"
+                >
+                  <div className="inspector-objects">
+                    <h4 className="inspector-heading">Objects</h4>
+                    {sceneObjectsErr ? (
+                      <p className="inspector-hint">{sceneObjectsErr}</p>
                     ) : null}
-                    <h4 className="inspector-heading inspector-roster-heading">
-                      Roster
-                    </h4>
-                    <ul className="collab-roster inspector-collab-roster">
-                      {roster.map((r) => (
-                        <li key={r.peerId}>
-                          <button
-                            type="button"
-                            className="collab-roster-name"
-                            onClick={() => onRosterSnapCamera(r.peerId)}
-                            title="Jump to their view"
-                          >
-                            <span
-                              className="collab-swatch"
-                              style={{
-                                background: `#${(r.colorRgb & 0xffffff)
-                                  .toString(16)
-                                  .padStart(6, "0")}`,
-                              }}
-                            />
-                            {r.displayName}
-                            {r.isLeader ? " (leader)" : ""}
-                          </button>
-                          {!r.isLeader && amLeader ? (
+                    <ul className="inspector-object-list">
+                      {sceneObjects
+                        .slice()
+                        .sort(
+                          (a, b) => a.sortOrder - b.sortOrder || a.id - b.id,
+                        )
+                        .map((o) => (
+                          <li key={o.id} className="inspector-object-row">
+                            <label className="inspector-active">
+                              <input
+                                type="radio"
+                                name="activeObject"
+                                checked={activeObjectId === o.id}
+                                onChange={() => {
+                                  void invoke("set_active_object", {
+                                    id: o.id,
+                                  }).then(() => {
+                                    setActiveObjectId(o.id);
+                                    refreshSceneObjects();
+                                  });
+                                }}
+                              />
+                              <span className="inspector-object-name">
+                                {o.name}
+                              </span>
+                            </label>
+                            <label className="inspector-visible">
+                              <input
+                                type="checkbox"
+                                checked={o.visible}
+                                onChange={(e) => {
+                                  void invoke("set_object_visible", {
+                                    id: o.id,
+                                    visible: e.target.checked,
+                                  }).then(() => refreshSceneObjects());
+                                }}
+                              />
+                              Visible
+                            </label>
+                          </li>
+                        ))}
+                    </ul>
+                    <button
+                      type="button"
+                      className="inspector-new-object"
+                      onClick={() => {
+                        void invoke<number>("create_scene_object", {
+                          name: "",
+                        }).then(() => refreshSceneObjects());
+                      }}
+                    >
+                      New object
+                    </button>
+                  </div>
+                  {collabActive ? (
+                    <div className="inspector-collaboration">
+                      <h4 className="inspector-heading">Session</h4>
+                      <p
+                        className={`inspector-session-status${hostWsUrl ? " is-live" : ""}`}
+                        role="status"
+                        aria-live="polite"
+                      >
+                        {hostWsUrl
+                          ? "Guests can use the link in the status bar."
+                          : "You're a guest."}
+                      </p>
+                      {hostWsUrl ? (
+                        <>
+                          <p className="collab-hint inspector-collab-hint">
+                            Nearby:
+                          </p>
+                          <p className="collab-hint inspector-collab-hint">
+                            {" "}
+                            <code>{hostWsUrl}</code>
+                          </p>
+                          {prefsEnableUpnp && natPending ? (
+                            <p
+                              className="collab-hint collab-hint-muted inspector-collab-hint"
+                              role="status"
+                            >
+                              Checking your router…
+                            </p>
+                          ) : null}
+                          {hostWanUrl ? (
                             <>
-                              <label className="collab-can-edit">
-                                <input
-                                  type="checkbox"
-                                  checked={r.canEdit}
-                                  onChange={(e) =>
-                                    setCanEdit(r.peerId, e.target.checked)
-                                  }
-                                />
-                                Edit
-                              </label>
-                              <button
-                                type="button"
-                                className="collab-kick"
-                                title="Remove guest"
-                                onClick={() =>
-                                  void invoke("collab_kick_peer", {
-                                    targetPeer: r.peerId,
-                                  })
-                                }
-                              >
-                                Kick
-                              </button>
+                              <p className="collab-hint inspector-collab-hint">
+                                Internet:
+                              </p>
+                              <p className="collab-hint inspector-collab-hint">
+                                <code>{hostWanUrl}</code>
+                              </p>
                             </>
                           ) : null}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
+                          {natError ? (
+                            <p
+                              className="collab-hint collab-hint-warn inspector-collab-hint"
+                              role="alert"
+                            >
+                              {natError} You can forward port {hostPort} in your
+                              router settings. Some networks won&apos;t allow
+                              guests over the internet.
+                            </p>
+                          ) : null}
+                        </>
+                      ) : null}
+                      <h4 className="inspector-heading inspector-roster-heading">
+                        Roster
+                      </h4>
+                      <ul className="collab-roster inspector-collab-roster">
+                        {roster.map((r) => (
+                          <li key={r.peerId}>
+                            <button
+                              type="button"
+                              className="collab-roster-name"
+                              onClick={() => onRosterSnapCamera(r.peerId)}
+                              title="Jump to their view"
+                            >
+                              <span
+                                className="collab-swatch"
+                                style={{
+                                  background: `#${(r.colorRgb & 0xffffff)
+                                    .toString(16)
+                                    .padStart(6, "0")}`,
+                                }}
+                              />
+                              {r.displayName}
+                              {r.isLeader ? " (leader)" : ""}
+                            </button>
+                            {!r.isLeader && amLeader ? (
+                              <>
+                                <label className="collab-can-edit">
+                                  <input
+                                    type="checkbox"
+                                    checked={r.canEdit}
+                                    onChange={(e) =>
+                                      setCanEdit(r.peerId, e.target.checked)
+                                    }
+                                  />
+                                  Edit
+                                </label>
+                                <button
+                                  type="button"
+                                  className="collab-kick"
+                                  title="Remove guest"
+                                  onClick={() =>
+                                    void invoke("collab_kick_peer", {
+                                      targetPeer: r.peerId,
+                                    })
+                                  }
+                                >
+                                  Kick
+                                </button>
+                              </>
+                            ) : null}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                </div>
               </div>
-            </div>
-          ) : null}
-        </aside>
+            ) : null}
+          </aside>
         ) : null}
       </div>
       <footer
@@ -7353,16 +8045,13 @@ function App() {
               type="button"
               className="status-bar-hosting-btn"
               onClick={copyHostingJoinAddress}
-              title={
-                hostingCopied
-                  ? "Copied"
-                  : "Copy invite link"
-              }
+              title={hostingCopied ? "Copied" : "Copy invite link"}
             >
               {hostingCopied
                 ? "Copied invite link"
-                : `Hosting · ${roster.length} ${roster.length === 1 ? "person" : "people"
-                }`}
+                : `Hosting · ${roster.length} ${
+                    roster.length === 1 ? "person" : "people"
+                  }`}
             </button>
           ) : null}
         </div>
@@ -7387,6 +8076,7 @@ function App() {
         loadProgress={loadProgress}
         loadPhase={loadPhase}
         pathLabel={pathLabel}
+        onCancel={cancelJoin}
       />
       <PreferencesModal
         open={preferencesOpen}
@@ -7404,7 +8094,9 @@ function App() {
           role="dialog"
           aria-modal="true"
           tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setNewProjectOpen(false)}
+          onClick={(e) =>
+            e.target === e.currentTarget && setNewProjectOpen(false)
+          }
           onKeyDown={(e) => e.key === "Escape" && setNewProjectOpen(false)}
         >
           <div className="modal">
