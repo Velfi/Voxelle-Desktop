@@ -3,7 +3,7 @@
 use crate::gpu_brick::{pack_cell, pack_empty};
 use crate::voxelle::{MaterialId, SceneObject, Voxel};
 use ahash::{AHashMap, AHashSet};
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
 
@@ -1524,6 +1524,156 @@ pub fn preview_cube_wireframe_mesh(
     }
 }
 
+/// Thin solid beam between two points (used for squishy metaball wire spheres).
+pub fn beam_segment_mesh(
+    p0: [f32; 3],
+    p1: [f32; 3],
+    thickness: f32,
+    color: [f32; 3],
+    mat_k: f32,
+) -> MeshBuffers {
+    let a = Vec3::from_array(p0);
+    let b = Vec3::from_array(p1);
+    let d = b - a;
+    let len = d.length();
+    if len < 1e-5 {
+        return MeshBuffers::default();
+    }
+    let dir = d / len;
+    let mid = (a + b) * 0.5;
+    let up = if dir.y.abs() < 0.9 {
+        Vec3::Y
+    } else {
+        Vec3::X
+    };
+    let mut u_ax = dir.cross(up);
+    if u_ax.length_squared() < 1e-10 {
+        u_ax = dir.cross(Vec3::Z);
+    }
+    u_ax = u_ax.normalize();
+    let v_ax = dir.cross(u_ax);
+    let hx = thickness * 0.5;
+    let hy = thickness * 0.5;
+    let hz = len * 0.5;
+
+    let corner = |sx: f32, sy: f32, sz: f32| -> [f32; 3] {
+        (mid + u_ax * (sx * hx) + v_ax * (sy * hy) + dir * (sz * hz)).to_array()
+    };
+
+    let c000 = corner(-1.0, -1.0, -1.0);
+    let c100 = corner(1.0, -1.0, -1.0);
+    let c110 = corner(1.0, 1.0, -1.0);
+    let c010 = corner(-1.0, 1.0, -1.0);
+    let c001 = corner(-1.0, -1.0, 1.0);
+    let c101 = corner(1.0, -1.0, 1.0);
+    let c111 = corner(1.0, 1.0, 1.0);
+    let c011 = corner(-1.0, 1.0, 1.0);
+
+    let mut positions: Vec<f32> = Vec::with_capacity(72);
+    let mut normals: Vec<f32> = Vec::with_capacity(72);
+    let mut colors: Vec<f32> = Vec::with_capacity(72);
+    let mut mat_kind: Vec<f32> = Vec::with_capacity(24);
+    let mut ao: Vec<f32> = Vec::with_capacity(24);
+    let mut indices: Vec<u32> = Vec::with_capacity(36);
+
+    let mut face = |nx: f32, ny: f32, nz: f32, corners: [[f32; 3]; 4]| {
+        let base = (positions.len() / 3) as u32;
+        for p in corners {
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&[nx, ny, nz]);
+            colors.extend_from_slice(&color);
+            mat_kind.push(mat_k);
+            ao.push(1.0);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    // Winding CCW when viewed from outward normal (matches `preview_cube_mesh`).
+    face(
+        u_ax.x,
+        u_ax.y,
+        u_ax.z,
+        [c100, c110, c111, c101],
+    );
+    face(
+        -u_ax.x,
+        -u_ax.y,
+        -u_ax.z,
+        [c000, c001, c011, c010],
+    );
+    face(
+        v_ax.x,
+        v_ax.y,
+        v_ax.z,
+        [c010, c011, c111, c110],
+    );
+    face(
+        -v_ax.x,
+        -v_ax.y,
+        -v_ax.z,
+        [c000, c100, c101, c001],
+    );
+    face(
+        dir.x,
+        dir.y,
+        dir.z,
+        [c001, c101, c111, c011],
+    );
+    face(
+        -dir.x,
+        -dir.y,
+        -dir.z,
+        [c000, c010, c110, c100],
+    );
+
+    MeshBuffers {
+        positions,
+        normals,
+        colors,
+        mat_kind,
+        ao,
+        indices,
+    }
+}
+
+/// Three orthogonal wire rings (web `SphereGeometry` wireframe parity for pick shells).
+pub fn append_sphere_pick_rings(
+    dst: &mut MeshBuffers,
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    radius: f32,
+    color: [f32; 3],
+    mat_k: f32,
+    segments: u32,
+) {
+    let r = radius.max(0.2);
+    let t = (r * 0.025).clamp(0.012, 0.045);
+    let n = segments.max(8) as usize;
+    let tau = std::f32::consts::TAU;
+    for i in 0..n {
+        let a0 = i as f32 / n as f32 * tau;
+        let a1 = (i + 1) as f32 / n as f32 * tau;
+        let p0 = [cx + r * a0.cos(), cy + r * a0.sin(), cz];
+        let p1 = [cx + r * a1.cos(), cy + r * a1.sin(), cz];
+        append_mesh_buffers(dst, beam_segment_mesh(p0, p1, t, color, mat_k));
+    }
+    for i in 0..n {
+        let a0 = i as f32 / n as f32 * tau;
+        let a1 = (i + 1) as f32 / n as f32 * tau;
+        let p0 = [cx + r * a0.cos(), cy, cz + r * a0.sin()];
+        let p1 = [cx + r * a1.cos(), cy, cz + r * a1.sin()];
+        append_mesh_buffers(dst, beam_segment_mesh(p0, p1, t, color, mat_k));
+    }
+    for i in 0..n {
+        let a0 = i as f32 / n as f32 * tau;
+        let a1 = (i + 1) as f32 / n as f32 * tau;
+        let p0 = [cx, cy + r * a0.cos(), cz + r * a0.sin()];
+        let p1 = [cx, cy + r * a1.cos(), cz + r * a1.sin()];
+        append_mesh_buffers(dst, beam_segment_mesh(p0, p1, t, color, mat_k));
+    }
+}
+
 pub fn transform_mesh_buffers(mesh: &mut MeshBuffers, model: glam::Mat4) {
     let det = model.determinant();
     let inv_t = if det.is_finite() && det.abs() > 1e-20 {
@@ -1698,6 +1848,217 @@ pub fn ping_ripple_line_vertices(
             out.extend_from_slice(&[x0, cy, z0, c[0], c[1], c[2]]);
             out.extend_from_slice(&[x1, cy, z1, c[0], c[1], c[2]]);
         }
+    }
+    out
+}
+
+/// Web `SELECTION_OVERLAY_HEX` — greedy selection overlay tint.
+pub const SELECTION_OVERLAY_COLOR: u32 = 0x3399ff;
+
+/// Above this count, use an axis-aligned box + bbox wireframe (web parity).
+pub const SELECTION_OVERLAY_MESH_THRESHOLD: usize = 20_000;
+
+pub fn selection_bounds(sel: &AHashSet<VoxelCoord>) -> Option<(i32, i32, i32, i32, i32, i32)> {
+    let mut it = sel.iter();
+    let first = *it.next()?;
+    let (mut min_x, mut min_y, mut min_z) = first;
+    let (mut max_x, mut max_y, mut max_z) = first;
+    for &(x, y, z) in it {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        min_z = min_z.min(z);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+        max_z = max_z.max(z);
+    }
+    Some((min_x, min_y, min_z, max_x, max_y, max_z))
+}
+
+/// Axis-aligned box centered at `(cx,cy,cz)` with half-extents `(hx,hy,hz)` — same winding as [`preview_cube_mesh`].
+pub fn axis_aligned_box_mesh(
+    cx: f32,
+    cy: f32,
+    cz: f32,
+    hx: f32,
+    hy: f32,
+    hz: f32,
+    color: [f32; 3],
+    mat_k: f32,
+) -> MeshBuffers {
+    let mut positions: Vec<f32> = Vec::with_capacity(24 * 3);
+    let mut normals: Vec<f32> = Vec::with_capacity(24 * 3);
+    let mut colors: Vec<f32> = Vec::with_capacity(24 * 3);
+    let mut mat_kind: Vec<f32> = Vec::with_capacity(24);
+    let mut ao: Vec<f32> = Vec::with_capacity(24);
+    let mut indices: Vec<u32> = Vec::with_capacity(36);
+
+    let mut face = |nx: f32, ny: f32, nz: f32, corners: [[f32; 3]; 4]| {
+        let base = (positions.len() / 3) as u32;
+        for p in corners {
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&[nx, ny, nz]);
+            colors.extend_from_slice(&color);
+            mat_kind.push(mat_k);
+            ao.push(1.0);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    face(
+        1.0,
+        0.0,
+        0.0,
+        [
+            [cx + hx, cy - hy, cz - hz],
+            [cx + hx, cy + hy, cz - hz],
+            [cx + hx, cy + hy, cz + hz],
+            [cx + hx, cy - hy, cz + hz],
+        ],
+    );
+    face(
+        -1.0,
+        0.0,
+        0.0,
+        [
+            [cx - hx, cy - hy, cz + hz],
+            [cx - hx, cy + hy, cz + hz],
+            [cx - hx, cy + hy, cz - hz],
+            [cx - hx, cy - hy, cz - hz],
+        ],
+    );
+    face(
+        0.0,
+        1.0,
+        0.0,
+        [
+            [cx - hx, cy + hy, cz + hz],
+            [cx + hx, cy + hy, cz + hz],
+            [cx + hx, cy + hy, cz - hz],
+            [cx - hx, cy + hy, cz - hz],
+        ],
+    );
+    face(
+        0.0,
+        -1.0,
+        0.0,
+        [
+            [cx - hx, cy - hy, cz - hz],
+            [cx + hx, cy - hy, cz - hz],
+            [cx + hx, cy - hy, cz + hz],
+            [cx - hx, cy - hy, cz + hz],
+        ],
+    );
+    face(
+        0.0,
+        0.0,
+        1.0,
+        [
+            [cx - hx, cy - hy, cz + hz],
+            [cx + hx, cy - hy, cz + hz],
+            [cx + hx, cy + hy, cz + hz],
+            [cx - hx, cy + hy, cz + hz],
+        ],
+    );
+    face(
+        0.0,
+        0.0,
+        -1.0,
+        [
+            [cx - hx, cy - hy, cz - hz],
+            [cx - hx, cy + hy, cz - hz],
+            [cx + hx, cy + hy, cz - hz],
+            [cx + hx, cy - hy, cz - hz],
+        ],
+    );
+
+    MeshBuffers {
+        positions,
+        normals,
+        colors,
+        mat_kind,
+        ao,
+        indices,
+    }
+}
+
+/// Solid selection overlay: greedy mesh for modest selections, AABB box when huge (matches web).
+pub fn mesh_buffers_selection_overlay_solid(
+    sel: &AHashSet<VoxelCoord>,
+    world: &AHashMap<VoxelCoord, Voxel>,
+) -> MeshBuffers {
+    if sel.is_empty() {
+        return MeshBuffers::default();
+    }
+    let Some((min_x, min_y, min_z, max_x, max_y, max_z)) = selection_bounds(sel) else {
+        return MeshBuffers::default();
+    };
+    if sel.len() >= SELECTION_OVERLAY_MESH_THRESHOLD {
+        let c = color_rgb(SELECTION_OVERLAY_COLOR);
+        let col = [c.x, c.y, c.z];
+        let hx = (max_x - min_x + 1) as f32 * 0.5;
+        let hy = (max_y - min_y + 1) as f32 * 0.5;
+        let hz = (max_z - min_z + 1) as f32 * 0.5;
+        let cx = (min_x + max_x) as f32 * 0.5;
+        let cy = (min_y + max_y) as f32 * 0.5;
+        let cz = (min_z + max_z) as f32 * 0.5;
+        return axis_aligned_box_mesh(cx, cy, cz, hx, hy, hz, col, 1.0);
+    }
+    let mut combined: AHashMap<VoxelCoord, Voxel> = AHashMap::with_capacity(world.len() + sel.len());
+    for (k, v) in world.iter() {
+        combined.insert(*k, *v);
+    }
+    for &c in sel.iter() {
+        let oid = world.get(&c).map(|v| v.object_id).unwrap_or(0);
+        combined.insert(
+            c,
+            Voxel {
+                x: c.0,
+                y: c.1,
+                z: c.2,
+                color: SELECTION_OVERLAY_COLOR,
+                material: MaterialId::Plastic,
+                object_id: oid,
+            },
+        );
+    }
+    let mut emit: Vec<Voxel> = Vec::with_capacity(sel.len());
+    for &c in sel.iter() {
+        if let Some(v) = combined.get(&c) {
+            emit.push(*v);
+        }
+    }
+    if emit.is_empty() {
+        return MeshBuffers::default();
+    }
+    build_greedy_mesh_mapped(&emit, &combined)
+}
+
+/// Line-list vertices for selection AABB wireframe (`position` + `color` per vertex); matches web `selectionAabbWireframePositions` tint.
+pub fn selection_aabb_line_vertices(
+    min_x: i32,
+    min_y: i32,
+    min_z: i32,
+    max_x: i32,
+    max_y: i32,
+    max_z: i32,
+) -> Vec<f32> {
+    let x0 = min_x as f32 - 0.5;
+    let y0 = min_y as f32 - 0.5;
+    let z0 = min_z as f32 - 0.5;
+    let x1 = max_x as f32 + 0.5;
+    let y1 = max_y as f32 + 0.5;
+    let z1 = max_z as f32 + 0.5;
+    let r = 0x9f as f32 / 255.0;
+    let g = 0xd8 as f32 / 255.0;
+    let b = 0xff as f32 / 255.0;
+    let pos: [f32; 72] = [
+        x0, y0, z0, x1, y0, z0, x1, y0, z0, x1, y0, z1, x1, y0, z1, x0, y0, z1, x0, y0, z1, x0, y0, z0,
+        x0, y1, z0, x1, y1, z0, x1, y1, z0, x1, y1, z1, x1, y1, z1, x0, y1, z1, x0, y1, z1, x0, y1, z0,
+        x0, y0, z0, x0, y1, z0, x1, y0, z0, x1, y1, z0, x1, y0, z1, x1, y1, z1, x0, y0, z1, x0, y1, z1,
+    ];
+    let mut out = Vec::with_capacity(144);
+    for chunk in pos.chunks(3) {
+        out.extend_from_slice(&[chunk[0], chunk[1], chunk[2], r, g, b]);
     }
     out
 }

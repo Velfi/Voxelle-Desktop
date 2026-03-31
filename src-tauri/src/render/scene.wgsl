@@ -9,6 +9,9 @@ struct GlobalState {
     brick_dims: vec4<f32>,
     screen: vec4<f32>,
     params: vec4<f32>,
+    light_params: vec4<f32>,
+    sun_color: vec4<f32>,
+    bg_color: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -101,7 +104,8 @@ fn shadow_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
     let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
     let depth_bias = SHADOW_DEPTH_BIAS_BASE + SHADOW_DEPTH_BIAS_SLOPE * (1.0 - ndl);
-    return textureSampleCompare(shadow_map, shadow_cmp, uv, ndc.z - depth_bias);
+    let sh = textureSampleCompare(shadow_map, shadow_cmp, uv, ndc.z - depth_bias);
+    return select(1.0, sh, g.light_params.z > 0.5);
 }
 
 fn schlick_f0(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>) -> vec3<f32> {
@@ -130,10 +134,13 @@ fn transmission_shade(
     let l = normalize(g.light_dir.xyz);
     let ndl = max(dot(n, l), 0.0);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
-    let lit = base * (hemi * 0.28 * vertex_ao + 0.55 * ndl * shadow_visibility(world, n));
+    let amb = g.light_params.x;
+    let sun = g.light_params.y;
+    let sc = g.sun_color.xyz;
+    let lit = base * (hemi * 0.28 * vertex_ao * amb + 0.55 * ndl * shadow_visibility(world, n) * sun * sc);
     let refr = bg * base * net_t * (vec3<f32>(1.0) - fresnel);
-    let spec = pow(max(dot(normalize(l + v), n), 0.0), 48.0) * 0.2;
-    return mix(refr, lit + vec3<f32>(spec), 0.15);
+    let spec = pow(max(dot(normalize(l + v), n), 0.0), 48.0) * 0.2 * sun;
+    return mix(refr, lit + sc * spec, 0.15);
 }
 
 @vertex
@@ -175,7 +182,11 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let ndl = max(dot(n, l), 0.0);
     let sh = shadow_visibility(in.world_pos, n);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
-    var rgb = base * (hemi * 0.30 * in.vertex_ao + 0.78 * ndl * sh) + vec3<f32>(pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh);
+    let amb = g.light_params.x;
+    let sun = g.light_params.y;
+    let sc = g.sun_color.xyz;
+    let spec_blinn = pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh * sun;
+    var rgb = base * (hemi * 0.30 * in.vertex_ao * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
     rgb = rgb + base * glow;
     let glow_mask = select(0.0, 1.0, in.mat_kind > 0.5 && in.mat_kind < 1.5);
     out.color = vec4<f32>(rgb, glow_mask);
@@ -205,14 +216,23 @@ fn preview_edge_rgb(in_color: vec3<f32>) -> vec3<f32> {
     return preview_tonemap(boosted);
 }
 
-/// Full-screen overlay (depth test off in pipeline): unlit, semi-transparent.
+/// In-front preview (`LessEqual` depth): unlit, semi-transparent. Darken when the preview
+/// voxel cell is occupied so overlap with existing solids matches the occluded/x-ray tone.
 @fragment
 fn fs_preview_front_mrt(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
     let is_edge = in.mat_kind > 1.5;
+    let cell = vec3<i32>(floor(in.world_pos + vec3<f32>(0.5)));
+    let occ = is_occupied(brick_fetch(cell));
     if (is_edge) {
-        let rgb = preview_edge_rgb(in.color);
-        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_EDGE);
+        let rgb = preview_edge_rgb(in.color * select(1.0, 0.92, occ));
+        let a = select(PREVIEW_ALPHA_EDGE, PREVIEW_ALPHA_EDGE_OCCLUDED, occ);
+        out.color = vec4<f32>(rgb, a);
+    } else if (occ) {
+        let dim = in.color * 0.62;
+        let rgb_lin = mix(dim, PREVIEW_OCCLUDED_BLUE, 0.4);
+        let rgb = preview_tonemap(rgb_lin);
+        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_OCCLUDED);
     } else {
         let rgb = preview_tonemap(saturate(in.color * 1.12));
         out.color = vec4<f32>(rgb, PREVIEW_ALPHA_FRONT);

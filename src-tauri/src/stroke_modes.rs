@@ -51,6 +51,13 @@ pub struct StrokeAux {
     pub cylinder_a: Option<[i32; 3]>,
     #[serde(default)]
     pub cylinder_b: Option<[i32; 3]>,
+    /// When true, plane stroke uses an annulus (outer brush radius, hollow center) instead of a filled disk.
+    #[serde(default)]
+    pub plane_hollow: bool,
+    #[serde(default)]
+    pub constrain_to_plane: bool,
+    #[serde(default)]
+    pub spray_size_range: bool,
 }
 
 fn axis_from_plane_axis(pa: PlaneAxis, face_axis: Option<usize>) -> Option<usize> {
@@ -108,6 +115,53 @@ fn disk_in_axis_plane(center: VoxelCoord, plane_axis: usize, radius: i32) -> Vec
             for dx in -r..=r {
                 for dy in -r..=r {
                     if dx * dx + dy * dy <= r2 {
+                        out.push((cx + dx, cy + dy, cz));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// Disk with the interior removed: voxels with `inner_r^2 < dist^2 <= outer_r^2` in the plane (Euclidean).
+fn annulus_in_axis_plane(center: VoxelCoord, plane_axis: usize, outer_r: i32) -> Vec<VoxelCoord> {
+    let outer_r = outer_r.max(0);
+    if outer_r == 0 {
+        return Vec::new();
+    }
+    let inner_r = outer_r.saturating_sub(1);
+    let o2 = outer_r * outer_r;
+    let i2 = inner_r * inner_r;
+    let mut out = Vec::new();
+    let (cx, cy, cz) = center;
+    match plane_axis {
+        0 => {
+            for dy in -outer_r..=outer_r {
+                for dz in -outer_r..=outer_r {
+                    let d2 = dy * dy + dz * dz;
+                    if d2 <= o2 && d2 > i2 {
+                        out.push((cx, cy + dy, cz + dz));
+                    }
+                }
+            }
+        }
+        1 => {
+            for dx in -outer_r..=outer_r {
+                for dz in -outer_r..=outer_r {
+                    let d2 = dx * dx + dz * dz;
+                    if d2 <= o2 && d2 > i2 {
+                        out.push((cx + dx, cy, cz + dz));
+                    }
+                }
+            }
+        }
+        2 => {
+            for dx in -outer_r..=outer_r {
+                for dy in -outer_r..=outer_r {
+                    let d2 = dx * dx + dy * dy;
+                    if d2 <= o2 && d2 > i2 {
                         out.push((cx + dx, cy + dy, cz));
                     }
                 }
@@ -398,7 +452,11 @@ pub fn stroke_anchor_centers_with_mode(
             let Some(c) = anchor else {
                 return Vec::new();
             };
-            disk_in_axis_plane(c, plane_ax, brush_radius as i32)
+            if aux.plane_hollow {
+                annulus_in_axis_plane(c, plane_ax, brush_radius as i32)
+            } else {
+                disk_in_axis_plane(c, plane_ax, brush_radius as i32)
+            }
         }
         DrawStrokeMode::Circle => {
             if let (Some(&cc), Some(&ce)) = (aux.circle_center.as_ref(), aux.circle_edge.as_ref()) {

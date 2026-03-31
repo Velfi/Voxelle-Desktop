@@ -69,6 +69,7 @@ fn mood_scene_roundtrip() {
             atmosphere: 0.4,
             sun_shafts: 0.5,
         }),
+        lighting: None,
         voxels: vec![],
         objects: super::format::default_scene_objects(),
         active_object_id: 0,
@@ -86,6 +87,7 @@ fn v4_roundtrip_small() {
         scene: Default::default(),
         scene_extra: None,
         mood: None,
+        lighting: None,
         voxels: vec![super::format::Voxel {
             x: 0,
             y: 0,
@@ -112,6 +114,7 @@ fn v4_objects_roundtrip_bson() {
         scene: Default::default(),
         scene_extra: None,
         mood: None,
+        lighting: None,
         voxels: vec![
             super::format::Voxel {
                 x: 0,

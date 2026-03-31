@@ -10,6 +10,9 @@ struct GlobalState {
     brick_dims: vec4<f32>,
     screen: vec4<f32>,
     params: vec4<f32>,
+    light_params: vec4<f32>,
+    sun_color: vec4<f32>,
+    bg_color: vec4<f32>,
 }
 
 @group(0) @binding(0)

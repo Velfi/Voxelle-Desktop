@@ -29,7 +29,8 @@ struct PostCompositeOpts {
     distance_tint_strength: f32,
     atmosphere_strength: f32,
     sun_shaft_strength: f32,
-    _pad: vec2<f32>,
+    transparent_bg: f32,
+    exposure_ev: f32,
 }
 
 @group(0) @binding(3)
@@ -104,7 +105,8 @@ fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(t_hdr, samp_linear, i.uv).rgb;
     let blo = textureSample(t_bloom, samp_linear, i.uv).rgb;
     // Bloom is thresholded in extract; keep strength modest so mids stay punchy.
-    let rgb0 = hdr + blo * 0.42;
+    var rgb0 = (hdr + blo * 0.42) * exp2(post_opts.exposure_ev);
+    let pre_energy = max(max(rgb0.r, rgb0.g), rgb0.b);
     // Scene + sky are linear scene-referred (Rgba16Float). Display-referred → sRGB swapchain.
     var mapped = apply_tone(post_opts.tone_mode, rgb0);
     let g = post_opts.grain_strength;
@@ -139,6 +141,10 @@ fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
         let r = sqrt(dx * dx + dy * dy);
         let streak = pow(max(0.0, 1.0 - r * 3.5), 6.0) * ss;
         mapped = mapped + vec3<f32>(0.35, 0.32, 0.22) * streak;
+    }
+    if post_opts.transparent_bg > 0.5 {
+        let a = clamp(pre_energy * 14.0, 0.0, 1.0);
+        return vec4<f32>(mapped * a, a);
     }
     return vec4<f32>(mapped, 1.0);
 }

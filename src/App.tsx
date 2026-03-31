@@ -7,7 +7,7 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
@@ -15,6 +15,7 @@ import { JoinSessionModal } from "./JoinSessionModal";
 import { PreferencesModal } from "./PreferencesModal";
 import { loadRecentJoinUrls, rememberJoinedUrl } from "./joinRecent";
 import {
+  applyAppearanceToDocument,
   autosaveSettingsInvokeArgs,
   loadPreferences,
   normalizeCollabAccentColor,
@@ -25,6 +26,23 @@ import {
   toneMappingToGpuMode,
 } from "./preferences";
 import "./App.css";
+import {
+  deriveSelectionMethod,
+  selectionMethodToState,
+  strokeModeSkipsDrag,
+  type DrawStrokeModeApi,
+  type PlaneAxisApi,
+  type StrokeDrawStyle,
+  type StrokeFamilyVariant,
+} from "./drawToolModel";
+import { DrawPaneSelectionToolOptions } from "./toolOptions/DrawPaneSelectionToolOptions";
+import { MATERIAL_BUILTIN_PALETTE_HEX } from "./materialBuiltinPalette";
+import { ViewportCameraHud } from "./ViewportCameraHud";
+import { ViewportSettingsSidebar } from "./ViewportSettingsSidebar";
+import packageJson from "../package.json";
+
+/** App semver from `package.json` (status bar when no file is open). */
+const VOXELLE_DESKTOP_VERSION = packageJson.version;
 
 /** Desktop viewer: cap new-project grid edge length (web allows larger). */
 const MAX_GRID_SIZE = 256;
@@ -34,6 +52,36 @@ const LS_SIDEBAR_EXPANDED = "voxelleSidebarExpanded";
 const LS_RIGHT_SIDEBAR_EXPANDED = "voxelleRightSidebarExpanded";
 const LS_TOOLS_FLOATING = "voxelleToolsFloating";
 const LS_TOOLS_FLOAT_POS = "voxelleToolsFloatPos";
+/** `localStorage` = `"1"`: show JS vs Rust viewport cursor overlay (see `get_viewport_cursor_debug`). */
+const LS_VIEWPORT_CURSOR_DEBUG = "voxelleDebugViewportCursor";
+
+/** Payload from `get_viewport_cursor_debug` (camelCase). */
+type ViewportCursorDebugPayload = {
+  viewportWidth: number;
+  viewportHeight: number;
+  previewNx: number | null;
+  previewNy: number | null;
+  texelSx: number | null;
+  texelSy: number | null;
+  rayOriginX: number | null;
+  rayOriginY: number | null;
+  rayOriginZ: number | null;
+  rayDirX: number | null;
+  rayDirY: number | null;
+  rayDirZ: number | null;
+};
+
+/** Browser pointer position for the debug overlay (CSS pixels). */
+type ViewportCursorDebugScreen = {
+  clientX: number;
+  clientY: number;
+  /** Offset inside `.viewport` (`client` − `getBoundingClientRect()`). */
+  relX: number;
+  relY: number;
+};
+
+/** Avoid duplicate `load_start_screen_logo` in React Strict Mode (dev). */
+let startScreenLogoInvokeSent = false;
 
 type RenderingMode =
   | "greedy"
@@ -159,7 +207,6 @@ type InteractionMode =
   | "add"
   | "remove"
   | "paint"
-  | "fill"
   | "eyedropper"
   | "select"
   | "selectByColor"
@@ -168,37 +215,17 @@ type InteractionMode =
   | "stamp"
   | "punch"
   | "sculpt"
-  | "generator";
+  | "generator"
+  | "squishy";
 
-/** `line` = anchor-to-cursor line (web Stroke / Line). `brush` = follow ray + connect samples (web Spray path). */
-type StrokeDrawStyle = "line" | "brush";
-
-/** Matches Rust `stroke_modes::DrawStrokeMode` (JSON camelCase). */
-type DrawStrokeModeApi =
-  | "line"
-  | "spray"
-  | "plane"
-  | "precise"
-  | "circle"
-  | "cuboid"
-  | "cylinder"
-  | "polygonHull"
-  | "polygon"
-  | "fill";
-/** Plane constraint for `plane` stroke (Rust `PlaneAxis`). */
-type PlaneAxisApi = "auto" | "x" | "y" | "z";
-
-function strokeModeSkipsDrag(mode: DrawStrokeModeApi): boolean {
-  return (
-    mode === "polygon" ||
-    mode === "polygonHull" ||
-    mode === "circle" ||
-    mode === "cuboid" ||
-    mode === "cylinder"
-  );
-}
-
-type ToolsPane = "hand" | "draw" | "sculpt" | "generators" | "mood" | "fly";
+type ToolsPane =
+  | "hand"
+  | "draw"
+  | "sculpt"
+  | "generators"
+  | "squishy"
+  | "mood"
+  | "fly";
 
 /** Matches Rust `SculptStrokeMode` (JSON camelCase). */
 type SculptStrokeModeApi =
@@ -207,16 +234,36 @@ type SculptStrokeModeApi =
   | "gouge"
   | "wall"
   | "terrain"
-  | "branch";
+  | "extrude";
 /** Matches Rust `TerrainSculptOp`. */
 type TerrainSculptOpApi = "raise" | "lower" | "smooth";
 
-type GeneratorKindId = "sphere" | "rocks" | "grass" | "rope" | "squishy";
+type GeneratorKindId = "rocks" | "grass" | "rope";
 
 type BrushShape = "sphere" | "cube" | "pyramid";
 
-/** Distinguishes Stroke vs Solid when both use line stroke + no spray (web parity). */
-type StrokeFamilyVariant = "stroke" | "solid";
+/** Web `SculptBrushShape`; engine uses `sculptBrushShapeToRust`. */
+type SculptBrushShapeUi = "square" | "circle" | "cube" | "sphere";
+
+/** Web `MAX_BRUSH_SIZE - 1` (slider index 0..63 → display 1..64). */
+const SCULPT_BRUSH_MAX_INDEX = 63;
+
+function sculptBrushShapeToRust(s: SculptBrushShapeUi): BrushShape {
+  if (s === "circle" || s === "sphere") return "sphere";
+  return "cube";
+}
+
+/** Web `WallAreaShape` / `SprayDirection` (Rust serde camelCase). */
+type WallAreaShapeApi = "brush" | "circle" | "polygon";
+type SprayDirectionApi =
+  | "auto"
+  | "none"
+  | "right"
+  | "left"
+  | "up"
+  | "down"
+  | "back"
+  | "forward";
 
 const MATERIAL_OPTIONS: { id: string; label: string }[] = [
   { id: "plastic", label: "Plastic" },
@@ -227,19 +274,113 @@ const MATERIAL_OPTIONS: { id: string; label: string }[] = [
   { id: "glow", label: "Glow" },
 ];
 
+function SymmetryColorSidebarSections(props: {
+  loading: boolean;
+  workBusy: boolean;
+  activeColor: number;
+  setActiveColor: (n: number) => void;
+  interactionMode: InteractionMode;
+  setInteractionMode: (m: InteractionMode) => void;
+}) {
+  const {
+    loading,
+    workBusy,
+    activeColor,
+    setActiveColor,
+    interactionMode,
+    setInteractionMode,
+  } = props;
+  return (
+    <div className="sidebar-symmetry-color-panel">
+      <div className="sidebar-section-label">Symmetry</div>
+      <div className="sidebar-mode-grid sidebar-mode-grid-3">
+        <button type="button" className="sidebar-mode-btn" disabled>
+          <span className="sidebar-mode-label">X</span>
+        </button>
+        <button type="button" className="sidebar-mode-btn" disabled>
+          <span className="sidebar-mode-label">Y</span>
+        </button>
+        <button type="button" className="sidebar-mode-btn" disabled>
+          <span className="sidebar-mode-label">Z</span>
+        </button>
+      </div>
+
+      <div className="sidebar-color-stack">
+        <div className="sidebar-section-label">Color</div>
+        <div className="sidebar-color-row">
+          <label className="sidebar-palette-row sidebar-color-swatch">
+            <input
+              type="color"
+              value={`#${activeColor.toString(16).padStart(6, "0")}`}
+              onChange={(ev) => {
+                const h = ev.target.value.slice(1);
+                const n = Number.parseInt(h, 16);
+                if (!Number.isNaN(n)) setActiveColor(n);
+              }}
+              disabled={loading || workBusy}
+              aria-label="Brush color"
+            />
+          </label>
+          <button
+            type="button"
+            className={
+              interactionMode === "eyedropper" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
+            }
+            disabled={loading || workBusy}
+            onClick={() => setInteractionMode("eyedropper")}
+          >
+            <span className="sidebar-mode-label">Eyedropper</span>
+          </button>
+        </div>
+        <div
+          className="sidebar-palette-swatches"
+          role="group"
+          aria-label="Material color palette"
+        >
+          {MATERIAL_BUILTIN_PALETTE_HEX.map((hex) => {
+            const rgb = Number.parseInt(hex.slice(1), 16);
+            const isActive = (activeColor & 0xffffff) === rgb;
+            return (
+              <button
+                key={hex}
+                type="button"
+                className={
+                  isActive ? "sidebar-palette-swatch is-active" : "sidebar-palette-swatch"
+                }
+                style={{ backgroundColor: hex }}
+                title={hex}
+                aria-label={`Select color ${hex}`}
+                aria-pressed={isActive}
+                disabled={loading || workBusy}
+                onClick={() => setActiveColor(rgb)}
+              />
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
-  /** Physical pixel size of the GPU surface; kept in sync with Rust (may differ slightly from CSS×dpr). */
+  /** Viewport render target in physical pixels (matches projection / picking); from Rust. */
   const viewportPhysRef = useRef({ w: 0, h: 0 });
+  /** Swapchain drawable in physical pixels (authoritative native size; may differ from inner×dpr). */
+  const surfacePhysRef = useRef({ w: 0, h: 0 });
+  /** Last `window.innerWidth` / `innerHeight` — when these change, do not use stale surface for mapping until Rust syncs. */
+  const lastWindowInnerRef = useRef({ w: 0, h: 0 });
   const lastRef = useRef({ x: 0, y: 0 });
   /** Last pointer position over `.viewport` in physical pixels (for Z = ping pick). */
-  const lastViewportPickPhysRef = useRef<{ x: number; y: number } | null>(null);
+  const lastViewportPickNormRef = useRef<{ nx: number; ny: number } | null>(
+    null,
+  );
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const maxPointerMoveRef = useRef(0);
   /** After pick probe: camera orbit/pan/dolly vs voxel click-to-edit (matches web: no hit → camera). */
   const gestureRef = useRef<{
     pointerId: number;
-    mode: "camera" | "voxel";
+    mode: "camera" | "voxel" | "squishyGizmo";
   } | null>(null);
   const probingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
@@ -252,10 +393,10 @@ function App() {
   const drawStrokeModeRef = useRef<DrawStrokeModeApi>("line");
   const planeAxisRef = useRef<PlaneAxisApi>("auto");
   const sprayDensityRef = useRef(0);
-  /** Viewport-physical start of stroke (for line stroke). */
-  const strokeViewportStartRef = useRef<{ x: number; y: number } | null>(null);
-  /** Previous sample for brush-mode segment chaining (viewport physical px). */
-  const lastStrokePhysRef = useRef<{ x: number; y: number } | null>(null);
+  /** Normalized viewport start of stroke (for line stroke); matches Rust `viewport_texels_from_norm`. */
+  const strokeViewportStartRef = useRef<{ nx: number; ny: number } | null>(null);
+  /** Previous brush sample (normalized viewport). */
+  const lastStrokeNormRef = useRef<{ nx: number; ny: number } | null>(null);
   const lastStrokeEditMsRef = useRef(0);
   const dragDidEditRef = useRef(false);
   const loadingRef = useRef(false);
@@ -266,7 +407,17 @@ function App() {
   const leaveSessionMenuRef = useRef<() => void>(() => { });
   const keysDownRef = useRef<Set<string>>(new Set());
   const flyRafRef = useRef<number>(0);
-  const flyLastTRef = useRef<number | null>(null);
+  /** True while fly mouse-look is active (pointer capture + Tauri grab / cursor warp for infinite look). */
+  const flyMouseLookActiveRef = useRef(false);
+  /** `pointerId` passed to `setPointerCapture` while mouselook is on; cleared on release. */
+  const flyCapturedPointerIdRef = useRef<number | null>(null);
+  /** Last client coords (CSS px) for fallback when movementX/Y are zero; never store viewport center unless the cursor is there. */
+  const flyLastClientRef = useRef<{ x: number; y: number } | null>(null);
+  /** Ignore one pointermove after programmatic cursor recenter (avoids treating the warp as a huge delta). */
+  const flySkipNextFlyMoveRef = useRef(false);
+  /** Physical-pixel look deltas coalesced per animation frame (pointermove IPC was starving RAF and inflating fly dt). */
+  const flyPendingLookDxRef = useRef(0);
+  const flyPendingLookDyRef = useRef(0);
   const [interactionMode, setInteractionMode] =
     useState<InteractionMode>("navigate");
   const [moodGrain, setMoodGrain] = useState(0);
@@ -275,6 +426,24 @@ function App() {
   const [moodAtmosphere, setMoodAtmosphere] = useState(0);
   const [moodSunShafts, setMoodSunShafts] = useState(0);
   const [selectionCount, setSelectionCount] = useState(0);
+  const [viewportCursorDebugEnabled, setViewportCursorDebugEnabled] = useState(
+    () => {
+      try {
+        return localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) === "1";
+      } catch {
+        return false;
+      }
+    },
+  );
+  const [viewportCursorDebugJs, setViewportCursorDebugJs] = useState<{
+    nx: number;
+    ny: number;
+  } | null>(null);
+  const [viewportCursorDebugRust, setViewportCursorDebugRust] =
+    useState<ViewportCursorDebugPayload | null>(null);
+  const [viewportCursorDebugScreen, setViewportCursorDebugScreen] =
+    useState<ViewportCursorDebugScreen | null>(null);
+  const viewportCursorDebugRafRef = useRef<number | null>(null);
   const [matchMaterialSelectColor, setMatchMaterialSelectColor] =
     useState(false);
   const matchMaterialSelectColorRef = useRef(false);
@@ -290,9 +459,22 @@ function App() {
     useState<DrawStrokeModeApi>("line");
   const [planeAxis, setPlaneAxis] = useState<PlaneAxisApi>("auto");
   const [sprayDensity, setSprayDensity] = useState(0);
+  /** Selection fill (web `fillSelectDiagonals` / `fillRespectsColor`). */
+  const [fillSelectDiagonals, setFillSelectDiagonals] = useState(false);
+  const [fillRespectsColor, setFillRespectsColor] = useState(true);
+  type SelectionCombineModeApi =
+    | "replace"
+    | "add"
+    | "subtract"
+    | "intersect";
+  const [selectionCombineMode, setSelectionCombineMode] =
+    useState<SelectionCombineModeApi>("replace");
+  const fillSelectDiagonalsRef = useRef(false);
+  const fillRespectsColorRef = useRef(true);
+  const selectionStrokeBegunRef = useRef(false);
   const [toolsPane, setToolsPane] = useState<ToolsPane>("draw");
   const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
-  const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("sphere");
+  const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("rocks");
   const [squishyMode, setSquishyMode] = useState<"add" | "edit" | "delete">(
     "add",
   );
@@ -300,6 +482,19 @@ function App() {
   const [squishyHollow, setSquishyHollow] = useState(false);
   const [squishyWallThickness, setSquishyWallThickness] = useState(1);
   const [squishySnapToSurface, setSquishySnapToSurface] = useState(true);
+  const [selectionStrokeSnapToSurface, setSelectionStrokeSnapToSurface] =
+    useState(true);
+  const [selectionStrokeAxisAlign, setSelectionStrokeAxisAlign] =
+    useState(true);
+  const [surfacePlaneHollow, setSurfacePlaneHollow] = useState(false);
+  const surfacePlaneHollowRef = useRef(false);
+  const [sprayConstrainToPlane, setSprayConstrainToPlane] =
+    useState(false);
+  const sprayConstrainToPlaneRef = useRef(false);
+  const [spraySizeRange, setSpraySizeRange] = useState(false);
+  const spraySizeRangeRef = useRef(false);
+  const [fillConstrainToPlane, setFillConstrainToPlane] = useState(false);
+  const fillConstrainToPlaneRef = useRef(false);
   const [squishyBallCount, setSquishyBallCount] = useState(0);
   const [strokePolygonVerts, setStrokePolygonVerts] = useState<
     [number, number, number][]
@@ -313,12 +508,12 @@ function App() {
     cuboidMin: null,
     cylinderA: null,
   });
-  const strokePolygonLastScreenRef = useRef<{ x: number; y: number } | null>(
+  const strokePolygonLastScreenRef = useRef<{ nx: number; ny: number } | null>(
     null,
   );
   const [ropeFirstScreen, setRopeFirstScreen] = useState<{
-    x: number;
-    y: number;
+    nx: number;
+    ny: number;
   } | null>(null);
   const [ropeSag, setRopeSag] = useState(2.5);
   const [rockRoughness, setRockRoughness] = useState(0.45);
@@ -332,7 +527,23 @@ function App() {
   const [terrainStrength, setTerrainStrength] = useState(4);
   const [terrainSmoothRadius, setTerrainSmoothRadius] = useState(2);
   const [sculptSmoothPasses, setSculptSmoothPasses] = useState(1);
+  /** Web `sculptBrushRadius` index (display = index + 1 voxel span). */
+  const [sculptBrushRadius, setSculptBrushRadius] = useState(2);
+  const [sculptBrushStrength, setSculptBrushStrength] = useState(100);
+  const [sculptBrushFalloff, setSculptBrushFalloff] = useState(0);
+  const [sculptBrushShapeUi, setSculptBrushShapeUi] =
+    useState<SculptBrushShapeUi>("square");
+  const [wallAreaShape, setWallAreaShape] = useState<WallAreaShapeApi>("brush");
+  const [sprayDirection, setSprayDirection] =
+    useState<SprayDirectionApi>("auto");
+  const [wallWidthIndex, setWallWidthIndex] = useState(0);
+  const [wallHeightVox, setWallHeightVox] = useState(2);
+  const [wallLockStartHeight, setWallLockStartHeight] = useState(false);
+  const [wallAxisAlign, setWallAxisAlign] = useState(false);
   const [pathLabel, setPathLabel] = useState("");
+  /** Cold-start title mesh from `Logo.voxelle`; enables bottom menu layout and viewport orbit. */
+  const [startScreenLogoLoaded, setStartScreenLogoLoaded] = useState(false);
+  const startScreenLogoLoadedRef = useRef(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   /** Session ended (leave, lost connection, or kicked); cleared on dismiss or new load/join. */
   const [collabBanner, setCollabBanner] = useState<{
@@ -475,23 +686,40 @@ function App() {
     const el = viewportRef.current;
     if (!el) return;
     const dpr = window.devicePixelRatio || 1;
-    // Swapchain must match the webview layout size (innerWidth/innerHeight), not only Rust
-    // inner_size(), or macOS leaves extra drawable rows below the document → transparent band reads as black.
     const iw = window.innerWidth;
     const ih = window.innerHeight;
     if (iw <= 0 || ih <= 0) return;
-    const surfaceWidth = Math.max(1, Math.round(iw * dpr));
-    const surfaceHeight = Math.max(1, Math.round(surfaceWidth * (ih / iw)));
 
     const rect = el.getBoundingClientRect();
     const rw = rect.width;
     const rh = rect.height;
     if (rw <= 0 || rh <= 0) return;
-    // Height-first rounding keeps the blit flush with the bottom of `.viewport` (footer sits below).
-    const viewportHeight = Math.max(1, Math.round(rh * dpr));
+
+    // Prefer last native swapchain size so configure matches drawable; bootstrap with layout×dpr.
+    const innerChanged =
+      lastWindowInnerRef.current.w !== iw ||
+      lastWindowInnerRef.current.h !== ih;
+    if (innerChanged) {
+      lastWindowInnerRef.current = { w: iw, h: ih };
+    }
+    const surf = surfacePhysRef.current;
+    // Height-first bootstrap matches typical swapchain rounding and pairs with viewport math below.
+    const bootstrapH = Math.max(1, Math.round(ih * dpr));
+    const bootstrapW = Math.max(1, Math.round(bootstrapH * (iw / ih)));
+    // After a window resize, native size is unknown until the next frame — use bootstrap for configure + origin.
+    const useNativeSurface =
+      surf.w > 0 && surf.h > 0 && !innerChanged;
+    const surfaceWidth = useNativeSurface ? surf.w : bootstrapW;
+    const surfaceHeight = useNativeSurface ? surf.h : bootstrapH;
+
+    // Derive viewport texture size from the same surface×layout fractions as viewportX/Y. Using
+    // round(rh*dpr) here while origin uses (rect.top/ih)*surfaceHeight caused vertical drift when
+    // surfaceHeight ≠ ih*dpr (native swapchain vs CSS estimate).
+    const viewportHeight = Math.max(1, Math.round((rh / ih) * surfaceHeight));
     const viewportWidth = Math.max(1, Math.round(viewportHeight * (rw / rh)));
-    const viewportX = Math.max(0, Math.round(rect.left * dpr));
-    const viewportY = Math.max(0, Math.round(rect.top * dpr));
+    // Proportional placement in the same pixel space as the swapchain (not raw rect×dpr alone).
+    const viewportX = Math.max(0, Math.round((rect.left / iw) * surfaceWidth));
+    const viewportY = Math.max(0, Math.round((rect.top / ih) * surfaceHeight));
     viewportPhysRef.current = { w: viewportWidth, h: viewportHeight };
     void invoke("viewer_resize", {
       surfaceWidth,
@@ -502,10 +730,16 @@ function App() {
       viewportHeight,
     })
       .then(() =>
-        invoke<{ width: number; height: number }>("get_viewport_pixel_size"),
+        invoke<{
+          width: number;
+          height: number;
+          surfaceWidth: number;
+          surfaceHeight: number;
+        }>("get_viewport_pixel_size"),
       )
       .then((sz) => {
         viewportPhysRef.current = { w: sz.width, h: sz.height };
+        surfacePhysRef.current = { w: sz.surfaceWidth, h: sz.surfaceHeight };
       })
       .catch(() => { });
   }, []);
@@ -517,8 +751,52 @@ function App() {
   }, [chatPanelOpen, collabActive, localPeerId]);
 
   useEffect(() => {
+    startScreenLogoLoadedRef.current = startScreenLogoLoaded;
+  }, [startScreenLogoLoaded]);
+
+  useEffect(() => {
     if (chatPanelOpen) setChatToasts([]);
   }, [chatPanelOpen]);
+
+  useEffect(() => {
+    const w = window as unknown as {
+      toggleVoxelleViewportCursorDebug?: () => void;
+    };
+    w.toggleVoxelleViewportCursorDebug = () => {
+      try {
+        const on = localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) !== "1";
+        localStorage.setItem(LS_VIEWPORT_CURSOR_DEBUG, on ? "1" : "0");
+        setViewportCursorDebugEnabled(on);
+        if (!on) {
+          setViewportCursorDebugJs(null);
+          setViewportCursorDebugRust(null);
+          setViewportCursorDebugScreen(null);
+        }
+        void invoke("debug_menu_sync_viewport_cursor_overlay", {
+          enabled: on,
+        }).catch(() => { });
+      } catch {
+        /* ignore */
+      }
+    };
+    return () => {
+      delete w.toggleVoxelleViewportCursorDebug;
+      if (viewportCursorDebugRafRef.current != null) {
+        cancelAnimationFrame(viewportCursorDebugRafRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const enabled = localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) === "1";
+      void invoke("debug_menu_sync_viewport_cursor_overlay", {
+        enabled,
+      }).catch(() => { });
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     sendResize();
@@ -548,6 +826,7 @@ function App() {
       listen<string>("voxelle-load-start", (e) => {
         setLoadError(null);
         setCollabBanner(null);
+        setStartScreenLogoLoaded(false);
         setPathLabel(e.payload);
         setLoading(true);
         setLoadProgress(0);
@@ -578,9 +857,11 @@ function App() {
         const p = e.payload;
         if (typeof p === "string") {
           setPathLabel(p);
+          setStartScreenLogoLoaded(false);
         } else if (p && typeof p === "object" && "path" in p) {
           const o = p as {
             path: string;
+            startScreenLogo?: boolean;
             mood?: {
               grain: number;
               vignette: number;
@@ -589,7 +870,13 @@ function App() {
               sunShafts: number;
             };
           };
-          setPathLabel(o.path);
+          if (o.startScreenLogo) {
+            setPathLabel("");
+            setStartScreenLogoLoaded(true);
+          } else {
+            setPathLabel(o.path);
+            setStartScreenLogoLoaded(false);
+          }
           if (o.mood) {
             setMoodGrain(o.mood.grain);
             setMoodVignette(o.mood.vignette);
@@ -618,9 +905,15 @@ function App() {
       listen<number>("viewport-fps", (e) => {
         setFpsDisplayed(e.payload);
       }),
-      listen<{ width: number; height: number }>("viewport-pixel-size", (e) => {
+      listen<{
+        width: number;
+        height: number;
+        surfaceWidth: number;
+        surfaceHeight: number;
+      }>("viewport-pixel-size", (e) => {
         const p = e.payload;
         viewportPhysRef.current = { w: p.width, h: p.height };
+        surfacePhysRef.current = { w: p.surfaceWidth, h: p.surfaceHeight };
       }),
       listen("voxelle-open-new-project", () => {
         setNewProjectOpen(true);
@@ -831,8 +1124,36 @@ function App() {
       listen<boolean>("voxelle-menu-match-material", (e) => {
         setMatchMaterialSelectColor(e.payload);
       }),
+      listen<boolean>("voxelle-debug-viewport-cursor-overlay", (e) => {
+        const enabled = e.payload;
+        try {
+          localStorage.setItem(
+            LS_VIEWPORT_CURSOR_DEBUG,
+            enabled ? "1" : "0",
+          );
+        } catch {
+          /* ignore */
+        }
+        setViewportCursorDebugEnabled(enabled);
+        if (!enabled) {
+          setViewportCursorDebugJs(null);
+          setViewportCursorDebugRust(null);
+          setViewportCursorDebugScreen(null);
+        }
+      }),
       listen<number>("voxelle-selection-updated", (e) => {
         setSelectionCount(typeof e.payload === "number" ? e.payload : 0);
+      }),
+      listen<string>("voxelle-selection-combine-mode", (e) => {
+        const p = e.payload;
+        if (
+          p === "replace" ||
+          p === "add" ||
+          p === "subtract" ||
+          p === "intersect"
+        ) {
+          setSelectionCombineMode(p);
+        }
       }),
       listen<string>("voxelle-menu-not-implemented", (e) => {
         const msg =
@@ -868,7 +1189,17 @@ function App() {
       sendResize();
     });
     return () => cancelAnimationFrame(id);
-  }, [sendResize, sidebarExpanded, rightSidebarExpanded, toolsPaneFloating]);
+  }, [
+    sendResize,
+    sidebarExpanded,
+    rightSidebarExpanded,
+    toolsPaneFloating,
+    pathLabel,
+    collabActive,
+    loading,
+    collabJoinPending,
+    workBusy,
+  ]);
 
   const onToolPaneDragMove = useCallback((e: PointerEvent) => {
     const d = toolPaneDragRef.current;
@@ -957,6 +1288,29 @@ function App() {
     interactionModeRef.current = interactionMode;
   }, [interactionMode]);
 
+  const prevInteractionModeForEyedropperRef =
+    useRef<InteractionMode>(interactionMode);
+  const eyedropperReturnModeRef = useRef<InteractionMode | null>(null);
+  useLayoutEffect(() => {
+    const prev = prevInteractionModeForEyedropperRef.current;
+    if (interactionMode === "eyedropper" && prev !== "eyedropper") {
+      eyedropperReturnModeRef.current = prev;
+    }
+    prevInteractionModeForEyedropperRef.current = interactionMode;
+  }, [interactionMode]);
+
+  useEffect(() => {
+    void invoke<SelectionCombineModeApi>("get_selection_combine_mode")
+      .then((m) => setSelectionCombineMode(m))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (startScreenLogoInvokeSent) return;
+    startScreenLogoInvokeSent = true;
+    void invoke("load_start_screen_logo").catch(() => {});
+  }, []);
+
   useEffect(() => {
     activeColorRef.current = activeColor;
   }, [activeColor]);
@@ -970,13 +1324,23 @@ function App() {
     brushShapeRef.current = brushShape;
   }, [brushShape]);
   const generatorSphereRadiusRef = useRef(4);
-  const generatorKindRef = useRef<GeneratorKindId>("sphere");
+  const generatorKindRef = useRef<GeneratorKindId>("rocks");
   const sculptStrokeModeRef = useRef<SculptStrokeModeApi>("draw");
   const terrainSculptOpRef = useRef<TerrainSculptOpApi>("raise");
   const terrainBaseYRef = useRef(0);
   const terrainStrengthRef = useRef(4);
   const terrainSmoothRadiusRef = useRef(2);
   const sculptSmoothPassesRef = useRef(1);
+  const sculptBrushRadiusRef = useRef(2);
+  const sculptBrushStrengthRef = useRef(100);
+  const sculptBrushFalloffRef = useRef(0);
+  const sculptBrushShapeUiRef = useRef<SculptBrushShapeUi>("square");
+  const wallAreaShapeRef = useRef<WallAreaShapeApi>("brush");
+  const sprayDirectionRef = useRef<SprayDirectionApi>("auto");
+  const wallWidthIndexRef = useRef(0);
+  const wallHeightVoxRef = useRef(2);
+  const wallLockStartHeightRef = useRef(false);
+  const wallAxisAlignRef = useRef(false);
   useEffect(() => {
     generatorSphereRadiusRef.current = generatorSphereRadius;
   }, [generatorSphereRadius]);
@@ -1001,6 +1365,36 @@ function App() {
   useEffect(() => {
     sculptSmoothPassesRef.current = sculptSmoothPasses;
   }, [sculptSmoothPasses]);
+  useEffect(() => {
+    sculptBrushRadiusRef.current = sculptBrushRadius;
+  }, [sculptBrushRadius]);
+  useEffect(() => {
+    sculptBrushStrengthRef.current = sculptBrushStrength;
+  }, [sculptBrushStrength]);
+  useEffect(() => {
+    sculptBrushFalloffRef.current = sculptBrushFalloff;
+  }, [sculptBrushFalloff]);
+  useEffect(() => {
+    sculptBrushShapeUiRef.current = sculptBrushShapeUi;
+  }, [sculptBrushShapeUi]);
+  useEffect(() => {
+    wallAreaShapeRef.current = wallAreaShape;
+  }, [wallAreaShape]);
+  useEffect(() => {
+    sprayDirectionRef.current = sprayDirection;
+  }, [sprayDirection]);
+  useEffect(() => {
+    wallWidthIndexRef.current = wallWidthIndex;
+  }, [wallWidthIndex]);
+  useEffect(() => {
+    wallHeightVoxRef.current = wallHeightVox;
+  }, [wallHeightVox]);
+  useEffect(() => {
+    wallLockStartHeightRef.current = wallLockStartHeight;
+  }, [wallLockStartHeight]);
+  useEffect(() => {
+    wallAxisAlignRef.current = wallAxisAlign;
+  }, [wallAxisAlign]);
   useEffect(() => {
     strokeDrawStyleRef.current = strokeDrawStyle;
   }, [strokeDrawStyle]);
@@ -1032,9 +1426,51 @@ function App() {
     }).catch(() => { });
   }, [squishyHollow, squishySnapToSurface, squishyWallThickness]);
 
+  function mergedStrokeAux(
+    base: Record<string, unknown> = {},
+  ): Record<string, unknown> {
+    const sm = drawStrokeModeRef.current;
+    const constrainToPlane =
+      sm === "fill"
+        ? fillConstrainToPlaneRef.current
+        : sm === "spray"
+          ? sprayConstrainToPlaneRef.current
+          : false;
+    return {
+      ...base,
+      planeHollow: surfacePlaneHollowRef.current,
+      constrainToPlane,
+      spraySizeRange: spraySizeRangeRef.current,
+    };
+  }
+
+  /** Payload for `sync_preview_input` — must match Rust `SyncPreviewInput` (camelCase). */
+  function buildSyncPreviewPayload(nx: number, ny: number, modeStr: string) {
+    const im = interactionModeRef.current;
+    const brushRadius =
+      im === "squishy"
+        ? Math.max(2, generatorSphereRadiusRef.current)
+        : brushRadiusRef.current;
+    return {
+      nx,
+      ny,
+      mode: modeStr,
+      brushRadius,
+      brushShape: brushShapeRef.current,
+      sprayDensity: sprayDensityRef.current,
+      strokeMode: drawStrokeModeRef.current,
+      planeAxis: planeAxisRef.current,
+      strokeAux: mergedStrokeAux({}),
+      color: activeColorRef.current,
+      material: activeMaterialRef.current,
+      matchMaterial: matchMaterialSelectColorRef.current,
+      useBrushPreview: im !== "sculpt" && im !== "squishy",
+    };
+  }
+
   function runVoxelEditAtScreen(
-    physX: number,
-    physY: number,
+    nx: number,
+    ny: number,
     strokeAux: {
       polygonVertices?: [number, number, number][];
       circleCenter?: [number, number, number];
@@ -1050,8 +1486,8 @@ function App() {
     const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
     void invoke("voxel_edit_at_screen", {
       args: {
-        x: physX,
-        y: physY,
+        nx,
+        ny,
         tool,
         color: activeColorRef.current,
         material: activeMaterialRef.current,
@@ -1060,25 +1496,31 @@ function App() {
         sprayDensity: sprayDensityRef.current,
         strokeMode: drawStrokeModeRef.current,
         planeAxis: planeAxisRef.current,
-        strokeAux,
+        strokeAux: mergedStrokeAux(
+          strokeAux as Record<string, unknown>,
+        ),
         matchMaterial: matchMaterialSelectColorRef.current,
       },
     }).catch(() => { });
   }
 
-  async function handleStrokeAnchorClick(physX: number, physY: number) {
+  async function handleStrokeAnchorClick(nx: number, ny: number) {
     const im = interactionModeRef.current;
     if (im !== "add" && im !== "remove" && im !== "paint") return;
     const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
     const c = await invoke<[number, number, number] | null>(
       "voxel_stroke_anchor_coord_at_screen",
-      { args: { x: physX, y: physY, tool } },
+      { args: { nx, ny, tool } },
     );
     if (!c) return;
     const sm = drawStrokeModeRef.current;
+    if (sm === "fill") {
+      runVoxelEditAtScreen(nx, ny, {});
+      return;
+    }
     if (sm === "polygon" || sm === "polygonHull") {
       setStrokePolygonVerts((v) => [...v, c]);
-      strokePolygonLastScreenRef.current = { x: physX, y: physY };
+      strokePolygonLastScreenRef.current = { nx, ny };
       return;
     }
     if (sm === "circle") {
@@ -1086,7 +1528,7 @@ function App() {
       if (!r.circleCenter) {
         r.circleCenter = c;
       } else {
-        runVoxelEditAtScreen(physX, physY, {
+        runVoxelEditAtScreen(nx, ny, {
           circleCenter: r.circleCenter,
           circleEdge: c,
         });
@@ -1099,7 +1541,7 @@ function App() {
       if (!r.cuboidMin) {
         r.cuboidMin = c;
       } else {
-        runVoxelEditAtScreen(physX, physY, {
+        runVoxelEditAtScreen(nx, ny, {
           cuboidMin: r.cuboidMin,
           cuboidMax: c,
         });
@@ -1112,7 +1554,7 @@ function App() {
       if (!r.cylinderA) {
         r.cylinderA = c;
       } else {
-        runVoxelEditAtScreen(physX, physY, {
+        runVoxelEditAtScreen(nx, ny, {
           cylinderA: r.cylinderA,
           cylinderB: c,
         });
@@ -1124,17 +1566,111 @@ function App() {
   function applyPolygonStrokeFill() {
     if (strokePolygonVerts.length < 3) return;
     const scr =
-      strokePolygonLastScreenRef.current ?? lastViewportPickPhysRef.current;
-    const x = scr?.x ?? 0;
-    const y = scr?.y ?? 0;
-    runVoxelEditAtScreen(x, y, {
+      strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
+    const nx = scr?.nx ?? 0;
+    const ny = scr?.ny ?? 0;
+    runVoxelEditAtScreen(nx, ny, {
       polygonVertices: strokePolygonVerts.map((v) => [v[0], v[1], v[2]]),
     });
+  }
+
+  function applyPolygonSelectionStrokeFill() {
+    if (strokePolygonVerts.length < 3) return;
+    const scr =
+      strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
+    const nx = scr?.nx ?? 0;
+    const ny = scr?.ny ?? 0;
+    runSelectionStrokeAtScreen(nx, ny, {
+      polygonVertices: strokePolygonVerts.map((v) => [v[0], v[1], v[2]]),
+    });
+  }
+
+  async function handleSelectionStrokeAnchorClick(nx: number, ny: number) {
+    const im = interactionModeRef.current;
+    if (
+      im !== "select" &&
+      im !== "selectByColor" &&
+      im !== "selectCoplanar" &&
+      im !== "selectCoplanarEmpty"
+    ) {
+      return;
+    }
+    const c = await invoke<[number, number, number] | null>(
+      "voxel_stroke_anchor_coord_at_screen",
+      { args: { nx, ny, tool: "remove" } },
+    );
+    if (!c) return;
+    const sm = drawStrokeModeRef.current;
+    if (sm === "fill") {
+      runSelectionStrokeAtScreen(nx, ny, {});
+      return;
+    }
+    if (sm === "polygon" || sm === "polygonHull") {
+      setStrokePolygonVerts((v) => [...v, c]);
+      strokePolygonLastScreenRef.current = { nx, ny };
+      return;
+    }
+    if (sm === "circle") {
+      const r = strokeClickRef.current;
+      if (!r.circleCenter) {
+        r.circleCenter = c;
+      } else {
+        runSelectionStrokeAtScreen(nx, ny, {
+          circleCenter: r.circleCenter,
+          circleEdge: c,
+        });
+        r.circleCenter = null;
+      }
+      return;
+    }
+    if (sm === "cuboid") {
+      const r = strokeClickRef.current;
+      if (!r.cuboidMin) {
+        r.cuboidMin = c;
+      } else {
+        runSelectionStrokeAtScreen(nx, ny, {
+          cuboidMin: r.cuboidMin,
+          cuboidMax: c,
+        });
+        r.cuboidMin = null;
+      }
+      return;
+    }
+    if (sm === "cylinder") {
+      const r = strokeClickRef.current;
+      if (!r.cylinderA) {
+        r.cylinderA = c;
+      } else {
+        runSelectionStrokeAtScreen(nx, ny, {
+          cylinderA: r.cylinderA,
+          cylinderB: c,
+        });
+        r.cylinderA = null;
+      }
+    }
   }
 
   useEffect(() => {
     sprayDensityRef.current = sprayDensity;
   }, [sprayDensity]);
+  useEffect(() => {
+    fillSelectDiagonalsRef.current = fillSelectDiagonals;
+  }, [fillSelectDiagonals]);
+  useEffect(() => {
+    fillRespectsColorRef.current = fillRespectsColor;
+  }, [fillRespectsColor]);
+  useEffect(() => {
+    surfacePlaneHollowRef.current = surfacePlaneHollow;
+  }, [surfacePlaneHollow]);
+  useEffect(() => {
+    sprayConstrainToPlaneRef.current = sprayConstrainToPlane;
+  }, [sprayConstrainToPlane]);
+  useEffect(() => {
+    spraySizeRangeRef.current = spraySizeRange;
+  }, [spraySizeRange]);
+  useEffect(() => {
+    fillConstrainToPlaneRef.current = fillConstrainToPlane;
+  }, [fillConstrainToPlane]);
   useEffect(() => {
     if (interactionMode === "fly") {
       setToolsPane("fly");
@@ -1152,11 +1688,14 @@ function App() {
       setToolsPane("generators");
       return;
     }
+    if (interactionMode === "squishy") {
+      setToolsPane("squishy");
+      return;
+    }
     if (
       interactionMode === "add" ||
       interactionMode === "remove" ||
       interactionMode === "paint" ||
-      interactionMode === "fill" ||
       interactionMode === "eyedropper" ||
       interactionMode === "select" ||
       interactionMode === "selectByColor" ||
@@ -1169,19 +1708,122 @@ function App() {
     }
   }, [interactionMode]);
 
+  useEffect(() => {
+    if (
+      selectionCount === 0 &&
+      (interactionMode === "stamp" || interactionMode === "punch")
+    ) {
+      setInteractionMode("add");
+    }
+  }, [selectionCount, interactionMode]);
+
   const previewModeForSync = (m: InteractionMode): string => {
     if (m === "add") return "add";
     if (m === "remove") return "remove";
     if (m === "paint") return "paint";
     if (m === "sculpt") return "add";
     if (m === "fly") return "fly";
+    if (m === "squishy") return "squishy";
+    if (
+      m === "select" ||
+      m === "selectByColor" ||
+      m === "selectCoplanar" ||
+      m === "selectCoplanarEmpty"
+    ) {
+      return "select";
+    }
     return "navigate";
   };
+
+  function selectionInteractionArg(im: InteractionMode): string {
+    if (im === "selectByColor") return "selectByColor";
+    if (im === "selectCoplanar") return "selectCoplanar";
+    if (im === "selectCoplanarEmpty") return "selectCoplanarEmpty";
+    return "select";
+  }
+
+  function runSelectionStrokeAtScreen(
+    nx: number,
+    ny: number,
+    strokeAux: Record<string, unknown>,
+    opts?: {
+      lineStart?: { nx: number; ny: number } | null;
+      brushPrev?: { nx: number; ny: number } | null;
+    },
+  ) {
+    const im = interactionModeRef.current;
+    if (
+      im !== "select" &&
+      im !== "selectByColor" &&
+      im !== "selectCoplanar" &&
+      im !== "selectCoplanarEmpty"
+    ) {
+      return;
+    }
+    const lineStart = opts?.lineStart;
+    const brushPrev = opts?.brushPrev;
+    void invoke<number>("selection_stroke_at_screen", {
+      args: {
+        nx,
+        ny,
+        brushRadius: brushRadiusRef.current,
+        brushShape: brushShapeRef.current,
+        sprayDensity: sprayDensityRef.current,
+        strokeMode: drawStrokeModeRef.current,
+        planeAxis: planeAxisRef.current,
+        strokeAux: mergedStrokeAux(strokeAux),
+        fillSelectDiagonals: fillSelectDiagonalsRef.current,
+        fillRespectsColor: fillRespectsColorRef.current,
+        matchMaterial: matchMaterialSelectColorRef.current,
+        interaction: selectionInteractionArg(im),
+        ...(lineStart
+          ? {
+            strokeLineStartNx: lineStart.nx,
+            strokeLineStartNy: lineStart.ny,
+          }
+          : {}),
+        ...(!lineStart && brushPrev
+          ? {
+            strokeSegmentPrevNx: brushPrev.nx,
+            strokeSegmentPrevNy: brushPrev.ny,
+          }
+          : {}),
+      },
+    })
+      .then((n) => {
+        if (n > 0) {
+          void invoke<number>("selection_get_count").then((c) =>
+            setSelectionCount(c),
+          );
+        }
+      })
+      .catch(() => {});
+  }
+
+  useLayoutEffect(() => {
+    applyAppearanceToDocument(loadPreferences().appearanceTheme);
+  }, []);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: light)");
+    const onSchemeChange = () => {
+      if (loadPreferences().appearanceTheme === "auto") {
+        applyAppearanceToDocument("auto");
+      }
+    };
+    mq.addEventListener("change", onSchemeChange);
+    return () => mq.removeEventListener("change", onSchemeChange);
+  }, []);
 
   useEffect(() => {
     loadingRef.current = loading;
     interactionBlockedRef.current = loading || workBusy;
   }, [loading, workBusy]);
+
+  /** Any path that sets `loadError` must not leave `loading` stuck true (e.g. `collab-error`, invoke `.catch`). */
+  useEffect(() => {
+    if (loadError != null) setLoading(false);
+  }, [loadError]);
 
   useEffect(() => {
     const p = loadPreferences();
@@ -1327,7 +1969,7 @@ function App() {
         collabJoinPending
       )
         return;
-      const p = lastViewportPickPhysRef.current;
+      const p = lastViewportPickNormRef.current;
       if (!p) return;
       e.preventDefault();
       const dn = loadPreferences().collabDisplayName.trim();
@@ -1337,7 +1979,7 @@ function App() {
         y?: number;
         z?: number;
       }>("ping_cursor_pick", {
-        args: { x: p.x, y: p.y, displayName: dn },
+        args: { nx: p.nx, ny: p.ny, displayName: dn },
       })
         .then((r) => {
           if (!r?.ok || r.x == null || r.y == null || r.z == null) return;
@@ -1363,17 +2005,183 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [preferencesOpen, joinModalOpen, newProjectOpen, collabJoinPending]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.repeat) return;
+      const t = e.target as HTMLElement | null;
+      if (
+        t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable)
+      ) {
+        return;
+      }
+      if (
+        preferencesOpen ||
+        joinModalOpen ||
+        newProjectOpen ||
+        collabJoinPending
+      ) {
+        return;
+      }
+      if (loading || workBusy) return;
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.code !== "KeyX" || selectionCount === 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      void invoke<number>("selection_delete_selected_voxels").catch(() => {});
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [
+    selectionCount,
+    preferencesOpen,
+    joinModalOpen,
+    newProjectOpen,
+    collabJoinPending,
+    loading,
+    workBusy,
+  ]);
+
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
-      args: { x: -1, y: 0, mode: "navigate" },
+      args: buildSyncPreviewPayload(-1, 0, "navigate"),
     }).catch(() => { });
+    void invoke("squishy_gizmo_pointer_up").catch(() => {});
+  }, []);
+
+  const releaseFlyMouseLook = useCallback(async () => {
+    flyMouseLookActiveRef.current = false;
+    flyLastClientRef.current = null;
+    flySkipNextFlyMoveRef.current = false;
+    flyPendingLookDxRef.current = 0;
+    flyPendingLookDyRef.current = 0;
+    const vp = viewportRef.current;
+    const pid = flyCapturedPointerIdRef.current;
+    flyCapturedPointerIdRef.current = null;
+    if (vp != null && pid != null) {
+      try {
+        vp.releasePointerCapture(pid);
+      } catch {
+        /* not capturing or pointer already gone */
+      }
+    }
+    const w = getCurrentWindow();
+    try {
+      await w.setCursorGrab(false);
+    } catch {
+      /* e.g. Linux: grab unsupported */
+    }
+    try {
+      await w.setCursorVisible(true);
+    } catch {
+      /* */
+    }
+  }, []);
+
+  const activateFlyMouseLook = useCallback(async (pointerId: number) => {
+    const el = viewportRef.current;
+    if (!el) return;
+    flySkipNextFlyMoveRef.current = false;
+    flyPendingLookDxRef.current = 0;
+    flyPendingLookDyRef.current = 0;
+    // Retargets this pointer to the viewport until pointerup (capture does not persist across the full click).
+    try {
+      el.setPointerCapture(pointerId);
+      flyCapturedPointerIdRef.current = pointerId;
+    } catch {
+      flyCapturedPointerIdRef.current = null;
+    }
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2;
+    const cy = r.top + r.height / 2;
+    const w = getCurrentWindow();
+    try {
+      await w.setCursorPosition(new LogicalPosition(cx, cy));
+    } catch {
+      /* */
+    }
+    try {
+      await w.setCursorGrab(true);
+    } catch {
+      /* Linux: unsupported */
+    }
+    try {
+      await w.setCursorVisible(false);
+    } catch {
+      /* */
+    }
+    flyLastClientRef.current = { x: cx, y: cy };
+    flyMouseLookActiveRef.current = true;
   }, []);
 
   useEffect(() => {
     void invoke("sync_preview_input", {
-      args: { x: -1, y: 0, mode: previewModeForSync(interactionMode) },
+      args: buildSyncPreviewPayload(-1, 0, previewModeForSync(interactionMode)),
     }).catch(() => { });
   }, [interactionMode]);
+
+  /** Re-push brush/stroke params so hover preview updates when sliders change without moving the pointer. */
+  useEffect(() => {
+    const im = interactionModeRef.current;
+    if (
+      im !== "add" &&
+      im !== "remove" &&
+      im !== "paint" &&
+      im !== "sculpt" &&
+      im !== "select" &&
+      im !== "selectByColor" &&
+      im !== "selectCoplanar" &&
+      im !== "selectCoplanarEmpty"
+    ) {
+      return;
+    }
+    if (interactionBlockedRef.current) return;
+    const p = lastViewportPickNormRef.current;
+    if (p == null) return;
+    void invoke("sync_preview_input", {
+      args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(im)),
+    }).catch(() => {});
+  }, [
+    brushRadius,
+    brushShape,
+    drawStrokeMode,
+    sprayDensity,
+    planeAxis,
+    surfacePlaneHollow,
+    sprayConstrainToPlane,
+    spraySizeRange,
+    fillConstrainToPlane,
+    activeColor,
+    activeMaterial,
+    matchMaterialSelectColor,
+  ]);
+
+  /** Squishy: re-sync metaball preview when radius / hollow / mode change without moving the pointer. */
+  useEffect(() => {
+    const im = interactionModeRef.current;
+    if (im !== "squishy") return;
+    if (interactionBlockedRef.current) return;
+    const p = lastViewportPickNormRef.current;
+    if (p == null) return;
+    void invoke("sync_preview_input", {
+      args: buildSyncPreviewPayload(p.nx, p.ny, "squishy"),
+    }).catch(() => {});
+  }, [
+    squishyMode,
+    generatorSphereRadius,
+    squishyHollow,
+    squishyWallThickness,
+    squishySnapToSurface,
+  ]);
+
+  useEffect(() => {
+    if (interactionMode !== "squishy" || squishyMode !== "edit") {
+      void invoke("squishy_gizmo_pointer_up").catch(() => {});
+    }
+  }, [interactionMode, squishyMode]);
 
   useEffect(() => {
     matchMaterialSelectColorRef.current = matchMaterialSelectColor;
@@ -1400,23 +2208,100 @@ function App() {
   useEffect(() => {
     if (interactionMode !== "fly") {
       void invoke("set_fly_mode", { enabled: false }).catch(() => { });
-      flyLastTRef.current = null;
       keysDownRef.current.clear();
+      void releaseFlyMouseLook();
       return;
     }
     void invoke("set_fly_mode", { enabled: true }).catch(() => { });
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.code === "Escape" && flyMouseLookActiveRef.current) {
+        void releaseFlyMouseLook();
+        e.preventDefault();
+        return;
+      }
       keysDownRef.current.add(e.code);
+      if (
+        e.code === "KeyW" ||
+        e.code === "KeyS" ||
+        e.code === "KeyA" ||
+        e.code === "KeyD" ||
+        e.code === "KeyE" ||
+        e.code === "KeyQ" ||
+        e.code === "ShiftLeft" ||
+        e.code === "ShiftRight"
+      ) {
+        e.preventDefault();
+      }
     };
     const onKeyUp = (e: KeyboardEvent) => {
       keysDownRef.current.delete(e.code);
+      if (
+        e.code === "KeyW" ||
+        e.code === "KeyS" ||
+        e.code === "KeyA" ||
+        e.code === "KeyD" ||
+        e.code === "KeyE" ||
+        e.code === "KeyQ" ||
+        e.code === "ShiftLeft" ||
+        e.code === "ShiftRight"
+      ) {
+        e.preventDefault();
+      }
     };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    const tick = (t: number) => {
-      const last = flyLastTRef.current ?? t;
-      flyLastTRef.current = t;
-      const dt = Math.min(0.05, (t - last) / 1000);
+    const dpr = () => window.devicePixelRatio || 1;
+    const onFlyPointerMove = (e: PointerEvent) => {
+      const vp = viewportRef.current;
+      const s = dpr();
+      if (!flyMouseLookActiveRef.current || !vp) return;
+      if (flySkipNextFlyMoveRef.current) {
+        flySkipNextFlyMoveRef.current = false;
+        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+      // True FPS deltas: prefer movementX/Y. Do NOT use (client - viewportCenter);
+      // that behaves like a joystick and keeps turning while the cursor stays off-center.
+      let dxCss = e.movementX;
+      let dyCss = e.movementY;
+      if (dxCss === 0 && dyCss === 0) {
+        const last = flyLastClientRef.current;
+        if (last == null) {
+          flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+          return;
+        }
+        dxCss = e.clientX - last.x;
+        dyCss = e.clientY - last.y;
+        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+        if (dxCss === 0 && dyCss === 0) return;
+      } else {
+        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+      }
+      flyPendingLookDxRef.current += dxCss * s;
+      flyPendingLookDyRef.current += dyCss * s;
+      const r = vp.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      void getCurrentWindow()
+        .setCursorPosition(new LogicalPosition(cx, cy))
+        .then(() => {
+          flySkipNextFlyMoveRef.current = true;
+          flyLastClientRef.current = { x: cx, y: cy };
+        })
+        .catch(() => { });
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    document.addEventListener("pointermove", onFlyPointerMove, true);
+    const tick = () => {
+      const pdx = flyPendingLookDxRef.current;
+      const pdy = flyPendingLookDyRef.current;
+      flyPendingLookDxRef.current = 0;
+      flyPendingLookDyRef.current = 0;
+      if (pdx !== 0 || pdy !== 0) {
+        void invoke("camera_fly_look", {
+          args: { dx: pdx, dy: pdy },
+        }).catch(() => { });
+      }
       const k = keysDownRef.current;
       let forward = 0;
       let right = 0;
@@ -1425,21 +2310,25 @@ function App() {
       if (k.has("KeyS")) forward -= 1;
       if (k.has("KeyD")) right += 1;
       if (k.has("KeyA")) right -= 1;
-      if (k.has("Space")) up += 1;
-      if (k.has("ShiftLeft") || k.has("ShiftRight")) up -= 1;
-      void invoke("camera_fly_tick", {
-        args: { forward, right, up, dtSecs: dt },
+      if (k.has("KeyE")) up += 1;
+      if (k.has("KeyQ")) up -= 1;
+      const slow = k.has("ShiftLeft") || k.has("ShiftRight");
+      const speedScale = slow ? 1 / 8 : 1;
+      void invoke("sync_fly_input", {
+        args: { forward, right, up, speedScale },
       }).catch(() => { });
       flyRafRef.current = requestAnimationFrame(tick);
     };
     flyRafRef.current = requestAnimationFrame(tick);
     return () => {
       cancelAnimationFrame(flyRafRef.current);
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      document.removeEventListener("pointermove", onFlyPointerMove, true);
       void invoke("set_fly_mode", { enabled: false }).catch(() => { });
+      void releaseFlyMouseLook();
     };
-  }, [interactionMode]);
+  }, [interactionMode, releaseFlyMouseLook]);
 
   useEffect(() => {
     if (
@@ -1460,30 +2349,17 @@ function App() {
     }
   }, [loading, workBusy, clearPreview]);
 
-  const clientToViewportPhysical = useCallback((e: React.PointerEvent) => {
+  /** Normalized coords (0–1) in `.viewport`; Rust multiplies by `viewer.viewport_size()` so picking matches projection. */
+  const clientToViewportNormalized = useCallback((e: React.PointerEvent) => {
     const el = viewportRef.current;
-    if (!el) {
-      const dpr = window.devicePixelRatio || 1;
-      return { x: e.clientX * dpr, y: e.clientY * dpr };
-    }
-    const { w: pw, h: ph } = viewportPhysRef.current;
+    if (!el) return { nx: 0.5, ny: 0.5 };
     const rect = el.getBoundingClientRect();
     const rw = rect.width;
     const rh = rect.height;
-    if (pw > 0 && ph > 0 && rw > 0 && rh > 0) {
-      // Same normalization as sendResize (fractional rect), not offsetX/clientWidth
-      // (integer sizes can disagree with rect aspect and cause edge-only ray error).
-      return {
-        x: ((e.clientX - rect.left) / rw) * pw,
-        y: ((e.clientY - rect.top) / rh) * ph,
-      };
-    }
-    const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.round(rw * dpr));
-    const h = Math.max(1, Math.round(w * (rh / rw)));
+    if (rw <= 0 || rh <= 0) return { nx: 0.5, ny: 0.5 };
     return {
-      x: ((e.clientX - rect.left) / rw) * w,
-      y: ((e.clientY - rect.top) / rh) * h,
+      nx: (e.clientX - rect.left) / rw,
+      ny: (e.clientY - rect.top) / rh,
     };
   }, []);
 
@@ -1519,6 +2395,21 @@ function App() {
   }, [pathLabel, loading, loadError]);
 
   const onPointerDown = async (e: React.PointerEvent) => {
+    const modeEarly = interactionModeRef.current;
+    if (modeEarly === "fly" && (e.button === 0 || e.button === 2)) {
+      e.preventDefault();
+      if (flyMouseLookActiveRef.current) {
+        void releaseFlyMouseLook();
+      } else {
+        void activateFlyMouseLook(e.pointerId);
+      }
+      probingRef.current = false;
+      activePointerIdRef.current = null;
+      pointerStartRef.current = null;
+      gestureRef.current = null;
+      return;
+    }
+
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
     activePointerIdRef.current = e.pointerId;
     pointerStartRef.current = { x: e.clientX, y: e.clientY };
@@ -1526,18 +2417,16 @@ function App() {
     probingRef.current = true;
     gestureRef.current = null;
 
-    const { x, y } = clientToViewportPhysical(e);
+    const { nx, ny } = clientToViewportNormalized(e);
     const pointerId = e.pointerId;
     const middleButton = e.button === 1;
     const mode = interactionModeRef.current;
     const navigate = mode === "navigate" || mode === "fly";
     const forceCamera =
       middleButton ||
-      e.shiftKey ||
       (mode === "add" && e.button !== 0) ||
       (mode === "remove" && e.button !== 0) ||
       (mode === "paint" && e.button !== 0) ||
-      (mode === "fill" && e.button !== 0) ||
       (mode === "eyedropper" && e.button !== 0) ||
       (mode === "select" && e.button !== 0) ||
       (mode === "selectByColor" && e.button !== 0) ||
@@ -1546,10 +2435,41 @@ function App() {
       (mode === "stamp" && e.button !== 0) ||
       (mode === "punch" && e.button !== 0) ||
       (mode === "sculpt" && e.button !== 0) ||
-      (mode === "generator" && e.button !== 0);
+      (mode === "generator" && e.button !== 0) ||
+      (mode === "squishy" && e.button !== 0);
+
+    const logoSplashPointer =
+      startScreenLogoLoadedRef.current &&
+      !loading &&
+      !workBusy &&
+      e.button === 0;
+
+    if (
+      mode === "squishy" &&
+      squishyModeRef.current === "edit" &&
+      e.button === 0 &&
+      !loading &&
+      !workBusy &&
+      !logoSplashPointer
+    ) {
+      try {
+        const consumed = await invoke<boolean>("squishy_gizmo_pointer_down", {
+          args: { nx, ny },
+        });
+        if (consumed) {
+          probingRef.current = false;
+          gestureRef.current = { pointerId, mode: "squishyGizmo" };
+          lastRef.current = { x: e.clientX, y: e.clientY };
+          return;
+        }
+      } catch {
+        /* fall through to pick / camera */
+      }
+    }
 
     let hitSolid = false;
     if (
+      !logoSplashPointer &&
       !loading &&
       !workBusy &&
       !forceCamera &&
@@ -1557,7 +2477,6 @@ function App() {
       (mode === "add" ||
         mode === "remove" ||
         mode === "paint" ||
-        mode === "fill" ||
         mode === "eyedropper" ||
         mode === "select" ||
         mode === "selectByColor" ||
@@ -1566,12 +2485,13 @@ function App() {
         mode === "stamp" ||
         mode === "punch" ||
         mode === "sculpt" ||
-        mode === "generator") &&
+        mode === "generator" ||
+        mode === "squishy") &&
       e.button === 0
     ) {
       try {
         hitSolid = await invoke<boolean>("voxel_pick_probe", {
-          args: { x, y },
+          args: { nx, ny },
         });
       } catch {
         hitSolid = false;
@@ -1598,17 +2518,31 @@ function App() {
         mode === "sculpt")
     ) {
       dragDidEditRef.current = false;
-      strokeViewportStartRef.current = { x, y };
-      lastStrokePhysRef.current = { x, y };
+      strokeViewportStartRef.current = { nx, ny };
+      lastStrokeNormRef.current = { nx, ny };
       void invoke("voxel_stroke_begin").catch(() => { });
+    }
+
+    if (
+      gestureRef.current.mode === "voxel" &&
+      (mode === "select" ||
+        mode === "selectByColor" ||
+        mode === "selectCoplanar" ||
+        mode === "selectCoplanarEmpty")
+    ) {
+      dragDidEditRef.current = false;
+      strokeViewportStartRef.current = { nx, ny };
+      lastStrokeNormRef.current = { nx, ny };
+      selectionStrokeBegunRef.current = true;
+      void invoke("selection_stroke_begin").catch(() => { });
     }
 
     if (gestureRef.current.mode === "camera" && mode !== "fly") {
       void invoke("viewport_pointer", {
         ev: {
           kind: "down",
-          x,
-          y,
+          nx,
+          ny,
           dx: 0,
           dy: 0,
           button: e.button,
@@ -1620,19 +2554,56 @@ function App() {
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
-    const { x: px, y: py } = clientToViewportPhysical(e);
-    lastViewportPickPhysRef.current = { x: px, y: py };
+    const { nx: px, ny: py } = clientToViewportNormalized(e);
+    lastViewportPickNormRef.current = { nx: px, ny: py };
+    if (viewportCursorDebugEnabled) {
+      const el = viewportRef.current;
+      const rect = el?.getBoundingClientRect();
+      setViewportCursorDebugScreen(
+        rect
+          ? {
+              clientX: e.clientX,
+              clientY: e.clientY,
+              relX: e.clientX - rect.left,
+              relY: e.clientY - rect.top,
+            }
+          : null,
+      );
+      setViewportCursorDebugJs({ nx: px, ny: py });
+      if (viewportCursorDebugRafRef.current == null) {
+        viewportCursorDebugRafRef.current = requestAnimationFrame(() => {
+          viewportCursorDebugRafRef.current = null;
+          void invoke<ViewportCursorDebugPayload>("get_viewport_cursor_debug")
+            .then((d) => setViewportCursorDebugRust(d))
+            .catch(() => setViewportCursorDebugRust(null));
+        });
+      }
+    }
+    if (
+      gestureRef.current?.mode === "squishyGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      void invoke("squishy_gizmo_pointer_move", {
+        args: { nx: px, ny: py },
+      }).catch(() => {});
+      return;
+    }
     if (
       !probingRef.current &&
       (interactionModeRef.current === "add" ||
         interactionModeRef.current === "remove" ||
         interactionModeRef.current === "paint" ||
-        interactionModeRef.current === "sculpt") &&
+        interactionModeRef.current === "sculpt" ||
+        interactionModeRef.current === "select" ||
+        interactionModeRef.current === "selectByColor" ||
+        interactionModeRef.current === "selectCoplanar" ||
+        interactionModeRef.current === "selectCoplanarEmpty" ||
+        interactionModeRef.current === "squishy") &&
       !interactionBlockedRef.current
     ) {
       const m = previewModeForSync(interactionModeRef.current);
       void invoke("sync_preview_input", {
-        args: { x: px, y: py, mode: m },
+        args: buildSyncPreviewPayload(px, py, m),
       }).catch(() => { });
     }
 
@@ -1670,13 +2641,13 @@ function App() {
               ? strokeViewportStartRef.current
               : null;
           const brushPrev =
-            strokeDrawStyleRef.current === "brush" && lastStrokePhysRef.current
-              ? lastStrokePhysRef.current
+            strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
+              ? lastStrokeNormRef.current
               : null;
-          void invoke("voxel_edit_at_screen", {
+          void invoke("voxel_stroke_preview_at_screen", {
             args: {
-              x: px,
-              y: py,
+              nx: px,
+              ny: py,
               tool,
               color: activeColorRef.current,
               material: activeMaterialRef.current,
@@ -1685,28 +2656,56 @@ function App() {
               sprayDensity: sprayDensityRef.current,
               strokeMode: drawStrokeModeRef.current,
               planeAxis: planeAxisRef.current,
-              strokeAux: {},
+              strokeAux: mergedStrokeAux({}),
               matchMaterial: matchMaterialSelectColorRef.current,
               ...(lineStart
                 ? {
-                  strokeLineStartX: lineStart.x,
-                  strokeLineStartY: lineStart.y,
+                  strokeLineStartNx: lineStart.nx,
+                  strokeLineStartNy: lineStart.ny,
                 }
                 : {}),
               ...(!lineStart && brushPrev
                 ? {
-                  strokeSegmentPrevX: brushPrev.x,
-                  strokeSegmentPrevY: brushPrev.y,
+                  strokeSegmentPrevNx: brushPrev.nx,
+                  strokeSegmentPrevNy: brushPrev.ny,
                 }
                 : {}),
             },
           })
             .finally(() => {
               if (strokeDrawStyleRef.current === "brush") {
-                lastStrokePhysRef.current = { x: px, y: py };
+                lastStrokeNormRef.current = { nx: px, ny: py };
               }
             })
             .catch(() => { });
+        }
+      }
+      if (
+        e.buttons &&
+        (m === "select" ||
+          m === "selectByColor" ||
+          m === "selectCoplanar" ||
+          m === "selectCoplanarEmpty") &&
+        !loading &&
+        !workBusy &&
+        !strokeModeSkipsDrag(drawStrokeModeRef.current)
+      ) {
+        const now = Date.now();
+        if (now - lastStrokeEditMsRef.current >= 24) {
+          lastStrokeEditMsRef.current = now;
+          dragDidEditRef.current = true;
+          const lineStart =
+            strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
+              ? strokeViewportStartRef.current
+              : null;
+          const brushPrev =
+            strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
+              ? lastStrokeNormRef.current
+              : null;
+          runSelectionStrokeAtScreen(px, py, {}, { lineStart, brushPrev });
+          if (strokeDrawStyleRef.current === "brush") {
+            lastStrokeNormRef.current = { nx: px, ny: py };
+          }
         }
       }
       if (
@@ -1719,35 +2718,22 @@ function App() {
         if (now - lastStrokeEditMsRef.current >= 24) {
           lastStrokeEditMsRef.current = now;
           dragDidEditRef.current = true;
-          const lineStart =
-            strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
-              ? strokeViewportStartRef.current
-              : null;
-          const brushPrev =
-            strokeDrawStyleRef.current === "brush" && lastStrokePhysRef.current
-              ? lastStrokePhysRef.current
-              : null;
+          const sculptBrushPrev = lastStrokeNormRef.current;
           const sm = sculptStrokeModeRef.current;
-          void invoke("voxel_sculpt_stroke_at_screen", {
+          void invoke("voxel_sculpt_stroke_preview_at_screen", {
             args: {
-              x: px,
-              y: py,
+              nx: px,
+              ny: py,
               sculptMode: sm,
               color: activeColorRef.current,
               material: activeMaterialRef.current,
-              brushRadius: brushRadiusRef.current,
-              brushShape: brushShapeRef.current,
-              sprayDensity: sprayDensityRef.current,
-              ...(lineStart
+              brushRadius: sculptBrushRadiusRef.current,
+              brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+              sprayDensity: 0,
+              ...(sculptBrushPrev
                 ? {
-                  strokeLineStartX: lineStart.x,
-                  strokeLineStartY: lineStart.y,
-                }
-                : {}),
-              ...(!lineStart && brushPrev
-                ? {
-                  strokeSegmentPrevX: brushPrev.x,
-                  strokeSegmentPrevY: brushPrev.y,
+                  strokeSegmentPrevNx: sculptBrushPrev.nx,
+                  strokeSegmentPrevNy: sculptBrushPrev.ny,
                 }
                 : {}),
               ...(sm === "terrain"
@@ -1763,12 +2749,19 @@ function App() {
                   smoothNeighborPasses: sculptSmoothPassesRef.current,
                 }
                 : {}),
+              brushStrength: sculptBrushStrengthRef.current,
+              brushFalloff: sculptBrushFalloffRef.current,
+              strokeSeed: (Math.floor(Math.random() * 0x1_0000_0000) >>> 0),
+              wallAreaShape: wallAreaShapeRef.current,
+              sprayDirection: sprayDirectionRef.current,
+              wallWidthIndex: wallWidthIndexRef.current,
+              wallHeightVox: wallHeightVoxRef.current,
+              wallLockStartHeight: wallLockStartHeightRef.current,
+              wallAxisAlign: wallAxisAlignRef.current,
             },
           })
             .finally(() => {
-              if (strokeDrawStyleRef.current === "brush") {
-                lastStrokePhysRef.current = { x: px, y: py };
-              }
+              lastStrokeNormRef.current = { nx: px, ny: py };
             })
             .catch(() => { });
         }
@@ -1788,15 +2781,33 @@ function App() {
     const dy = (e.clientY - lastRef.current.y) * dpr;
     lastRef.current = { x: e.clientX, y: e.clientY };
     if (e.buttons === 0) {
+      if (
+        startScreenLogoLoadedRef.current &&
+        interactionModeRef.current !== "fly"
+      ) {
+        const { nx, ny } = clientToViewportNormalized(e);
+        void invoke("viewport_pointer", {
+          ev: {
+            kind: "move",
+            nx,
+            ny,
+            dx: 0,
+            dy: 0,
+            button: e.button,
+            buttons: 0,
+            shiftKey: e.shiftKey,
+          },
+        }).catch(() => {});
+      }
       return;
     }
-    const { x, y } = clientToViewportPhysical(e);
+    const { nx, ny } = clientToViewportNormalized(e);
     if (interactionModeRef.current !== "fly") {
       void invoke("viewport_pointer", {
         ev: {
           kind: "move",
-          x,
-          y,
+          nx,
+          ny,
           dx,
           dy,
           button: e.button,
@@ -1816,6 +2827,17 @@ function App() {
       return;
     }
 
+    if (
+      gestureRef.current?.mode === "squishyGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      void invoke("squishy_gizmo_pointer_up").catch(() => {});
+      gestureRef.current = null;
+      activePointerIdRef.current = null;
+      pointerStartRef.current = null;
+      return;
+    }
+
     const g = gestureRef.current;
     const start = pointerStartRef.current;
     const moved = maxPointerMoveRef.current;
@@ -1827,50 +2849,102 @@ function App() {
       !loading &&
       !workBusy &&
       start &&
-      !e.shiftKey &&
       e.button === 0
     ) {
-      const { x, y } = clientToViewportPhysical(e);
+      const { nx, ny } = clientToViewportNormalized(e);
       const m = interactionModeRef.current;
       if (moved < 5) {
-        if (m === "select") {
-          void invoke("selection_toggle_at_screen", { args: { x, y } })
-            .then(() =>
-              invoke<number>("selection_get_count").then((n) =>
-                setSelectionCount(n),
-              ),
-            )
-            .catch(() => { });
+        if (
+          m === "select" ||
+          m === "selectByColor" ||
+          m === "selectCoplanar" ||
+          m === "selectCoplanarEmpty"
+        ) {
+          const sm = drawStrokeModeRef.current;
+          if (strokeModeSkipsDrag(sm)) {
+            void handleSelectionStrokeAnchorClick(nx, ny);
+          } else {
+            const dm = drawStrokeModeRef.current;
+            if (m === "select") {
+              if (dm === "fill") {
+                runSelectionStrokeAtScreen(nx, ny, {});
+              } else {
+                runSelectionStrokeAtScreen(nx, ny, {});
+              }
+            } else if (m === "selectByColor") {
+              if (dm === "fill") {
+                runSelectionStrokeAtScreen(nx, ny, {});
+              } else {
+                void invoke<number>("selection_add_by_color_at_screen", {
+                  args: {
+                    nx,
+                    ny,
+                    matchMaterial: matchMaterialSelectColorRef.current,
+                  },
+                })
+                  .then((n) => {
+                    if (n > 0) {
+                      void invoke<number>("selection_get_count").then((c) =>
+                        setSelectionCount(c),
+                      );
+                    }
+                  })
+                  .catch(() => {});
+              }
+            } else if (m === "selectCoplanar") {
+              if (dm === "fill") {
+                runSelectionStrokeAtScreen(nx, ny, {});
+              } else {
+                void invoke<number>("selection_add_coplanar_at_screen", {
+                  args: { nx, ny },
+                })
+                  .then((n) => {
+                    if (n > 0) {
+                      void invoke<number>("selection_get_count").then((c) =>
+                        setSelectionCount(c),
+                      );
+                    }
+                  })
+                  .catch(() => {});
+              }
+            } else if (m === "selectCoplanarEmpty") {
+              if (dm === "fill") {
+                runSelectionStrokeAtScreen(nx, ny, {});
+              } else {
+                void invoke<number>("selection_add_coplanar_empty_at_screen", {
+                  args: { nx, ny },
+                })
+                  .then((n) => {
+                    if (n > 0) {
+                      void invoke<number>("selection_get_count").then((c) =>
+                        setSelectionCount(c),
+                      );
+                    }
+                  })
+                  .catch(() => {});
+              }
+            }
+          }
         } else if (m === "stamp") {
           void invoke("clipboard_stamp_at_screen", {
             args: {
-              x,
-              y,
+              nx,
+              ny,
               color: activeColorRef.current,
               material: activeMaterialRef.current,
             },
           }).catch(() => { });
         } else if (m === "punch") {
-          void invoke("clipboard_punch_at_screen", { args: { x, y } }).catch(
+          void invoke("clipboard_punch_at_screen", { args: { nx, ny } }).catch(
             () => { },
           );
         } else if (m === "generator") {
           const gk = generatorKindRef.current;
-          if (gk === "sphere") {
-            void invoke("generator_sphere_at_screen", {
-              args: {
-                x,
-                y,
-                radius: generatorSphereRadiusRef.current,
-                color: activeColorRef.current,
-                material: activeMaterialRef.current,
-              },
-            }).catch(() => { });
-          } else if (gk === "rocks") {
+          if (gk === "rocks") {
             void invoke("generator_rocks_at_screen", {
               args: {
-                x,
-                y,
+                nx,
+                ny,
                 seed: (Math.random() * 1e9) | 0,
                 size: Math.max(1, generatorSphereRadiusRef.current),
                 roughness: rockRoughness,
@@ -1881,8 +2955,8 @@ function App() {
           } else if (gk === "grass") {
             void invoke("generator_grass_at_screen", {
               args: {
-                x,
-                y,
+                nx,
+                ny,
                 seed: (Math.random() * 1e9) | 0,
                 density: grassDensity,
                 maxHeight: grassMaxHeight,
@@ -1892,14 +2966,14 @@ function App() {
             }).catch(() => { });
           } else if (gk === "rope") {
             if (!ropeFirstScreen) {
-              setRopeFirstScreen({ x, y });
+              setRopeFirstScreen({ nx, ny });
             } else {
               void invoke("generator_rope_at_screen", {
                 args: {
-                  x1: ropeFirstScreen.x,
-                  y1: ropeFirstScreen.y,
-                  x2: x,
-                  y2: y,
+                  nx1: ropeFirstScreen.nx,
+                  ny1: ropeFirstScreen.ny,
+                  nx2: nx,
+                  ny2: ny,
                   sag: ropeSag,
                   color: activeColorRef.current,
                   material: activeMaterialRef.current,
@@ -1907,85 +2981,35 @@ function App() {
               }).catch(() => { });
               setRopeFirstScreen(null);
             }
-          } else if (gk === "squishy") {
-            const mode = squishyModeRef.current;
-            void invoke("squishy_session_set_mode", { args: { mode } })
-              .then(() => {
-                if (mode === "add") {
-                  return invoke("squishy_metaball_add_at_screen", {
-                    args: {
-                      x,
-                      y,
-                      radius: Math.max(2, generatorSphereRadiusRef.current),
-                    },
-                  });
-                }
-                return invoke<number | null>("squishy_pick_at_screen", {
-                  args: { x, y },
-                }).then((id) => {
-                  if (id == null) return;
-                  if (mode === "delete") {
-                    return invoke("squishy_metaball_remove", { args: { id } });
-                  }
-                  return invoke("squishy_metaball_select", { args: { id } });
-                });
-              })
-              .then(() =>
-                invoke<{ balls: { id: number }[] }>("squishy_session_get"),
-              )
-              .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-              .catch(() => { });
           }
-        } else if (m === "selectByColor") {
-          void invoke<number>("selection_add_by_color_at_screen", {
-            args: {
-              x,
-              y,
-              matchMaterial: matchMaterialSelectColorRef.current,
-            },
-          })
-            .then((n) => {
-              if (n > 0) {
-                void invoke<number>("selection_get_count").then((c) =>
-                  setSelectionCount(c),
-                );
+        } else if (m === "squishy") {
+          const mode = squishyModeRef.current;
+          void invoke("squishy_session_set_mode", { args: { mode } })
+            .then(() => {
+              if (mode === "add") {
+                return invoke("squishy_metaball_add_at_screen", {
+                  args: {
+                    nx,
+                    ny,
+                    radius: Math.max(2, generatorSphereRadiusRef.current),
+                  },
+                });
               }
+              return invoke<number | null>("squishy_pick_at_screen", {
+                args: { nx, ny },
+              }).then((id) => {
+                if (id == null) return;
+                if (mode === "delete") {
+                  return invoke("squishy_metaball_remove", { args: { id } });
+                }
+                return invoke("squishy_metaball_select", { args: { id } });
+              });
             })
+            .then(() =>
+              invoke<{ balls: { id: number }[] }>("squishy_session_get"),
+            )
+            .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
             .catch(() => { });
-        } else if (m === "selectCoplanar") {
-          void invoke<number>("selection_add_coplanar_at_screen", {
-            args: { x, y },
-          })
-            .then((n) => {
-              if (n > 0) {
-                void invoke<number>("selection_get_count").then((c) =>
-                  setSelectionCount(c),
-                );
-              }
-            })
-            .catch(() => { });
-        } else if (m === "selectCoplanarEmpty") {
-          void invoke<number>("selection_add_coplanar_empty_at_screen", {
-            args: { x, y },
-          })
-            .then((n) => {
-              if (n > 0) {
-                void invoke<number>("selection_get_count").then((c) =>
-                  setSelectionCount(c),
-                );
-              }
-            })
-            .catch(() => { });
-        } else if (m === "fill") {
-          void invoke<boolean>("voxel_fill_at_screen", {
-            args: {
-              x,
-              y,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-              matchMaterial: matchMaterialSelectColorRef.current,
-            },
-          }).catch(() => { });
         }
       }
       if (m === "eyedropper") {
@@ -1995,8 +3019,8 @@ function App() {
             material: string;
           } | null>("voxel_pick_color_at_screen", {
             args: {
-              x,
-              y,
+              nx,
+              ny,
               tool: "add",
               color: activeColorRef.current,
               material: activeMaterialRef.current,
@@ -2008,6 +3032,10 @@ function App() {
               if (r) {
                 setActiveColor(r.color);
                 setActiveMaterial(r.material);
+                const back = eyedropperReturnModeRef.current;
+                if (back != null && back !== "eyedropper") {
+                  setInteractionMode(back);
+                }
               }
             })
             .catch(() => { });
@@ -2016,7 +3044,7 @@ function App() {
         const sm = drawStrokeModeRef.current;
         if (!dragDidEditRef.current && moved < 5) {
           if (strokeModeSkipsDrag(sm)) {
-            void handleStrokeAnchorClick(x, y);
+            void handleStrokeAnchorClick(nx, ny);
           } else {
             const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
             const lineStart =
@@ -2025,8 +3053,8 @@ function App() {
                 : null;
             void invoke("voxel_edit_at_screen", {
               args: {
-                x,
-                y,
+                nx,
+                ny,
                 tool,
                 color: activeColorRef.current,
                 material: activeMaterialRef.current,
@@ -2035,12 +3063,12 @@ function App() {
                 sprayDensity: sprayDensityRef.current,
                 strokeMode: drawStrokeModeRef.current,
                 planeAxis: planeAxisRef.current,
-                strokeAux: {},
+                strokeAux: mergedStrokeAux({}),
                 matchMaterial: matchMaterialSelectColorRef.current,
                 ...(lineStart
                   ? {
-                    strokeLineStartX: lineStart.x,
-                    strokeLineStartY: lineStart.y,
+                    strokeLineStartNx: lineStart.nx,
+                    strokeLineStartNy: lineStart.ny,
                   }
                   : {}),
               },
@@ -2048,30 +3076,29 @@ function App() {
           }
         }
         void invoke("voxel_stroke_end").catch(() => { });
-        lastStrokePhysRef.current = null;
+        lastStrokeNormRef.current = null;
+      } else if (
+        m === "select" ||
+        m === "selectByColor" ||
+        m === "selectCoplanar" ||
+        m === "selectCoplanarEmpty"
+      ) {
+        void invoke("selection_stroke_end").catch(() => {});
+        selectionStrokeBegunRef.current = false;
+        lastStrokeNormRef.current = null;
       } else if (m === "sculpt") {
         if (!dragDidEditRef.current && moved < 5) {
-          const lineStart =
-            strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
-              ? strokeViewportStartRef.current
-              : null;
           const sm = sculptStrokeModeRef.current;
           void invoke("voxel_sculpt_stroke_at_screen", {
             args: {
-              x,
-              y,
+              nx,
+              ny,
               sculptMode: sm,
               color: activeColorRef.current,
               material: activeMaterialRef.current,
-              brushRadius: brushRadiusRef.current,
-              brushShape: brushShapeRef.current,
-              sprayDensity: sprayDensityRef.current,
-              ...(lineStart
-                ? {
-                  strokeLineStartX: lineStart.x,
-                  strokeLineStartY: lineStart.y,
-                }
-                : {}),
+              brushRadius: sculptBrushRadiusRef.current,
+              brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+              sprayDensity: 0,
               ...(sm === "terrain"
                 ? {
                   terrainOp: terrainSculptOpRef.current,
@@ -2085,21 +3112,30 @@ function App() {
                   smoothNeighborPasses: sculptSmoothPassesRef.current,
                 }
                 : {}),
+              brushStrength: sculptBrushStrengthRef.current,
+              brushFalloff: sculptBrushFalloffRef.current,
+              strokeSeed: (Math.floor(Math.random() * 0x1_0000_0000) >>> 0),
+              wallAreaShape: wallAreaShapeRef.current,
+              sprayDirection: sprayDirectionRef.current,
+              wallWidthIndex: wallWidthIndexRef.current,
+              wallHeightVox: wallHeightVoxRef.current,
+              wallLockStartHeight: wallLockStartHeightRef.current,
+              wallAxisAlign: wallAxisAlignRef.current,
             },
           }).catch(() => { });
         }
         void invoke("voxel_stroke_end").catch(() => { });
-        lastStrokePhysRef.current = null;
+        lastStrokeNormRef.current = null;
       }
     }
 
     if (isThisPointer && g?.mode === "camera" && interactionModeRef.current !== "fly") {
-      const { x, y } = clientToViewportPhysical(e);
+      const { nx, ny } = clientToViewportNormalized(e);
       void invoke("viewport_pointer", {
         ev: {
           kind: "up",
-          x,
-          y,
+          nx,
+          ny,
           dx: 0,
           dy: 0,
           button: e.button,
@@ -2118,6 +3154,28 @@ function App() {
 
   const onPointerLeave = (e: React.PointerEvent) => {
     clearPreview();
+    if (viewportCursorDebugEnabled) {
+      setViewportCursorDebugJs(null);
+      setViewportCursorDebugRust(null);
+      setViewportCursorDebugScreen(null);
+    }
+    if (
+      startScreenLogoLoadedRef.current &&
+      interactionModeRef.current !== "fly"
+    ) {
+      void invoke("viewport_pointer", {
+        ev: {
+          kind: "leave",
+          nx: 0.5,
+          ny: 0.5,
+          dx: 0,
+          dy: 0,
+          button: 0,
+          buttons: 0,
+          shiftKey: false,
+        },
+      }).catch(() => {});
+    }
     onPointerUp(e);
   };
 
@@ -2202,8 +3260,18 @@ function App() {
 
   /** Solo or host: can open files. Guests (session without hosting) cannot. */
   const collabGuest = collabActive && !hostWsUrl;
-  const showEmptyOpenFile =
-    !pathLabel && !loading && !workBusy && !collabGuest;
+  /** Editor chrome (sidebars, tool HUD) once a document exists, collab is active, or load/join is in progress. */
+  const showEditorChrome =
+    Boolean(pathLabel) ||
+    collabActive ||
+    loading ||
+    collabJoinPending ||
+    (workBusy && !startScreenLogoLoaded);
+  const showStartScreen = !showEditorChrome;
+  const showEmptyOpenFile = showStartScreen;
+  /** Cold start: logo mesh still decoding (ignore `showStartScreen` while `workBusy` toggles editor chrome). */
+  const showStartScreenLogoSpinner =
+    !startScreenLogoLoaded && !pathLabel && !collabActive;
 
   const reopenLastProject = useCallback(() => {
     const info = lastSessionInfo;
@@ -2255,7 +3323,7 @@ function App() {
       if (collabActive) return `${base} · Live`;
       return base;
     }
-    return "No file open";
+    return `v${VOXELLE_DESKTOP_VERSION}`;
   })();
 
   const sendChat = () => {
@@ -2275,24 +3343,54 @@ function App() {
     );
   };
 
+  const isSelectionInteractionMode =
+    interactionMode === "select" ||
+    interactionMode === "selectByColor" ||
+    interactionMode === "selectCoplanar" ||
+    interactionMode === "selectCoplanarEmpty";
+
+  const isDrawVoxelEditMode =
+    interactionMode === "add" ||
+    interactionMode === "remove" ||
+    interactionMode === "paint";
+
+  const showDrawPaneToolMatrix =
+    toolsPane === "draw" &&
+    (isDrawVoxelEditMode || isSelectionInteractionMode);
+
+  const selectionMethod = deriveSelectionMethod({
+    drawStrokeMode,
+    strokeDrawStyle,
+    sprayDensity,
+    strokeFamilyVariant,
+  });
+
   const showToolOptionsPanel =
+    showEditorChrome &&
     !loading &&
     !workBusy &&
     (toolsPane === "sculpt" ||
       toolsPane === "generators" ||
+      toolsPane === "squishy" ||
       toolsPane === "mood" ||
       (toolsPane === "draw" &&
         (interactionMode === "add" ||
           interactionMode === "remove" ||
           interactionMode === "paint" ||
-          interactionMode === "fill")));
+          interactionMode === "eyedropper" ||
+          interactionMode === "stamp" ||
+          interactionMode === "punch" ||
+          isSelectionInteractionMode)));
 
   return (
-    <div className="app">
+    <div
+      className={`app${loading && !loadError ? " app-loading-cursor" : ""}`}
+    >
       <div className="app-main">
-        {toolsPaneFloating ? (
+        {toolsPaneFloating && showEditorChrome ? (
           <div className="app-sidebar-spacer" aria-hidden />
         ) : null}
+        {showEditorChrome ? (
         <aside
           className={`${sidebarExpanded
               ? "app-sidebar is-expanded"
@@ -2439,6 +3537,19 @@ function App() {
                   <button
                     type="button"
                     role="tab"
+                    className={toolsPane === "squishy" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
+                    aria-selected={toolsPane === "squishy"}
+                    disabled={loading || workBusy}
+                    onClick={() => {
+                      setToolsPane("squishy");
+                      setInteractionMode("squishy");
+                    }}
+                  >
+                    Squishy
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
                     className={toolsPane === "mood" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"}
                     aria-selected={toolsPane === "mood"}
                     disabled={loading || workBusy}
@@ -2466,7 +3577,10 @@ function App() {
                   ) : null}
 
                   {toolsPane === "fly" ? (
-                    <p className="sidebar-pane-hint">Click viewport, then WASD + Space/Shift to fly.</p>
+                    <p className="sidebar-pane-hint">
+                      Click viewport to capture pointer. WASD move, E/Q up/down, Shift slow. Mouse
+                      looks. Esc releases pointer.
+                    </p>
                   ) : null}
 
                   {toolsPane === "draw" ? (
@@ -2494,7 +3608,6 @@ function App() {
                         </div>
                         <div className="sidebar-tool-selection-col">
                           <div className="sidebar-section-label">Selection</div>
-                          <div className="sidebar-selection-count">{selectionCount} selected</div>
                           <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
                             <button
                               type="button"
@@ -2507,7 +3620,7 @@ function App() {
                             <button
                               type="button"
                               className={interactionMode === "stamp" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                              disabled={loading || workBusy}
+                              disabled={loading || workBusy || selectionCount === 0}
                               onClick={() => setInteractionMode("stamp")}
                             >
                               <span className="sidebar-mode-label">Stamp</span>
@@ -2515,7 +3628,7 @@ function App() {
                             <button
                               type="button"
                               className={interactionMode === "punch" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                              disabled={loading || workBusy}
+                              disabled={loading || workBusy || selectionCount === 0}
                               onClick={() => setInteractionMode("punch")}
                             >
                               <span className="sidebar-mode-label">Punch</span>
@@ -2529,19 +3642,17 @@ function App() {
                         <button
                           type="button"
                           className={
-                            interactionMode !== "fill" &&
-                              strokeDrawStyle === "line" &&
-                              sprayDensity === 0 &&
-                              strokeFamilyVariant === "stroke"
+                            selectionMethod === "stroke"
                               ? "sidebar-mode-btn is-active"
                               : "sidebar-mode-btn"
                           }
                           disabled={loading || workBusy}
                           onClick={() => {
-                            if (interactionMode === "fill") setInteractionMode("add");
-                            setStrokeDrawStyle("line");
-                            setSprayDensity(0);
-                            setStrokeFamilyVariant("stroke");
+                            const s = selectionMethodToState("stroke");
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
                           }}
                           title="Line from pointer down to cursor (web Stroke)"
                         >
@@ -2550,17 +3661,17 @@ function App() {
                         <button
                           type="button"
                           className={
-                            interactionMode !== "fill" &&
-                              strokeDrawStyle === "brush" &&
-                              sprayDensity === 0
+                            selectionMethod === "surface"
                               ? "sidebar-mode-btn is-active"
                               : "sidebar-mode-btn"
                           }
                           disabled={loading || workBusy}
                           onClick={() => {
-                            if (interactionMode === "fill") setInteractionMode("add");
-                            setStrokeDrawStyle("brush");
-                            setSprayDensity(0);
+                            const s = selectionMethodToState("surface");
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
                           }}
                           title="Brush along the drag (web Surface)"
                         >
@@ -2569,19 +3680,17 @@ function App() {
                         <button
                           type="button"
                           className={
-                            interactionMode !== "fill" &&
-                              strokeDrawStyle === "line" &&
-                              sprayDensity === 0 &&
-                              strokeFamilyVariant === "solid"
+                            selectionMethod === "solid"
                               ? "sidebar-mode-btn is-active"
                               : "sidebar-mode-btn"
                           }
                           disabled={loading || workBusy}
                           onClick={() => {
-                            if (interactionMode === "fill") setInteractionMode("add");
-                            setStrokeDrawStyle("line");
-                            setSprayDensity(0);
-                            setStrokeFamilyVariant("solid");
+                            const s = selectionMethodToState("solid");
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
                           }}
                           title="Solid volume stroke (line; placeholder for future volume behavior)"
                         >
@@ -2595,17 +3704,17 @@ function App() {
                         <button
                           type="button"
                           className={
-                            interactionMode !== "fill" &&
-                              strokeDrawStyle === "brush" &&
-                              sprayDensity > 0
+                            selectionMethod === "spray"
                               ? "sidebar-mode-btn is-active"
                               : "sidebar-mode-btn"
                           }
                           disabled={loading || workBusy}
                           onClick={() => {
-                            if (interactionMode === "fill") setInteractionMode("add");
-                            setStrokeDrawStyle("brush");
-                            setSprayDensity(0.45);
+                            const s = selectionMethodToState("spray");
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
                           }}
                           title="Spray density along brush path"
                         >
@@ -2614,55 +3723,32 @@ function App() {
                         <button
                           type="button"
                           className={
-                            interactionMode === "fill"
+                            selectionMethod === "fill"
                               ? "sidebar-mode-btn is-active"
                               : "sidebar-mode-btn"
                           }
                           disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("fill")}
-                          title="Fill connected region"
+                          onClick={() => {
+                            const s = selectionMethodToState("fill");
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
+                          }}
+                          title="Fill connected region (add / remove / paint / selection)"
                         >
                           <span className="sidebar-mode-label">Fill</span>
                         </button>
                       </div>
 
-                      <div className="sidebar-section-label">Symmetry</div>
-                      <div className="sidebar-mode-grid sidebar-mode-grid-3">
-                        <button type="button" className="sidebar-mode-btn" disabled>
-                          <span className="sidebar-mode-label">X</span>
-                        </button>
-                        <button type="button" className="sidebar-mode-btn" disabled>
-                          <span className="sidebar-mode-label">Y</span>
-                        </button>
-                        <button type="button" className="sidebar-mode-btn" disabled>
-                          <span className="sidebar-mode-label">Z</span>
-                        </button>
-                      </div>
-
-                      <div className="sidebar-section-label">Color</div>
-                      <div className="sidebar-color-row">
-                        <label className="sidebar-palette-row sidebar-color-swatch">
-                          <input
-                            type="color"
-                            value={`#${activeColor.toString(16).padStart(6, "0")}`}
-                            onChange={(ev) => {
-                              const h = ev.target.value.slice(1);
-                              const n = Number.parseInt(h, 16);
-                              if (!Number.isNaN(n)) setActiveColor(n);
-                            }}
-                            disabled={loading || workBusy}
-                            aria-label="Brush color"
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          className={interactionMode === "eyedropper" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("eyedropper")}
-                        >
-                          <span className="sidebar-mode-label">Eyedropper</span>
-                        </button>
-                      </div>
+                      <SymmetryColorSidebarSections
+                        loading={loading}
+                        workBusy={workBusy}
+                        activeColor={activeColor}
+                        setActiveColor={setActiveColor}
+                        interactionMode={interactionMode}
+                        setInteractionMode={setInteractionMode}
+                      />
 
                       <div className="sidebar-section-label">Material</div>
                       <select
@@ -2678,34 +3764,19 @@ function App() {
                           </option>
                         ))}
                       </select>
-
-                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Brush size and shape are in the tool options panel.
-                      </p>
                     </>
                   ) : null}
 
                   {toolsPane === "sculpt" ? (
                     <>
-                      <div className="sidebar-section-label">Sculpt</div>
-                      <button
-                        type="button"
-                        className={interactionMode === "sculpt" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("sculpt")}
-                      >
-                        <span className="sidebar-mode-label">Sculpt</span>
-                      </button>
-                      <div className="sidebar-section-label">Mode</div>
-                      <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                      <div className="sidebar-section-label">Sculpt mode</div>
+                      <div className="sidebar-mode-grid sidebar-sculpt-mode-grid">
                         {(
                           [
                             ["draw", "Draw"],
+                            ["gouge", "Scrape"],
                             ["smooth", "Smooth"],
-                            ["gouge", "Gouge"],
-                            ["wall", "Wall"],
-                            ["terrain", "Terrain"],
-                            ["branch", "Branch"],
+                            ["extrude", "Extrude"],
                           ] as const
                         ).map(([id, label]) => (
                           <button
@@ -2722,37 +3793,37 @@ function App() {
                             <span className="sidebar-mode-label">{label}</span>
                           </button>
                         ))}
+                        {(
+                          [
+                            ["wall", "Wall"],
+                            ["terrain", "Terrain"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              sculptStrokeMode === id
+                                ? "sidebar-mode-btn is-active sidebar-sculpt-mode-wide"
+                                : "sidebar-mode-btn sidebar-sculpt-mode-wide"
+                            }
+                            disabled={loading || workBusy || interactionMode !== "sculpt"}
+                            onClick={() => setSculptStrokeMode(id)}
+                          >
+                            <span className="sidebar-mode-label">{label}</span>
+                          </button>
+                        ))}
                       </div>
-                      {sculptStrokeMode === "terrain" ? (
-                        <>
-                          <div className="sidebar-section-label">Terrain op</div>
-                          <div className="sidebar-mode-grid sidebar-mode-grid-3">
-                            {(
-                              [
-                                ["raise", "Raise"],
-                                ["lower", "Lower"],
-                                ["smooth", "Smooth"],
-                              ] as const
-                            ).map(([id, label]) => (
-                              <button
-                                key={id}
-                                type="button"
-                                className={
-                                  terrainSculptOp === id
-                                    ? "sidebar-mode-btn is-active"
-                                    : "sidebar-mode-btn"
-                                }
-                                disabled={loading || workBusy || interactionMode !== "sculpt"}
-                                onClick={() => setTerrainSculptOp(id)}
-                              >
-                                <span className="sidebar-mode-label">{label}</span>
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      ) : null}
+                      <SymmetryColorSidebarSections
+                        loading={loading}
+                        workBusy={workBusy}
+                        activeColor={activeColor}
+                        setActiveColor={setActiveColor}
+                        interactionMode={interactionMode}
+                        setInteractionMode={setInteractionMode}
+                      />
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Brush, stroke, and color are in the tool options panel.
+                        Brush and terrain options are in the tool options panel.
                       </p>
                     </>
                   ) : null}
@@ -2772,11 +3843,9 @@ function App() {
                       <div className="sidebar-mode-grid sidebar-mode-grid-2">
                         {(
                           [
-                            ["sphere", "Sphere"],
                             ["rocks", "Rocks"],
                             ["grass", "Grass"],
                             ["rope", "Rope"],
-                            ["squishy", "Squishy"],
                           ] as const
                         ).map(([id, label]) => (
                           <button
@@ -2797,13 +3866,46 @@ function App() {
                           </button>
                         ))}
                       </div>
+                      <SymmetryColorSidebarSections
+                        loading={loading}
+                        workBusy={workBusy}
+                        activeColor={activeColor}
+                        setActiveColor={setActiveColor}
+                        interactionMode={interactionMode}
+                        setInteractionMode={setInteractionMode}
+                      />
                       {generatorKind === "rope" && ropeFirstScreen ? (
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
                           Click second point to finish rope.
                         </p>
                       ) : null}
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Options in the tool options panel. Rope: two clicks.
+                        Size and shape in the tool options panel. Rope: two clicks.
+                      </p>
+                    </>
+                  ) : null}
+
+                  {toolsPane === "squishy" ? (
+                    <>
+                      <div className="sidebar-section-label">Squishy</div>
+                      <button
+                        type="button"
+                        className={interactionMode === "squishy" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                        disabled={loading || workBusy}
+                        onClick={() => setInteractionMode("squishy")}
+                      >
+                        <span className="sidebar-mode-label">Metaballs</span>
+                      </button>
+                      <SymmetryColorSidebarSections
+                        loading={loading}
+                        workBusy={workBusy}
+                        activeColor={activeColor}
+                        setActiveColor={setActiveColor}
+                        interactionMode={interactionMode}
+                        setInteractionMode={setInteractionMode}
+                      />
+                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
+                        Add / pick / delete blobs in the viewport; commit in tool options.
                       </p>
                     </>
                   ) : null}
@@ -2813,6 +3915,8 @@ function App() {
                       Mood sliders are in the tool options panel.
                     </p>
                   ) : null}
+
+                  <ViewportSettingsSidebar loading={loading} workBusy={workBusy} />
                 </div>
               </>
             ) : (
@@ -2857,7 +3961,14 @@ function App() {
             )}
           </div>
         </aside>
-        <div className="viewport-wrap">
+        ) : null}
+        <div
+          className={`viewport-wrap${showStartScreen ? " is-start-screen" : ""}${
+            showEditorChrome && !rightSidebarExpanded
+              ? " is-right-sidebar-collapsed"
+              : ""
+          }`}
+        >
           {loading || workBusy ? (
             <div className="load-bar" aria-hidden>
               <div
@@ -2869,6 +3980,16 @@ function App() {
                   )}%`,
                 }}
               />
+            </div>
+          ) : null}
+          {showStartScreenLogoSpinner ? (
+            <div
+              className="viewport-start-screen-spinner"
+              role="status"
+              aria-live="polite"
+              aria-label="Loading scene"
+            >
+              <div className="viewport-start-screen-spinner-ring" aria-hidden />
             </div>
           ) : null}
           <div
@@ -2889,6 +4010,87 @@ function App() {
             role="application"
             aria-label="3D viewport"
           />
+          {showEditorChrome && viewportCursorDebugEnabled ? (
+            <div className="viewport-cursor-debug-overlay" aria-hidden>
+              {viewportCursorDebugJs ? (
+                <div
+                  className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
+                  style={{
+                    left: `${viewportCursorDebugJs.nx * 100}%`,
+                    top: `${viewportCursorDebugJs.ny * 100}%`,
+                  }}
+                />
+              ) : null}
+              {viewportCursorDebugRust?.previewNx != null &&
+              viewportCursorDebugRust.previewNy != null ? (
+                <div
+                  className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
+                  style={{
+                    left: `${viewportCursorDebugRust.previewNx * 100}%`,
+                    top: `${viewportCursorDebugRust.previewNy * 100}%`,
+                  }}
+                />
+              ) : null}
+              <div className="viewport-cursor-debug-legend">
+                <div>
+                  JS{" "}
+                  {viewportCursorDebugJs
+                    ? `${viewportCursorDebugJs.nx.toFixed(5)}, ${viewportCursorDebugJs.ny.toFixed(5)}`
+                    : "—"}
+                </div>
+                <div>
+                  Rust preview{" "}
+                  {viewportCursorDebugRust?.previewNx != null &&
+                  viewportCursorDebugRust.previewNy != null
+                    ? `${viewportCursorDebugRust.previewNx.toFixed(5)}, ${viewportCursorDebugRust.previewNy.toFixed(5)}`
+                    : "—"}
+                </div>
+                <div>
+                  Δn{" "}
+                  {viewportCursorDebugJs &&
+                  viewportCursorDebugRust?.previewNx != null &&
+                  viewportCursorDebugRust.previewNy != null
+                    ? `${(viewportCursorDebugJs.nx - viewportCursorDebugRust.previewNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.previewNy).toFixed(5)}`
+                    : "—"}
+                </div>
+                <div>
+                  viewport{" "}
+                  {viewportCursorDebugRust
+                    ? `${viewportCursorDebugRust.viewportWidth}×${viewportCursorDebugRust.viewportHeight}`
+                    : "—"}
+                  {viewportCursorDebugRust?.texelSx != null &&
+                  viewportCursorDebugRust.texelSy != null
+                    ? ` · texel ${viewportCursorDebugRust.texelSx.toFixed(2)}, ${viewportCursorDebugRust.texelSy.toFixed(2)}`
+                    : ""}
+                </div>
+                <div>
+                  screen client{" "}
+                  {viewportCursorDebugScreen
+                    ? `${viewportCursorDebugScreen.clientX.toFixed(1)}, ${viewportCursorDebugScreen.clientY.toFixed(1)}`
+                    : "—"}
+                  {" · rel "}
+                  {viewportCursorDebugScreen
+                    ? `${viewportCursorDebugScreen.relX.toFixed(2)}, ${viewportCursorDebugScreen.relY.toFixed(2)}`
+                    : "—"}
+                </div>
+                <div>
+                  world ray (Rust, preview texels) o{" "}
+                  {viewportCursorDebugRust?.rayOriginX != null &&
+                  viewportCursorDebugRust.rayOriginY != null &&
+                  viewportCursorDebugRust.rayOriginZ != null
+                    ? `${viewportCursorDebugRust.rayOriginX.toFixed(4)}, ${viewportCursorDebugRust.rayOriginY.toFixed(4)}, ${viewportCursorDebugRust.rayOriginZ.toFixed(4)}`
+                    : "—"}
+                  {" d "}
+                  {viewportCursorDebugRust?.rayDirX != null &&
+                  viewportCursorDebugRust.rayDirY != null &&
+                  viewportCursorDebugRust.rayDirZ != null
+                    ? `${viewportCursorDebugRust.rayDirX.toFixed(4)}, ${viewportCursorDebugRust.rayDirY.toFixed(4)}, ${viewportCursorDebugRust.rayDirZ.toFixed(4)}`
+                    : "—"}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {showEditorChrome ? (
           <div className="viewport-ping-overlay" aria-hidden>
             {pingLabelCss ? (
               <div
@@ -2902,6 +4104,13 @@ function App() {
               </div>
             ) : null}
           </div>
+          ) : null}
+          {showEditorChrome ? (
+          <ViewportCameraHud
+            flyMode={interactionMode === "fly"}
+            loadingOrBusy={loading || workBusy}
+          />
+          ) : null}
           {showToolOptionsPanel ? (
             <div
               className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""
@@ -2917,319 +4126,458 @@ function App() {
               onPointerDown={(e) => e.stopPropagation()}
               onPointerUp={(e) => e.stopPropagation()}
             >
-              {toolsPane === "draw" &&
-                (interactionMode === "add" ||
-                  interactionMode === "remove" ||
-                  interactionMode === "paint") ? (
-                <>
-                  <div className="tool-options-section">
-                    <div className="tool-options-heading">Brush</div>
-                    <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
-                      {(
-                        [
-                          ["sphere", "Sphere"],
-                          ["cube", "Cube"],
-                          ["pyramid", "Pyr"],
-                        ] as const
-                      ).map(([id, label]) => (
-                        <button
-                          key={id}
-                          type="button"
-                          className={
-                            brushShape === id
-                              ? "tool-options-shape-btn is-active"
-                              : "tool-options-shape-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setBrushShape(id)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <label className="tool-options-range-label">
-                      <span>Size</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={32}
-                        value={brushRadius}
-                        onChange={(ev) =>
-                          setBrushRadius(Number(ev.target.value))
-                        }
-                        disabled={loading || workBusy}
-                      />
-                    </label>
-                    {sprayDensity > 0 ? (
-                      <label className="tool-options-range-label">
-                        <span>Spray density</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={1}
-                          step={0.02}
-                          value={sprayDensity}
-                          onChange={(ev) =>
-                            setSprayDensity(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                    ) : null}
+              {selectionCount > 0 ? (
+                <div className="tool-options-section tool-panel-selection-toolbar">
+                  <div
+                    className="tool-options-shape-row"
+                    style={{
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <span
+                      className="tool-panel-selection-count"
+                      role="status"
+                      aria-live="polite"
+                    >
+                      {selectionCount} selected
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        void invoke("selection_clear").catch(() => {});
+                      }}
+                    >
+                      Deselect
+                    </button>
                   </div>
-                </>
+                </div>
               ) : null}
-              {toolsPane === "draw" && interactionMode === "fill" ? (
+              {toolsPane === "draw" &&
+              drawStrokeMode === "fill" &&
+              (interactionMode === "add" ||
+                interactionMode === "remove" ||
+                interactionMode === "paint" ||
+                isSelectionInteractionMode) ? (
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Fill</div>
                   <p className="tool-options-hint">
-                    Click a solid voxel. Connected region matching the fill
-                    options in the sidebar is recolored.
+                    Click a solid voxel. The connected region is filled, recolored,
+                    or added to the selection per your current tool and the options
+                    below.
                   </p>
                 </div>
               ) : null}
-              {toolsPane === "sculpt" && interactionMode === "sculpt" ? (
+              {toolsPane === "draw" && isSelectionInteractionMode ? (
+                <div className="tool-options-section">
+                  <div className="tool-options-heading">Combine</div>
+                  <div
+                    className="tool-options-shape-row tool-options-shape-row-two"
+                    role="group"
+                    aria-label="Selection combine mode"
+                  >
+                    {(
+                      [
+                        ["replace", "Replace"],
+                        ["intersect", "Intersect"],
+                        ["add", "Add"],
+                        ["subtract", "Subtract"],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        className={
+                          selectionCombineMode === id
+                            ? "tool-options-shape-btn is-active"
+                            : "tool-options-shape-btn"
+                        }
+                        disabled={loading || workBusy}
+                        onClick={() => {
+                          setSelectionCombineMode(id);
+                          void invoke("selection_set_combine_mode", {
+                            mode: id,
+                          }).catch(() => {});
+                        }}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {showDrawPaneToolMatrix ? (
                 <>
-                  <div className="tool-options-section">
-                    <div className="tool-options-heading">Brush</div>
-                    <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
-                      {(
-                        [
-                          ["sphere", "Sphere"],
-                          ["cube", "Cube"],
-                          ["pyramid", "Pyr"],
-                        ] as const
-                      ).map(([id, label]) => (
-                        <button
-                          key={id}
-                          type="button"
-                          className={
-                            brushShape === id
-                              ? "tool-options-shape-btn is-active"
-                              : "tool-options-shape-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setBrushShape(id)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </div>
-                    <label className="tool-options-range-label">
-                      <span>Size</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={32}
-                        value={brushRadius}
-                        onChange={(ev) =>
-                          setBrushRadius(Number(ev.target.value))
-                        }
-                        disabled={loading || workBusy}
-                      />
-                    </label>
-                    <div className="tool-options-heading" style={{ marginTop: "0.5rem" }}>
-                      Stroke
-                    </div>
-                    <div className="tool-options-shape-row" role="group" aria-label="Stroke style">
-                      <button
-                        type="button"
-                        className={
-                          strokeDrawStyle === "line"
-                            ? "tool-options-shape-btn is-active"
-                            : "tool-options-shape-btn"
-                        }
-                        disabled={loading || workBusy}
-                        onClick={() => setStrokeDrawStyle("line")}
-                      >
-                        Line
-                      </button>
-                      <button
-                        type="button"
-                        className={
-                          strokeDrawStyle === "brush"
-                            ? "tool-options-shape-btn is-active"
-                            : "tool-options-shape-btn"
-                        }
-                        disabled={loading || workBusy}
-                        onClick={() => setStrokeDrawStyle("brush")}
-                      >
-                        Brush
-                      </button>
-                    </div>
-                    <label
-                      className="tool-options-range-label"
-                      style={{ marginTop: "0.35rem" }}
-                    >
-                      <span>Stroke mode</span>
-                      <select
-                        value={drawStrokeMode}
-                        onChange={(ev) =>
-                          setDrawStrokeMode(ev.target.value as DrawStrokeModeApi)
-                        }
-                        disabled={loading || workBusy}
-                      >
-                        <option value="line">Line</option>
-                        <option value="spray">Spray</option>
-                        <option value="plane">Plane</option>
-                        <option value="precise">Precise</option>
-                        <option value="circle">Circle</option>
-                        <option value="cuboid">Cuboid</option>
-                        <option value="cylinder">Cylinder</option>
-                        <option value="polygonHull">Polygon hull</option>
-                        <option value="polygon">Polygon</option>
-                        <option value="fill">Fill (paint)</option>
-                      </select>
-                    </label>
-                    {drawStrokeMode === "plane" ? (
+                  <DrawPaneSelectionToolOptions
+                    loading={loading}
+                    workBusy={workBusy}
+                    selectionMethod={selectionMethod}
+                    drawStrokeMode={drawStrokeMode}
+                    setDrawStrokeMode={setDrawStrokeMode}
+                    strokeDrawStyle={strokeDrawStyle}
+                    setStrokeDrawStyle={setStrokeDrawStyle}
+                    strokeFamilyVariant={strokeFamilyVariant}
+                    setStrokeFamilyVariant={setStrokeFamilyVariant}
+                    planeAxis={planeAxis}
+                    setPlaneAxis={setPlaneAxis}
+                    fillSelectDiagonals={fillSelectDiagonals}
+                    setFillSelectDiagonals={setFillSelectDiagonals}
+                    fillRespectsColor={fillRespectsColor}
+                    setFillRespectsColor={setFillRespectsColor}
+                    strokePolygonVerts={strokePolygonVerts}
+                    setStrokePolygonVerts={setStrokePolygonVerts}
+                    strokePolygonLastScreenRef={strokePolygonLastScreenRef}
+                    sprayDensity={sprayDensity}
+                    setSprayDensity={setSprayDensity}
+                    brushShape={brushShape}
+                    setBrushShape={setBrushShape}
+                    brushRadius={brushRadius}
+                    setBrushRadius={setBrushRadius}
+                    selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
+                    setSelectionStrokeSnapToSurface={
+                      setSelectionStrokeSnapToSurface
+                    }
+                    selectionStrokeAxisAlign={selectionStrokeAxisAlign}
+                    setSelectionStrokeAxisAlign={setSelectionStrokeAxisAlign}
+                    surfacePlaneHollow={surfacePlaneHollow}
+                    setSurfacePlaneHollow={setSurfacePlaneHollow}
+                    sprayConstrainToPlane={sprayConstrainToPlane}
+                    setSprayConstrainToPlane={setSprayConstrainToPlane}
+                    spraySizeRange={spraySizeRange}
+                    setSpraySizeRange={setSpraySizeRange}
+                    fillConstrainToPlane={fillConstrainToPlane}
+                    setFillConstrainToPlane={setFillConstrainToPlane}
+                    onApplyPolygonSelection={
+                      isDrawVoxelEditMode
+                        ? applyPolygonStrokeFill
+                        : applyPolygonSelectionStrokeFill
+                    }
+                  />
+                </>
+              ) : null}
+              {toolsPane === "draw" && isSelectionInteractionMode ? (
+                <>
+                  {interactionMode === "selectByColor" ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">By color</div>
+                      <p className="tool-options-hint">
+                        Click a voxel to select all connected voxels of the same color.
+                      </p>
                       <label
                         className="tool-options-range-label"
-                        style={{ marginTop: "0.25rem" }}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.35rem",
+                        }}
                       >
-                        <span>Plane axis</span>
-                        <select
-                          value={planeAxis}
+                        <input
+                          type="checkbox"
+                          checked={matchMaterialSelectColor}
                           onChange={(ev) =>
-                            setPlaneAxis(ev.target.value as PlaneAxisApi)
+                            setMatchMaterialSelectColor(ev.target.checked)
                           }
                           disabled={loading || workBusy}
-                        >
-                          <option value="auto">Auto (face)</option>
-                          <option value="x">X</option>
-                          <option value="y">Y</option>
-                          <option value="z">Z</option>
-                        </select>
+                        />
+                        <span>Match material when matching color</span>
                       </label>
-                    ) : null}
-                    {(drawStrokeMode === "polygon" ||
-                      drawStrokeMode === "polygonHull") ? (
-                      <div style={{ marginTop: "0.35rem" }}>
-                        <p style={{ margin: "0 0 0.35rem", fontSize: "0.85rem", opacity: 0.9 }}>
-                          Vertices: {strokePolygonVerts.length}. Click to add corners; Apply with three or more.
-                        </p>
-                        <div className="tool-options-shape-row" style={{ flexWrap: "wrap" }}>
-                          <button
-                            type="button"
-                            className="tool-options-shape-btn"
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              setStrokePolygonVerts([]);
-                              strokePolygonLastScreenRef.current = null;
-                            }}
-                          >
-                            Clear
-                          </button>
-                          <button
-                            type="button"
-                            className="tool-options-shape-btn"
-                            disabled={
-                              loading || workBusy || strokePolygonVerts.length < 3
-                            }
-                            onClick={() => applyPolygonStrokeFill()}
-                          >
-                            Apply
-                          </button>
-                        </div>
-                      </div>
-                    ) : null}
-                    {drawStrokeMode === "circle" ? (
-                      <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", opacity: 0.9 }}>
-                        Circle: first click center, second click edge.
+                    </div>
+                  ) : null}
+                  {interactionMode === "selectCoplanar" ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Coplanar</div>
+                      <p className="tool-options-hint">
+                        Click a solid voxel to extend the selection along the same
+                        face plane.
                       </p>
-                    ) : null}
-                    {drawStrokeMode === "cuboid" ? (
-                      <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", opacity: 0.9 }}>
-                        Cuboid: two opposite corners.
+                    </div>
+                  ) : null}
+                  {interactionMode === "selectCoplanarEmpty" ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Coplanar void</div>
+                      <p className="tool-options-hint">
+                        Click empty space on a plane to select the coplanar empty
+                        region.
                       </p>
-                    ) : null}
-                    {drawStrokeMode === "cylinder" ? (
-                      <p style={{ margin: "0.35rem 0 0", fontSize: "0.85rem", opacity: 0.9 }}>
-                        Cylinder: axis start then end (uses brush radius).
-                      </p>
-                    ) : null}
-                    {sprayDensity > 0 ? (
-                      <label className="tool-options-range-label">
-                        <span>Spray density</span>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              {toolsPane === "sculpt" && interactionMode === "sculpt" ? (
+                <>
+                  {(sculptStrokeMode === "draw" ||
+                    sculptStrokeMode === "smooth" ||
+                    sculptStrokeMode === "gouge" ||
+                    sculptStrokeMode === "extrude" ||
+                    sculptStrokeMode === "terrain") ? (
+                    <div className="tool-options-section" aria-label="Sculpt">
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Brush</span>
                         <input
                           type="range"
                           min={0}
-                          max={1}
-                          step={0.02}
-                          value={sprayDensity}
+                          max={SCULPT_BRUSH_MAX_INDEX}
+                          value={sculptBrushRadius}
                           onChange={(ev) =>
-                            setSprayDensity(Number(ev.target.value))
+                            setSculptBrushRadius(Number(ev.target.value))
                           }
                           disabled={loading || workBusy}
+                          title="Brush size (1–64 voxels)"
                         />
+                        <span className="tool-options-range-value">
+                          {sculptBrushRadius + 1}
+                        </span>
                       </label>
-                    ) : null}
-                  </div>
-                  <div className="tool-options-section">
-                    <div className="tool-options-heading">Color</div>
-                    <label className="tool-options-color-label">
-                      <span>Color</span>
-                      <input
-                        type="color"
-                        value={`#${activeColor.toString(16).padStart(6, "0")}`}
-                        onChange={(ev) => {
-                          const h = ev.target.value.slice(1);
-                          const n = Number.parseInt(h, 16);
-                          if (!Number.isNaN(n)) setActiveColor(n);
-                        }}
-                        disabled={loading || workBusy}
-                      />
-                    </label>
-                  </div>
-                  {sculptStrokeMode === "terrain" ? (
-                    <div className="tool-options-section">
-                      <div className="tool-options-heading">Terrain</div>
-                      <label className="tool-options-range-label">
-                        <span>Base Y</span>
-                        <input
-                          type="range"
-                          min={-64}
-                          max={64}
-                          value={terrainBaseY}
-                          onChange={(ev) =>
-                            setTerrainBaseY(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
+                      <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Strength</span>
                         <input
                           type="range"
-                          min={0}
-                          max={32}
-                          value={terrainStrength}
+                          min={1}
+                          max={100}
+                          value={sculptBrushStrength}
                           onChange={(ev) =>
-                            setTerrainStrength(Number(ev.target.value))
+                            setSculptBrushStrength(Number(ev.target.value))
                           }
                           disabled={loading || workBusy}
+                          title="How strongly the brush applies (with falloff)"
                         />
+                        <span className="tool-options-range-value">
+                          {sculptBrushStrength}
+                        </span>
                       </label>
-                      {terrainSculptOp === "smooth" ? (
-                        <label className="tool-options-range-label">
-                          <span>Smooth radius</span>
-                          <input
-                            type="range"
-                            min={0}
-                            max={8}
-                            value={terrainSmoothRadius}
-                            onChange={(ev) =>
-                              setTerrainSmoothRadius(Number(ev.target.value))
-                            }
-                            disabled={loading || workBusy}
-                          />
-                        </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Falloff</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={sculptBrushFalloff}
+                          onChange={(ev) =>
+                            setSculptBrushFalloff(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="0 = hard edge; higher = softer falloff toward brush radius"
+                        />
+                        <span className="tool-options-range-value">
+                          {sculptBrushFalloff}
+                        </span>
+                      </label>
+                      {(sculptStrokeMode === "draw" ||
+                        sculptStrokeMode === "smooth" ||
+                        sculptStrokeMode === "gouge") ? (
+                        <>
+                          <div
+                            className="tool-options-heading"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            Brush shape
+                          </div>
+                          <div
+                            className="tool-options-shape-row tool-options-shape-row-two"
+                            role="group"
+                            aria-label="Sculpt brush shape"
+                          >
+                            {(
+                              [
+                                ["square", "Square"],
+                                ["circle", "Circle"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  sculptBrushShapeUi === id
+                                    ? "tool-options-shape-btn is-active"
+                                    : "tool-options-shape-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() =>
+                                  setSculptBrushShapeUi(id)
+                                }
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          <div
+                            className="tool-options-shape-row tool-options-shape-row-two"
+                            role="group"
+                            aria-label="Sculpt brush shape 3D"
+                          >
+                            {(
+                              [
+                                ["cube", "Cube"],
+                                ["sphere", "Sphere"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  sculptBrushShapeUi === id
+                                    ? "tool-options-shape-btn is-active"
+                                    : "tool-options-shape-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() =>
+                                  setSculptBrushShapeUi(id)
+                                }
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      ) : null}
+                      {sculptStrokeMode === "terrain" ? (
+                        <>
+                          <div
+                            className="tool-options-heading"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            Brush shape
+                          </div>
+                          <div
+                            className="tool-options-shape-row tool-options-shape-row-two"
+                            role="group"
+                            aria-label="Terrain brush shape (horizontal XZ)"
+                          >
+                            <button
+                              type="button"
+                              className={
+                                sculptBrushShapeUi === "square" ||
+                                sculptBrushShapeUi === "cube"
+                                  ? "tool-options-shape-btn is-active"
+                                  : "tool-options-shape-btn"
+                              }
+                              disabled={loading || workBusy}
+                              onClick={() => setSculptBrushShapeUi("square")}
+                              title="Square footprint in XZ"
+                            >
+                              Square
+                            </button>
+                            <button
+                              type="button"
+                              className={
+                                sculptBrushShapeUi === "circle" ||
+                                sculptBrushShapeUi === "sphere"
+                                  ? "tool-options-shape-btn is-active"
+                                  : "tool-options-shape-btn"
+                              }
+                              disabled={loading || workBusy}
+                              onClick={() => setSculptBrushShapeUi("circle")}
+                              title="Circular footprint in XZ"
+                            >
+                              Circle
+                            </button>
+                          </div>
+                          <div
+                            className="tool-options-heading"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            Terrain
+                          </div>
+                          <div
+                            className="tool-options-shape-row"
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "1fr 1fr 1fr",
+                              gap: "0.25rem",
+                            }}
+                            role="group"
+                            aria-label="Terrain operation"
+                          >
+                            {(
+                              [
+                                ["raise", "Raise"],
+                                ["lower", "Lower"],
+                                ["smooth", "Smooth"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  terrainSculptOp === id
+                                    ? "tool-options-shape-btn is-active"
+                                    : "tool-options-shape-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() => setTerrainSculptOp(id)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          <label
+                            className="tool-options-range-label"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            <span>Base Y</span>
+                            <input
+                              type="number"
+                              value={terrainBaseY}
+                              min={-512}
+                              max={512}
+                              step={1}
+                              onChange={(ev) => {
+                                const n = Number(ev.target.value);
+                                if (Number.isNaN(n)) return;
+                                setTerrainBaseY(Math.max(-512, Math.min(512, n)));
+                              }}
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          {(terrainSculptOp === "raise" ||
+                            terrainSculptOp === "lower") ? (
+                            <label className="tool-options-range-label tool-options-range-with-value">
+                              <span>Strength</span>
+                              <input
+                                type="range"
+                                min={1}
+                                max={32}
+                                value={terrainStrength}
+                                onChange={(ev) =>
+                                  setTerrainStrength(Number(ev.target.value))
+                                }
+                                disabled={loading || workBusy}
+                              />
+                              <span className="tool-options-range-value">
+                                {terrainStrength}
+                              </span>
+                            </label>
+                          ) : null}
+                          {terrainSculptOp === "smooth" ? (
+                            <label className="tool-options-range-label tool-options-range-with-value">
+                              <span>Smooth reach</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={8}
+                                value={terrainSmoothRadius}
+                                onChange={(ev) =>
+                                  setTerrainSmoothRadius(Number(ev.target.value))
+                                }
+                                disabled={loading || workBusy}
+                              />
+                              <span className="tool-options-range-value">
+                                {terrainSmoothRadius}
+                              </span>
+                            </label>
+                          ) : null}
+                        </>
                       ) : null}
                     </div>
                   ) : null}
                   {sculptStrokeMode === "smooth" ? (
                     <div className="tool-options-section">
                       <div className="tool-options-heading">Smooth</div>
-                      <label className="tool-options-range-label">
+                      <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Passes</span>
                         <input
                           type="range"
@@ -3241,6 +4589,142 @@ function App() {
                           }
                           disabled={loading || workBusy}
                         />
+                        <span className="tool-options-range-value">
+                          {sculptSmoothPasses}
+                        </span>
+                      </label>
+                    </div>
+                  ) : null}
+                  {sculptStrokeMode === "wall" ? (
+                    <div className="tool-options-section" aria-label="Sculpt wall">
+                      <div className="tool-options-heading">Area shape</div>
+                      <div
+                        className="tool-options-shape-row"
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr 1fr",
+                          gap: "0.25rem",
+                        }}
+                        role="group"
+                        aria-label="Wall area shape"
+                      >
+                        {(
+                          [
+                            ["brush", "Brush"],
+                            ["circle", "Circle"],
+                            ["polygon", "Polygon"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              wallAreaShape === id
+                                ? "tool-options-shape-btn is-active"
+                                : "tool-options-shape-btn"
+                            }
+                            disabled={loading || workBusy}
+                            title={
+                              id === "brush"
+                                ? "Drag a freehand stroke on the surface"
+                                : id === "circle"
+                                  ? "Drag from center to edge on the face"
+                                  : "Click corners for a closed outline, then Done (web)"
+                            }
+                            onClick={() => setWallAreaShape(id)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="tool-options-hint" style={{ marginTop: "0.35rem" }}>
+                        Circle and polygon use the same freehand stroke as brush on
+                        desktop until dedicated flows land.
+                      </p>
+                      <label
+                        className="tool-options-range-label"
+                        style={{
+                          marginTop: "0.45rem",
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <span style={{ minWidth: "4.5rem" }}>Direction</span>
+                        <select
+                          className="sidebar-material-select"
+                          style={{ flex: 1, maxWidth: "12rem" }}
+                          value={sprayDirection}
+                          onChange={(ev) =>
+                            setSprayDirection(ev.target.value as SprayDirectionApi)
+                          }
+                          disabled={loading || workBusy}
+                          title="Auto = face normal; or pick a world axis"
+                          aria-label="Wall extrusion direction"
+                        >
+                          <option value="auto">Auto</option>
+                          <option value="none">None</option>
+                          <option value="right">X+</option>
+                          <option value="left">X−</option>
+                          <option value="up">Y+</option>
+                          <option value="down">Y−</option>
+                          <option value="back">Z+</option>
+                          <option value="forward">Z−</option>
+                        </select>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Width</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={SCULPT_BRUSH_MAX_INDEX}
+                          value={wallWidthIndex}
+                          onChange={(ev) =>
+                            setWallWidthIndex(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="Path thickness (1–64 voxels)"
+                        />
+                        <span className="tool-options-range-value">
+                          {wallWidthIndex + 1}
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Height</span>
+                        <input
+                          type="range"
+                          min={2}
+                          max={20}
+                          value={wallHeightVox}
+                          onChange={(ev) =>
+                            setWallHeightVox(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="Voxels to extend along direction (min 2)"
+                        />
+                        <span className="tool-options-range-value">
+                          {wallHeightVox}
+                        </span>
+                      </label>
+                      <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
+                        <input
+                          type="checkbox"
+                          checked={wallLockStartHeight}
+                          onChange={(ev) =>
+                            setWallLockStartHeight(ev.target.checked)
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Lock start height</span>
+                      </label>
+                      <label className="tool-options-checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={wallAxisAlign}
+                          onChange={(ev) => setWallAxisAlign(ev.target.checked)}
+                          disabled={loading || workBusy}
+                        />
+                        <span>Axis-align</span>
                       </label>
                     </div>
                   ) : null}
@@ -3253,21 +4737,6 @@ function App() {
               {toolsPane === "generators" ? (
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Generator</div>
-                  {generatorKind === "sphere" ? (
-                    <label className="tool-options-range-label">
-                      <span>Radius</span>
-                      <input
-                        type="range"
-                        min={1}
-                        max={32}
-                        value={generatorSphereRadius}
-                        onChange={(ev) =>
-                          setGeneratorSphereRadius(Number(ev.target.value))
-                        }
-                        disabled={loading || workBusy}
-                      />
-                    </label>
-                  ) : null}
                   {generatorKind === "rocks" ? (
                     <>
                       <label className="tool-options-range-label">
@@ -3343,137 +4812,141 @@ function App() {
                       />
                     </label>
                   ) : null}
-                  {generatorKind === "squishy" ? (
-                    <>
-                      <div className="tool-options-heading">Squishy session</div>
-                      <div className="tool-options-shape-row" role="group" aria-label="Squishy mode">
-                        <button
-                          type="button"
-                          className={
-                            squishyMode === "add"
-                              ? "tool-options-shape-btn is-active"
-                              : "tool-options-shape-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setSquishyMode("add")}
-                        >
-                          Add
-                        </button>
-                        <button
-                          type="button"
-                          className={
-                            squishyMode === "edit"
-                              ? "tool-options-shape-btn is-active"
-                              : "tool-options-shape-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setSquishyMode("edit")}
-                        >
-                          Pick
-                        </button>
-                        <button
-                          type="button"
-                          className={
-                            squishyMode === "delete"
-                              ? "tool-options-shape-btn is-active"
-                              : "tool-options-shape-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setSquishyMode("delete")}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                      <p style={{ fontSize: "0.85rem", opacity: 0.85, margin: "0.25rem 0" }}>
-                        Metaballs: {squishyBallCount}. Click viewport to add/pick/delete; Commit voxelizes the combined field.
-                      </p>
-                      <label className="tool-options-range-label">
-                        <span>Blob radius (add)</span>
-                        <input
-                          type="range"
-                          min={2}
-                          max={10}
-                          value={Math.min(10, Math.max(2, generatorSphereRadius))}
-                          onChange={(ev) =>
-                            setGeneratorSphereRadius(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
-                        <input
-                          type="checkbox"
-                          checked={squishyHollow}
-                          onChange={(ev) => setSquishyHollow(ev.target.checked)}
-                          disabled={loading || workBusy}
-                        />
-                        <span>Hollow shell</span>
-                      </label>
-                      {squishyHollow ? (
-                        <label className="tool-options-range-label">
-                          <span>Shell thickness (voxels)</span>
-                          <input
-                            type="range"
-                            min={1}
-                            max={8}
-                            step={1}
-                            value={Math.min(8, Math.max(1, squishyWallThickness))}
-                            onChange={(ev) =>
-                              setSquishyWallThickness(Number(ev.target.value))
-                            }
-                            disabled={loading || workBusy}
-                          />
-                        </label>
-                      ) : null}
-                      <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
-                        <input
-                          type="checkbox"
-                          checked={squishySnapToSurface}
-                          onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
-                          disabled={loading || workBusy}
-                        />
-                        <span>Snap add to surface</span>
-                      </label>
-                      <div className="tool-options-shape-row" style={{ marginTop: "0.35rem" }}>
-                        <button
-                          type="button"
-                          className="tool-options-shape-btn"
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            void invoke("squishy_session_commit", {
-                              args: {
-                                color: activeColorRef.current,
-                                material: activeMaterialRef.current,
-                              },
-                            })
-                              .then(() =>
-                                invoke<{ balls: { id: number }[] }>(
-                                  "squishy_session_get",
-                                ),
-                              )
-                              .then((s) =>
-                                setSquishyBallCount(s.balls?.length ?? 0),
-                              )
-                              .catch(() => { });
-                          }}
-                        >
-                          Commit to voxels
-                        </button>
-                        <button
-                          type="button"
-                          className="tool-options-shape-btn"
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            void invoke("squishy_session_clear")
-                              .then(() => setSquishyBallCount(0))
-                              .catch(() => { });
-                          }}
-                        >
-                          Clear session
-                        </button>
-                      </div>
-                    </>
+                </div>
+              ) : null}
+              {toolsPane === "squishy" && interactionMode === "squishy" ? (
+                <div className="tool-options-section">
+                  <div className="tool-options-heading">Squishy session</div>
+                  <div className="tool-options-shape-row" role="group" aria-label="Squishy mode">
+                    <button
+                      type="button"
+                      className={
+                        squishyMode === "add"
+                          ? "tool-options-shape-btn is-active"
+                          : "tool-options-shape-btn"
+                      }
+                      disabled={loading || workBusy}
+                      onClick={() => setSquishyMode("add")}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        squishyMode === "edit"
+                          ? "tool-options-shape-btn is-active"
+                          : "tool-options-shape-btn"
+                      }
+                      disabled={loading || workBusy}
+                      onClick={() => setSquishyMode("edit")}
+                    >
+                      Pick
+                    </button>
+                    <button
+                      type="button"
+                      className={
+                        squishyMode === "delete"
+                          ? "tool-options-shape-btn is-active"
+                          : "tool-options-shape-btn"
+                      }
+                      disabled={loading || workBusy}
+                      onClick={() => setSquishyMode("delete")}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  <p style={{ fontSize: "0.85rem", opacity: 0.85, margin: "0.25rem 0" }}>
+                    Metaballs: {squishyBallCount}. Click viewport to add/pick/delete; Commit voxelizes the combined field.
+                  </p>
+                  <label className="tool-options-range-label">
+                    <span>Blob radius (add)</span>
+                    <input
+                      type="range"
+                      min={2}
+                      max={10}
+                      value={Math.min(10, Math.max(2, generatorSphereRadius))}
+                      onChange={(ev) =>
+                        setGeneratorSphereRadius(Number(ev.target.value))
+                      }
+                      disabled={loading || workBusy}
+                    />
+                  </label>
+                  <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                    <input
+                      type="checkbox"
+                      checked={squishyHollow}
+                      onChange={(ev) => setSquishyHollow(ev.target.checked)}
+                      disabled={loading || workBusy}
+                    />
+                    <span>Hollow shell</span>
+                  </label>
+                  {squishyHollow ? (
+                    <label className="tool-options-range-label">
+                      <span>Shell thickness (voxels)</span>
+                      <input
+                        type="range"
+                        min={1}
+                        max={8}
+                        step={1}
+                        value={Math.min(8, Math.max(1, squishyWallThickness))}
+                        onChange={(ev) =>
+                          setSquishyWallThickness(Number(ev.target.value))
+                        }
+                        disabled={loading || workBusy}
+                      />
+                    </label>
                   ) : null}
+                  <label className="tool-options-range-label" style={{ flexDirection: "row", alignItems: "center", gap: "0.5rem" }}>
+                    <input
+                      type="checkbox"
+                      checked={squishySnapToSurface}
+                      onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
+                      disabled={loading || workBusy}
+                    />
+                    <span>Snap add to surface</span>
+                  </label>
+                  <div className="tool-options-shape-row" style={{ marginTop: "0.35rem" }}>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        void invoke("squishy_session_commit", {
+                          args: {
+                            color: activeColorRef.current,
+                            material: activeMaterialRef.current,
+                          },
+                        })
+                          .then(() =>
+                            invoke<{ balls: { id: number }[] }>(
+                              "squishy_session_get",
+                            ),
+                          )
+                          .then((s) =>
+                            setSquishyBallCount(s.balls?.length ?? 0),
+                          )
+                          .catch(() => { });
+                      }}
+                    >
+                      Commit to voxels
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        void invoke("squishy_session_clear")
+                          .then(() => setSquishyBallCount(0))
+                          .catch(() => { });
+                      }}
+                    >
+                      Clear session
+                    </button>
+                  </div>
+                </div>
+              ) : toolsPane === "squishy" ? (
+                <div className="tool-options-section">
+                  <p className="tool-options-hint">Select Squishy mode in the sidebar.</p>
                 </div>
               ) : null}
               {toolsPane === "mood" ? (
@@ -3569,7 +5042,7 @@ function App() {
                     role="group"
                     aria-label="Continue last project"
                   >
-                    <div className="viewport-empty-last-title">Continue</div>
+                    <div className="viewport-empty-last-title">Continue where you left off</div>
                     {lastSessionInfo.documentBasename ? (
                       <div
                         className="viewport-empty-last-filename"
@@ -3590,7 +5063,16 @@ function App() {
                       <button
                         type="button"
                         className="viewport-empty-open-btn"
+                        onClick={() => setNewProjectOpen(true)}
+                        disabled={loading || workBusy}
+                      >
+                        Start new project
+                      </button>
+                      <button
+                        type="button"
+                        className="viewport-empty-open-btn is-secondary"
                         onClick={reopenLastProject}
+                        disabled={loading || workBusy}
                         aria-describedby={
                           lastProjectBlurb ? "viewport-empty-last-desc" : undefined
                         }
@@ -3751,6 +5233,7 @@ function App() {
             </div>
           ) : null}
         </div>
+        {showEditorChrome ? (
         <aside
           className={
             rightSidebarExpanded
@@ -3950,8 +5433,12 @@ function App() {
             </div>
           ) : null}
         </aside>
+        ) : null}
       </div>
-      <footer className="app-status-bar" role="contentinfo">
+      <footer
+        className={`app-status-bar${showStartScreen ? " is-start-screen" : ""}`}
+        role="contentinfo"
+      >
         <div className="status-bar-main">
           <div
             className="status-bar-message"
@@ -3979,7 +5466,7 @@ function App() {
             </button>
           ) : null}
         </div>
-        {showFpsCounter ? (
+        {showFpsCounter && showEditorChrome ? (
           <div className="fps-counter" role="status" aria-live="polite">
             {fpsDisplayed} FPS
           </div>

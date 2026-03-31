@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
+  APPEARANCE_THEME_OPTIONS,
   autosaveSettingsInvokeArgs,
   loadPreferences,
   normalizeCollabHostPort,
@@ -8,6 +9,7 @@ import {
   savePreferences,
   TONE_MAPPING_OPTIONS,
   toneMappingToGpuMode,
+  type AppearanceTheme,
   type ToneMappingPreference,
   type VoxelleDesktopPreferences,
 } from "./preferences";
@@ -70,6 +72,12 @@ export function PreferencesModal({
     setPrefs(next);
     savePreferences(next);
     applyToneToGpu(value);
+  };
+
+  const onAppearanceTheme = (value: AppearanceTheme) => {
+    const next = { ...prefs, appearanceTheme: value };
+    setPrefs(next);
+    savePreferences(next);
   };
 
   const onEnableUpnp = (checked: boolean) => {
@@ -182,6 +190,25 @@ export function PreferencesModal({
               onChange={(e) => onFps(e.target.checked)}
             />
             FPS overlay
+          </label>
+          <label className="prefs-select-label">
+            <span className="prefs-select-label-text">Appearance</span>
+            <select
+              className="prefs-tone-select"
+              value={prefs.appearanceTheme}
+              onChange={(e) =>
+                onAppearanceTheme(e.target.value as AppearanceTheme)
+              }
+            >
+              {APPEARANCE_THEME_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <span className="prefs-field-hint">
+              Light uses an unbleached paper tone. Auto follows this device.
+            </span>
           </label>
           <h4 className="prefs-section-title">Collaboration</h4>
           <label className="prefs-select-label">

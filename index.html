@@ -1,6 +1,28 @@
 <!doctype html>
 <html lang="en">
   <head>
+    <script>
+      (function () {
+        try {
+          var raw = localStorage.getItem("voxelle-preferences");
+          var mode = "auto";
+          if (raw) {
+            var p = JSON.parse(raw);
+            if (
+              p &&
+              (p.appearanceTheme === "light" ||
+                p.appearanceTheme === "dark" ||
+                p.appearanceTheme === "auto")
+            ) {
+              mode = p.appearanceTheme;
+            }
+          }
+          document.documentElement.setAttribute("data-appearance", mode);
+        } catch (e) {
+          document.documentElement.setAttribute("data-appearance", "auto");
+        }
+      })();
+    </script>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

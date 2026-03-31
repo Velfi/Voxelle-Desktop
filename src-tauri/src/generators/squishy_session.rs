@@ -86,6 +86,17 @@ impl SquishySession {
         self.balls.len() < n
     }
 
+    pub fn set_ball_transform(&mut self, id: u32, x: i32, y: i32, z: i32, radius: f32) -> bool {
+        if let Some(b) = self.balls.iter_mut().find(|b| b.id == id) {
+            b.x = x;
+            b.y = y;
+            b.z = z;
+            b.radius = radius.max(0.5);
+            return true;
+        }
+        false
+    }
+
     pub fn add_ball(&mut self, x: i32, y: i32, z: i32, radius: f32) -> u32 {
         let id = self.alloc_id();
         self.balls.push(Metaball {
@@ -183,6 +194,68 @@ pub fn voxel_coords_for_session(session: &SquishySession, grid_size: i32) -> Vec
     solid.into_iter().collect()
 }
 
+/// Preview path: same field as commit, but stops after `max_voxels` (web ~24k preview cap).
+pub fn voxel_coords_for_session_with_limit(
+    session: &SquishySession,
+    grid_size: i32,
+    max_voxels: usize,
+) -> Vec<VoxelCoord> {
+    if session.balls.is_empty() || max_voxels == 0 {
+        return Vec::new();
+    }
+    let gs = grid_size.max(1);
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX;
+    let mut max_z = i32::MIN;
+    let mut max_r = 4.0_f32;
+    for b in &session.balls {
+        max_r = max_r.max(b.radius * 3.0);
+        min_x = min_x.min(b.x);
+        max_x = max_x.max(b.x);
+        min_y = min_y.min(b.y);
+        max_y = max_y.max(b.y);
+        min_z = min_z.min(b.z);
+        max_z = max_z.max(b.z);
+    }
+    let pad = max_r.ceil() as i32 + 4;
+    min_x -= pad;
+    max_x += pad;
+    min_y -= pad;
+    max_y += pad;
+    min_z -= pad;
+    max_z += pad;
+
+    let (gx0, gx1) = crate::voxel_edit::grid_valid_range(gs);
+    min_x = min_x.max(gx0);
+    max_x = max_x.min(gx1);
+    min_y = min_y.max(gx0);
+    max_y = max_y.min(gx1);
+    min_z = min_z.max(gx0);
+    max_z = max_z.min(gx1);
+
+    let mut solid: HashSet<VoxelCoord> = HashSet::new();
+    'scan: for x in min_x..=max_x {
+        for y in min_y..=max_y {
+            for z in min_z..=max_z {
+                if solid.len() >= max_voxels {
+                    break 'scan;
+                }
+                if !in_grid(x, y, z, gs) {
+                    continue;
+                }
+                if session.field_sum_at(x, y, z) >= FIELD_THRESHOLD {
+                    solid.insert((x, y, z));
+                }
+            }
+        }
+    }
+
+    solid.into_iter().take(max_voxels).collect()
+}
+
 /// Outer `wall_thickness` layers: peel boundary repeatedly and union those layers (web hollow shell).
 fn hollow_shell_layers(mut s: HashSet<VoxelCoord>, wt: i32) -> HashSet<VoxelCoord> {
     let wt = wt.max(1) as usize;
@@ -246,7 +319,8 @@ pub fn pick_metaball_at_screen(
     let mut best: Option<(u32, f32)> = None;
     for b in &session.balls {
         let c = Vec3::new(b.x as f32 + 0.5, b.y as f32 + 0.5, b.z as f32 + 0.5);
-        if let Some(t) = ray_sphere_intersect(o, d, c, 0.55) {
+        let pick_r = b.radius.max(0.2_f32).min(64.0_f32);
+        if let Some(t) = ray_sphere_intersect(o, d, c, pick_r) {
             if t >= 0.0 {
                 let replace = best.map(|(_, bt)| t < bt).unwrap_or(true);
                 if replace {

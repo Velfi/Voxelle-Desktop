@@ -488,13 +488,18 @@ fn replace_file_on_main<R: Runtime>(
     let app_mesh = app.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = app.run_on_main_thread(move || {
-        let r = crate::apply_mesh_and_camera(&state_apply, &app_mesh, file, prepared);
+        let r = crate::apply_mesh_and_camera(&state_apply, &app_mesh, file, prepared, false);
         let _ = tx.send(r);
     });
     let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
     match main_result {
         Ok(()) => {
-            crate::emit_voxelle_loaded(&app, "collab snapshot".to_string(), state_emit.as_ref());
+            crate::emit_voxelle_loaded(
+                &app,
+                "collab snapshot".to_string(),
+                state_emit.as_ref(),
+                false,
+            );
             Ok(())
         }
         Err(e) => {

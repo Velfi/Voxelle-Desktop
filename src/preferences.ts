@@ -1,5 +1,7 @@
 /** Overlap with Voxelle web `voxelle-preferences` for shared keys. */
 
+import { invoke } from "@tauri-apps/api/core";
+
 export const VOXELLE_PREFERENCES_KEY = "voxelle-preferences";
 
 export const TONE_MAPPING_OPTIONS = [
@@ -12,6 +14,18 @@ export const TONE_MAPPING_OPTIONS = [
 ] as const;
 
 export type ToneMappingPreference = (typeof TONE_MAPPING_OPTIONS)[number]["value"];
+
+export type AppearanceTheme = "auto" | "light" | "dark";
+
+export const APPEARANCE_THEME_OPTIONS = [
+  { value: "auto" as const, label: "Auto (system)" },
+  { value: "light" as const, label: "Light" },
+  { value: "dark" as const, label: "Dark" },
+] as const;
+
+export function isAppearanceTheme(v: unknown): v is AppearanceTheme {
+  return v === "auto" || v === "light" || v === "dark";
+}
 
 const TONE_ORDER: ToneMappingPreference[] = [
   "neutral",
@@ -49,6 +63,8 @@ export type VoxelleDesktopPreferences = {
   autosaveIntervalSecs: number;
   /** Rotating backup slots per project in app data (1–64). */
   autosaveKeepCount: number;
+  /** UI chrome: follow OS, force light (paper), or force dark. */
+  appearanceTheme: AppearanceTheme;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -63,6 +79,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   autosaveEnabled: true,
   autosaveIntervalSecs: 120,
   autosaveKeepCount: 5,
+  appearanceTheme: "auto",
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -74,6 +91,22 @@ const HEX_COLOR = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 export function normalizeCollabDisplayName(raw: string): string {
   const t = raw.trim().slice(0, 32);
   return t.length > 0 ? t : DEFAULTS.collabDisplayName;
+}
+
+/** Whether `theme` resolves to the light (paper) UI, including OS preference when `auto`. */
+export function appearanceThemeResolvesToLight(theme: AppearanceTheme): boolean {
+  if (theme === "light") return true;
+  if (theme === "dark") return false;
+  if (typeof window === "undefined") return false;
+  return window.matchMedia("(prefers-color-scheme: light)").matches;
+}
+
+/** Sets `data-appearance` on `<html>` and syncs cold-start GPU gradient (Tauri). */
+export function applyAppearanceToDocument(theme: AppearanceTheme): void {
+  if (typeof document === "undefined") return;
+  document.documentElement.setAttribute("data-appearance", theme);
+  const light = appearanceThemeResolvesToLight(theme);
+  void invoke("set_start_screen_light", { light }).catch(() => {});
 }
 
 export function normalizeCollabAccentColor(raw: string): string {
@@ -213,6 +246,9 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         typeof o.autosaveKeepCount === "number" && Number.isFinite(o.autosaveKeepCount)
           ? clampInt(o.autosaveKeepCount, 1, 64)
           : DEFAULTS.autosaveKeepCount,
+      appearanceTheme: isAppearanceTheme(o.appearanceTheme)
+        ? o.appearanceTheme
+        : DEFAULTS.appearanceTheme,
     };
   } catch {
     return { ...DEFAULTS };
@@ -246,7 +282,9 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.autosaveEnabled = prefs.autosaveEnabled;
     merged.autosaveIntervalSecs = prefs.autosaveIntervalSecs;
     merged.autosaveKeepCount = prefs.autosaveKeepCount;
+    merged.appearanceTheme = prefs.appearanceTheme;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
+    applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {
     /* ignore */
   }

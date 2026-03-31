@@ -6,9 +6,10 @@ Guidance for humans and coding agents working in this repo. This app is desktop-
 
 | Name | Role |
 | --- | --- |
-| **Tool sidebar** (left) | Controls and inputs for making art (modes, brushes, palette-style tools as they land). Implemented in [`src/App.tsx`](src/App.tsx) as the left `aside`. |
+| **Tools sidebar** (left) | Controls and inputs for making art (modes, brushes, palette-style tools as they land). Implemented in [`src/App.tsx`](src/App.tsx) as the left `aside`. |
 | **Inspector sidebar** (right) | Project metadata and management: hierarchy / outliner-style tools, properties, and related panels. Implemented as the right `aside`. |
 | **Status bar** (bottom) | High-level feedback on what the app is doing (current file, load/collab state, optional FPS). The `footer.app-status-bar` row. |
+| **Tool Panel** (bottom left)| Tool options and selection. Implemented in [`src/App.tsx`](src/App.tsx) as the bottom left `aside`. |
 
 **Long waits:** Whenever the user might wait more than a few seconds (load, save, mesh rebuild, visibility refresh, etc.), the status bar should explain **why**—not a spinner with no copy. Emit meaningful phases (and optional fraction) via the usual events (e.g. `voxelle-work-progress`, `voxelle-load-progress` from [`src-tauri/src/lib.rs`](src-tauri/src/lib.rs)); don’t leave the UI silent during noticeable work.
 
@@ -18,9 +19,9 @@ The native [`WgpuViewer`](src-tauri/src/render/mod.rs) swapchain is sized by [`v
 
 **Conventions:**
 
-- **Origin**: Treat `(sx, sy)` passed to `voxel_pick_probe`, `voxel_edit_at_screen`, and `sync_preview_input` as **physical pixels** in the **render target**: `(0,0)` = top-left of the swapchain texture, **+X** right, **+Y** down (same as NDC→pixel in `screen_to_world_ray`).
+- **Origin**: Treat `(sx, sy)` passed to `voxel_pick_probe`, `voxel_edit_at_screen`, and `sync_preview_input` as **physical pixels** in the **viewport-sized render target** (the sub-rect copied into the swapchain): `(0,0)` = top-left of that texture, **+X** right, **+Y** down (same as NDC→pixel in `screen_to_world_ray`).
 - **Do not** assume `(clientX - rect.left) * devicePixelRatio` matches that grid. CSS layout, `getBoundingClientRect`, and `devicePixelRatio` can disagree slightly with the **actual** drawable; that skews NDC. Use **proportional** mapping with **`(clientX - rect.left) / rect.width`** and **`(clientY - rect.top) / rect.height`** (same **`getBoundingClientRect()`** as in `sendResize`), scaled by **`physW` × `physH`**. Do **not** use **`offsetX / clientWidth`**: `clientWidth` / `clientHeight` are integers and can disagree with **fractional** `rect.width` / `rect.height`, which **breaks aspect ratio** (picking looks fine at the **center** of the viewport and **diverges toward the edges**). When converting CSS size to physical pixels for `viewer_resize`, derive **one** dimension with `Math.round` and the other from **aspect** (`height = round(width * (rh/rw))`) so **pw/ph** matches the element aspect.
-- **Source of truth for `physW` × `physH`**: [`get_viewport_pixel_size`](src-tauri/src/lib.rs), the **`viewport-pixel-size`** event when the surface size changes after a frame, and the ref updated from [`sendResize`](src/App.tsx). Each frame, [`WgpuViewer::render`](src-tauri/src/render/mod.rs) syncs `self.size` from `frame.texture.size()` so CPU math matches the swapchain.
+- **Source of truth for `physW` × `physH`**: [`get_viewport_pixel_size`](src-tauri/src/lib.rs) (includes viewport and **surface** sizes). **Surface** width/height must match the native drawable (wgpu `frame.texture`); [`get_surface_pixel_size`](src-tauri/src/lib.rs) exposes swapchain pixels only. The **`viewport-pixel-size`** event fires after [`viewer_resize`](src-tauri/src/lib.rs) and when the surface size changes after a frame, so the webview can stay aligned without guessing `innerWidth × devicePixelRatio` alone. [`sendResize`](src/App.tsx) maps `viewportX` / `viewportY` **proportionally** (`rect.left / innerWidth`, etc.) into that surface’s pixel space—**not** only `rect.left × dpr`, which can drift when the drawable differs from the CSS estimate.
 
 ## Performance metrics
 

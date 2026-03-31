@@ -1,7 +1,8 @@
 //! macOS: drive `NSUndoManager` so the system Edit → Undo/Redo stack matches solo voxel edits.
 //! Collaboration uses the existing Rust/collab paths only (`macos_undo` is not called).
-
-use std::sync::Once;
+//!
+//! The main window’s undo manager is shared with WebKit; do not set `groupsByEvent` to `false` there.
+//! WebKit registers text edits without manual grouping and will crash if automatic grouping is off.
 
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -17,7 +18,6 @@ use crate::perform_solo_voxel_redo;
 use crate::perform_solo_voxel_undo;
 use crate::ViewerState;
 
-static CONFIGURE_UNDO: Once = Once::new();
 static UNDO_TARGET_PTR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 fn undo_target() -> &'static NSObject {
@@ -50,12 +50,6 @@ fn undo_manager_for_main_window<R: Runtime>(app: &AppHandle<R>) -> Option<Retain
     unsafe { msg_send![window, undoManager] }
 }
 
-fn configure_undo_manager(um: &NSUndoManager) {
-    CONFIGURE_UNDO.call_once(|| {
-        um.setGroupsByEvent(false);
-    });
-}
-
 /// Register one undo step with `NSUndoManager` after a solo edit has been applied and pushed to
 /// `edit_undo`. Must mirror [`perform_solo_voxel_undo`] / [`perform_solo_voxel_redo`] pairing.
 pub fn register_solo_edit_completed(app: &AppHandle, state: &std::sync::Arc<ViewerState>) {
@@ -70,7 +64,6 @@ fn register_solo_edit_completed_on_main(app: &AppHandle, state: &std::sync::Arc<
     let Some(um) = undo_manager_for_main_window(app) else {
         return;
     };
-    configure_undo_manager(&um);
     let target = undo_target();
     let um_shared = um.clone();
     let state_u = std::sync::Arc::clone(state);

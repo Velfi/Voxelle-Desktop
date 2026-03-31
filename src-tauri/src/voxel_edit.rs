@@ -291,9 +291,10 @@ pub enum EditTool {
     Paint,
 }
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BrushShape {
+    #[default]
     Sphere,
     Cube,
     Pyramid,
@@ -735,8 +736,509 @@ pub fn apply_edit(
     Ok(out)
 }
 
+/// Whether drag samples for stroke preview should union across moves (`true`) or replace each frame (`false`).
+pub fn stroke_preview_accumulates_samples(
+    stroke_mode: DrawStrokeMode,
+    stroke_line_start: Option<(f32, f32)>,
+) -> bool {
+    match stroke_mode {
+        DrawStrokeMode::Plane | DrawStrokeMode::Spray => true,
+        DrawStrokeMode::Precise => false,
+        DrawStrokeMode::Line => stroke_line_start.is_none(),
+        _ => false,
+    }
+}
+
+/// Voxel coordinates one `apply_edit` call would affect (same rules; no mutation).
+#[allow(clippy::too_many_arguments)]
+pub fn collect_stroke_edit_targets(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    tool: EditTool,
+    color: u32,
+    material: MaterialId,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    stroke_mode: DrawStrokeMode,
+    plane_axis: PlaneAxis,
+    stroke_aux: &StrokeAux,
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let spray = spray_density.clamp(0.0, 1.0);
+    let centers = stroke_anchor_centers_with_mode(
+        stroke_mode,
+        plane_axis,
+        stroke_aux,
+        tool,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        brush_radius,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if centers.is_empty() {
+        return Vec::new();
+    }
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut out: Vec<VoxelCoord> = Vec::new();
+
+    match tool {
+        EditTool::Add => {
+            for (cx, cy, cz) in centers {
+                for (dx, dy, dz) in &offsets {
+                    let x = cx + dx;
+                    let y = cy + dy;
+                    let z = cz + dz;
+                    if !in_grid(x, y, z, grid_size) {
+                        continue;
+                    }
+                    if !spray_passes((x, y, z), spray) {
+                        continue;
+                    }
+                    if !seen.insert((x, y, z)) {
+                        continue;
+                    }
+                    if voxel_map.contains_key(&(x, y, z)) {
+                        continue;
+                    }
+                    out.push((x, y, z));
+                }
+            }
+        }
+        EditTool::Remove => {
+            for (hx, hy, hz) in centers {
+                for (dx, dy, dz) in &offsets {
+                    let x = hx + dx;
+                    let y = hy + dy;
+                    let z = hz + dz;
+                    if !spray_passes((x, y, z), spray) {
+                        continue;
+                    }
+                    if !seen.insert((x, y, z)) {
+                        continue;
+                    }
+                    if voxel_map.contains_key(&(x, y, z)) {
+                        out.push((x, y, z));
+                    }
+                }
+            }
+        }
+        EditTool::Paint => {
+            for (hx, hy, hz) in centers {
+                for (dx, dy, dz) in &offsets {
+                    let x = hx + dx;
+                    let y = hy + dy;
+                    let z = hz + dz;
+                    if !spray_passes((x, y, z), spray) {
+                        continue;
+                    }
+                    if !seen.insert((x, y, z)) {
+                        continue;
+                    }
+                    let Some(&idx) = voxel_map.get(&(x, y, z)) else {
+                        continue;
+                    };
+                    let before = file.voxels[idx];
+                    if before.color == color && before.material == material {
+                        continue;
+                    }
+                    out.push((x, y, z));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Apply add/remove/paint to a precomputed union of target cells (one undo step).
+pub fn apply_edits_to_coords(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    tool: EditTool,
+    color: u32,
+    material: MaterialId,
+    coords: &AHashSet<VoxelCoord>,
+) -> Vec<VoxelEditDelta> {
+    let grid_size = file.grid_size.max(1);
+    let mut out: Vec<VoxelEditDelta> = Vec::new();
+
+    match tool {
+        EditTool::Add => {
+            for &(x, y, z) in coords {
+                if !in_grid(x, y, z, grid_size) {
+                    continue;
+                }
+                if voxel_map.contains_key(&(x, y, z)) {
+                    continue;
+                }
+                let nv = Voxel {
+                    x,
+                    y,
+                    z,
+                    color,
+                    material,
+                    object_id: file.active_object_id,
+                };
+                let idx = file.voxels.len();
+                file.voxels.push(nv);
+                voxel_map.insert((x, y, z), idx);
+                out.push(VoxelEditDelta::Added(nv));
+            }
+        }
+        EditTool::Remove => {
+            for &(x, y, z) in coords {
+                let Some(&remove_idx) = voxel_map.get(&(x, y, z)) else {
+                    continue;
+                };
+                let removed_voxel = file.voxels[remove_idx];
+                let last = file.voxels.len() - 1;
+                if remove_idx != last {
+                    file.voxels.swap(remove_idx, last);
+                    let moved = file.voxels[remove_idx];
+                    voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+                }
+                file.voxels.pop();
+                voxel_map.remove(&(x, y, z));
+                out.push(VoxelEditDelta::Removed {
+                    voxel: removed_voxel,
+                });
+            }
+        }
+        EditTool::Paint => {
+            for &(x, y, z) in coords {
+                let Some(&idx) = voxel_map.get(&(x, y, z)) else {
+                    continue;
+                };
+                let before = file.voxels[idx];
+                if before.color == color && before.material == material {
+                    continue;
+                }
+                let after = Voxel {
+                    color,
+                    material,
+                    ..before
+                };
+                file.voxels[idx] = after;
+                out.push(VoxelEditDelta::Painted { before, after });
+            }
+        }
+    }
+    out
+}
+
+/// Solid voxel coordinates along a selection stroke (web parity: same geometry as remove/paint,
+/// keeping only cells that exist — same as `apply_edit` remove sampling without mutating voxels).
+#[allow(clippy::too_many_arguments)]
+pub fn selection_stroke_sample_coords(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    stroke_mode: DrawStrokeMode,
+    plane_axis: PlaneAxis,
+    stroke_aux: &StrokeAux,
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let spray = spray_density.clamp(0.0, 1.0);
+    let tool = EditTool::Remove;
+    let centers = stroke_anchor_centers_with_mode(
+        stroke_mode,
+        plane_axis,
+        stroke_aux,
+        tool,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        brush_radius,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if centers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut out: Vec<VoxelCoord> = Vec::new();
+
+    for (hx, hy, hz) in centers {
+        for (dx, dy, dz) in &offsets {
+            let x = hx + dx;
+            let y = hy + dy;
+            let z = hz + dz;
+            if !in_grid(x, y, z, grid_size) {
+                continue;
+            }
+            if !spray_passes((x, y, z), spray) {
+                continue;
+            }
+            if !seen.insert((x, y, z)) {
+                continue;
+            }
+            if voxel_map.contains_key(&(x, y, z)) {
+                out.push((x, y, z));
+            }
+        }
+    }
+    out
+}
+
+/// Empty-cell stroke samples (e.g. coplanar void selection) — `EditTool::Add` anchors, keep only empty cells.
+#[allow(clippy::too_many_arguments)]
+pub fn selection_stroke_sample_empty_coords(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    stroke_mode: DrawStrokeMode,
+    plane_axis: PlaneAxis,
+    stroke_aux: &StrokeAux,
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let spray = spray_density.clamp(0.0, 1.0);
+    let tool = EditTool::Add;
+    let centers = stroke_anchor_centers_with_mode(
+        stroke_mode,
+        plane_axis,
+        stroke_aux,
+        tool,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        brush_radius,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if centers.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut out: Vec<VoxelCoord> = Vec::new();
+
+    for (cx, cy, cz) in centers {
+        for (dx, dy, dz) in &offsets {
+            let x = cx + dx;
+            let y = cy + dy;
+            let z = cz + dz;
+            if !in_grid(x, y, z, grid_size) {
+                continue;
+            }
+            if !spray_passes((x, y, z), spray) {
+                continue;
+            }
+            if !seen.insert((x, y, z)) {
+                continue;
+            }
+            if !voxel_map.contains_key(&(x, y, z)) {
+                out.push((x, y, z));
+            }
+        }
+    }
+    out
+}
+
+/// Keep empty coords that lie on the coplanar-void plane from screen (same plane as `coplanar_empty_connected_from_screen`).
+pub fn filter_coords_coplanar_empty_from_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    coords: &[VoxelCoord],
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(prev) = prev else {
+        return Vec::new();
+    };
+    let Some((axis, fixed)) = plane_axis_fixed(prev, hit) else {
+        return Vec::new();
+    };
+    coords
+        .iter()
+        .copied()
+        .filter(|c| {
+            !voxel_map.contains_key(c) && voxel_on_plane(*c, axis, fixed)
+        })
+        .collect()
+}
+
+fn neighbors_26(c: VoxelCoord) -> Vec<VoxelCoord> {
+    let (x, y, z) = c;
+    let mut v = Vec::with_capacity(26);
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if dx == 0 && dy == 0 && dz == 0 {
+                    continue;
+                }
+                v.push((x + dx, y + dy, z + dz));
+            }
+        }
+    }
+    v
+}
+
+/// Flood BFS over solid voxels from screen pick (selection fill). `respect_color`: only like-colored
+/// to seed; if false, include any solid connected in the chosen adjacency.
+pub fn flood_fill_selection_coords(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    fill_diagonals: bool,
+    respect_color: bool,
+    match_material: bool,
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(&seed_idx) = voxel_map.get(&hit) else {
+        return Vec::new();
+    };
+    let seed_v = file.voxels[seed_idx];
+    let tc = seed_v.color;
+    let tm = seed_v.material;
+
+    let mut out: Vec<VoxelCoord> = Vec::new();
+    let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
+    let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
+    queue.push_back(hit);
+
+    while let Some(c) = queue.pop_front() {
+        if visited.contains(&c) {
+            continue;
+        }
+        visited.insert(c);
+        let Some(&idx) = voxel_map.get(&c) else {
+            continue;
+        };
+        let v = file.voxels[idx];
+        if respect_color {
+            if v.color != tc || (match_material && v.material != tm) {
+                continue;
+            }
+        }
+        out.push(c);
+
+        let neigh: Vec<VoxelCoord> = if fill_diagonals {
+            neighbors_26(c)
+        } else {
+            neighbors_6(c).to_vec()
+        };
+        for n in neigh {
+            if !in_grid(n.0, n.1, n.2, grid_size) {
+                continue;
+            }
+            if !visited.contains(&n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    out
+}
+
+/// Keep only coords whose voxels match `seed` color (and optionally material).
+pub fn filter_coords_by_seed_color(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    coords: &[VoxelCoord],
+    seed: Voxel,
+    match_material: bool,
+) -> Vec<VoxelCoord> {
+    coords
+        .iter()
+        .copied()
+        .filter(|c| {
+            voxel_map.get(c).is_some_and(|&i| {
+                let v = file.voxels[i];
+                v.color == seed.color && (!match_material || v.material == seed.material)
+            })
+        })
+        .collect()
+}
+
+/// Keep coords that lie on the same face plane as the coplanar pick from screen (solid hit).
+pub fn filter_coords_coplanar_solid_from_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    coords: &[VoxelCoord],
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(prev) = prev else {
+        return Vec::new();
+    };
+    let Some((axis, fixed)) = plane_axis_fixed(prev, hit) else {
+        return Vec::new();
+    };
+    coords
+        .iter()
+        .copied()
+        .filter(|c| voxel_map.contains_key(c) && voxel_on_plane(*c, axis, fixed))
+        .collect()
+}
+
 /// Matches web [`SculptMode`](digital-garden) for stroke-based sculpting (excluding rope/cloth generators).
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SculptStrokeMode {
     Draw,
@@ -744,7 +1246,8 @@ pub enum SculptStrokeMode {
     Gouge,
     Wall,
     Terrain,
-    Branch,
+    #[serde(alias = "branch")]
+    Extrude,
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -755,12 +1258,37 @@ pub enum TerrainSculptOp {
     Smooth,
 }
 
+/// Web `WallAreaShape` — circle/polygon need extra pointer flows; brush uses freehand spine.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WallAreaShape {
+    #[default]
+    Brush,
+    Circle,
+    Polygon,
+}
+
+/// Web `SprayDirection` for wall extrusion.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SprayDirection {
+    #[default]
+    Auto,
+    None,
+    Right,
+    Left,
+    Up,
+    Down,
+    Back,
+    Forward,
+}
+
 #[inline]
 fn sculpt_edit_tool(mode: SculptStrokeMode) -> EditTool {
     match mode {
         SculptStrokeMode::Draw
         | SculptStrokeMode::Wall
-        | SculptStrokeMode::Branch
+        | SculptStrokeMode::Extrude
         | SculptStrokeMode::Terrain => EditTool::Add,
         SculptStrokeMode::Smooth | SculptStrokeMode::Gouge => EditTool::Remove,
     }
@@ -928,7 +1456,529 @@ fn apply_terrain_sculpt(
     out
 }
 
-/// Stroke-based sculpt: draw / gouge / smooth / wall / branch behave like add/remove/smooth;
+/// Brush footprint for one sculpt stroke sample (spine + brush offsets + spray), no edits.
+pub fn collect_sculpt_stroke_footprint(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    mode: SculptStrokeMode,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+) -> Vec<VoxelCoord> {
+    let grid_size = file.grid_size.max(1);
+    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let spray = spray_density.clamp(0.0, 1.0);
+
+    let spine = stroke_anchor_centers_sculpt(
+        mode,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if spine.is_empty() {
+        return Vec::new();
+    }
+
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+    let mut footprint: Vec<VoxelCoord> = Vec::new();
+    for (cx, cy, cz) in &spine {
+        for (dx, dy, dz) in &offsets {
+            let x = cx + dx;
+            let y = cy + dy;
+            let z = cz + dz;
+            if !in_grid(x, y, z, grid_size) {
+                continue;
+            }
+            if !spray_passes((x, y, z), spray) {
+                continue;
+            }
+            if seen.insert((x, y, z)) {
+                footprint.push((x, y, z));
+            }
+        }
+    }
+    footprint
+}
+
+fn dist_sq_point_segment(
+    px: f32,
+    py: f32,
+    pz: f32,
+    ax: f32,
+    ay: f32,
+    az: f32,
+    bx: f32,
+    by: f32,
+    bz: f32,
+) -> f32 {
+    let abx = bx - ax;
+    let aby = by - ay;
+    let abz = bz - az;
+    let apx = px - ax;
+    let apy = py - ay;
+    let apz = pz - az;
+    let ab_len_sq = abx * abx + aby * aby + abz * abz;
+    if ab_len_sq < 1e-12 {
+        let dx = px - ax;
+        let dy = py - ay;
+        let dz = pz - az;
+        return dx * dx + dy * dy + dz * dz;
+    }
+    let mut t = (apx * abx + apy * aby + apz * abz) / ab_len_sq;
+    t = t.clamp(0.0, 1.0);
+    let qx = ax + t * abx;
+    let qy = ay + t * aby;
+    let qz = az + t * abz;
+    let dx = px - qx;
+    let dy = py - qy;
+    let dz = pz - qz;
+    dx * dx + dy * dy + dz * dz
+}
+
+fn min_dist_point_to_polyline(px: f32, py: f32, pz: f32, spine: &[(i32, i32, i32)]) -> f32 {
+    if spine.is_empty() {
+        return 0.0;
+    }
+    if spine.len() == 1 {
+        let sx = spine[0].0 as f32 + 0.5;
+        let sy = spine[0].1 as f32 + 0.5;
+        let sz = spine[0].2 as f32 + 0.5;
+        let dx = px - sx;
+        let dy = py - sy;
+        let dz = pz - sz;
+        return (dx * dx + dy * dy + dz * dz).sqrt();
+    }
+    let mut min_d = f32::INFINITY;
+    for i in 0..spine.len() - 1 {
+        let ax = spine[i].0 as f32 + 0.5;
+        let ay = spine[i].1 as f32 + 0.5;
+        let az = spine[i].2 as f32 + 0.5;
+        let bx = spine[i + 1].0 as f32 + 0.5;
+        let by = spine[i + 1].1 as f32 + 0.5;
+        let bz = spine[i + 1].2 as f32 + 0.5;
+        let d = dist_sq_point_segment(px, py, pz, ax, ay, az, bx, by, bz).sqrt();
+        if d < min_d {
+            min_d = d;
+        }
+    }
+    min_d
+}
+
+/// Mulberry32 — matches web `createSeededRng` (`strokeGeometry.ts`).
+fn mulberry32_next(state: &mut u32) -> f32 {
+    *state = state.wrapping_add(0x6d2b79f5);
+    let mut t = *state;
+    t = (t ^ (t >> 15)).wrapping_mul(t | 1);
+    t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
+    ((t ^ (t >> 14)) as f32) / 4294967296.0
+}
+
+/// Web `computeSculptVoxelWeights` + `filterPositionsBySculptBrush` (sculptBrushWeights.ts).
+fn filter_sculpt_footprint_stochastic(
+    footprint: Vec<VoxelCoord>,
+    spine: &[(i32, i32, i32)],
+    brush_radius: u32,
+    falloff_100: u32,
+    strength_100: u32,
+    stroke_seed: u32,
+) -> Vec<VoxelCoord> {
+    let fall = (falloff_100.min(100) as f32) / 100.0;
+    let str = (strength_100.max(1).min(100) as f32) / 100.0;
+    if fall <= 1e-9 && str >= 1.0 - 1e-9 {
+        return footprint;
+    }
+
+    let r_vox = (brush_radius as f32 * 0.5).max(1e-6);
+
+    let mut spine_eff: Vec<(i32, i32, i32)> = spine.to_vec();
+    if spine_eff.is_empty() && !footprint.is_empty() {
+        spine_eff.push(footprint[0]);
+    }
+
+    let mut rng_state = stroke_seed;
+    let mut out: Vec<VoxelCoord> = Vec::with_capacity(footprint.len());
+    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
+
+    for (x, y, z) in footprint {
+        if !seen.insert((x, y, z)) {
+            continue;
+        }
+        let cx = x as f32 + 0.5;
+        let cy = y as f32 + 0.5;
+        let cz = z as f32 + 0.5;
+
+        let mut w = 1.0f32;
+        if fall > 1e-9 && !spine_eff.is_empty() {
+            let d = min_dist_point_to_polyline(cx, cy, cz, &spine_eff);
+            let t = (d / r_vox).min(1.0);
+            let soft = (1.0 - t) * (1.0 - t);
+            w = (1.0 - fall) + fall * soft;
+            w = w.clamp(0.0, 1.0);
+        }
+
+        let p = w * str;
+        if p >= 1.0 - 1e-9 {
+            out.push((x, y, z));
+            continue;
+        }
+        if p <= 1e-9 {
+            continue;
+        }
+        let u = mulberry32_next(&mut rng_state);
+        if u < p {
+            out.push((x, y, z));
+        }
+    }
+    out
+}
+
+fn snap_normal_to_axis(n: (i32, i32, i32)) -> (i32, i32, i32) {
+    let ax = n.0.abs();
+    let ay = n.1.abs();
+    let az = n.2.abs();
+    if ax >= ay && ax >= az {
+        return (if n.0 >= 0 { 1 } else { -1 }, 0, 0);
+    }
+    if ay >= az {
+        return (0, if n.1 >= 0 { 1 } else { -1 }, 0);
+    }
+    (0, 0, if n.2 >= 0 { 1 } else { -1 })
+}
+
+pub fn spray_direction_vector(
+    dir: SprayDirection,
+    face_normal: Option<(i32, i32, i32)>,
+) -> Option<(i32, i32, i32)> {
+    match dir {
+        SprayDirection::Auto => face_normal.map(snap_normal_to_axis),
+        SprayDirection::None => None,
+        SprayDirection::Down => Some((0, -1, 0)),
+        SprayDirection::Up => Some((0, 1, 0)),
+        SprayDirection::Forward => Some((0, 0, -1)),
+        SprayDirection::Back => Some((0, 0, 1)),
+        SprayDirection::Left => Some((-1, 0, 0)),
+        SprayDirection::Right => Some((1, 0, 0)),
+    }
+}
+
+fn wall_lock_axis(dir: SprayDirection, face_n: Option<(i32, i32, i32)>) -> Option<usize> {
+    match dir {
+        SprayDirection::Auto => {
+            let d = spray_direction_vector(SprayDirection::Auto, face_n)?;
+            if d.0 != 0 {
+                Some(0)
+            } else if d.1 != 0 {
+                Some(1)
+            } else {
+                Some(2)
+            }
+        }
+        SprayDirection::Left | SprayDirection::Right => Some(0),
+        SprayDirection::Down | SprayDirection::Up => Some(1),
+        SprayDirection::Forward | SprayDirection::Back => Some(2),
+        SprayDirection::None => None,
+    }
+}
+
+fn perpendicular_step_thick(dir: (i32, i32, i32)) -> (i32, i32, i32) {
+    if dir.0 != 0 {
+        (0, 1, 0)
+    } else if dir.1 != 0 {
+        (1, 0, 0)
+    } else {
+        (0, 1, 0)
+    }
+}
+
+fn thicken_path_in_plane_wall(
+    positions: &[(i32, i32, i32)],
+    radius: f32,
+    plane_normal_axis: usize,
+) -> Vec<(i32, i32, i32)> {
+    if radius <= 0.0 {
+        return positions.to_vec();
+    }
+    let lo = -radius.ceil() as i32;
+    let hi = radius.floor() as i32;
+    let mut seen: HashSet<(i32, i32, i32)> = positions.iter().copied().collect();
+    let mut result: Vec<(i32, i32, i32)> = positions.to_vec();
+    for &(px, py, pz) in positions {
+        match plane_normal_axis {
+            0 => {
+                for dy in lo..=hi {
+                    for dz in lo..=hi {
+                        let p = (px, py + dy, pz + dz);
+                        if seen.insert(p) {
+                            result.push(p);
+                        }
+                    }
+                }
+            }
+            1 => {
+                for dx in lo..=hi {
+                    for dz in lo..=hi {
+                        let p = (px + dx, py, pz + dz);
+                        if seen.insert(p) {
+                            result.push(p);
+                        }
+                    }
+                }
+            }
+            _ => {
+                for dx in lo..=hi {
+                    for dy in lo..=hi {
+                        let p = (px + dx, py + dy, pz);
+                        if seen.insert(p) {
+                            result.push(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
+
+fn directional_streak_wall(
+    base: &[(i32, i32, i32)],
+    direction: (i32, i32, i32),
+    streak_len: i32,
+) -> Vec<(i32, i32, i32)> {
+    let len = streak_len.max(0);
+    if len == 0 {
+        return base.to_vec();
+    }
+    let (dx, dy, dz) = direction;
+    let mut seen: HashSet<(i32, i32, i32)> = base.iter().copied().collect();
+    let mut result = base.to_vec();
+    for &(px, py, pz) in base {
+        for k in 1..=len {
+            let p = (px + k * dx, py + k * dy, pz + k * dz);
+            if seen.insert(p) {
+                result.push(p);
+            }
+        }
+    }
+    result
+}
+
+/// Outward face normal (empty cell before solid along the ray).
+pub fn outward_face_normal_from_screen_ray(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<(i32, i32, i32)> {
+    let grid_size = file.grid_size.max(1);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let (hit, prev) = ray_first_solid(origin, dir, voxel_map, grid_size)?;
+    let prev = prev?;
+    Some((prev.0 - hit.0, prev.1 - hit.1, prev.2 - hit.2))
+}
+
+/// Web `thickenPathForStroke` wall path + strength/falloff.
+pub fn compute_wall_sculpt_footprint(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    wall_area_shape: WallAreaShape,
+    spray_direction: SprayDirection,
+    wall_width_index: u32,
+    wall_height_vox: u32,
+    wall_lock_start_height: bool,
+    wall_axis_align: bool,
+    brush_radius: u32,
+    brush_falloff: u32,
+    brush_strength: u32,
+    stroke_seed: u32,
+) -> Vec<VoxelCoord> {
+    let _ = wall_area_shape;
+
+    let mut spine = stroke_anchor_centers_sculpt(
+        SculptStrokeMode::Wall,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if spine.is_empty() {
+        return Vec::new();
+    }
+
+    if wall_axis_align && spine.len() >= 2 {
+        let a = spine[0];
+        let b = spine[spine.len() - 1];
+        spine = voxel_line_dda(a, b);
+    }
+
+    let face_out = outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy);
+    let face_snapped = face_out.map(snap_normal_to_axis);
+
+    if wall_lock_start_height {
+        if let Some(axis) = wall_lock_axis(spray_direction, face_snapped) {
+            let fixed = match axis {
+                0 => spine[0].0,
+                1 => spine[0].1,
+                _ => spine[0].2,
+            };
+            for p in spine.iter_mut() {
+                match axis {
+                    0 => p.0 = fixed,
+                    1 => p.1 = fixed,
+                    _ => p.2 = fixed,
+                }
+            }
+        }
+    }
+
+    let spine_for_weights = spine.clone();
+
+    let wparam = if wall_width_index == 0 {
+        0u32
+    } else {
+        wall_width_index.saturating_add(1)
+    };
+
+    let dir_vec = spray_direction_vector(spray_direction, face_snapped);
+    let dir_for_plane = dir_vec.unwrap_or((0, 1, 0));
+    let plane_normal_axis = if dir_for_plane.0 != 0 {
+        0usize
+    } else if dir_for_plane.1 != 0 {
+        1usize
+    } else {
+        2usize
+    };
+
+    let mut base_positions: Vec<(i32, i32, i32)> = spine;
+
+    if wparam == 0 {
+        // path only
+    } else if wparam == 1 {
+        let perp = perpendicular_step_thick(dir_for_plane);
+        let mut seen: HashSet<(i32, i32, i32)> = base_positions.iter().copied().collect();
+        let mut extra = base_positions.clone();
+        for &(px, py, pz) in &base_positions {
+            let p = (px + perp.0, py + perp.1, pz + perp.2);
+            if seen.insert(p) {
+                extra.push(p);
+            }
+        }
+        base_positions = extra;
+    } else {
+        let r = (wparam - 1) as f32 * 0.5;
+        base_positions = thicken_path_in_plane_wall(&base_positions, r, plane_normal_axis);
+    }
+
+    let h = wall_height_vox.max(2) as i32;
+    let mut out = if let Some(dv) = dir_vec {
+        directional_streak_wall(&base_positions, dv, h)
+    } else {
+        base_positions
+    };
+
+    let grid_size = file.grid_size.max(1);
+    out.retain(|&(x, y, z)| in_grid(x, y, z, grid_size));
+
+    filter_sculpt_footprint_stochastic(
+        out,
+        &spine_for_weights,
+        brush_radius,
+        brush_falloff,
+        brush_strength,
+        stroke_seed,
+    )
+}
+
+/// Brush footprint after web-style strength / falloff thinning. Terrain skips thinning (column ops).
+pub fn sculpt_stroke_effective_footprint(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    mode: SculptStrokeMode,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    brush_strength: u32,
+    brush_falloff: u32,
+    stroke_seed: u32,
+) -> Vec<VoxelCoord> {
+    let footprint = collect_sculpt_stroke_footprint(
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        mode,
+        brush_radius,
+        brush_shape,
+        spray_density,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    if footprint.is_empty() {
+        return footprint;
+    }
+    if matches!(mode, SculptStrokeMode::Terrain) {
+        return footprint;
+    }
+    let spine = stroke_anchor_centers_sculpt(
+        mode,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        stroke_line_start,
+        stroke_segment_prev,
+    );
+    filter_sculpt_footprint_stochastic(
+        footprint,
+        &spine,
+        brush_radius,
+        brush_falloff,
+        brush_strength,
+        stroke_seed,
+    )
+}
+
+/// Stroke-based sculpt: draw / gouge / smooth / wall / extrude behave like add/remove/smooth;
 /// terrain uses column heightfield ops (web `applyTerrainStroke`).
 pub fn apply_sculpt_stroke(
     file: &mut VoxelleFile,
@@ -951,10 +2001,62 @@ pub fn apply_sculpt_stroke(
     terrain_strength: i32,
     terrain_smooth_radius: i32,
     smooth_neighbor_passes: u32,
+    brush_strength: u32,
+    brush_falloff: u32,
+    stroke_seed: u32,
+    wall_area_shape: WallAreaShape,
+    spray_direction: SprayDirection,
+    wall_width_index: u32,
+    wall_height_vox: u32,
+    wall_lock_start_height: bool,
+    wall_axis_align: bool,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = file.grid_size.max(1);
-    let offsets = brush_offset_cells(brush_shape, brush_radius);
-    let spray = spray_density.clamp(0.0, 1.0);
+    let footprint = if mode == SculptStrokeMode::Wall {
+        compute_wall_sculpt_footprint(
+            file,
+            voxel_map,
+            camera,
+            width,
+            height,
+            sx,
+            sy,
+            stroke_line_start,
+            stroke_segment_prev,
+            wall_area_shape,
+            spray_direction,
+            wall_width_index,
+            wall_height_vox,
+            wall_lock_start_height,
+            wall_axis_align,
+            brush_radius,
+            brush_falloff,
+            brush_strength,
+            stroke_seed,
+        )
+    } else {
+        sculpt_stroke_effective_footprint(
+            file,
+            voxel_map,
+            camera,
+            width,
+            height,
+            sx,
+            sy,
+            mode,
+            brush_radius,
+            brush_shape,
+            spray_density,
+            stroke_line_start,
+            stroke_segment_prev,
+            brush_strength,
+            brush_falloff,
+            stroke_seed,
+        )
+    };
+    if footprint.is_empty() {
+        return Ok(Vec::new());
+    }
 
     let spine = stroke_anchor_centers_sculpt(
         mode,
@@ -968,34 +2070,9 @@ pub fn apply_sculpt_stroke(
         stroke_line_start,
         stroke_segment_prev,
     );
-    if spine.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
-    let mut footprint: Vec<(i32, i32, i32)> = Vec::new();
-    for (cx, cy, cz) in &spine {
-        for (dx, dy, dz) in &offsets {
-            let x = cx + dx;
-            let y = cy + dy;
-            let z = cz + dz;
-            if !in_grid(x, y, z, grid_size) {
-                continue;
-            }
-            if !spray_passes((x, y, z), spray) {
-                continue;
-            }
-            if seen.insert((x, y, z)) {
-                footprint.push((x, y, z));
-            }
-        }
-    }
-    if footprint.is_empty() {
-        return Ok(Vec::new());
-    }
 
     match mode {
-        SculptStrokeMode::Draw | SculptStrokeMode::Wall | SculptStrokeMode::Branch => {
+        SculptStrokeMode::Draw | SculptStrokeMode::Wall | SculptStrokeMode::Extrude => {
             let mut out: Vec<VoxelEditDelta> = Vec::new();
             for (x, y, z) in footprint {
                 if voxel_map.contains_key(&(x, y, z)) {
@@ -1289,6 +2366,22 @@ pub fn remove_voxel_at(
     Some(removed_voxel)
 }
 
+/// Remove solid voxels at the given coordinates. Skips empty cells.
+/// Web parity: `deleteSelectedVoxels` — selection set is unchanged.
+pub fn remove_voxels_at_coords(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    coords: impl IntoIterator<Item = VoxelCoord>,
+) -> Vec<VoxelEditDelta> {
+    let mut out = Vec::new();
+    for c in coords {
+        if let Some(v) = remove_voxel_at(file, voxel_map, c) {
+            out.push(VoxelEditDelta::Removed { voxel: v });
+        }
+    }
+    out
+}
+
 pub fn push_voxel_known(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
@@ -1577,67 +2670,6 @@ pub fn sculpt_raise_at_screen(
     Ok(vec![VoxelEditDelta::Added(nv)])
 }
 
-/// Demo generator: filled sphere of voxels at the add-tool anchor.
-pub fn generator_sphere_at_screen(
-    file: &mut VoxelleFile,
-    voxel_map: &mut AHashMap<VoxelCoord, usize>,
-    camera: &OrbitCamera,
-    width: f32,
-    height: f32,
-    sx: f32,
-    sy: f32,
-    radius: i32,
-    color: u32,
-    material: MaterialId,
-) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
-    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((_, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
-        return Ok(Vec::new());
-    };
-    let Some((cx, cy, cz)) = prev else {
-        return Ok(Vec::new());
-    };
-    let r = radius.max(1).min(12);
-    let r2 = r * r;
-    let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
-    let mut out: Vec<VoxelEditDelta> = Vec::new();
-    for dx in -r..=r {
-        for dy in -r..=r {
-            for dz in -r..=r {
-                if dx * dx + dy * dy + dz * dz > r2 {
-                    continue;
-                }
-                let x = cx + dx;
-                let y = cy + dy;
-                let z = cz + dz;
-                if !in_grid(x, y, z, grid_size) {
-                    continue;
-                }
-                if !seen.insert((x, y, z)) {
-                    continue;
-                }
-                if voxel_map.contains_key(&(x, y, z)) {
-                    continue;
-                }
-                let nv = Voxel {
-                    x,
-                    y,
-                    z,
-                    color,
-                    material,
-                    object_id: file.active_object_id,
-                };
-                let idx = file.voxels.len();
-                file.voxels.push(nv);
-                voxel_map.insert((x, y, z), idx);
-                out.push(VoxelEditDelta::Added(nv));
-            }
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1695,6 +2727,7 @@ mod tests {
             scene: crate::voxelle::Scene::default(),
             scene_extra: None,
             mood: None,
+            lighting: None,
             voxels: vec![Voxel {
                 x: 0,
                 y: 0,
@@ -1734,6 +2767,15 @@ mod tests {
             4,
             2,
             1,
+            100,
+            0,
+            0,
+            WallAreaShape::Brush,
+            SprayDirection::Auto,
+            0,
+            2,
+            false,
+            false,
         )
         .unwrap();
         assert!(!deltas.is_empty());

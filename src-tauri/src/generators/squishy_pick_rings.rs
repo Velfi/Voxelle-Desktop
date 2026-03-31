@@ -1,0 +1,41 @@
+//! Per-metaball wire pick shells (web `syncSquishyPickMeshes` parity).
+
+use crate::generators::squishy_session::{SquishyMode, SquishySession};
+use crate::greedy_mesh::{self, MeshBuffers};
+
+/// Web: `deleteHover ? 0xff3355 : isSelected ? 0xffcc55 : 0x40b8ff`; add ghost `0x5ef5a0`.
+pub fn append_squishy_metaball_pick_rings(
+    dst: &mut MeshBuffers,
+    session: &SquishySession,
+    add_anchor: Option<(i32, i32, i32)>,
+    preview_radius_i: i32,
+    delete_hover_id: Option<u32>,
+) {
+    for b in &session.balls {
+        let cx = b.x as f32 + 0.5;
+        let cy = b.y as f32 + 0.5;
+        let cz = b.z as f32 + 0.5;
+        let r = b.radius.max(0.2);
+        let delete_hover =
+            session.mode == SquishyMode::Delete && delete_hover_id == Some(b.id);
+        let is_selected = session.selected_id == Some(b.id);
+        let color = if delete_hover {
+            [1.0, 51.0 / 255.0, 85.0 / 255.0]
+        } else if is_selected {
+            [1.0, 204.0 / 255.0, 85.0 / 255.0]
+        } else {
+            [64.0 / 255.0, 184.0 / 255.0, 1.0]
+        };
+        greedy_mesh::append_sphere_pick_rings(dst, cx, cy, cz, r, color, 2.0, 24);
+    }
+    if session.mode == SquishyMode::Add {
+        if let Some((ax, ay, az)) = add_anchor {
+            let cx = ax as f32 + 0.5;
+            let cy = ay as f32 + 0.5;
+            let cz = az as f32 + 0.5;
+            let r = (preview_radius_i as f32).max(0.2);
+            let color = [94.0 / 255.0, 245.0 / 255.0, 160.0 / 255.0];
+            greedy_mesh::append_sphere_pick_rings(dst, cx, cy, cz, r, color, 2.0, 24);
+        }
+    }
+}

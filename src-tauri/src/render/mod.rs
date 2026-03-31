@@ -10,6 +10,9 @@ mod gpu {
     pub mod post_bloom_extract {
         pub const WGSL: &str = include_str!("post_bloom_extract.wgsl");
     }
+    pub mod meter_luminance {
+        pub const WGSL: &str = include_str!("meter_luminance.wgsl");
+    }
     pub mod post_blur {
         pub const WGSL: &str = include_str!("post_blur.wgsl");
     }
@@ -18,6 +21,9 @@ mod gpu {
     }
     pub mod sky {
         pub const WGSL: &str = include_str!("sky.wgsl");
+    }
+    pub mod start_screen_bg {
+        pub const WGSL: &str = include_str!("start_screen_bg.wgsl");
     }
     pub mod mesh_greedy {
         pub const WGSL: &str = include_str!("gpu/mesh_greedy.wgsl");
@@ -269,6 +275,10 @@ struct GlobalState {
     brick_dims: [f32; 4],
     screen: [f32; 4],
     params: [f32; 4],
+    /// x: ambient scale, y: sun scale, z: shadows on (0/1), w: sky gradient on (0/1)
+    light_params: [f32; 4],
+    sun_color: [f32; 4],
+    bg_color: [f32; 4],
 }
 
 #[repr(C, align(16))]
@@ -289,8 +299,10 @@ struct PostCompositeOpts {
     atmosphere_strength: f32,
     /// Stylized radial streak (web sun shafts).
     sun_shaft_strength: f32,
-    _pad0: f32,
-    _pad1: f32,
+    /// 1 = premultiplied alpha from scene energy (cold-start logo over webview).
+    transparent_bg: f32,
+    /// Exposure in EV stops (`rgb *= 2^ev` before tone mapping).
+    exposure_ev: f32,
 }
 
 pub struct WgpuViewer {
@@ -315,6 +327,12 @@ pub struct WgpuViewer {
 
     scene_bounds: MeshBounds,
     light_dir: Vec3,
+    light_ambient: f32,
+    light_sun: f32,
+    sun_color_linear: Vec3,
+    bg_color_linear: Vec3,
+    shadows_enabled: bool,
+    sky_enabled: bool,
 
     #[allow(dead_code)]
     shadow_texture: wgpu::Texture,
@@ -365,11 +383,28 @@ pub struct WgpuViewer {
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
     pipeline_sky: wgpu::RenderPipeline,
+    pipeline_start_screen_bg: wgpu::RenderPipeline,
     pipeline_trans: wgpu::RenderPipeline,
     pipeline_shadow: wgpu::RenderPipeline,
     pipeline_bloom_extract: wgpu::RenderPipeline,
     pipeline_blur: wgpu::RenderPipeline,
     pipeline_composite: wgpu::RenderPipeline,
+    /// 1×1 average linear luminance (HDR, pre-exposure) for auto exposure.
+    pipeline_meter: wgpu::RenderPipeline,
+    meter_texture: wgpu::Texture,
+    meter_view: wgpu::TextureView,
+    meter_staging: wgpu::Buffer,
+    bind_meter: wgpu::BindGroup,
+    /// User EV slider (−5…5); with auto exposure, added as bias on metered EV.
+    exposure_user_ev: f32,
+    auto_exposure_enabled: bool,
+    /// Smoothed \( \log_2(\text{target}/\bar{L}) \) from metering.
+    auto_exposure_smoothed: f32,
+
+    /// When true, draw [`pipeline_start_screen_bg`] instead of sky (default true until a scene load sets [`ViewerState::start_screen_logo_transparent`] false).
+    start_screen_transparent: bool,
+    /// 0 = dark cold-start gradient, 1 = light (paper) — passed in [`GlobalState::params`].x for `start_screen_bg.wgsl`.
+    start_screen_appearance: f32,
 
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
@@ -399,8 +434,15 @@ pub struct WgpuViewer {
     ping_wire_vertex_buffer: Option<wgpu::Buffer>,
     ping_wire_index_buffer: Option<wgpu::Buffer>,
     ping_wire_index_count: u32,
+    selection_overlay_vertex_buffer: Option<wgpu::Buffer>,
+    selection_overlay_index_buffer: Option<wgpu::Buffer>,
+    selection_overlay_index_count: u32,
+    selection_overlay_line_vertex_buffer: Option<wgpu::Buffer>,
+    selection_overlay_line_vertex_count: u32,
     /// Dedup CPU mesh rebuild when hover cell unchanged.
-    pub preview_cache_key: Option<(i32, i32, i32, u8)>,
+    pub preview_cache_key: Option<u64>,
+    /// `(selection fingerprint, mesh_refresh_generation)` — invalidates when selection or voxels change.
+    pub selection_overlay_cache_key: Option<u64>,
 
     sampler_linear: wgpu::Sampler,
     sampler_comparison: wgpu::Sampler,
@@ -537,6 +579,14 @@ fn light_view_proj(bounds: &MeshBounds, light_dir: Vec3) -> Mat4 {
     let he = r * 1.8;
     let proj = Mat4::orthographic_rh(-he, he, -he, he, 1.0, r * 12.0);
     proj * view
+}
+
+/// Horizontal angle (degrees, CCW from +X in XZ) and elevation above XZ (degrees). Y-up.
+fn light_dir_from_azimuth_elevation_deg(azimuth_deg: f32, elevation_deg: f32) -> Vec3 {
+    let az = azimuth_deg.to_radians();
+    let el = elevation_deg.clamp(0.5, 89.5).to_radians();
+    let ce = el.cos();
+    Vec3::new(ce * az.cos(), el.sin(), ce * az.sin()).normalize()
 }
 
 /// Alpha blend into HDR color; leave destination alpha (bloom/glow mask) unchanged.
@@ -1060,6 +1110,10 @@ impl WgpuViewer {
             label: Some("sky"),
             source: wgpu::ShaderSource::Wgsl(gpu::sky::WGSL.into()),
         });
+        let shader_start_screen_bg = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("start_screen_bg"),
+            source: wgpu::ShaderSource::Wgsl(gpu::start_screen_bg::WGSL.into()),
+        });
         let shader_shadow = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("shadow"),
             source: wgpu::ShaderSource::Wgsl(gpu::shadow::WGSL.into()),
@@ -1075,6 +1129,10 @@ impl WgpuViewer {
         let shader_composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("composite"),
             source: wgpu::ShaderSource::Wgsl(gpu::post_composite::WGSL.into()),
+        });
+        let shader_meter = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("meter_lum"),
+            source: wgpu::ShaderSource::Wgsl(gpu::meter_luminance::WGSL.into()),
         });
         let shader_collab_lines = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("collab_peer_lines"),
@@ -1225,9 +1283,16 @@ impl WgpuViewer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::Always,
+                    // In-front preview only (complements `Greater` occluded pass). `Always` was
+                    // blending bright preview over occluded/x-ray regions and through solids.
+                    depth_compare: wgpu::CompareFunction::LessEqual,
                     stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
+                    // Nudge slightly toward the camera so preview wins coplanar depth ties with mesh.
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
                 }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
@@ -1292,9 +1357,13 @@ impl WgpuViewer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::Always,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
                     stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
                 }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
@@ -1313,6 +1382,45 @@ impl WgpuViewer {
             fragment: Some(wgpu::FragmentState {
                 module: &shader_sky,
                 entry_point: Some("fs_sky_mrt"),
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: vf,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: vf,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let pipeline_start_screen_bg = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("start_screen_bg"),
+            layout: Some(&pl_opaque),
+            vertex: wgpu::VertexState {
+                module: &shader_start_screen_bg,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_start_screen_bg,
+                entry_point: Some("fs_start_screen_mrt"),
                 targets: &[
                     Some(wgpu::ColorTargetState {
                         format: vf,
@@ -1437,6 +1545,52 @@ impl WgpuViewer {
             })],
             None,
         );
+        let pipeline_meter = fullscreen_pipeline(
+            &device,
+            &pl_bloom,
+            &shader_meter,
+            "fs_meter",
+            &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::R32Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            None,
+        );
+
+        let meter_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("meter_lum"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let meter_view = meter_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let meter_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("meter_staging"),
+            size: 256,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let default_lit = crate::voxelle::LightingSettings::default();
+        let light_dir = light_dir_from_azimuth_elevation_deg(
+            default_lit.light_angle_deg,
+            default_lit.light_elevation_deg,
+        );
+        let sun_c = crate::voxelle::hex_srgb_to_linear_rgb3(&default_lit.light_color)
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
+            .unwrap_or(Vec3::ONE);
+        let bg_c = crate::voxelle::hex_srgb_to_linear_rgb3(&default_lit.background_color)
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
+            .unwrap_or(Vec3::new(0.04, 0.045, 0.055));
 
         let global_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("globals"),
@@ -1462,8 +1616,8 @@ impl WgpuViewer {
             distance_tint_strength: 0.0,
             atmosphere_strength: 0.0,
             sun_shaft_strength: 0.0,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            transparent_bg: 0.0,
+            exposure_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
         };
         let post_composite_opts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("post_composite_opts"),
@@ -1495,7 +1649,6 @@ impl WgpuViewer {
             min: Vec3::splat(-10.0),
             max: Vec3::splat(10.0),
         };
-        let light_dir = Vec3::new(0.35, 0.92, 0.15).normalize();
 
         let (
             hdr_opaque_texture,
@@ -1555,6 +1708,20 @@ impl WgpuViewer {
 
         let bind_bloom_extract = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_ex"),
+            layout: &post_bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+            ],
+        });
+        let bind_meter = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("meter_lum"),
             layout: &post_bloom_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -1659,6 +1826,12 @@ impl WgpuViewer {
             brick_dims_u: (0, 0, 0),
             scene_bounds,
             light_dir,
+            light_ambient: default_lit.ambient_intensity,
+            light_sun: default_lit.sunlight_intensity,
+            sun_color_linear: sun_c,
+            bg_color_linear: bg_c,
+            shadows_enabled: default_lit.enable_shadows,
+            sky_enabled: default_lit.enable_sky,
             shadow_texture,
             shadow_view,
             hdr_opaque_texture,
@@ -1684,6 +1857,7 @@ impl WgpuViewer {
             bind_scene_opaque,
             bind_shadow_pass,
             bind_bloom_extract,
+            bind_meter,
             bind_blur_h,
             bind_blur_v,
             bind_composite,
@@ -1697,11 +1871,22 @@ impl WgpuViewer {
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
             pipeline_sky,
+            pipeline_start_screen_bg,
             pipeline_trans,
             pipeline_shadow,
             pipeline_bloom_extract,
             pipeline_blur,
             pipeline_composite,
+            pipeline_meter,
+            meter_texture,
+            meter_view,
+            meter_staging,
+            exposure_user_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
+            auto_exposure_enabled: default_lit.auto_exposure,
+            auto_exposure_smoothed: 0.0,
+            // Match default `ViewerState::start_screen_logo_transparent`: gradient until a real scene load turns it off.
+            start_screen_transparent: true,
+            start_screen_appearance: 0.0,
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
@@ -1725,7 +1910,13 @@ impl WgpuViewer {
             ping_wire_vertex_buffer: None,
             ping_wire_index_buffer: None,
             ping_wire_index_count: 0,
+            selection_overlay_vertex_buffer: None,
+            selection_overlay_index_buffer: None,
+            selection_overlay_index_count: 0,
+            selection_overlay_line_vertex_buffer: None,
+            selection_overlay_line_vertex_count: 0,
             preview_cache_key: None,
+            selection_overlay_cache_key: None,
             sampler_linear,
             sampler_comparison,
             sampler_nearest,
@@ -1828,6 +2019,11 @@ impl WgpuViewer {
         (self.viewport_width.max(1), self.viewport_height.max(1))
     }
 
+    /// Swapchain drawable in physical pixels (matches [`Self::surface_size`]; may differ slightly from webview `inner* × dpr` after configure).
+    pub fn surface_pixel_size(&self) -> (u32, u32) {
+        (self.surface_size.0.max(1), self.surface_size.1.max(1))
+    }
+
     /// Update world-space AABB used for lighting / shadow frusta (call when the opaque mesh changes without a voxel brick upload).
     pub fn set_scene_bounds(&mut self, bounds: MeshBounds) {
         self.scene_bounds = bounds;
@@ -1863,6 +2059,76 @@ impl WgpuViewer {
             0,
             bytemuck::bytes_of(&self.post_composite_opts),
         );
+    }
+
+    fn sync_composite_exposure_ev(&mut self) {
+        self.post_composite_opts.exposure_ev = if self.auto_exposure_enabled {
+            (self.auto_exposure_smoothed + self.exposure_user_ev).clamp(-5.0, 5.0)
+        } else {
+            self.exposure_user_ev
+        };
+    }
+
+    /// Read 1×1 meter from the previous submit; updates smoothed EV for the next frame.
+    fn read_meter_luminance_and_update_auto_exposure(&mut self) {
+        let slice = self.meter_staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        let Ok(map_ok) = rx.recv() else {
+            return;
+        };
+        if map_ok.is_err() {
+            return;
+        }
+        let lum = {
+            let view = slice.get_mapped_range();
+            let arr: [u8; 4] = view[0..4].try_into().unwrap_or([0; 4]);
+            let v = f32::from_le_bytes(arr);
+            drop(view);
+            self.meter_staging.unmap();
+            v
+        };
+        let target = 0.18_f32;
+        let ev_inst = (target / lum.max(1e-5)).log2();
+        // Faster adaptation so toggling auto is visibly responsive (still stable).
+        self.auto_exposure_smoothed = self.auto_exposure_smoothed * 0.82 + ev_inst * 0.18;
+    }
+
+    pub fn apply_lighting_settings(&mut self, s: &crate::voxelle::LightingSettings) {
+        self.light_ambient = s.ambient_intensity.max(0.0);
+        self.light_sun = s.sunlight_intensity.max(0.0);
+        self.shadows_enabled = s.enable_shadows;
+        self.sky_enabled = s.enable_sky;
+        self.light_dir = light_dir_from_azimuth_elevation_deg(s.light_angle_deg, s.light_elevation_deg);
+        self.sun_color_linear = crate::voxelle::hex_srgb_to_linear_rgb3(&s.light_color)
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
+            .unwrap_or(Vec3::ONE);
+        self.bg_color_linear = crate::voxelle::hex_srgb_to_linear_rgb3(&s.background_color)
+            .map(|c| Vec3::new(c[0], c[1], c[2]))
+            .unwrap_or(Vec3::new(0.04, 0.045, 0.055));
+        self.exposure_user_ev = s.exposure_ev.clamp(-5.0, 5.0);
+        let was_auto = self.auto_exposure_enabled;
+        self.auto_exposure_enabled = s.auto_exposure;
+        if s.auto_exposure && !was_auto {
+            self.auto_exposure_smoothed = 0.0;
+        }
+        self.sync_composite_exposure_ev();
+        self.queue.write_buffer(
+            &self.post_composite_opts_buf,
+            0,
+            bytemuck::bytes_of(&self.post_composite_opts),
+        );
+    }
+
+    pub fn set_start_screen_transparent(&mut self, v: bool) {
+        self.start_screen_transparent = v;
+    }
+
+    pub fn set_start_screen_appearance(&mut self, t: f32) {
+        self.start_screen_appearance = t.clamp(0.0, 1.0);
     }
 
     fn rebuild_bind_groups(&mut self) {
@@ -1904,6 +2170,20 @@ impl WgpuViewer {
         });
         self.bind_bloom_extract = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_ex"),
+            layout: &self.post_bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.hdr_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+            ],
+        });
+        self.bind_meter = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("meter_lum"),
             layout: &self.post_bloom_layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2890,6 +3170,66 @@ impl WgpuViewer {
         self.preview_cache_key = None;
     }
 
+    pub fn upload_selection_overlay_solid(&mut self, solid: &MeshBuffers) {
+        if solid.indices.is_empty() {
+            self.selection_overlay_vertex_buffer = None;
+            self.selection_overlay_index_buffer = None;
+            self.selection_overlay_index_count = 0;
+            return;
+        }
+        let solid_v = Self::interleaved_from_mesh(solid);
+        self.selection_overlay_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("selection_overlay_vtx"),
+                contents: bytemuck::cast_slice(&solid_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            },
+        ));
+        self.selection_overlay_index_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("selection_overlay_idx"),
+                contents: bytemuck::cast_slice(&solid.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            },
+        ));
+        self.selection_overlay_index_count = solid.indices.len() as u32;
+    }
+
+    pub fn upload_selection_overlay_lines(&mut self, verts: &[f32]) {
+        if verts.is_empty() || verts.len() % 6 != 0 {
+            self.selection_overlay_line_vertex_buffer = None;
+            self.selection_overlay_line_vertex_count = 0;
+            return;
+        }
+        let n_floats = verts.len();
+        let vertex_count = (n_floats / 6) as u32;
+        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
+        if let Some(ref buf) = self.selection_overlay_line_vertex_buffer {
+            if buf.size() == nbytes {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
+                self.selection_overlay_line_vertex_count = vertex_count;
+                return;
+            }
+        }
+        self.selection_overlay_line_vertex_buffer = Some(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("selection_overlay_lines_vtx"),
+                contents: bytemuck::cast_slice(verts),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+        self.selection_overlay_line_vertex_count = vertex_count;
+    }
+
+    pub fn clear_selection_overlay(&mut self) {
+        self.selection_overlay_vertex_buffer = None;
+        self.selection_overlay_index_buffer = None;
+        self.selection_overlay_index_count = 0;
+        self.selection_overlay_line_vertex_buffer = None;
+        self.selection_overlay_line_vertex_count = 0;
+        self.selection_overlay_cache_key = None;
+    }
+
     /// Line list: each vertex is `[x,y,z, r,g,b]` (6 floats); pairs form eye→target segments.
     pub fn upload_collab_peer_lines(&mut self, verts: &[f32]) {
         if verts.is_empty() || verts.len() % 6 != 0 {
@@ -3166,7 +3506,30 @@ impl WgpuViewer {
                 0.0,
             ],
             screen: [w, h, 1.0 / w.max(1.0), 1.0 / h.max(1.0)],
-            params: [0.0, 0.0, BLOOM_STRENGTH, camera.near],
+            params: [
+                self.start_screen_appearance,
+                0.0,
+                BLOOM_STRENGTH,
+                camera.near,
+            ],
+            light_params: [
+                self.light_ambient,
+                self.light_sun,
+                if self.shadows_enabled { 1.0 } else { 0.0 },
+                if self.sky_enabled { 1.0 } else { 0.0 },
+            ],
+            sun_color: [
+                self.sun_color_linear.x,
+                self.sun_color_linear.y,
+                self.sun_color_linear.z,
+                0.0,
+            ],
+            bg_color: [
+                self.bg_color_linear.x,
+                self.bg_color_linear.y,
+                self.bg_color_linear.z,
+                0.0,
+            ],
         };
         self.queue
             .write_buffer(&self.global_buffer, 0, bytemuck::bytes_of(&gs));
@@ -3222,6 +3585,40 @@ impl WgpuViewer {
                 pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
             }
         }
+    }
+
+    fn draw_indexed_selection_overlay_solid(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if let (Some(vb), Some(ib)) = (
+            &self.selection_overlay_vertex_buffer,
+            &self.selection_overlay_index_buffer,
+        ) {
+            if self.selection_overlay_index_count > 0 {
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_preview_occluded);
+                pass.draw_indexed(0..self.selection_overlay_index_count, 0, 0..1);
+                pass.set_pipeline(&self.pipeline_preview_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw_indexed(0..self.selection_overlay_index_count, 0, 0..1);
+            }
+        }
+    }
+
+    fn draw_selection_overlay_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let Some(ref vb) = self.selection_overlay_line_vertex_buffer else {
+            return;
+        };
+        if self.selection_overlay_line_vertex_count < 2 {
+            return;
+        }
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.set_pipeline(&self.pipeline_collab_lines_occluded);
+        pass.draw(0..self.selection_overlay_line_vertex_count, 0..1);
+        pass.set_pipeline(&self.pipeline_collab_lines_front);
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.draw(0..self.selection_overlay_line_vertex_count, 0..1);
     }
 
     fn draw_indexed_ping(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -3360,13 +3757,21 @@ impl WgpuViewer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline_sky);
-            pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-            pass.draw(0..3, 0..1);
+            if self.start_screen_transparent {
+                pass.set_pipeline(&self.pipeline_start_screen_bg);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw(0..3, 0..1);
+            } else {
+                pass.set_pipeline(&self.pipeline_sky);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw(0..3, 0..1);
+            }
             pass.set_pipeline(&self.pipeline_opaque);
             pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
             self.draw_indexed_mesh(&mut pass);
+            self.draw_indexed_selection_overlay_solid(&mut pass);
             self.draw_indexed_preview(&mut pass);
+            self.draw_selection_overlay_lines(&mut pass);
             self.draw_collab_peer_lines(&mut pass);
             self.draw_ping_wave_lines(&mut pass);
             self.draw_indexed_ping(&mut pass);
@@ -3491,6 +3896,62 @@ impl WgpuViewer {
             pass.draw(0..3, 0..1);
         }
 
+        if self.auto_exposure_enabled {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("meter_lum"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.meter_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.18,
+                                g: 0.0,
+                                b: 0.0,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline_meter);
+                pass.set_bind_group(0, &self.bind_meter, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &self.meter_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &self.meter_staging,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(256),
+                        rows_per_image: Some(1),
+                    },
+                },
+                wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        self.post_composite_opts.transparent_bg = 0.0;
+        self.sync_composite_exposure_ev();
+        self.queue.write_buffer(
+            &self.post_composite_opts_buf,
+            0,
+            bytemuck::bytes_of(&self.post_composite_opts),
+        );
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("composite"),
@@ -3560,6 +4021,9 @@ impl WgpuViewer {
         );
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        if self.auto_exposure_enabled {
+            self.read_meter_luminance_and_update_auto_exposure();
+        }
         frame.present();
         Ok(())
     }

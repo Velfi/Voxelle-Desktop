@@ -172,6 +172,189 @@ impl Default for MoodSettings {
     }
 }
 
+/// Scene lighting / viewport defaults under `scene.lighting` in BSON (matches web Voxelle sidebar).
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LightingSettings {
+    pub ambient_intensity: f32,
+    pub sunlight_intensity: f32,
+    pub light_color: String,
+    /// Degrees in XZ (web `lightAngle`).
+    #[serde(rename = "lightAngle")]
+    pub light_angle_deg: f32,
+    /// Degrees above horizon (web `lightElevation`).
+    #[serde(rename = "lightElevation")]
+    pub light_elevation_deg: f32,
+    pub enable_shadows: bool,
+    pub enable_sky: bool,
+    pub background_color: String,
+    pub exposure_ev: f32,
+    pub auto_exposure: bool,
+}
+
+impl Default for LightingSettings {
+    fn default() -> Self {
+        Self {
+            ambient_intensity: 1.0,
+            sunlight_intensity: 1.0,
+            light_color: "#ffffff".to_string(),
+            light_angle_deg: 45.0,
+            light_elevation_deg: 45.0,
+            enable_shadows: true,
+            enable_sky: true,
+            background_color: "#0a0b0e".to_string(),
+            exposure_ev: 0.0,
+            auto_exposure: false,
+        }
+    }
+}
+
+fn lighting_to_bson_document(l: &LightingSettings) -> Document {
+    bson::doc! {
+        "ambientIntensity": l.ambient_intensity as f64,
+        "sunlightIntensity": l.sunlight_intensity as f64,
+        "lightColor": &l.light_color,
+        "lightAngle": l.light_angle_deg as f64,
+        "lightElevation": l.light_elevation_deg as f64,
+        "enableShadows": l.enable_shadows,
+        "enableSky": l.enable_sky,
+        "backgroundColor": &l.background_color,
+        "exposureEv": l.exposure_ev as f64,
+        "autoExposure": l.auto_exposure,
+    }
+}
+
+fn parse_lighting_from_scene_optional(scene: &Document) -> Option<LightingSettings> {
+    let m = scene.get_document("lighting").ok()?;
+    Some(LightingSettings {
+        ambient_intensity: m
+            .get("ambientIntensity")
+            .and_then(|b| bson_f32(b))
+            .unwrap_or(1.0),
+        sunlight_intensity: m
+            .get("sunlightIntensity")
+            .and_then(|b| bson_f32(b))
+            .unwrap_or(1.0),
+        light_color: m
+            .get_str("lightColor")
+            .ok()
+            .map(|s| s.to_string())
+            .filter(|s| s.starts_with('#'))
+            .unwrap_or_else(|| "#ffffff".to_string()),
+        light_angle_deg: m
+            .get("lightAngle")
+            .and_then(|b| bson_f32(b))
+            .unwrap_or(45.0),
+        light_elevation_deg: m
+            .get("lightElevation")
+            .and_then(|b| bson_f32(b))
+            .unwrap_or(45.0),
+        enable_shadows: m.get_bool("enableShadows").unwrap_or(true),
+        enable_sky: m.get_bool("enableSky").unwrap_or(true),
+        background_color: m
+            .get_str("backgroundColor")
+            .ok()
+            .map(|s| s.to_string())
+            .filter(|s| s.starts_with('#'))
+            .unwrap_or_else(|| "#0a0b0e".to_string()),
+        exposure_ev: m.get("exposureEv").and_then(|b| bson_f32(b)).unwrap_or(0.0),
+        auto_exposure: m.get_bool("autoExposure").unwrap_or(false),
+    })
+}
+
+fn parse_lighting_from_raw_file_bytes(bytes: &[u8]) -> Option<LightingSettings> {
+    let doc = RawDocument::from_bytes(bytes).ok()?;
+    let scene = doc.get_document("scene").ok()?;
+    let m = scene.get_document("lighting").ok()?;
+    Some(LightingSettings {
+        ambient_intensity: m
+            .get("ambientIntensity")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(1.0),
+        sunlight_intensity: m
+            .get("sunlightIntensity")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(1.0),
+        light_color: m
+            .get("lightColor")
+            .ok()
+            .flatten()
+            .and_then(|b| match b {
+                RawBsonRef::String(s) if s.starts_with('#') => Some(s.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "#ffffff".to_string()),
+        light_angle_deg: m
+            .get("lightAngle")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(45.0),
+        light_elevation_deg: m
+            .get("lightElevation")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(45.0),
+        enable_shadows: m
+            .get("enableShadows")
+            .ok()
+            .flatten()
+            .and_then(|b| match b {
+                RawBsonRef::Boolean(x) => Some(x),
+                _ => None,
+            })
+            .unwrap_or(true),
+        enable_sky: m
+            .get("enableSky")
+            .ok()
+            .flatten()
+            .and_then(|b| match b {
+                RawBsonRef::Boolean(x) => Some(x),
+                _ => None,
+            })
+            .unwrap_or(true),
+        background_color: m
+            .get("backgroundColor")
+            .ok()
+            .flatten()
+            .and_then(|b| match b {
+                RawBsonRef::String(s) if s.starts_with('#') => Some(s.to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "#0a0b0e".to_string()),
+        exposure_ev: m
+            .get("exposureEv")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0),
+        auto_exposure: m
+            .get("autoExposure")
+            .ok()
+            .flatten()
+            .and_then(|b| match b {
+                RawBsonRef::Boolean(x) => Some(x),
+                _ => None,
+            })
+            .unwrap_or(false),
+    })
+}
+
+fn parse_lighting_from_file_bytes(bytes: &[u8]) -> Option<LightingSettings> {
+    if bytes.len() <= 8 * 1024 * 1024 {
+        let doc = bson::from_slice::<Document>(bytes).ok()?;
+        let scene = doc.get_document("scene").ok()?;
+        parse_lighting_from_scene_optional(scene)
+    } else {
+        parse_lighting_from_raw_file_bytes(bytes)
+    }
+}
+
 fn bson_f32(b: &Bson) -> Option<f32> {
     match b {
         Bson::Double(d) if d.is_finite() => Some(*d as f32),
@@ -274,6 +457,8 @@ pub struct VoxelleFile {
     pub scene_extra: Option<Document>,
     /// Parsed from `scene.mood` on load; merged into `scene` on save when `Some`.
     pub mood: Option<MoodSettings>,
+    /// Parsed from `scene.lighting` on load; merged into `scene` on save when `Some`.
+    pub lighting: Option<LightingSettings>,
     pub voxels: Vec<Voxel>,
     pub objects: Vec<SceneObject>,
     /// Target object for new voxel edits (persisted in BSON; default 0).
@@ -283,6 +468,41 @@ pub struct VoxelleFile {
 /// Match `focalLengthToFov` in Voxelle `sceneSetup.ts`.
 pub fn focal_length_to_fov_y_radians(mm: f32) -> f32 {
     2.0 * (12.0_f32 / mm).atan()
+}
+
+fn srgb_byte_to_linear_u8(b: u8) -> f32 {
+    let c = b as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// `#rgb` or `#rrggbb` (CSS-style) → linear RGB in \([0,1]\) for GPU.
+pub fn hex_srgb_to_linear_rgb3(hex: &str) -> Option<[f32; 3]> {
+    let t = hex.trim();
+    let s = t.strip_prefix('#')?;
+    let (r, g, b) = match s.len() {
+        3 => {
+            let r = u8::from_str_radix(&format!("{}{}", &s[0..1], &s[0..1]), 16).ok()?;
+            let g = u8::from_str_radix(&format!("{}{}", &s[1..2], &s[1..2]), 16).ok()?;
+            let b = u8::from_str_radix(&format!("{}{}", &s[2..3], &s[2..3]), 16).ok()?;
+            (r, g, b)
+        }
+        6 => {
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            (r, g, b)
+        }
+        _ => return None,
+    };
+    Some([
+        srgb_byte_to_linear_u8(r),
+        srgb_byte_to_linear_u8(g),
+        srgb_byte_to_linear_u8(b),
+    ])
 }
 
 fn decompress_if_gzipped(bytes: &[u8]) -> Result<Vec<u8>, ParseError> {
@@ -476,6 +696,9 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     let mood = scene_extra
         .as_ref()
         .and_then(parse_mood_from_scene_optional);
+    let lighting = scene_extra
+        .as_ref()
+        .and_then(parse_lighting_from_scene_optional);
     // Skip hidden voxels (viewer policy: visible only)
     Ok(VoxelleFile {
         version: file_version,
@@ -483,6 +706,7 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         scene,
         scene_extra,
         mood,
+        lighting,
         voxels,
         objects,
         active_object_id,
@@ -668,6 +892,7 @@ fn parse_bson_full_raw(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     };
 
     let mood = parse_mood_from_file_bytes(bytes);
+    let lighting = parse_lighting_from_file_bytes(bytes);
 
     let (objects, active_object_id) = parse_objects_bson_full(bytes);
 
@@ -677,6 +902,7 @@ fn parse_bson_full_raw(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
         scene,
         scene_extra,
         mood,
+        lighting,
         voxels,
         objects,
         active_object_id,
@@ -727,6 +953,12 @@ fn scene_document_for_encode(file: &VoxelleFile) -> Document {
     };
     if let Some(ref mood) = file.mood {
         d.insert("mood", Bson::Document(mood_to_bson_document(mood)));
+    }
+    if let Some(ref lighting) = file.lighting {
+        d.insert(
+            "lighting",
+            Bson::Document(lighting_to_bson_document(lighting)),
+        );
     }
     d
 }
@@ -883,6 +1115,7 @@ pub fn empty_collab_placeholder() -> VoxelleFile {
         },
         scene_extra: None,
         mood: None,
+        lighting: None,
         voxels: Vec::new(),
         objects: default_scene_objects(),
         active_object_id: 0,
