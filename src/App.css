@@ -59,6 +59,8 @@ body,
   --app-shadow-deep: rgb(0 0 0 / 0.55);
   --app-palette-hover-ring: rgb(255 255 255 / 0.45);
   --app-modal-secondary-bg: rgb(0 0 0 / 0.5);
+  /* White headings over GPU start canvas need a hint of shadow; dark text in light mode does not. */
+  --app-start-screen-heading-shadow: 0 1px 4px rgb(0 0 0 / 0.85);
 }
 
 :root[data-appearance="light"] {
@@ -88,6 +90,7 @@ body,
   --app-shadow-deep: rgba(0, 0, 0, 0.2);
   --app-palette-hover-ring: rgba(0, 0, 0, 0.28);
   --app-modal-secondary-bg: rgba(0, 0, 0, 0.06);
+  --app-start-screen-heading-shadow: none;
 }
 
 @media (prefers-color-scheme: light) {
@@ -118,6 +121,7 @@ body,
     --app-shadow-deep: rgba(0, 0, 0, 0.2);
     --app-palette-hover-ring: rgba(0, 0, 0, 0.28);
     --app-modal-secondary-bg: rgba(0, 0, 0, 0.06);
+    --app-start-screen-heading-shadow: none;
   }
 }
 
@@ -1296,7 +1300,7 @@ body,
 .viewport-wrap.is-start-screen .viewport-empty-last-title,
 .viewport-wrap.is-start-screen .viewport-empty-last-filename,
 .viewport-wrap.is-start-screen .viewport-empty-last-blurb {
-  text-shadow: 0 1px 4px rgb(0 0 0 / 0.85);
+  text-shadow: var(--app-start-screen-heading-shadow);
 }
 
 .app-status-bar.is-start-screen {
@@ -1370,6 +1374,151 @@ body,
   font-size: 0.85rem;
   color: var(--app-text-strong);
   font-variant-numeric: tabular-nums;
+}
+
+/* Top-center stack: load/work phase + extrusion depth (Done / Cancel). */
+.viewport-top-center-hud {
+  position: absolute;
+  /* Sit below the 3px `load-bar` when loading/working so the strip stays visible. */
+  top: calc(3px + max(0.5rem, env(safe-area-inset-top, 0px)));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.45rem;
+  max-width: min(96vw, 40rem);
+  pointer-events: none;
+}
+
+.viewport-top-center-hud > * {
+  pointer-events: auto;
+}
+
+.viewport-work-phase-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.45rem 0.65rem;
+  padding: 0.38rem 0.75rem;
+  background: var(--app-field-bg);
+  border: 1px solid var(--app-border-separator);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px var(--app-shadow-deep);
+  font-size: 0.82rem;
+  color: var(--app-text-strong);
+  text-align: center;
+}
+
+.viewport-work-phase-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.viewport-work-phase-pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--app-text-muted);
+}
+
+.viewport-work-phase-cancel {
+  margin: 0;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--app-control-border-strong);
+  border-radius: 4px;
+  background: var(--app-control-surface);
+  color: var(--app-text-strong);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.viewport-work-phase-cancel:hover {
+  background: var(--app-control-surface-hover);
+  border-color: var(--app-border-muted);
+}
+
+/* Cuboid / cylinder extrusion depth: same tokens as zoom HUD; sits under phase chip in `.viewport-top-center-hud`. */
+.viewport-cuboid-depth-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.55rem;
+  background: var(--app-field-bg);
+  border: 1px solid var(--app-border-separator);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px var(--app-shadow-deep);
+  font-size: 0.82rem;
+  color: var(--app-text-strong);
+}
+
+.viewport-cuboid-depth-bar .tool-options-shape-btn:hover {
+  background: var(--app-control-surface-hover);
+  border-color: var(--app-border-muted);
+}
+
+.viewport-cuboid-depth-bar .viewport-cuboid-depth-input {
+  box-sizing: border-box;
+  min-width: 2.75rem;
+  max-width: 5.5rem;
+  padding: 0.2rem 0.35rem;
+  text-align: center;
+  font: inherit;
+  font-size: inherit;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: inherit;
+  background: var(--app-control-surface);
+  border: 1px solid var(--app-control-border-strong);
+  border-radius: 4px;
+}
+
+.viewport-cuboid-depth-bar .viewport-cuboid-depth-input:focus {
+  outline: 2px solid var(--theme-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Polygon area (vertices + Clear / Apply): same stack as depth / Done. */
+.viewport-polygon-phase-bar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  padding: 0.4rem 0.65rem;
+  max-width: min(92vw, 22rem);
+  background: var(--app-field-bg);
+  border: 1px solid var(--app-border-separator);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px var(--app-shadow-deep);
+  font-size: 0.82rem;
+  color: var(--app-text-strong);
+}
+
+.viewport-polygon-phase-hint {
+  margin: 0;
+  line-height: 1.35;
+  font-size: 0.82rem;
+  opacity: 0.95;
+  text-align: center;
+}
+
+.viewport-polygon-phase-actions {
+  display: flex;
+  gap: 0.4rem;
+  justify-content: stretch;
+}
+
+.viewport-polygon-phase-actions .tool-options-shape-btn {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.viewport-polygon-phase-bar .tool-options-shape-btn:hover {
+  background: var(--app-control-surface-hover);
+  border-color: var(--app-border-muted);
 }
 
 /* Floating tool options (matches web `ToolPanel.svelte`: fixed above canvas). */
@@ -1686,9 +1835,10 @@ body,
   font-size: 0.68rem;
   line-height: 1.35;
   color: var(--app-text-strong);
-  background: rgba(0, 0, 0, 0.72);
-  border: 1px solid var(--app-control-border-strong);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+  background: var(--app-popover-surface);
+  border: 1px solid var(--app-border-muted);
+  box-shadow: 0 2px 12px var(--app-shadow-deep);
+  text-shadow: none;
 }
 
 .viewport-ping-overlay {

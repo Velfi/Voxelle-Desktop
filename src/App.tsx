@@ -54,11 +54,55 @@ const LS_TOOLS_FLOATING = "voxelleToolsFloating";
 const LS_TOOLS_FLOAT_POS = "voxelleToolsFloatPos";
 /** `localStorage` = `"1"`: show JS vs Rust viewport cursor overlay (see `get_viewport_cursor_debug`). */
 const LS_VIEWPORT_CURSOR_DEBUG = "voxelleDebugViewportCursor";
+/** `localStorage` = `"1"`: GPU uses full swapchain; picking uses client ÷ layout viewport (see `layoutViewportCssSize`). */
+const LS_FULL_SURFACE_VIEWPORT = "voxelleFullSurfaceViewport";
+
+/**
+ * CSS layout viewport size for mapping `clientX`/`clientY` and layout fractions to the native surface.
+ * Prefer `document.documentElement.clientWidth/Height` over `window.inner*` so the denominator matches
+ * the pointer coordinate span (inner includes scrollbar gutter; client does not). That mismatch shows up
+ * as edge drift on macOS windowed WebKit and often disappears in fullscreen where inner ≈ client.
+ */
+function layoutViewportCssSize(): { w: number; h: number } {
+  const de = document.documentElement;
+  const w = de.clientWidth || window.innerWidth;
+  const h = de.clientHeight || window.innerHeight;
+  return { w: Math.max(1, w), h: Math.max(1, h) };
+}
+
+function readFullSurfaceViewportEnabled(): boolean {
+  try {
+    return localStorage.getItem(LS_FULL_SURFACE_VIEWPORT) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Map texture-normalized nx, ny to position inside `.viewport` for debug overlay markers. */
+function viewportCursorOverlayPercent(
+  fullSurfaceViewport: boolean,
+  nx: number,
+  ny: number,
+  rect: DOMRectReadOnly | null,
+): { leftPct: number; topPct: number } {
+  if (!fullSurfaceViewport || !rect || rect.width <= 0 || rect.height <= 0) {
+    return { leftPct: nx * 100, topPct: ny * 100 };
+  }
+  const { w: lw, h: lh } = layoutViewportCssSize();
+  return {
+    leftPct: ((nx * lw - rect.left) / rect.width) * 100,
+    topPct: ((ny * lh - rect.top) / rect.height) * 100,
+  };
+}
 
 /** Payload from `get_viewport_cursor_debug` (camelCase). */
 type ViewportCursorDebugPayload = {
   viewportWidth: number;
   viewportHeight: number;
+  surfaceWidth: number;
+  surfaceHeight: number;
+  viewportOriginX: number;
+  viewportOriginY: number;
   previewNx: number | null;
   previewNy: number | null;
   texelSx: number | null;
@@ -71,6 +115,9 @@ type ViewportCursorDebugPayload = {
   rayDirZ: number | null;
   projCubeNx: number | null;
   projCubeNy: number | null;
+  /** Projected voxel center (same as hover mesh anchor); differs from proj cube on oblique views. */
+  projCenterNx: number | null;
+  projCenterNy: number | null;
 };
 
 /** Browser pointer position for the debug overlay (CSS pixels). */
@@ -80,6 +127,15 @@ type ViewportCursorDebugScreen = {
   /** Offset inside `.viewport` (`client` − `getBoundingClientRect()`). */
   relX: number;
   relY: number;
+  innerWidth: number;
+  innerHeight: number;
+  /** `documentElement.client*` span; matches `sendResize` / `layoutViewportCssSize`. */
+  layoutWidth: number;
+  layoutHeight: number;
+  rectLeft: number;
+  rectTop: number;
+  rectWidth: number;
+  rectHeight: number;
 };
 
 /** Avoid duplicate `load_start_screen_logo` in React Strict Mode (dev). */
@@ -379,8 +435,10 @@ function App() {
   const viewportPhysRef = useRef({ w: 0, h: 0 });
   /** Swapchain drawable in physical pixels (authoritative native size; may differ from inner×dpr). */
   const surfacePhysRef = useRef({ w: 0, h: 0 });
-  /** Last `window.innerWidth` / `innerHeight` — when these change, do not use stale surface for mapping until Rust syncs. */
-  const lastWindowInnerRef = useRef({ w: 0, h: 0 });
+  /** Last layout viewport CSS size (`layoutViewportCssSize`) — when these change, do not use stale surface for mapping until Rust syncs. */
+  const lastLayoutViewportCssRef = useRef({ w: 0, h: 0 });
+  /** When true, `viewer_resize` uses the full swapchain; picking uses window-normalized coords. */
+  const fullSurfaceViewportRef = useRef(readFullSurfaceViewportEnabled());
   const lastRef = useRef({ x: 0, y: 0 });
   /** Last pointer position over `.viewport` in physical pixels (for Z = ping pick). */
   const lastViewportPickNormRef = useRef<{ nx: number; ny: number } | null>(
@@ -395,11 +453,14 @@ function App() {
   } | null>(null);
   const probingRef = useRef(false);
   const activePointerIdRef = useRef<number | null>(null);
+  /** Pointer id currently captured by the viewport element (or null when not captured). */
+  const capturedPointerIdRef = useRef<number | null>(null);
   const interactionModeRef = useRef<InteractionMode>("navigate");
   const activeColorRef = useRef(0x8899aa);
   const activeMaterialRef = useRef("plastic");
   const brushRadiusRef = useRef(0);
   const brushShapeRef = useRef<BrushShape>("sphere");
+  const brushClipBottomHalfRef = useRef(false);
   const strokeDrawStyleRef = useRef<StrokeDrawStyle>("line");
   const drawStrokeModeRef = useRef<DrawStrokeModeApi>("line");
   const planeAxisRef = useRef<PlaneAxisApi>("auto");
@@ -458,6 +519,9 @@ function App() {
   const viewportCursorDebugScreenRef =
     useRef<ViewportCursorDebugScreen | null>(null);
   const viewportCursorDebugRafRef = useRef<number | null>(null);
+  const [fullSurfaceViewportEnabled, setFullSurfaceViewportEnabled] = useState(
+    readFullSurfaceViewportEnabled,
+  );
   const [matchMaterialSelectColor, setMatchMaterialSelectColor] =
     useState(false);
   const matchMaterialSelectColorRef = useRef(false);
@@ -465,10 +529,13 @@ function App() {
   const [activeMaterial, setActiveMaterial] = useState("plastic");
   const [brushRadius, setBrushRadius] = useState(0);
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
+  /** Brush: clip to half-space along the face outward normal from the pick (see Rust `brush_clip_half_normal_from_screen`). */
+  const [brushClipBottomHalf, setBrushClipBottomHalf] = useState(false);
   const [strokeDrawStyle, setStrokeDrawStyle] =
     useState<StrokeDrawStyle>("line");
   const [strokeFamilyVariant, setStrokeFamilyVariant] =
     useState<StrokeFamilyVariant>("stroke");
+  const strokeFamilyVariantRef = useRef<StrokeFamilyVariant>("stroke");
   const [drawStrokeMode, setDrawStrokeMode] =
     useState<DrawStrokeModeApi>("line");
   const [planeAxis, setPlaneAxis] = useState<PlaneAxisApi>("auto");
@@ -500,6 +567,8 @@ function App() {
     useState(true);
   const [selectionStrokeAxisAlign, setSelectionStrokeAxisAlign] =
     useState(true);
+  const selectionStrokeSnapToSurfaceRef = useRef(true);
+  const selectionStrokeAxisAlignRef = useRef(true);
   const [surfacePlaneHollow, setSurfacePlaneHollow] = useState(false);
   const surfacePlaneHollowRef = useRef(false);
   const [sprayConstrainToPlane, setSprayConstrainToPlane] =
@@ -513,15 +582,32 @@ function App() {
   const [strokePolygonVerts, setStrokePolygonVerts] = useState<
     [number, number, number][]
   >([]);
+  /** Kept in sync with `strokePolygonVerts` for `sync_preview_input` / `mergedStrokeAux` (no stale closure). */
+  const strokePolygonVertsRef = useRef<[number, number, number][]>([]);
   const strokeClickRef = useRef<{
     circleCenter: [number, number, number] | null;
-    cuboidMin: [number, number, number] | null;
-    cylinderA: [number, number, number] | null;
   }>({
     circleCenter: null,
-    cuboidMin: null,
-    cylinderA: null,
   });
+  /** Solid cuboid depth phase (web parity): plane drag done; adjust depth then Done. */
+  const [cuboidDepthPhase, setCuboidDepthPhase] = useState<{
+    lineStart: { nx: number; ny: number };
+    endNorm: { nx: number; ny: number };
+  } | null>(null);
+  const cuboidDepthPhaseRef = useRef(cuboidDepthPhase);
+  const [cuboidDepthUi, setCuboidDepthUi] = useState(1);
+  const cuboidDepthRef = useRef(1);
+  /** Solid cylinder: disk drag done; adjust depth then Done (same flow as cuboid). */
+  const [cylinderDepthPhase, setCylinderDepthPhase] = useState<{
+    lineStart: { nx: number; ny: number };
+    endNorm: { nx: number; ny: number };
+  } | null>(null);
+  const cylinderDepthPhaseRef = useRef(cylinderDepthPhase);
+  const [cylinderDepthUi, setCylinderDepthUi] = useState(1);
+  const cylinderDepthRef = useRef(1);
+  /** Inline depth field: draft while focused; +/- still updates value + draft when editing. */
+  const [extrusionDepthEditing, setExtrusionDepthEditing] = useState(false);
+  const [extrusionDepthDraft, setExtrusionDepthDraft] = useState("");
   const strokePolygonLastScreenRef = useRef<{ nx: number; ny: number } | null>(
     null,
   );
@@ -572,6 +658,11 @@ function App() {
   const [workBusy, setWorkBusy] = useState(false);
   const [workProgress, setWorkProgress] = useState(0);
   const [workPhase, setWorkPhase] = useState("");
+  const workPhaseRef = useRef("");
+  workPhaseRef.current = workPhase;
+  /** True from flood-fill invoke start until it settles; mesh phases say "Applying edit…" not "Fill", so HUD can't rely on phase text alone. */
+  const [fillOperationPending, setFillOperationPending] = useState(false);
+  const fillOperationPendingRef = useRef(false);
   const [fpsDisplayed, setFpsDisplayed] = useState(0);
   const [showFpsCounter, setShowFpsCounter] = useState(
     () => loadPreferences().showFpsCounter,
@@ -700,9 +791,7 @@ function App() {
     const el = viewportRef.current;
     if (!el) return;
     const dpr = window.devicePixelRatio || 1;
-    const iw = window.innerWidth;
-    const ih = window.innerHeight;
-    if (iw <= 0 || ih <= 0) return;
+    const { w: layoutW, h: layoutH } = layoutViewportCssSize();
 
     const rect = el.getBoundingClientRect();
     const rw = rect.width;
@@ -711,29 +800,42 @@ function App() {
 
     // Prefer last native swapchain size so configure matches drawable; bootstrap with layout×dpr.
     const innerChanged =
-      lastWindowInnerRef.current.w !== iw ||
-      lastWindowInnerRef.current.h !== ih;
+      lastLayoutViewportCssRef.current.w !== layoutW ||
+      lastLayoutViewportCssRef.current.h !== layoutH;
     if (innerChanged) {
-      lastWindowInnerRef.current = { w: iw, h: ih };
+      lastLayoutViewportCssRef.current = { w: layoutW, h: layoutH };
     }
     const surf = surfacePhysRef.current;
     // Height-first bootstrap matches typical swapchain rounding and pairs with viewport math below.
-    const bootstrapH = Math.max(1, Math.round(ih * dpr));
-    const bootstrapW = Math.max(1, Math.round(bootstrapH * (iw / ih)));
+    const bootstrapH = Math.max(1, Math.round(layoutH * dpr));
+    const bootstrapW = Math.max(1, Math.round(bootstrapH * (layoutW / layoutH)));
     // After a window resize, native size is unknown until the next frame — use bootstrap for configure + origin.
     const useNativeSurface =
       surf.w > 0 && surf.h > 0 && !innerChanged;
     const surfaceWidth = useNativeSurface ? surf.w : bootstrapW;
     const surfaceHeight = useNativeSurface ? surf.h : bootstrapH;
 
-    // Derive viewport texture size from the same surface×layout fractions as viewportX/Y. Using
-    // round(rh*dpr) here while origin uses (rect.top/ih)*surfaceHeight caused vertical drift when
-    // surfaceHeight ≠ ih*dpr (native swapchain vs CSS estimate).
-    const viewportHeight = Math.max(1, Math.round((rh / ih) * surfaceHeight));
-    const viewportWidth = Math.max(1, Math.round(viewportHeight * (rw / rh)));
-    // Proportional placement in the same pixel space as the swapchain (not raw rect×dpr alone).
-    const viewportX = Math.max(0, Math.round((rect.left / iw) * surfaceWidth));
-    const viewportY = Math.max(0, Math.round((rect.top / ih) * surfaceHeight));
+    const fullVp = fullSurfaceViewportRef.current;
+    let viewportWidth: number;
+    let viewportHeight: number;
+    let viewportX: number;
+    let viewportY: number;
+    if (fullVp) {
+      // Experimental: render 3D to the full drawable; pick using client/inner normalized coords.
+      viewportX = 0;
+      viewportY = 0;
+      viewportWidth = surfaceWidth;
+      viewportHeight = surfaceHeight;
+    } else {
+      // Derive viewport texture size from the same surface×layout fractions as viewportX/Y. Using
+      // round(rh*dpr) here while origin uses (rect.top/ih)*surfaceHeight caused vertical drift when
+      // surfaceHeight ≠ ih*dpr (native swapchain vs CSS estimate).
+      viewportHeight = Math.max(1, Math.round((rh / layoutH) * surfaceHeight));
+      viewportWidth = Math.max(1, Math.round(viewportHeight * (rw / rh)));
+      // Proportional placement in the same pixel space as the swapchain (not raw rect×dpr alone).
+      viewportX = Math.max(0, Math.round((rect.left / layoutW) * surfaceWidth));
+      viewportY = Math.max(0, Math.round((rect.top / layoutH) * surfaceHeight));
+    }
     viewportPhysRef.current = { w: viewportWidth, h: viewportHeight };
     void invoke("viewer_resize", {
       surfaceWidth,
@@ -756,6 +858,24 @@ function App() {
         surfacePhysRef.current = { w: sz.surfaceWidth, h: sz.surfaceHeight };
       })
       .catch(() => { });
+  }, []);
+
+  useEffect(() => {
+    fullSurfaceViewportRef.current = fullSurfaceViewportEnabled;
+  }, [fullSurfaceViewportEnabled]);
+
+  useEffect(() => {
+    sendResize();
+  }, [fullSurfaceViewportEnabled, sendResize]);
+
+  useEffect(() => {
+    try {
+      void invoke("view_menu_sync_full_surface_viewport", {
+        enabled: readFullSurfaceViewportEnabled(),
+      }).catch(() => {});
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   useEffect(() => {
@@ -863,6 +983,8 @@ function App() {
         if (p.fraction >= 1) {
           setWorkBusy(false);
           setWorkPhase("");
+          fillOperationPendingRef.current = false;
+          setFillOperationPending(false);
         } else {
           setWorkBusy(true);
         }
@@ -1157,6 +1279,19 @@ function App() {
           setViewportCursorDebugScreen(null);
         }
       }),
+      listen<boolean>("voxelle-full-surface-viewport", (e) => {
+        const enabled = e.payload;
+        try {
+          localStorage.setItem(
+            LS_FULL_SURFACE_VIEWPORT,
+            enabled ? "1" : "0",
+          );
+        } catch {
+          /* ignore */
+        }
+        fullSurfaceViewportRef.current = enabled;
+        setFullSurfaceViewportEnabled(enabled);
+      }),
       listen<number>("voxelle-selection-updated", (e) => {
         setSelectionCount(typeof e.payload === "number" ? e.payload : 0);
       }),
@@ -1339,6 +1474,9 @@ function App() {
   useEffect(() => {
     brushShapeRef.current = brushShape;
   }, [brushShape]);
+  useEffect(() => {
+    brushClipBottomHalfRef.current = brushClipBottomHalf;
+  }, [brushClipBottomHalf]);
   const generatorSphereRadiusRef = useRef(4);
   const generatorKindRef = useRef<GeneratorKindId>("rocks");
   const sculptStrokeModeRef = useRef<SculptStrokeModeApi>("draw");
@@ -1412,10 +1550,31 @@ function App() {
     wallAxisAlignRef.current = wallAxisAlign;
   }, [wallAxisAlign]);
   useEffect(() => {
+    selectionStrokeSnapToSurfaceRef.current = selectionStrokeSnapToSurface;
+  }, [selectionStrokeSnapToSurface]);
+  useEffect(() => {
+    selectionStrokeAxisAlignRef.current = selectionStrokeAxisAlign;
+  }, [selectionStrokeAxisAlign]);
+  useEffect(() => {
     strokeDrawStyleRef.current = strokeDrawStyle;
   }, [strokeDrawStyle]);
   useEffect(() => {
+    strokeFamilyVariantRef.current = strokeFamilyVariant;
+  }, [strokeFamilyVariant]);
+  useEffect(() => {
     drawStrokeModeRef.current = drawStrokeMode;
+    if (drawStrokeMode !== "cuboid") {
+      setCuboidDepthPhase(null);
+      cuboidDepthPhaseRef.current = null;
+      cuboidDepthRef.current = 1;
+      setCuboidDepthUi(1);
+    }
+    if (drawStrokeMode !== "cylinder") {
+      setCylinderDepthPhase(null);
+      cylinderDepthPhaseRef.current = null;
+      cylinderDepthRef.current = 1;
+      setCylinderDepthUi(1);
+    }
   }, [drawStrokeMode]);
   useEffect(() => {
     planeAxisRef.current = planeAxis;
@@ -1423,12 +1582,14 @@ function App() {
   useEffect(() => {
     strokeClickRef.current = {
       circleCenter: null,
-      cuboidMin: null,
-      cylinderA: null,
     };
     setStrokePolygonVerts([]);
+    strokePolygonVertsRef.current = [];
     strokePolygonLastScreenRef.current = null;
   }, [drawStrokeMode]);
+  useEffect(() => {
+    strokePolygonVertsRef.current = strokePolygonVerts;
+  }, [strokePolygonVerts]);
   useEffect(() => {
     squishyModeRef.current = squishyMode;
   }, [squishyMode]);
@@ -1452,35 +1613,311 @@ function App() {
         : sm === "spray"
           ? sprayConstrainToPlaneRef.current
           : false;
-    return {
+    const poly = strokePolygonVertsRef.current;
+    const polygonVertices =
+      (sm === "polygon" || sm === "polygonHull") && poly.length > 0
+        ? poly.map((v) => [v[0], v[1], v[2]] as [number, number, number])
+        : undefined;
+    const out: Record<string, unknown> = {
       ...base,
       planeHollow: surfacePlaneHollowRef.current,
       constrainToPlane,
       spraySizeRange: spraySizeRangeRef.current,
+      strokeFamilyVariant: strokeFamilyVariantRef.current,
+      strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+      strokeAxisAlign: selectionStrokeAxisAlignRef.current,
+      brushClipBottomHalf: brushClipBottomHalfRef.current,
+      ...(polygonVertices != null && polygonVertices.length > 0
+        ? { polygonVertices }
+        : {}),
     };
+    if (sm === "cuboid" && cuboidDepthPhaseRef.current) {
+      out.cuboidDepth = cuboidDepthRef.current;
+      out.cuboidHollowWallThickness = 1;
+    }
+    if (sm === "cylinder" && cylinderDepthPhaseRef.current) {
+      out.cylinderDepth = cylinderDepthRef.current;
+      out.cylinderTaperPct = 0;
+      out.cuboidHollowWallThickness = 1;
+    }
+    return out;
+  }
+
+  useEffect(() => {
+    cuboidDepthPhaseRef.current = cuboidDepthPhase;
+  }, [cuboidDepthPhase]);
+
+  useEffect(() => {
+    cuboidDepthRef.current = cuboidDepthUi;
+  }, [cuboidDepthUi]);
+
+  useEffect(() => {
+    cylinderDepthPhaseRef.current = cylinderDepthPhase;
+  }, [cylinderDepthPhase]);
+
+  useEffect(() => {
+    cylinderDepthRef.current = cylinderDepthUi;
+  }, [cylinderDepthUi]);
+
+  useEffect(() => {
+    if (!cuboidDepthPhase || loading || workBusy) return;
+    const im = interactionModeRef.current;
+    if (im !== "add" && im !== "remove" && im !== "paint") return;
+    const { lineStart, endNorm } = cuboidDepthPhase;
+    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    void invoke("voxel_stroke_preview_at_screen", {
+      args: {
+        nx: endNorm.nx,
+        ny: endNorm.ny,
+        tool,
+        color: activeColorRef.current,
+        material: activeMaterialRef.current,
+        brushRadius: brushRadiusRef.current,
+        brushShape: brushShapeRef.current,
+        sprayDensity: sprayDensityRef.current,
+        strokeMode: "cuboid",
+        planeAxis: planeAxisRef.current,
+        strokeAux: mergedStrokeAux({}),
+        matchMaterial: matchMaterialSelectColorRef.current,
+        strokeLineStartNx: lineStart.nx,
+        strokeLineStartNy: lineStart.ny,
+      },
+    }).catch(() => {});
+  }, [cuboidDepthPhase, cuboidDepthUi, loading, workBusy, interactionMode]);
+
+  useEffect(() => {
+    if (!cylinderDepthPhase || loading || workBusy) return;
+    const im = interactionModeRef.current;
+    if (im !== "add" && im !== "remove" && im !== "paint") return;
+    const { lineStart, endNorm } = cylinderDepthPhase;
+    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    void invoke("voxel_stroke_preview_at_screen", {
+      args: {
+        nx: endNorm.nx,
+        ny: endNorm.ny,
+        tool,
+        color: activeColorRef.current,
+        material: activeMaterialRef.current,
+        brushRadius: brushRadiusRef.current,
+        brushShape: brushShapeRef.current,
+        sprayDensity: sprayDensityRef.current,
+        strokeMode: "cylinder",
+        planeAxis: planeAxisRef.current,
+        strokeAux: mergedStrokeAux({}),
+        matchMaterial: matchMaterialSelectColorRef.current,
+        strokeLineStartNx: lineStart.nx,
+        strokeLineStartNy: lineStart.ny,
+      },
+    }).catch(() => {});
+  }, [cylinderDepthPhase, cylinderDepthUi, loading, workBusy, interactionMode]);
+
+  function cancelCuboidDepthPhase() {
+    setCuboidDepthPhase(null);
+    cuboidDepthPhaseRef.current = null;
+    cuboidDepthRef.current = 1;
+    setCuboidDepthUi(1);
+    void invoke("voxel_stroke_preview_reset").catch(() => {});
+  }
+
+  function cancelCylinderDepthPhase() {
+    setCylinderDepthPhase(null);
+    cylinderDepthPhaseRef.current = null;
+    cylinderDepthRef.current = 1;
+    setCylinderDepthUi(1);
+    void invoke("voxel_stroke_preview_reset").catch(() => {});
+  }
+
+  useEffect(() => {
+    if (!cuboidDepthPhase && !cylinderDepthPhase) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (cuboidDepthPhaseRef.current) cancelCuboidDepthPhase();
+        if (cylinderDepthPhaseRef.current) cancelCylinderDepthPhase();
+        e.preventDefault();
+      } else if (e.key === "Enter" && !e.repeat) {
+        e.preventDefault();
+        if (cuboidDepthPhaseRef.current) commitCuboidSolidAtScreen();
+        else if (cylinderDepthPhaseRef.current) commitCylinderSolidAtScreen();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [cuboidDepthPhase, cylinderDepthPhase]);
+
+  useEffect(() => {
+    if (!cuboidDepthPhase && !cylinderDepthPhase) return;
+    const im = interactionMode;
+    if (
+      im !== "add" &&
+      im !== "remove" &&
+      im !== "paint" &&
+      im !== "select" &&
+      im !== "selectByColor" &&
+      im !== "selectCoplanar" &&
+      im !== "selectCoplanarEmpty"
+    ) {
+      if (cuboidDepthPhase) cancelCuboidDepthPhase();
+      if (cylinderDepthPhase) cancelCylinderDepthPhase();
+    }
+  }, [interactionMode, cuboidDepthPhase, cylinderDepthPhase]);
+
+  async function commitCuboidSolidAtScreen() {
+    const phase = cuboidDepthPhaseRef.current;
+    if (!phase) return;
+    const im = interactionModeRef.current;
+    const { lineStart, endNorm } = phase;
+    const strokeAuxSnapshot = mergedStrokeAux({});
+    try {
+      if (im === "add" || im === "remove" || im === "paint") {
+        const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+        await invoke("voxel_edit_at_screen", {
+          args: {
+            nx: endNorm.nx,
+            ny: endNorm.ny,
+            tool,
+            color: activeColorRef.current,
+            material: activeMaterialRef.current,
+            brushRadius: brushRadiusRef.current,
+            brushShape: brushShapeRef.current,
+            sprayDensity: sprayDensityRef.current,
+            strokeMode: "cuboid",
+            planeAxis: planeAxisRef.current,
+            strokeAux: strokeAuxSnapshot,
+            matchMaterial: matchMaterialSelectColorRef.current,
+            fillSelectDiagonals: fillSelectDiagonalsRef.current,
+            fillRespectsColor: fillRespectsColorRef.current,
+            strokeLineStartNx: lineStart.nx,
+            strokeLineStartNy: lineStart.ny,
+          },
+        });
+      } else if (
+        im === "select" ||
+        im === "selectByColor" ||
+        im === "selectCoplanar" ||
+        im === "selectCoplanarEmpty"
+      ) {
+        const n = await invoke<number>("selection_stroke_at_screen", {
+          args: {
+            nx: endNorm.nx,
+            ny: endNorm.ny,
+            brushRadius: brushRadiusRef.current,
+            brushShape: brushShapeRef.current,
+            sprayDensity: sprayDensityRef.current,
+            strokeMode: drawStrokeModeRef.current,
+            planeAxis: planeAxisRef.current,
+            strokeAux: strokeAuxSnapshot,
+            fillSelectDiagonals: fillSelectDiagonalsRef.current,
+            fillRespectsColor: fillRespectsColorRef.current,
+            matchMaterial: matchMaterialSelectColorRef.current,
+            interaction: selectionInteractionArg(im),
+            strokeLineStartNx: lineStart.nx,
+            strokeLineStartNy: lineStart.ny,
+          },
+        });
+        if (n > 0) {
+          const c = await invoke<number>("selection_get_count");
+          setSelectionCount(c);
+        }
+      }
+    } catch (e) {
+      console.error("[voxelle] commit cuboid depth phase", e);
+    } finally {
+      cancelCuboidDepthPhase();
+    }
+  }
+
+  async function commitCylinderSolidAtScreen() {
+    const phase = cylinderDepthPhaseRef.current;
+    if (!phase) return;
+    const im = interactionModeRef.current;
+    const { lineStart, endNorm } = phase;
+    const strokeAuxSnapshot = mergedStrokeAux({});
+    try {
+      if (im === "add" || im === "remove" || im === "paint") {
+        const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+        await invoke("voxel_edit_at_screen", {
+          args: {
+            nx: endNorm.nx,
+            ny: endNorm.ny,
+            tool,
+            color: activeColorRef.current,
+            material: activeMaterialRef.current,
+            brushRadius: brushRadiusRef.current,
+            brushShape: brushShapeRef.current,
+            sprayDensity: sprayDensityRef.current,
+            strokeMode: "cylinder",
+            planeAxis: planeAxisRef.current,
+            strokeAux: strokeAuxSnapshot,
+            matchMaterial: matchMaterialSelectColorRef.current,
+            fillSelectDiagonals: fillSelectDiagonalsRef.current,
+            fillRespectsColor: fillRespectsColorRef.current,
+            strokeLineStartNx: lineStart.nx,
+            strokeLineStartNy: lineStart.ny,
+          },
+        });
+      } else if (
+        im === "select" ||
+        im === "selectByColor" ||
+        im === "selectCoplanar" ||
+        im === "selectCoplanarEmpty"
+      ) {
+        const n = await invoke<number>("selection_stroke_at_screen", {
+          args: {
+            nx: endNorm.nx,
+            ny: endNorm.ny,
+            brushRadius: brushRadiusRef.current,
+            brushShape: brushShapeRef.current,
+            sprayDensity: sprayDensityRef.current,
+            strokeMode: drawStrokeModeRef.current,
+            planeAxis: planeAxisRef.current,
+            strokeAux: strokeAuxSnapshot,
+            fillSelectDiagonals: fillSelectDiagonalsRef.current,
+            fillRespectsColor: fillRespectsColorRef.current,
+            matchMaterial: matchMaterialSelectColorRef.current,
+            interaction: selectionInteractionArg(im),
+            strokeLineStartNx: lineStart.nx,
+            strokeLineStartNy: lineStart.ny,
+          },
+        });
+        if (n > 0) {
+          const c = await invoke<number>("selection_get_count");
+          setSelectionCount(c);
+        }
+      }
+    } catch (e) {
+      console.error("[voxelle] commit cylinder depth phase", e);
+    } finally {
+      cancelCylinderDepthPhase();
+    }
   }
 
   /** Payload for `sync_preview_input` — must match Rust `SyncPreviewInput` (camelCase). */
   function buildSyncPreviewPayload(nx: number, ny: number, modeStr: string) {
     const im = interactionModeRef.current;
+    const isSculpt = im === "sculpt";
     const brushRadius =
       im === "squishy"
         ? Math.max(2, generatorSphereRadiusRef.current)
+        : isSculpt
+        ? sculptBrushRadiusRef.current
         : brushRadiusRef.current;
+    const brushShape = isSculpt
+      ? sculptBrushShapeToRust(sculptBrushShapeUiRef.current)
+      : brushShapeRef.current;
     return {
       nx,
       ny,
       mode: modeStr,
       brushRadius,
-      brushShape: brushShapeRef.current,
-      sprayDensity: sprayDensityRef.current,
-      strokeMode: drawStrokeModeRef.current,
-      planeAxis: planeAxisRef.current,
+      brushShape,
+      sprayDensity: isSculpt ? 0 : sprayDensityRef.current,
+      strokeMode: isSculpt ? "precise" : drawStrokeModeRef.current,
+      planeAxis: isSculpt ? "auto" : planeAxisRef.current,
       strokeAux: mergedStrokeAux({}),
       color: activeColorRef.current,
       material: activeMaterialRef.current,
       matchMaterial: matchMaterialSelectColorRef.current,
-      useBrushPreview: im !== "sculpt" && im !== "squishy",
+      useBrushPreview: im !== "squishy",
     };
   }
 
@@ -1491,8 +1928,6 @@ function App() {
       polygonVertices?: [number, number, number][];
       circleCenter?: [number, number, number];
       circleEdge?: [number, number, number];
-      cuboidMin?: [number, number, number];
-      cuboidMax?: [number, number, number];
       cylinderA?: [number, number, number];
       cylinderB?: [number, number, number];
     },
@@ -1500,6 +1935,8 @@ function App() {
     const im = interactionModeRef.current;
     if (im !== "add" && im !== "remove" && im !== "paint") return;
     const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    const isFill = drawStrokeModeRef.current === "fill";
+    if (isFill) beginFillOperation();
     void invoke("voxel_edit_at_screen", {
       args: {
         nx,
@@ -1516,10 +1953,16 @@ function App() {
           strokeAux as Record<string, unknown>,
         ),
         matchMaterial: matchMaterialSelectColorRef.current,
+        fillSelectDiagonals: fillSelectDiagonalsRef.current,
+        fillRespectsColor: fillRespectsColorRef.current,
       },
-    }).catch((e) => {
-      console.error("[voxelle] voxel_edit_at_screen error", e);
-    });
+    })
+      .catch((e) => {
+        console.error("[voxelle] voxel_edit_at_screen error", e);
+      })
+      .finally(() => {
+        if (isFill) endFillOperation();
+      });
   }
 
   async function handleStrokeAnchorClick(nx: number, ny: number) {
@@ -1528,7 +1971,14 @@ function App() {
     const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
     const c = await invoke<[number, number, number] | null>(
       "voxel_stroke_anchor_coord_at_screen",
-      { args: { nx, ny, tool } },
+      {
+        args: {
+          nx,
+          ny,
+          tool,
+          strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+        },
+      },
     );
     if (!c) return;
     const sm = drawStrokeModeRef.current;
@@ -1537,8 +1987,25 @@ function App() {
       return;
     }
     if (sm === "polygon" || sm === "polygonHull") {
-      setStrokePolygonVerts((v) => [...v, c]);
+      setStrokePolygonVerts((v) => {
+        const idx = v.findIndex(
+          (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
+        );
+        const next =
+          idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+        strokePolygonVertsRef.current = next;
+        return next;
+      });
       strokePolygonLastScreenRef.current = { nx, ny };
+      queueMicrotask(() => {
+        void invoke("sync_preview_input", {
+          args: buildSyncPreviewPayload(
+            nx,
+            ny,
+            previewModeForSync(interactionModeRef.current),
+          ),
+        }).catch(() => {});
+      });
       return;
     }
     if (sm === "circle") {
@@ -1553,31 +2020,6 @@ function App() {
         r.circleCenter = null;
       }
       return;
-    }
-    if (sm === "cuboid") {
-      const r = strokeClickRef.current;
-      if (!r.cuboidMin) {
-        r.cuboidMin = c;
-      } else {
-        runVoxelEditAtScreen(nx, ny, {
-          cuboidMin: r.cuboidMin,
-          cuboidMax: c,
-        });
-        r.cuboidMin = null;
-      }
-      return;
-    }
-    if (sm === "cylinder") {
-      const r = strokeClickRef.current;
-      if (!r.cylinderA) {
-        r.cylinderA = c;
-      } else {
-        runVoxelEditAtScreen(nx, ny, {
-          cylinderA: r.cylinderA,
-          cylinderB: c,
-        });
-        r.cylinderA = null;
-      }
     }
   }
 
@@ -1624,8 +2066,25 @@ function App() {
       return;
     }
     if (sm === "polygon" || sm === "polygonHull") {
-      setStrokePolygonVerts((v) => [...v, c]);
+      setStrokePolygonVerts((v) => {
+        const idx = v.findIndex(
+          (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
+        );
+        const next =
+          idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+        strokePolygonVertsRef.current = next;
+        return next;
+      });
       strokePolygonLastScreenRef.current = { nx, ny };
+      queueMicrotask(() => {
+        void invoke("sync_preview_input", {
+          args: buildSyncPreviewPayload(
+            nx,
+            ny,
+            previewModeForSync(interactionModeRef.current),
+          ),
+        }).catch(() => {});
+      });
       return;
     }
     if (sm === "circle") {
@@ -1640,31 +2099,6 @@ function App() {
         r.circleCenter = null;
       }
       return;
-    }
-    if (sm === "cuboid") {
-      const r = strokeClickRef.current;
-      if (!r.cuboidMin) {
-        r.cuboidMin = c;
-      } else {
-        runSelectionStrokeAtScreen(nx, ny, {
-          cuboidMin: r.cuboidMin,
-          cuboidMax: c,
-        });
-        r.cuboidMin = null;
-      }
-      return;
-    }
-    if (sm === "cylinder") {
-      const r = strokeClickRef.current;
-      if (!r.cylinderA) {
-        r.cylinderA = c;
-      } else {
-        runSelectionStrokeAtScreen(nx, ny, {
-          cylinderA: r.cylinderA,
-          cylinderB: c,
-        });
-        r.cylinderA = null;
-      }
     }
   }
 
@@ -1778,6 +2212,16 @@ function App() {
     return null;
   }
 
+  function beginFillOperation() {
+    fillOperationPendingRef.current = true;
+    setFillOperationPending(true);
+  }
+
+  function endFillOperation() {
+    fillOperationPendingRef.current = false;
+    setFillOperationPending(false);
+  }
+
   function runSelectionStrokeAtScreen(
     nx: number,
     ny: number,
@@ -1798,6 +2242,8 @@ function App() {
     }
     const lineStart = opts?.lineStart;
     const brushPrev = opts?.brushPrev;
+    const isFill = drawStrokeModeRef.current === "fill";
+    if (isFill) beginFillOperation();
     void invoke<number>("selection_stroke_at_screen", {
       args: {
         nx,
@@ -1833,7 +2279,10 @@ function App() {
           );
         }
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (isFill) endFillOperation();
+      });
   }
 
   useLayoutEffect(() => {
@@ -1853,8 +2302,27 @@ function App() {
 
   useEffect(() => {
     loadingRef.current = loading;
-    interactionBlockedRef.current = loading || workBusy;
-  }, [loading, workBusy]);
+    interactionBlockedRef.current =
+      loading || workBusy || fillOperationPending;
+  }, [loading, workBusy, fillOperationPending]);
+
+  /** Escape cancels in-progress flood fill (Rust BFS checks `fill_operation_cancel`). */
+  useEffect(() => {
+    if (!workBusy && !fillOperationPending) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Escape") return;
+      if (e.repeat) return;
+      if (
+        !fillOperationPendingRef.current &&
+        !/fill/i.test(workPhaseRef.current)
+      )
+        return;
+      e.preventDefault();
+      void invoke("voxel_fill_cancel").catch(() => {});
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [workBusy, fillOperationPending]);
 
   /** Any path that sets `loadError` must not leave `loading` stuck true (e.g. `collab-error`, invoke `.catch`). */
   useEffect(() => {
@@ -2193,6 +2661,10 @@ function App() {
     activeColor,
     activeMaterial,
     matchMaterialSelectColor,
+    brushClipBottomHalf,
+    sculptBrushRadius,
+    sculptBrushShapeUi,
+    strokePolygonVerts,
   ]);
 
   /** Squishy: re-sync metaball preview when radius / hollow / mode change without moving the pointer. */
@@ -2386,14 +2858,23 @@ function App() {
   }, [loading, workBusy, clearPreview]);
 
   /**
-   * Normalized coords (0–1) in the GPU viewport texture. Rust uses `nx * viewportW` texels
-   * ([`viewport_texels_from_norm`]); the viewport image is stretched over the `.viewport` CSS box from
-   * `sendResize`, so the same linear fraction as `(relX/rect.width, relY/rect.height)` with
-   * `getBoundingClientRect()` (AGENTS.md — proportional to `rect.width`/`height`, not `innerWidth`).
-   * Window×surface scaling `(clientX/iw)*sw` drifts when `innerWidth` ≠ pointer coordinate extent or when
-   * `sw/iw` ≠ `viewportW/rect.width`, which shows up as horizontal slope error.
+   * Normalized coords (0–1) in the GPU viewport texture. The native layer stretches the W×H texture to
+   * the `.viewport` CSS box, so linear fractions `relX/rect.width` and `relY/rect.height` match what
+   * hits the eye — unlike `(clientY/innerHeight)*surfaceH − viewportY`, which breaks when `inner*` includes
+   * the scrollbar gutter and does not match `documentElement.client*` / `clientY` (common on macOS windowed
+   * WebKit; often disappears in fullscreen where inner ≈ client).
+   *
+   * **Full-window GPU viewport** (experimental): texture covers the full swapchain; normalize with
+   * `layoutViewportCssSize` so the denominator matches `clientX`/`clientY` (same as `sendResize`).
    */
   const clientToViewportNormalized = useCallback((e: React.PointerEvent) => {
+    if (fullSurfaceViewportRef.current) {
+      const { w: lw, h: lh } = layoutViewportCssSize();
+      return {
+        nx: Math.min(1, Math.max(0, e.clientX / lw)),
+        ny: Math.min(1, Math.max(0, e.clientY / lh)),
+      };
+    }
     const el = viewportRef.current;
     if (!el) return { nx: 0.5, ny: 0.5 };
     const rect = el.getBoundingClientRect();
@@ -2408,6 +2889,50 @@ function App() {
       ny: Math.min(1, Math.max(0, relY / rh)),
     };
   }, []);
+
+  const planeStrokeDebugEnabledRef = useRef(true);
+  const logPlaneStrokeDebug = useCallback(
+    (phase: string, e: React.PointerEvent, extra?: Record<string, unknown>) => {
+      if (!planeStrokeDebugEnabledRef.current) return;
+      const mode = interactionModeRef.current;
+      const sm = drawStrokeModeRef.current;
+      if (!(sm === "plane" && (mode === "add" || mode === "remove" || mode === "paint"))) {
+        return;
+      }
+      const g = gestureRef.current;
+      console.debug("[voxelle][plane-stroke]", {
+        phase,
+        eventType: e.type,
+        pointerId: e.pointerId,
+        button: e.button,
+        buttons: e.buttons,
+        mode,
+        strokeMode: sm,
+        gestureMode: g?.mode ?? null,
+        gesturePointerId: g?.pointerId ?? null,
+        activePointerId: activePointerIdRef.current,
+        capturedPointerId: capturedPointerIdRef.current,
+        probing: probingRef.current,
+        dragDidEdit: dragDidEditRef.current,
+        movedPx: maxPointerMoveRef.current,
+        ...extra,
+      });
+    },
+    [],
+  );
+
+  const resetPointerGesture = useCallback(
+    (reason: string, e?: React.PointerEvent) => {
+      if (e) {
+        logPlaneStrokeDebug(`gesture:reset:${reason}`, e);
+      }
+      gestureRef.current = null;
+      activePointerIdRef.current = null;
+      pointerStartRef.current = null;
+      maxPointerMoveRef.current = 0;
+    },
+    [logPlaneStrokeDebug],
+  );
 
   const createNewProject = useCallback(() => {
     if (loading || workBusy) return;
@@ -2441,6 +2966,7 @@ function App() {
   }, [pathLabel, loading, loadError]);
 
   const onPointerDown = async (e: React.PointerEvent) => {
+    logPlaneStrokeDebug("down:received", e);
     const modeEarly = interactionModeRef.current;
     if (modeEarly === "fly" && (e.button === 0 || e.button === 2)) {
       e.preventDefault();
@@ -2450,13 +2976,18 @@ function App() {
         void activateFlyMouseLook(e.pointerId);
       }
       probingRef.current = false;
-      activePointerIdRef.current = null;
-      pointerStartRef.current = null;
-      gestureRef.current = null;
+      resetPointerGesture("fly-toggle", e);
       return;
     }
 
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    const captureEl = e.currentTarget as HTMLElement;
+    try {
+      captureEl.setPointerCapture(e.pointerId);
+      capturedPointerIdRef.current = e.pointerId;
+    } catch (err) {
+      capturedPointerIdRef.current = null;
+      console.warn("[voxelle][plane-stroke] setPointerCapture failed", err);
+    }
     activePointerIdRef.current = e.pointerId;
     pointerStartRef.current = { x: e.clientX, y: e.clientY };
     maxPointerMoveRef.current = 0;
@@ -2554,6 +3085,12 @@ function App() {
       pointerId,
       mode: forceCamera || navigate || !hitSolid ? "camera" : "voxel",
     };
+    logPlaneStrokeDebug("down:gesture-assigned", e, {
+      hitSolid,
+      forceCamera,
+      navigate,
+      assignedGestureMode: gestureRef.current.mode,
+    });
     lastRef.current = { x: e.clientX, y: e.clientY };
 
     if (
@@ -2563,6 +3100,12 @@ function App() {
         mode === "paint" ||
         mode === "sculpt")
     ) {
+      if (drawStrokeModeRef.current === "cuboid" && cuboidDepthPhaseRef.current) {
+        cancelCuboidDepthPhase();
+      }
+      if (drawStrokeModeRef.current === "cylinder" && cylinderDepthPhaseRef.current) {
+        cancelCylinderDepthPhase();
+      }
       dragDidEditRef.current = false;
       strokeViewportStartRef.current = { nx, ny };
       lastStrokeNormRef.current = { nx, ny };
@@ -2576,6 +3119,12 @@ function App() {
         mode === "selectCoplanar" ||
         mode === "selectCoplanarEmpty")
     ) {
+      if (drawStrokeModeRef.current === "cuboid" && cuboidDepthPhaseRef.current) {
+        cancelCuboidDepthPhase();
+      }
+      if (drawStrokeModeRef.current === "cylinder" && cylinderDepthPhaseRef.current) {
+        cancelCylinderDepthPhase();
+      }
       dragDidEditRef.current = false;
       strokeViewportStartRef.current = { nx, ny };
       lastStrokeNormRef.current = { nx, ny };
@@ -2605,12 +3154,21 @@ function App() {
     if (viewportCursorDebugEnabled) {
       const el = viewportRef.current;
       const rect = el?.getBoundingClientRect();
+      const lv = layoutViewportCssSize();
       const scr: ViewportCursorDebugScreen | null = rect
         ? {
             clientX: e.clientX,
             clientY: e.clientY,
             relX: e.clientX - rect.left,
             relY: e.clientY - rect.top,
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+            layoutWidth: lv.w,
+            layoutHeight: lv.h,
+            rectLeft: rect.left,
+            rectTop: rect.top,
+            rectWidth: rect.width,
+            rectHeight: rect.height,
           }
         : null;
       viewportCursorDebugScreenRef.current = scr;
@@ -2629,44 +3187,60 @@ function App() {
               const rW = wrap?.getBoundingClientRect();
               const phys = viewportPhysRef.current;
               const surf = surfacePhysRef.current;
-              const iw = window.innerWidth;
-              const ih = window.innerHeight;
+              const scrSnap = viewportCursorDebugScreenRef.current;
+              const iw = scrSnap?.layoutWidth ?? layoutViewportCssSize().w;
+              const ih = scrSnap?.layoutHeight ?? layoutViewportCssSize().h;
               fetch(
                 "http://127.0.0.1:7756/ingest/93734617-b27b-4379-bb59-e5971936c3d4",
                 {
                   method: "POST",
                   headers: {
                     "Content-Type": "application/json",
-                    "X-Debug-Session-Id": "215b55",
+                    "X-Debug-Session-Id": "0e537f",
                   },
                   body: JSON.stringify({
-                    sessionId: "215b55",
-                    runId: "post-fix",
-                    hypothesisId: "H_overlay_parent",
+                    sessionId: "0e537f",
+                    runId: "rect-mapping",
+                    hypothesisId: "H_innerY_vs_relY",
                     location: "App.tsx:viewportDebugRaf",
-                    message: "overlay inside .viewport; rel vs window nx",
+                    message: "pick uses rel/rect; compare inner*surface−origin Y vs relY/rh",
                     data: (() => {
                       const scr = viewportCursorDebugScreenRef.current;
                       const pick = lastViewportPickNormRef.current;
                       let nxFromRel: number | null = null;
                       let nxWindow: number | null = null;
                       let deltaWinVsRel: number | null = null;
+                      let nyFromRel: number | null = null;
+                      let nyFromInner: number | null = null;
+                      let deltaInnerVsRelNy: number | null = null;
                       if (
                         scr &&
                         rV &&
                         rV.width > 0 &&
+                        rV.height > 0 &&
                         phys.w > 0 &&
+                        phys.h > 0 &&
                         iw > 0 &&
-                        surf.w > 0
+                        ih > 0 &&
+                        surf.w > 0 &&
+                        surf.h > 0
                       ) {
                         nxFromRel = scr.relX / rV.width;
+                        nyFromRel = scr.relY / rV.height;
                         const ox = Math.max(
                           0,
                           Math.round((rV.left / iw) * surf.w),
                         );
+                        const oy = Math.max(
+                          0,
+                          Math.round((rV.top / ih) * surf.h),
+                        );
                         nxWindow =
                           ((scr.clientX / iw) * surf.w - ox) / phys.w;
                         deltaWinVsRel = nxWindow - nxFromRel;
+                        nyFromInner =
+                          ((scr.clientY / ih) * surf.h - oy) / phys.h;
+                        deltaInnerVsRelNy = nyFromInner - nyFromRel;
                       }
                       return {
                         viewportRw: rV?.width,
@@ -2696,10 +3270,18 @@ function App() {
                         nxFromRel,
                         nxWindow,
                         deltaWinVsRel,
+                        nyFromRel,
+                        nyFromInner,
+                        deltaInnerVsRelNy,
                         nxPick: pick?.nx ?? null,
-                        deltaPickVsRel:
+                        nyPick: pick?.ny ?? null,
+                        deltaPickVsRelNx:
                           pick && nxFromRel != null
                             ? pick.nx - nxFromRel
+                            : null,
+                        deltaPickVsRelNy:
+                          pick && nyFromRel != null
+                            ? pick.ny - nyFromRel
                             : null,
                       };
                     })(),
@@ -2763,7 +3345,16 @@ function App() {
         (m === "add" || m === "remove" || m === "paint") &&
         !loading &&
         !workBusy &&
-        !strokeModeSkipsDrag(drawStrokeModeRef.current)
+        !fillOperationPending &&
+        !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
+        !(
+          drawStrokeModeRef.current === "cuboid" &&
+          cuboidDepthPhaseRef.current
+        ) &&
+        !(
+          drawStrokeModeRef.current === "cylinder" &&
+          cylinderDepthPhaseRef.current
+        )
       ) {
         const now = Date.now();
         if (now - lastStrokeEditMsRef.current >= 24) {
@@ -2809,6 +3400,13 @@ function App() {
               }
             })
             .catch(() => { });
+          logPlaneStrokeDebug("move:preview", e, {
+            nx: px,
+            ny: py,
+            tool,
+            lineStart: lineStart ?? null,
+            brushPrev: brushPrev ?? null,
+          });
         }
       }
       if (
@@ -2819,7 +3417,10 @@ function App() {
           m === "selectCoplanarEmpty") &&
         !loading &&
         !workBusy &&
-        !strokeModeSkipsDrag(drawStrokeModeRef.current)
+        !fillOperationPending &&
+        !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
+        drawStrokeModeRef.current !== "cuboid" &&
+        drawStrokeModeRef.current !== "cylinder"
       ) {
         const now = Date.now();
         if (now - lastStrokeEditMsRef.current >= 24) {
@@ -2840,7 +3441,8 @@ function App() {
         e.buttons &&
         m === "sculpt" &&
         !loading &&
-        !workBusy
+        !workBusy &&
+        !fillOperationPending
       ) {
         const now = Date.now();
         if (now - lastStrokeEditMsRef.current >= 24) {
@@ -2858,6 +3460,7 @@ function App() {
               brushRadius: sculptBrushRadiusRef.current,
               brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
               sprayDensity: 0,
+              brushClipBottomHalf: brushClipBottomHalfRef.current,
               ...(sculptBrushPrev
                 ? {
                   strokeSegmentPrevNx: sculptBrushPrev.nx,
@@ -2909,6 +3512,7 @@ function App() {
     const dy = (e.clientY - lastRef.current.y) * dpr;
     lastRef.current = { x: e.clientX, y: e.clientY };
     if (e.buttons === 0) {
+      logPlaneStrokeDebug("move:buttons-zero", e);
       if (
         startScreenLogoLoadedRef.current &&
         interactionModeRef.current !== "fly"
@@ -2947,11 +3551,10 @@ function App() {
   };
 
   const onPointerUp = (e: React.PointerEvent) => {
+    logPlaneStrokeDebug("up:received", e);
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
       probingRef.current = false;
-      gestureRef.current = null;
-      activePointerIdRef.current = null;
-      pointerStartRef.current = null;
+      resetPointerGesture("probe-up", e);
       return;
     }
 
@@ -2960,9 +3563,7 @@ function App() {
       gestureRef.current.pointerId === e.pointerId
     ) {
       void invoke("squishy_gizmo_pointer_up").catch(() => {});
-      gestureRef.current = null;
-      activePointerIdRef.current = null;
-      pointerStartRef.current = null;
+      resetPointerGesture("squishy-gizmo-up", e);
       return;
     }
 
@@ -2970,14 +3571,24 @@ function App() {
     const start = pointerStartRef.current;
     const moved = maxPointerMoveRef.current;
     const isThisPointer = g?.pointerId === e.pointerId;
+    let hasPointerCaptureForUp = capturedPointerIdRef.current === e.pointerId;
+    if (!hasPointerCaptureForUp && viewportRef.current) {
+      try {
+        hasPointerCaptureForUp = viewportRef.current.hasPointerCapture(e.pointerId);
+      } catch {
+        hasPointerCaptureForUp = false;
+      }
+    }
 
     if (
       isThisPointer &&
       g?.mode === "voxel" &&
       !loading &&
       !workBusy &&
+      !fillOperationPending &&
       start &&
-      e.button === 0
+      e.button === 0 &&
+      hasPointerCaptureForUp
     ) {
       const { nx, ny } = clientToViewportNormalized(e);
       const m = interactionModeRef.current;
@@ -3170,12 +3781,42 @@ function App() {
         }
       } else if (m === "add" || m === "remove" || m === "paint") {
         const sm = drawStrokeModeRef.current;
+        if (
+          sm === "cuboid" &&
+          (dragDidEditRef.current || moved >= 5) &&
+          strokeViewportStartRef.current
+        ) {
+          cuboidDepthRef.current = 1;
+          setCuboidDepthUi(1);
+          const phase = {
+            lineStart: { ...strokeViewportStartRef.current },
+            endNorm: { nx, ny },
+          };
+          cuboidDepthPhaseRef.current = phase;
+          setCuboidDepthPhase(phase);
+        }
+        if (
+          sm === "cylinder" &&
+          (dragDidEditRef.current || moved >= 5) &&
+          strokeViewportStartRef.current
+        ) {
+          cylinderDepthRef.current = 1;
+          setCylinderDepthUi(1);
+          const phase = {
+            lineStart: { ...strokeViewportStartRef.current },
+            endNorm: { nx, ny },
+          };
+          cylinderDepthPhaseRef.current = phase;
+          setCylinderDepthPhase(phase);
+        }
         if (!dragDidEditRef.current && moved < 5) {
           if (strokeModeSkipsDrag(sm)) {
             void handleStrokeAnchorClick(nx, ny);
           } else {
             const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
             const lineStart = strokeViewportLineStartNorm();
+            const isFillStroke = drawStrokeModeRef.current === "fill";
+            if (isFillStroke) beginFillOperation();
             void invoke("voxel_edit_at_screen", {
               args: {
                 nx,
@@ -3190,6 +3831,8 @@ function App() {
                 planeAxis: planeAxisRef.current,
                 strokeAux: mergedStrokeAux({}),
                 matchMaterial: matchMaterialSelectColorRef.current,
+                fillSelectDiagonals: fillSelectDiagonalsRef.current,
+                fillRespectsColor: fillRespectsColorRef.current,
                 ...(lineStart
                   ? {
                     strokeLineStartNx: lineStart.nx,
@@ -3197,11 +3840,21 @@ function App() {
                   }
                   : {}),
               },
-            }).catch((e) => {
-              console.error("[voxelle] voxel_edit_at_screen error", e);
-            });
+            })
+              .catch((e) => {
+                console.error("[voxelle] voxel_edit_at_screen error", e);
+              })
+              .finally(() => {
+                if (isFillStroke) endFillOperation();
+              });
           }
         }
+        logPlaneStrokeDebug("up:voxel-stroke-end", e, {
+          moved,
+          dragDidEdit: dragDidEditRef.current,
+          strokeMode: sm,
+          interactionMode: m,
+        });
         void invoke("voxel_stroke_end").catch(() => { });
         lastStrokeNormRef.current = null;
       } else if (
@@ -3210,6 +3863,35 @@ function App() {
         m === "selectCoplanar" ||
         m === "selectCoplanarEmpty"
       ) {
+        const sm = drawStrokeModeRef.current;
+        if (
+          sm === "cuboid" &&
+          (dragDidEditRef.current || moved >= 5) &&
+          strokeViewportStartRef.current
+        ) {
+          cuboidDepthRef.current = 1;
+          setCuboidDepthUi(1);
+          const phase = {
+            lineStart: { ...strokeViewportStartRef.current },
+            endNorm: { nx, ny },
+          };
+          cuboidDepthPhaseRef.current = phase;
+          setCuboidDepthPhase(phase);
+        }
+        if (
+          sm === "cylinder" &&
+          (dragDidEditRef.current || moved >= 5) &&
+          strokeViewportStartRef.current
+        ) {
+          cylinderDepthRef.current = 1;
+          setCylinderDepthUi(1);
+          const phase = {
+            lineStart: { ...strokeViewportStartRef.current },
+            endNorm: { nx, ny },
+          };
+          cylinderDepthPhaseRef.current = phase;
+          setCylinderDepthPhase(phase);
+        }
         void invoke("selection_stroke_end").catch(() => {});
         selectionStrokeBegunRef.current = false;
         lastStrokeNormRef.current = null;
@@ -3226,6 +3908,7 @@ function App() {
               brushRadius: sculptBrushRadiusRef.current,
               brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
               sprayDensity: 0,
+              brushClipBottomHalf: brushClipBottomHalfRef.current,
               ...(sm === "terrain"
                 ? {
                   terrainOp: terrainSculptOpRef.current,
@@ -3254,6 +3937,10 @@ function App() {
         void invoke("voxel_stroke_end").catch(() => { });
         lastStrokeNormRef.current = null;
       }
+    } else if (isThisPointer && g?.mode === "voxel" && e.button === 0 && !hasPointerCaptureForUp) {
+      logPlaneStrokeDebug("up:ignored-no-capture", e, {
+        moved,
+      });
     }
 
     if (isThisPointer && g?.mode === "camera" && interactionModeRef.current !== "fly") {
@@ -3273,13 +3960,15 @@ function App() {
     }
 
     if (isThisPointer) {
-      gestureRef.current = null;
-      activePointerIdRef.current = null;
+      resetPointerGesture("pointer-up-complete", e);
+      if (capturedPointerIdRef.current === e.pointerId) {
+        capturedPointerIdRef.current = null;
+      }
     }
-    pointerStartRef.current = null;
   };
 
   const onPointerLeave = (e: React.PointerEvent) => {
+    logPlaneStrokeDebug("leave", e);
     clearPreview();
     if (viewportCursorDebugEnabled) {
       setViewportCursorDebugJs(null);
@@ -3304,7 +3993,16 @@ function App() {
         },
       }).catch(() => {});
     }
-    onPointerUp(e);
+    // Never synthesize pointer-up from leave. Commit only on real pointer-up/cancel;
+    // pointer capture keeps those events routed to the viewport during drags.
+  };
+
+  const onGotPointerCapture = (e: React.PointerEvent) => {
+    logPlaneStrokeDebug("capture:got", e);
+  };
+
+  const onLostPointerCapture = (e: React.PointerEvent) => {
+    logPlaneStrokeDebug("capture:lost", e);
   };
 
   const onWheel = (e: React.WheelEvent) => {
@@ -3432,7 +4130,50 @@ function App() {
       ? lastProjectReopenBlurb(lastSessionInfo)
       : null;
 
+  /** Phase + progress for the top-center viewport HUD (load / mesh / fill / etc.). */
+  const viewportTopCenterHud = (() => {
+    if (loading && pathLabel) {
+      const pct = Math.round(Math.min(1, Math.max(0, loadProgress)) * 100);
+      const phase = loadPhase.trim();
+      return {
+        label: phase || `Loading ${basename(pathLabel)}…`,
+        pct,
+        showFillCancel: false,
+      };
+    }
+    if (loading) {
+      return {
+        label: loadPhase.trim() || "Loading…",
+        pct: Math.round(Math.min(1, Math.max(0, loadProgress)) * 100),
+        showFillCancel: false,
+      };
+    }
+    if (workBusy || fillOperationPending) {
+      const pct = Math.round(Math.min(1, Math.max(0, workProgress)) * 100);
+      const phase = workPhase.trim();
+      const showFillCancel =
+        fillOperationPending || /fill/i.test(workPhase);
+      return {
+        label:
+          phase ||
+          (fillOperationPending ? "Fill…" : "Working…"),
+        pct,
+        showFillCancel,
+      };
+    }
+    return null;
+  })();
+
   const statusBarMessage = (() => {
+    // Shorten footer only while loading (top HUD shows load detail). Keep mesh/edit phases in the bar during work.
+    if (viewportTopCenterHud != null && loading) {
+      if (pathLabel) {
+        const base = basename(pathLabel);
+        if (collabActive) return `${base} · Live`;
+        return base;
+      }
+      return collabActive ? "Live session" : `v${VOXELLE_DESKTOP_VERSION}`;
+    }
     if (loading && pathLabel) {
       const pct = Math.round(Math.min(1, Math.max(0, loadProgress)) * 100);
       const phase = loadPhase.trim();
@@ -3441,10 +4182,14 @@ function App() {
         : `Loading ${basename(pathLabel)}… ${pct}%`;
     }
     if (loading) return "Loading…";
-    if (workBusy) {
+    if (workBusy || fillOperationPending) {
       const pct = Math.round(Math.min(1, Math.max(0, workProgress)) * 100);
       const phase = workPhase.trim();
-      return phase ? `${phase} ${pct}%` : `Working… ${pct}%`;
+      return phase
+        ? `${phase} ${pct}%`
+        : fillOperationPending
+          ? `Fill… ${pct}%`
+          : `Working… ${pct}%`;
     }
     if (pathLabel) {
       const base = basename(pathLabel);
@@ -3485,6 +4230,18 @@ function App() {
   const showDrawPaneToolMatrix =
     toolsPane === "draw" &&
     (isDrawVoxelEditMode || isSelectionInteractionMode);
+
+  const showPolygonPhaseHud =
+    showEditorChrome &&
+    showDrawPaneToolMatrix &&
+    (drawStrokeMode === "polygon" || drawStrokeMode === "polygonHull");
+
+  const showViewportTopCenterStack =
+    showEditorChrome &&
+    (viewportTopCenterHud != null ||
+      cuboidDepthPhase ||
+      cylinderDepthPhase ||
+      showPolygonPhaseHud);
 
   const selectionMethod = deriveSelectionMethod({
     drawStrokeMode,
@@ -4115,6 +4872,8 @@ function App() {
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
             onPointerLeave={onPointerLeave}
+            onGotPointerCapture={onGotPointerCapture}
+            onLostPointerCapture={onLostPointerCapture}
             onContextMenu={(ev) => ev.preventDefault()}
             onWheel={onWheel}
             role="application"
@@ -4122,26 +4881,55 @@ function App() {
           >
             {showEditorChrome && viewportCursorDebugEnabled ? (
             <div className="viewport-cursor-debug-overlay" aria-hidden>
-              {viewportCursorDebugJs ? (
-                <div
-                  className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
-                  style={{
-                    left: `${viewportCursorDebugJs.nx * 100}%`,
-                    top: `${viewportCursorDebugJs.ny * 100}%`,
-                  }}
-                />
-              ) : null}
-              {viewportCursorDebugRust?.previewNx != null &&
-              viewportCursorDebugRust.previewNy != null ? (
-                <div
-                  className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
-                  style={{
-                    left: `${viewportCursorDebugRust.previewNx * 100}%`,
-                    top: `${viewportCursorDebugRust.previewNy * 100}%`,
-                  }}
-                />
-              ) : null}
+              {(() => {
+                const overlayRect =
+                  viewportRef.current?.getBoundingClientRect() ?? null;
+                const jsPct = viewportCursorDebugJs
+                  ? viewportCursorOverlayPercent(
+                      fullSurfaceViewportEnabled,
+                      viewportCursorDebugJs.nx,
+                      viewportCursorDebugJs.ny,
+                      overlayRect,
+                    )
+                  : null;
+                const rustPct =
+                  viewportCursorDebugRust?.previewNx != null &&
+                  viewportCursorDebugRust.previewNy != null
+                    ? viewportCursorOverlayPercent(
+                        fullSurfaceViewportEnabled,
+                        viewportCursorDebugRust.previewNx,
+                        viewportCursorDebugRust.previewNy,
+                        overlayRect,
+                      )
+                    : null;
+                return (
+                  <>
+                    {jsPct ? (
+                      <div
+                        className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
+                        style={{
+                          left: `${jsPct.leftPct}%`,
+                          top: `${jsPct.topPct}%`,
+                        }}
+                      />
+                    ) : null}
+                    {rustPct ? (
+                      <div
+                        className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
+                        style={{
+                          left: `${rustPct.leftPct}%`,
+                          top: `${rustPct.topPct}%`,
+                        }}
+                      />
+                    ) : null}
+                  </>
+                );
+              })()}
               <div className="viewport-cursor-debug-legend">
+                <div>
+                  Full-window GPU (experimental){" "}
+                  {fullSurfaceViewportEnabled ? "on" : "off"}
+                </div>
                 <div>
                   JS{" "}
                   {viewportCursorDebugJs
@@ -4164,7 +4952,7 @@ function App() {
                     : "—"}
                 </div>
                 <div>
-                  proj cube{" "}
+                  proj cube (face hit){" "}
                   {viewportCursorDebugRust?.projCubeNx != null &&
                   viewportCursorDebugRust.projCubeNy != null
                     ? `${viewportCursorDebugRust.projCubeNx.toFixed(5)}, ${viewportCursorDebugRust.projCubeNy.toFixed(5)}`
@@ -4173,6 +4961,18 @@ function App() {
                   viewportCursorDebugRust?.projCubeNx != null &&
                   viewportCursorDebugRust.projCubeNy != null
                     ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCubeNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCubeNy).toFixed(5)}`
+                    : ""}
+                </div>
+                <div>
+                  proj center (voxel ctr, debug){" "}
+                  {viewportCursorDebugRust?.projCenterNx != null &&
+                  viewportCursorDebugRust.projCenterNy != null
+                    ? `${viewportCursorDebugRust.projCenterNx.toFixed(5)}, ${viewportCursorDebugRust.projCenterNy.toFixed(5)}`
+                    : "—"}
+                  {viewportCursorDebugJs &&
+                  viewportCursorDebugRust?.projCenterNx != null &&
+                  viewportCursorDebugRust.projCenterNy != null
+                    ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCenterNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCenterNy).toFixed(5)}`
                     : ""}
                 </div>
                 <div>
@@ -4196,6 +4996,27 @@ function App() {
                     : "—"}
                 </div>
                 <div>
+                  layout→surface origin{" "}
+                  {viewportCursorDebugRust &&
+                  viewportCursorDebugScreen &&
+                  viewportCursorDebugScreen.layoutWidth > 0 &&
+                  viewportCursorDebugScreen.layoutHeight > 0
+                    ? (() => {
+                        const s = viewportCursorDebugScreen;
+                        const r = viewportCursorDebugRust;
+                        const expX = Math.round(
+                          (s.rectLeft / s.layoutWidth) * r.surfaceWidth,
+                        );
+                        const expY = Math.round(
+                          (s.rectTop / s.layoutHeight) * r.surfaceHeight,
+                        );
+                        const dx = expX - r.viewportOriginX;
+                        const dy = expY - r.viewportOriginY;
+                        return `expect (${expX}, ${expY}) · Rust (${r.viewportOriginX}, ${r.viewportOriginY}) · Δ (${dx}, ${dy}) · surface ${r.surfaceWidth}×${r.surfaceHeight} · layout ${s.layoutWidth}×${s.layoutHeight} · inner ${s.innerWidth}×${s.innerHeight} · rect @ ${s.rectLeft.toFixed(0)},${s.rectTop.toFixed(0)}`;
+                      })()
+                    : "—"}
+                </div>
+                <div>
                   world ray (Rust, preview texels) o{" "}
                   {viewportCursorDebugRust?.rayOriginX != null &&
                   viewportCursorDebugRust.rayOriginY != null &&
@@ -4212,6 +5033,188 @@ function App() {
               </div>
             </div>
             ) : null}
+          {showViewportTopCenterStack ? (
+            <div
+              className="viewport-top-center-hud"
+              onPointerDown={(e) => e.stopPropagation()}
+            >
+              {viewportTopCenterHud ? (
+                <div
+                  className="viewport-work-phase-chip"
+                  role="status"
+                  aria-live="polite"
+                >
+                  <span className="viewport-work-phase-text">
+                    {viewportTopCenterHud.label}
+                  </span>
+                  <span className="viewport-work-phase-pct">
+                    {viewportTopCenterHud.pct}%
+                  </span>
+                  {viewportTopCenterHud.showFillCancel ? (
+                    <button
+                      type="button"
+                      className="viewport-work-phase-cancel"
+                      onClick={() =>
+                        void invoke("voxel_fill_cancel").catch(() => {})
+                      }
+                    >
+                      Cancel
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              {cuboidDepthPhase || cylinderDepthPhase ? (
+                <div
+                  className="viewport-cuboid-depth-bar"
+                  role="dialog"
+                  aria-label={
+                    cuboidDepthPhase
+                      ? "Cuboid extrusion depth"
+                      : "Cylinder extrusion depth"
+                  }
+                >
+                  <span>Depth</span>
+                  <button
+                    type="button"
+                    className="tool-options-shape-btn"
+                    onClick={() => {
+                      if (cuboidDepthPhase) {
+                        const n = Math.max(-256, cuboidDepthUi - 1);
+                        cuboidDepthRef.current = n;
+                        setCuboidDepthUi(n);
+                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
+                      } else {
+                        const n = Math.max(-256, cylinderDepthUi - 1);
+                        cylinderDepthRef.current = n;
+                        setCylinderDepthUi(n);
+                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
+                      }
+                    }}
+                  >
+                    −
+                  </button>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    className="viewport-cuboid-depth-input"
+                    aria-label="Extrusion depth"
+                    autoComplete="off"
+                    value={
+                      extrusionDepthEditing
+                        ? extrusionDepthDraft
+                        : String(
+                            cuboidDepthPhase ? cuboidDepthUi : cylinderDepthUi,
+                          )
+                    }
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (v === "" || /^-?\d*$/.test(v)) {
+                        setExtrusionDepthDraft(v);
+                      }
+                    }}
+                    onFocus={(e) => {
+                      const cur = cuboidDepthPhase
+                        ? cuboidDepthUi
+                        : cylinderDepthUi;
+                      setExtrusionDepthEditing(true);
+                      setExtrusionDepthDraft(String(cur));
+                      e.target.select();
+                    }}
+                    onBlur={() => {
+                      const current = cuboidDepthPhase
+                        ? cuboidDepthUi
+                        : cylinderDepthUi;
+                      let n = parseInt(extrusionDepthDraft, 10);
+                      if (Number.isNaN(n)) n = current;
+                      n = Math.max(-256, Math.min(256, n));
+                      if (cuboidDepthPhase) {
+                        setCuboidDepthUi(n);
+                        cuboidDepthRef.current = n;
+                      } else {
+                        setCylinderDepthUi(n);
+                        cylinderDepthRef.current = n;
+                      }
+                      setExtrusionDepthEditing(false);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        (e.target as HTMLInputElement).blur();
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="tool-options-shape-btn"
+                    onClick={() => {
+                      if (cuboidDepthPhase) {
+                        const n = Math.min(256, cuboidDepthUi + 1);
+                        cuboidDepthRef.current = n;
+                        setCuboidDepthUi(n);
+                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
+                      } else {
+                        const n = Math.min(256, cylinderDepthUi + 1);
+                        cylinderDepthRef.current = n;
+                        setCylinderDepthUi(n);
+                        if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
+                      }
+                    }}
+                  >
+                    +
+                  </button>
+                  <button
+                    type="button"
+                    className="tool-options-shape-btn"
+                    onClick={() => {
+                      if (cuboidDepthPhase) void commitCuboidSolidAtScreen();
+                      else void commitCylinderSolidAtScreen();
+                    }}
+                  >
+                    Done
+                  </button>
+                </div>
+              ) : null}
+              {showPolygonPhaseHud ? (
+                <div
+                  className="viewport-polygon-phase-bar"
+                  role="dialog"
+                  aria-label="Polygon area"
+                >
+                  <p className="viewport-polygon-phase-hint">
+                    Vertices: {strokePolygonVerts.length}. Click to add
+                    corners; Apply with three or more.
+                  </p>
+                  <div className="viewport-polygon-phase-actions">
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setStrokePolygonVerts([]);
+                        strokePolygonLastScreenRef.current = null;
+                      }}
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={
+                        loading ||
+                        workBusy ||
+                        strokePolygonVerts.length < 3
+                      }
+                      onClick={() => {
+                        if (isDrawVoxelEditMode) applyPolygonStrokeFill();
+                        else applyPolygonSelectionStrokeFill();
+                      }}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           </div>
           {showEditorChrome ? (
           <div className="viewport-ping-overlay" aria-hidden>
@@ -4351,13 +5354,12 @@ function App() {
                     setFillSelectDiagonals={setFillSelectDiagonals}
                     fillRespectsColor={fillRespectsColor}
                     setFillRespectsColor={setFillRespectsColor}
-                    strokePolygonVerts={strokePolygonVerts}
-                    setStrokePolygonVerts={setStrokePolygonVerts}
-                    strokePolygonLastScreenRef={strokePolygonLastScreenRef}
                     sprayDensity={sprayDensity}
                     setSprayDensity={setSprayDensity}
                     brushShape={brushShape}
                     setBrushShape={setBrushShape}
+                    brushClipBottomHalf={brushClipBottomHalf}
+                    setBrushClipBottomHalf={setBrushClipBottomHalf}
                     brushRadius={brushRadius}
                     setBrushRadius={setBrushRadius}
                     selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
@@ -4374,11 +5376,6 @@ function App() {
                     setSpraySizeRange={setSpraySizeRange}
                     fillConstrainToPlane={fillConstrainToPlane}
                     setFillConstrainToPlane={setFillConstrainToPlane}
-                    onApplyPolygonSelection={
-                      isDrawVoxelEditMode
-                        ? applyPolygonStrokeFill
-                        : applyPolygonSelectionStrokeFill
-                    }
                   />
                 </>
               ) : null}
@@ -4489,6 +5486,26 @@ function App() {
                           {sculptBrushFalloff}
                         </span>
                       </label>
+                      {(sculptStrokeMode === "draw" ||
+                        sculptStrokeMode === "smooth" ||
+                        sculptStrokeMode === "gouge" ||
+                        sculptStrokeMode === "extrude" ||
+                        sculptStrokeMode === "terrain") ? (
+                        <label
+                          className="tool-options-checkbox-row"
+                          style={{ marginTop: "0.35rem" }}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={brushClipBottomHalf}
+                            onChange={(ev) =>
+                              setBrushClipBottomHalf(ev.target.checked)
+                            }
+                            disabled={loading || workBusy}
+                          />
+                          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+                        </label>
+                      ) : null}
                       {(sculptStrokeMode === "draw" ||
                         sculptStrokeMode === "smooth" ||
                         sculptStrokeMode === "gouge") ? (

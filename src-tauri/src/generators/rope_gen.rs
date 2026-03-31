@@ -1,6 +1,9 @@
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
-use crate::voxel_edit::{in_grid, ray_first_solid, screen_to_world_ray, VoxelEditDelta};
+use crate::voxel_edit::{
+    effective_ray_grid_size, ensure_grid_fits_coord, ray_first_solid, screen_to_world_ray,
+    VoxelEditDelta,
+};
 use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
@@ -44,7 +47,7 @@ pub fn generator_rope_between_screens(
     color: u32,
     material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (o1, d1) = screen_to_world_ray(camera, width, height, sx1, sy1);
     let (o2, d2) = screen_to_world_ray(camera, width, height, sx2, sy2);
     let Some((h1, _)) = ray_first_solid(o1, d1, voxel_map, grid_size) else {
@@ -57,9 +60,7 @@ pub fn generator_rope_between_screens(
     let mut out = Vec::new();
     let mut seen: HashSet<VoxelCoord> = HashSet::new();
     for (x, y, z) in path {
-        if !in_grid(x, y, z, grid_size) {
-            continue;
-        }
+        ensure_grid_fits_coord(file, x, y, z);
         if !seen.insert((x, y, z)) {
             continue;
         }

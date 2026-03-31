@@ -291,7 +291,7 @@ pub fn squishy_add_ball_at_screen(
     radius: i32,
 ) -> Option<u32> {
     let anchor = if session.add_snap_to_surface {
-        preview_add_cell(file, voxel_map, camera, width, height, sx, sy)
+        preview_add_cell(file, voxel_map, camera, width, height, sx, sy).map(|(c, _)| c)
     } else {
         crate::voxel_edit::pick_solid_coord_at_screen(file, voxel_map, camera, width, height, sx, sy)
     };

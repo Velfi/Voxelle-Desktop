@@ -41,6 +41,7 @@ use crate::voxel_edit::VoxelEditDelta;
 use crate::voxelle::{SceneObject, Voxel};
 use glam::{IVec3, Mat4, Vec3};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
 use tauri::{AppHandle, Runtime};
 use wgpu::util::DeviceExt;
@@ -50,6 +51,18 @@ const MESH_GREEDY_PIPELINE_LAYOUT_VERSION: u32 = 2;
 
 /// Opaque mesh vertex: `vec3 pos, vec3 n, vec3 color, mat_kind, ao` → 11×`f32`.
 const OPAQUE_VERTEX_STRIDE: u64 = 44;
+
+/// [`Maintain::Wait`] can starve other threads while the GPU drains; use a short [`Maintain::Poll`]
+/// loop with yields during heavy mesh rebuild so the app stays responsive.
+#[inline]
+fn poll_device_yielding_until_queue_empty(device: &wgpu::Device) {
+    loop {
+        if device.poll(wgpu::Maintain::Poll).is_queue_empty() {
+            break;
+        }
+        std::thread::yield_now();
+    }
+}
 
 /// Timings from [`WgpuViewer::remesh_opaque_chunks`] (incremental CPU chunked path).
 #[derive(Clone, Debug, Default)]
@@ -2446,13 +2459,42 @@ impl WgpuViewer {
     }
 
     /// Full CPU chunked mesh upload (all spatial chunks). Used on load and when chunk origin shifts.
-    pub fn upload_cpu_mesh_chunked_full(&mut self, voxels: &[Voxel]) {
+    pub fn upload_cpu_mesh_chunked_full<R: Runtime>(
+        &mut self,
+        voxels: &[Voxel],
+        work_progress: Option<&AppHandle<R>>,
+    ) {
         self.vertex_buffer = None;
         self.index_buffer = None;
         self.index_count = 0;
         self.opaque_chunks.clear();
+        if let Some(app) = work_progress {
+            crate::emit_work_progress(
+                app,
+                0.38,
+                "Indexing voxels for mesh…",
+            );
+        }
+        let last_permille = AtomicU32::new(0);
         let Some((origin, meshes, spatial_cache)) =
-            greedy_mesh::build_chunk_meshes_and_spatial_cache(voxels, greedy_mesh::SPATIAL_CHUNK_SIZE, |_, _, _| {})
+            greedy_mesh::build_chunk_meshes_and_spatial_cache(
+                voxels,
+                greedy_mesh::SPATIAL_CHUNK_SIZE,
+                |frac: f32, done: u32, total: u32| {
+                    if let Some(app) = work_progress {
+                        let permille = (frac * 1000.0).min(1000.0) as u32;
+                        let prev = last_permille.load(Ordering::Relaxed);
+                        if permille.saturating_sub(prev) >= 40 || done == total {
+                            last_permille.store(permille, Ordering::Relaxed);
+                            crate::emit_work_progress(
+                                app,
+                                0.38 + 0.35 * frac,
+                                format!("Mesh chunks {done}/{total}…"),
+                            );
+                        }
+                    }
+                },
+            )
         else {
             self.opaque_chunked = false;
             self.spatial_mesh_cache = None;
@@ -2465,7 +2507,10 @@ impl WgpuViewer {
             return;
         }
         self.opaque_chunked = true;
-        for (key, mesh) in meshes {
+        for (i, (key, mesh)) in meshes.into_iter().enumerate() {
+            if i > 0 && i % 4 == 0 {
+                std::thread::yield_now();
+            }
             self.opaque_chunks
                 .insert(key, self.opaque_draw_from_mesh(&mesh));
         }
@@ -2500,6 +2545,13 @@ impl WgpuViewer {
 
         if self.spatial_mesh_cache.is_none() {
             let t_cold = Instant::now();
+            if let Some(app) = work_progress {
+                crate::emit_work_progress(
+                    app,
+                    0.4,
+                    "Indexing voxels for mesh…",
+                );
+            }
             self.spatial_mesh_cache = greedy_mesh::SpatialMeshCache::from_voxels(voxels, cs);
             perf.buckets_ms = t_cold.elapsed().as_secs_f64() * 1000.0;
         }
@@ -2510,7 +2562,7 @@ impl WgpuViewer {
         let origin_iv = IVec3::new(cache_ref.origin.0, cache_ref.origin.1, cache_ref.origin.2);
         if origin_iv != self.chunk_grid_origin {
             let t_full = Instant::now();
-            self.upload_cpu_mesh_chunked_full(voxels);
+            self.upload_cpu_mesh_chunked_full(voxels, work_progress);
             perf.full_chunked_rebuild_ms = t_full.elapsed().as_secs_f64() * 1000.0;
             return (false, perf);
         }
@@ -2552,6 +2604,9 @@ impl WgpuViewer {
         let nk = keys.len().max(1) as u32;
         let mut last_emit_permille: u32 = 0;
         for (ki, key) in keys.iter().enumerate() {
+            if ki > 0 && ki % 2 == 0 {
+                std::thread::yield_now();
+            }
             let done = (ki + 1) as u32;
             let frac = done as f32 / nk as f32;
             let permille = (frac * 1000.0).min(1000.0) as u32;
@@ -2668,7 +2723,7 @@ impl WgpuViewer {
             .len()
             > 1;
         if work.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS && !multi {
-            self.upload_cpu_mesh_chunked_full(&work);
+            self.upload_cpu_mesh_chunked_full(&work, None::<&AppHandle<tauri::Wry>>);
         } else {
             let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
             self.upload_mesh(&mesh);
@@ -2942,7 +2997,7 @@ impl WgpuViewer {
         }
         enc.copy_buffer_to_buffer(counters_buf, 0, readback, 0, 8);
         queue.submit(std::iter::once(enc.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        poll_device_yielding_until_queue_empty(device);
 
         let slice = readback.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2993,7 +3048,7 @@ impl WgpuViewer {
             enc.copy_buffer_to_buffer(vtx_out, 0, &draw.vertex_buffer, 0, vtx_bytes);
             enc.copy_buffer_to_buffer(idx_out, 0, &draw.index_buffer, 0, idx_bytes);
             self.queue.submit(std::iter::once(enc.finish()));
-            self.device.poll(wgpu::Maintain::Wait);
+            poll_device_yielding_until_queue_empty(&self.device);
             draw.index_count = i_total;
             return;
         }
@@ -3018,7 +3073,7 @@ impl WgpuViewer {
         enc.copy_buffer_to_buffer(vtx_out, 0, &vb, 0, vtx_bytes);
         enc.copy_buffer_to_buffer(idx_out, 0, &ib, 0, idx_bytes);
         self.queue.submit(std::iter::once(enc.finish()));
-        self.device.poll(wgpu::Maintain::Wait);
+        poll_device_yielding_until_queue_empty(&self.device);
         self.opaque_chunks.insert(
             key,
             OpaqueChunkDraw {
@@ -3183,7 +3238,7 @@ impl WgpuViewer {
             (i_total as u64).saturating_mul(4),
         );
         self.queue.submit(std::iter::once(enc3.finish()));
-        self.device.poll(wgpu::Maintain::Wait);
+        poll_device_yielding_until_queue_empty(&self.device);
 
         self.opaque_chunked = false;
         self.opaque_chunks.clear();

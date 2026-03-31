@@ -704,9 +704,19 @@ impl SpatialMeshCache {
     pub fn from_voxels(voxels: &[Voxel], cs: i32) -> Option<Self> {
         let origin = voxel_aabb_min_int(voxels)?;
         let cs = cs.max(1);
-        let occupancy = voxel_map(voxels);
+        const YIELD_EVERY: usize = 16_384;
+        let mut occupancy = AHashMap::with_capacity(voxels.len());
+        for (i, v) in voxels.iter().enumerate() {
+            if i != 0 && i % YIELD_EVERY == 0 {
+                std::thread::yield_now();
+            }
+            occupancy.insert(coord_key(v.x, v.y, v.z), *v);
+        }
         let mut buckets: AHashMap<ChunkKey, Vec<Voxel>> = AHashMap::new();
-        for v in voxels {
+        for (i, v) in voxels.iter().enumerate() {
+            if i != 0 && i % YIELD_EVERY == 0 {
+                std::thread::yield_now();
+            }
             let k = chunk_key_from_world(v.x, v.y, v.z, origin, cs);
             buckets.entry(k).or_default().push(*v);
         }

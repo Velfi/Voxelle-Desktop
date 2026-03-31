@@ -19,8 +19,8 @@ export type DrawStrokeModeApi =
   | "polygon"
   | "fill";
 
-/** Plane constraint for `plane` stroke (Rust `PlaneAxis`). */
-export type PlaneAxisApi = "auto" | "x" | "y" | "z";
+/** Plane constraint for `plane` stroke and fill (Rust `PlaneAxis`). */
+export type PlaneAxisApi = "auto" | "x" | "y" | "z" | "camera";
 
 /** Distinguishes Stroke vs Solid when both use line stroke + no spray (web parity). */
 export type StrokeFamilyVariant = "stroke" | "solid";
@@ -39,10 +39,7 @@ export function strokeModeSkipsDrag(mode: DrawStrokeModeApi): boolean {
   return (
     mode === "fill" ||
     mode === "polygon" ||
-    mode === "polygonHull" ||
-    mode === "circle" ||
-    mode === "cuboid" ||
-    mode === "cylinder"
+    mode === "polygonHull"
   );
 }
 

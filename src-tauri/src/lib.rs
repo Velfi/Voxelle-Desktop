@@ -40,6 +40,7 @@ use std::io::Write;
 use voxelle::{
     decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, start_shape::StartShape,
 };
+use voxelle::scene::object_world_matrix;
 
 struct FpsCounter {
     period_start: Option<Instant>,
@@ -333,7 +334,13 @@ fn scene_bounds_for_edits(
 /// Normalized viewport coords (0..=1) → texels using the same `w,h` as projection / [`voxel_edit::screen_to_world_ray`].
 #[inline]
 fn viewport_texels_from_norm(nx: f32, ny: f32, w: f32, h: f32) -> (f32, f32) {
-    (nx.clamp(0.0, 1.0) * w, ny.clamp(0.0, 1.0) * h)
+    // Pixel-center convention:
+    // - `screen_to_world_ray` samples `(sx + 0.5, sy + 0.5) / (w,h)`.
+    // - Therefore `sx/sy` must live in `[0, w-1] / [0, h-1]` so `nx=0.5` maps to exact center.
+    // Mapping to `[0, w]` introduced a systematic half-pixel bias in rays.
+    let sx = nx.clamp(0.0, 1.0) * (w.max(1.0) - 1.0);
+    let sy = ny.clamp(0.0, 1.0) * (h.max(1.0) - 1.0);
+    (sx, sy)
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -366,6 +373,11 @@ struct VoxelEditAtScreen {
     /// When `stroke_mode` is fill + paint: match material as well as color.
     #[serde(default)]
     match_material: bool,
+    /// Solid/empty flood adjacency (fill stroke); mirrors selection fill.
+    #[serde(default)]
+    fill_select_diagonals: bool,
+    #[serde(default = "default_fill_respects_color")]
+    fill_respects_color: bool,
 }
 
 fn default_terrain_strength_sculpt() -> i32 {
@@ -396,6 +408,8 @@ struct SculptStrokeAtScreenArgs {
     brush_shape: voxel_edit::BrushShape,
     #[serde(default)]
     spray_density: f32,
+    #[serde(default)]
+    brush_clip_bottom_half: bool,
     #[serde(default)]
     stroke_line_start_nx: Option<f32>,
     #[serde(default)]
@@ -467,6 +481,7 @@ impl Default for PreviewHoverContext {
     }
 }
 
+/// `texel_s*` included because single-cell hover is anchored at the ray face hit (moves within a cell).
 fn hash_single_cell_preview(
     mode: PreviewMode,
     cx: i32,
@@ -475,6 +490,9 @@ fn hash_single_cell_preview(
     tag: u8,
     debug_overlay: bool,
     palette_color: u32,
+    object_id: u32,
+    texel_sx: f32,
+    texel_sy: f32,
 ) -> u64 {
     let mut h = AHasher::default();
     mode.hash(&mut h);
@@ -484,6 +502,9 @@ fn hash_single_cell_preview(
     tag.hash(&mut h);
     debug_overlay.hash(&mut h);
     palette_color.hash(&mut h);
+    object_id.hash(&mut h);
+    texel_sx.to_bits().hash(&mut h);
+    texel_sy.to_bits().hash(&mut h);
     h.finish()
 }
 
@@ -668,6 +689,8 @@ pub struct ViewerState {
     grid_overlay_cache_key: Mutex<Option<u64>>,
     selection_overlay_cache_key: Mutex<Option<u64>>,
     preview_overlay_cache_key: Mutex<Option<u64>>,
+    /// Set by [`voxel_fill_cancel`] during a long flood fill so BFS can exit cooperatively.
+    pub fill_operation_cancel: Arc<AtomicBool>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -710,6 +733,12 @@ fn get_viewport_pixel_size(state: State<'_, Arc<ViewerState>>) -> Result<Viewpor
 struct ViewportCursorDebug {
     viewport_width: u32,
     viewport_height: u32,
+    /// Swapchain drawable size (physical px); see [`WgpuViewer::surface_pixel_size`].
+    surface_width: u32,
+    surface_height: u32,
+    /// Top-left of the viewport texture in surface pixel space (`copy_texture_to_texture` dest origin).
+    viewport_origin_x: u32,
+    viewport_origin_y: u32,
     preview_nx: Option<f32>,
     preview_ny: Option<f32>,
     texel_sx: Option<f32>,
@@ -724,11 +753,14 @@ struct ViewportCursorDebug {
     /// Preview cube world center projected back to normalized viewport coords.
     proj_cube_nx: Option<f32>,
     proj_cube_ny: Option<f32>,
+    /// Same projection path as `proj_cube_*`, but voxel **center** in world space (matches hover mesh).
+    proj_center_nx: Option<f32>,
+    proj_center_ny: Option<f32>,
 }
 
 /// #region agent log
 fn debug_agent_ndjson_log(payload: serde_json::Value) {
-    const PATH: &str = "/Users/zelda/Documents/digital-garden/.cursor/debug-215b55.log";
+    const PATH: &str = "/Users/zelda/Documents/digital-garden/.cursor/debug-0e537f.log";
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(PATH) {
         if let Ok(s) = serde_json::to_string(&payload) {
             let _ = writeln!(f, "{}", s);
@@ -795,7 +827,7 @@ fn get_viewport_cursor_debug(
     };
     // #region agent log
     debug_agent_ndjson_log(serde_json::json!({
-        "sessionId": "215b55",
+        "sessionId": "0e537f",
         "hypothesisId": "H_rust_surface",
         "location": "lib.rs:get_viewport_cursor_debug",
         "message": "gpu viewport + texels",
@@ -815,35 +847,83 @@ fn get_viewport_cursor_debug(
         "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
     }));
     // #endregion
-    let (proj_cube_nx, proj_cube_ny) = match (texel_sx, texel_sy) {
+    let (proj_cube_nx, proj_cube_ny, proj_center_nx, proj_center_ny) = match (texel_sx, texel_sy) {
         (Some(sx), Some(sy)) => {
             let file_guard = state.current_file.lock();
             let vmap_guard = state.voxel_map.lock();
             match (file_guard.as_ref(), vmap_guard.as_ref()) {
                 (Some(file), Some(vmap)) if !file.voxels.is_empty() => {
-                    let grid_size = file.grid_size.max(1);
+                    let grid_size = voxel_edit::effective_ray_grid_size(file);
                     let (o, d) = voxel_edit::screen_to_world_ray(&cam, wf, hf, sx, sy);
-                    match voxel_edit::ray_first_solid(o, d, vmap, grid_size) {
-                        Some(((cx, cy, cz), _normal)) => {
-                            let wcx = cx as f32 + 0.5;
-                            let wcy = cy as f32 + 0.5;
-                            let wcz = cz as f32 + 0.5;
-                            match voxel_edit::world_to_viewport_pixels(&cam, wf, hf, wcx, wcy, wcz) {
-                                Some((px, py)) => (Some(px / wf), Some(py / hf)),
-                                None => (None, None),
+                    match voxel_edit::ray_first_solid_scene(o, d, file, vmap, grid_size) {
+                        Some(((cx, cy, cz), _prev, oid)) => {
+                            let m = object_world_matrix(&file.objects, oid);
+                            let wp_hit = voxel_edit::world_ray_entry_on_voxel_cell(o, d, cx, cy, cz, m)
+                                .unwrap_or_else(|| {
+                                    m.transform_point3(glam::Vec3::new(
+                                        cx as f32,
+                                        cy as f32,
+                                        cz as f32,
+                                    ))
+                                });
+                            let wc = m.transform_point3(glam::Vec3::new(
+                                cx as f32,
+                                cy as f32,
+                                cz as f32,
+                            ));
+                            let denom_x = (wf - 1.0).max(1.0);
+                            let denom_y = (hf - 1.0).max(1.0);
+                            let hit_norm = voxel_edit::world_to_viewport_pixels(&cam, wf, hf, wp_hit.x, wp_hit.y, wp_hit.z)
+                                .map(|(px, py)| (px / denom_x, py / denom_y));
+                            let center_norm = voxel_edit::world_to_viewport_pixels(&cam, wf, hf, wc.x, wc.y, wc.z)
+                                .map(|(px, py)| (px / denom_x, py / denom_y));
+                            // #region agent log
+                            if let (Some((hnx, hny)), Some((cnx, cny))) = (hit_norm, center_norm) {
+                                    debug_agent_ndjson_log(serde_json::json!({
+                                        "sessionId": "0e537f",
+                                        "runId": "post-fix",
+                                        "hypothesisId": "H1_center_vs_hit",
+                                        "location": "lib.rs:get_viewport_cursor_debug",
+                                        "message": "proj hit vs voxel center (hover mesh uses center)",
+                                    "data": {
+                                        "cx": cx, "cy": cy, "cz": cz,
+                                        "projHitNx": hnx, "projHitNy": hny,
+                                        "projCenterNx": cnx, "projCenterNy": cny,
+                                        "deltaCenterMinusHitNx": cnx - hnx,
+                                        "deltaCenterMinusHitNy": cny - hny,
+                                        "previewNx": preview_nx,
+                                        "previewNy": preview_ny,
+                                    },
+                                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+                                }));
+                            }
+                            // #endregion
+                            match (hit_norm, center_norm) {
+                                (Some((hnx, hny)), Some((cnx, cny))) => (
+                                    Some(hnx),
+                                    Some(hny),
+                                    Some(cnx),
+                                    Some(cny),
+                                ),
+                                (Some((hnx, hny)), _) => (Some(hnx), Some(hny), None, None),
+                                _ => (None, None, None, None),
                             }
                         }
-                        None => (None, None),
+                        None => (None, None, None, None),
                     }
                 }
-                _ => (None, None),
+                _ => (None, None, None, None),
             }
         }
-        _ => (None, None),
+        _ => (None, None, None, None),
     };
     Ok(ViewportCursorDebug {
         viewport_width: vw,
         viewport_height: vh,
+        surface_width: surface_w,
+        surface_height: surface_h,
+        viewport_origin_x: viewport_x,
+        viewport_origin_y: viewport_y,
         preview_nx,
         preview_ny,
         texel_sx,
@@ -856,6 +936,8 @@ fn get_viewport_cursor_debug(
         ray_dir_z,
         proj_cube_nx,
         proj_cube_ny,
+        proj_center_nx,
+        proj_center_ny,
     })
 }
 
@@ -1276,6 +1358,53 @@ fn work_progress_for_voxel_refresh(
     !use_incremental || nv >= 32_768
 }
 
+/// Full greedy rebuild CPU prep runs off-thread above these thresholds (viewer lock released during prep).
+const OFF_THREAD_GREEDY_MESH_MIN_VOXELS: usize = 2_000;
+const OFF_THREAD_GREEDY_MESH_MIN_DELTAS: usize = 500;
+const OFF_THREAD_SMOOTH_MESH_MIN_VOXELS: usize = 4_000;
+/// Incremental remesh releases the viewer mutex between batches so the render loop can present.
+const INCREMENTAL_REMESH_KEY_BATCH: usize = 8;
+
+fn merge_remesh_opaque_perf(acc: &mut render::RemeshOpaquePerf, p: &render::RemeshOpaquePerf) {
+    acc.buckets_ms += p.buckets_ms;
+    acc.greedy_ms += p.greedy_ms;
+    acc.greedy_gpu_ms += p.greedy_gpu_ms;
+    acc.greedy_cpu_ms += p.greedy_cpu_ms;
+    acc.chunk_buffers_ms += p.chunk_buffers_ms;
+    acc.full_chunked_rebuild_ms += p.full_chunked_rebuild_ms;
+}
+
+fn off_thread_prepare_greedy_rebuild<R: Runtime>(
+    app: &AppHandle<R>,
+    grid_size: i32,
+    voxels: Vec<voxelle::Voxel>,
+    objects: Vec<voxelle::SceneObject>,
+) -> Result<PreparedGreedyRebuild, String> {
+    use std::sync::atomic::AtomicU32;
+    let app_pb = app.clone();
+    std::thread::Builder::new()
+        .name("voxelle-edit-greedy-prep".into())
+        .spawn(move || {
+            let last_permille = AtomicU32::new(0);
+            let chunk_progress = |frac: f32, done: u32, total: u32| {
+                let permille = (frac * 1000.0).min(1000.0) as u32;
+                let prev = last_permille.load(Ordering::Relaxed);
+                if permille.saturating_sub(prev) >= 40 || done == total {
+                    last_permille.store(permille, Ordering::Relaxed);
+                    emit_work_progress(
+                        &app_pb,
+                        0.38 + 0.52 * frac,
+                        format!("Building mesh chunks {done}/{total}…"),
+                    );
+                }
+            };
+            compute_greedy_rebuild_cpu(&voxels, &objects, grid_size, Some(&chunk_progress))
+        })
+        .map_err(|e| e.to_string())?
+        .join()
+        .map_err(|_| "greedy mesh prep thread panicked".to_string())?
+}
+
 /// Progress band inside [`prepare_load_scene_cpu`] (mesh build uses [`LOAD_P_MESH_START`]..[`LOAD_P_MESH_END`]).
 const LOAD_P_BOUNDS: f32 = 0.22;
 const LOAD_P_BRICK: f32 = 0.26;
@@ -1500,7 +1629,7 @@ fn unload_current_project<R: Runtime>(state: &Arc<ViewerState>, app: &AppHandle<
 
     log::info!(target: "voxelle_load", "unload_current_project: done");
     #[cfg(desktop)]
-    selection_menu_sync_enabled_for_scene(app, state.as_ref());
+    selection_menu_sync_enabled_for_scene(app, false, false);
     Ok(())
 }
 
@@ -1895,6 +2024,7 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
     } else {
         cam.logo_splash_rest = None;
     }
+    drop(v);
     *state.last_scene_bounds.lock() = Some(bounds);
     *state.voxel_edit_stats_cache.lock() = voxel_edit_stats_cache;
     state.solo_undo.lock().clear();
@@ -1906,7 +2036,10 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
     emit_load_progress(app, 0.97, "Finishing…");
     emit_load_progress(app, 1.0, "");
     #[cfg(desktop)]
-    selection_menu_sync_enabled_for_scene(app, state.as_ref());
+    {
+        let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+        selection_menu_sync_enabled_for_scene(app, has_voxels, has_selection);
+    }
     Ok(())
 }
 
@@ -2030,17 +2163,19 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     let t_lock_start = Instant::now();
     let mut v = state.viewer.lock();
     let viewer_lock_wait_ms = t_lock_start.elapsed().as_secs_f64() * 1000.0;
-    let Some(viewer) = v.as_mut() else {
-        return Err("viewer not ready".into());
-    };
 
-    let fg = state.current_file.lock();
+    let mut fg = state.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
 
     let rm = *state.rendering_mode.lock();
-    let show_work = work_progress_for_voxel_refresh(viewer, file, rm);
+    let show_work = {
+        let Some(viewer) = v.as_mut() else {
+            return Err("viewer not ready".into());
+        };
+        work_progress_for_voxel_refresh(viewer, file, rm) || deltas.len() >= 1_000
+    };
     let mut wp = WorkProgressGuard::new(app);
     if show_work {
         wp.arm();
@@ -2048,33 +2183,38 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     }
 
     let t_brick = Instant::now();
-    if file.voxels.is_empty() {
-        viewer.upload_scene_data(bounds, &file.voxels, None);
-    } else if deltas.len() == 1 {
-        let brick_patch = Some(match &deltas[0] {
-            voxel_edit::VoxelEditDelta::Added(v) => BrickCellWrite {
-                x: v.x,
-                y: v.y,
-                z: v.z,
-                packed: gpu_brick::pack_cell(v.color, v.material),
-            },
-            voxel_edit::VoxelEditDelta::Removed { voxel } => BrickCellWrite {
-                x: voxel.x,
-                y: voxel.y,
-                z: voxel.z,
-                packed: gpu_brick::pack_empty(),
-            },
-            voxel_edit::VoxelEditDelta::Painted { after, .. } => BrickCellWrite {
-                x: after.x,
-                y: after.y,
-                z: after.z,
-                packed: gpu_brick::pack_cell(after.color, after.material),
-            },
-        });
-        viewer.upload_scene_data(bounds, &file.voxels, brick_patch);
-    } else {
-        let patches = deltas_to_brick_patches(deltas);
-        viewer.upload_scene_data_patches(bounds, &file.voxels, &patches);
+    {
+        let Some(viewer) = v.as_mut() else {
+            return Err("viewer not ready".into());
+        };
+        if file.voxels.is_empty() {
+            viewer.upload_scene_data(bounds, &file.voxels, None);
+        } else if deltas.len() == 1 {
+            let brick_patch = Some(match &deltas[0] {
+                voxel_edit::VoxelEditDelta::Added(v) => BrickCellWrite {
+                    x: v.x,
+                    y: v.y,
+                    z: v.z,
+                    packed: gpu_brick::pack_cell(v.color, v.material),
+                },
+                voxel_edit::VoxelEditDelta::Removed { voxel } => BrickCellWrite {
+                    x: voxel.x,
+                    y: voxel.y,
+                    z: voxel.z,
+                    packed: gpu_brick::pack_empty(),
+                },
+                voxel_edit::VoxelEditDelta::Painted { after, .. } => BrickCellWrite {
+                    x: after.x,
+                    y: after.y,
+                    z: after.z,
+                    packed: gpu_brick::pack_cell(after.color, after.material),
+                },
+            });
+            viewer.upload_scene_data(bounds, &file.voxels, brick_patch);
+        } else {
+            let patches = deltas_to_brick_patches(deltas);
+            viewer.upload_scene_data_patches(bounds, &file.voxels, &patches);
+        }
     }
     let brick_ms = t_brick.elapsed().as_secs_f64() * 1000.0;
 
@@ -2093,22 +2233,73 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     let mut mesh_pipeline_ms = 0.0;
 
     if file.voxels.is_empty() {
-        viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
-        viewer.last_mesh_route = "clear".to_string();
+        {
+            let Some(viewer) = v.as_mut() else {
+                return Err("viewer not ready".into());
+            };
+            viewer.upload_mesh(&greedy_mesh::MeshBuffers::default());
+            viewer.last_mesh_route = "clear".to_string();
+        }
         *state.voxel_edit_stats_cache.lock() = None;
     } else if rm.uses_smooth_surface() {
-        let mesh = match rm {
-            RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
-            RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
-            _ => unreachable!(),
-        };
-        viewer.upload_mesh(&mesh);
-        viewer.last_mesh_route = match rm {
-            RenderingMode::MarchingCubes => "marching_cubes".to_string(),
-            RenderingMode::DualContour => "dual_contour".to_string(),
-            _ => unreachable!(),
-        };
-        *state.voxel_edit_stats_cache.lock() = Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
+        let nv = file.voxels.len();
+        if nv >= OFF_THREAD_SMOOTH_MESH_MIN_VOXELS {
+            let voxels = file.voxels.clone();
+            let rm_copy = rm;
+            let token = state.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            drop(fg);
+            drop(v);
+            let mesh_from_thread: greedy_mesh::MeshBuffers = std::thread::Builder::new()
+                .name("voxelle-smooth-mesh".into())
+                .spawn(move || match rm_copy {
+                    RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&voxels),
+                    RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&voxels),
+                    _ => greedy_mesh::MeshBuffers::default(),
+                })
+                .map_err(|e| e.to_string())?
+                .join()
+                .map_err(|_| "smooth mesh thread panicked".to_string())?;
+            v = state.viewer.lock();
+            let Some(viewer) = v.as_mut() else {
+                return Err("viewer not ready".into());
+            };
+            fg = state.current_file.lock();
+            let Some(file) = fg.as_ref() else {
+                return Err("no model loaded".into());
+            };
+            let mesh = if state.mesh_refresh_generation.load(Ordering::SeqCst) == token {
+                mesh_from_thread
+            } else {
+                match rm {
+                    RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
+                    RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
+                    _ => unreachable!(),
+                }
+            };
+            viewer.upload_mesh(&mesh);
+            viewer.last_mesh_route = match rm {
+                RenderingMode::MarchingCubes => "marching_cubes".to_string(),
+                RenderingMode::DualContour => "dual_contour".to_string(),
+                _ => unreachable!(),
+            };
+            *state.voxel_edit_stats_cache.lock() = Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
+        } else {
+            let Some(viewer) = v.as_mut() else {
+                return Err("viewer not ready".into());
+            };
+            let mesh = match rm {
+                RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
+                RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
+                _ => unreachable!(),
+            };
+            viewer.upload_mesh(&mesh);
+            viewer.last_mesh_route = match rm {
+                RenderingMode::MarchingCubes => "marching_cubes".to_string(),
+                RenderingMode::DualContour => "dual_contour".to_string(),
+                _ => unreachable!(),
+            };
+            *state.voxel_edit_stats_cache.lock() = Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
+        }
     } else {
         let cached_stats = state.voxel_edit_stats_cache.lock().clone();
         let voxel_stats =
@@ -2116,53 +2307,151 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
         let origin_new = voxel_stats.aabb_min;
         let single_object = voxel_stats.common_object_id.is_some();
         let origin_iv = glam::IVec3::new(origin_new.0, origin_new.1, origin_new.2);
-        let use_incremental = viewer.opaque_chunked
-            && single_object
-            && file.voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS
-            && viewer.chunk_grid_origin == origin_iv;
+        let use_incremental = {
+            let Some(viewer) = v.as_mut() else {
+                return Err("viewer not ready".into());
+            };
+            viewer.opaque_chunked
+                && single_object
+                && file.voxels.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS
+                && viewer.chunk_grid_origin == origin_iv
+        };
 
         if use_incremental {
-            let t_cache = Instant::now();
-            for d in deltas {
-                viewer.apply_spatial_cache_edit(d);
-            }
-            mesh_voxel_map_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
-            let dirty = union_dirty_chunk_keys_for_deltas(
-                deltas,
-                origin_new,
-                greedy_mesh::SPATIAL_CHUNK_SIZE,
-            );
-            let (ok, rperf) = viewer.remesh_opaque_chunks(
-                &dirty,
-                &file.voxels,
-                if show_work { Some(app) } else { None },
-            );
-            mesh_buckets_ms = rperf.buckets_ms;
-            mesh_greedy_ms = rperf.greedy_ms;
-            mesh_greedy_gpu_ms = rperf.greedy_gpu_ms;
-            mesh_greedy_cpu_ms = rperf.greedy_cpu_ms;
-            mesh_chunk_buffers_ms = rperf.chunk_buffers_ms;
-            mesh_full_chunked_rebuild_ms = rperf.full_chunked_rebuild_ms;
-            if ok {
-                viewer.last_mesh_route = "cpu_chunked_incremental".to_string();
+            let dirty = {
+                let Some(viewer) = v.as_mut() else {
+                    return Err("viewer not ready".into());
+                };
+                let t_cache = Instant::now();
+                for d in deltas {
+                    viewer.apply_spatial_cache_edit(d);
+                }
+                mesh_voxel_map_ms = t_cache.elapsed().as_secs_f64() * 1000.0;
+                union_dirty_chunk_keys_for_deltas(
+                    deltas,
+                    origin_new,
+                    greedy_mesh::SPATIAL_CHUNK_SIZE,
+                )
+            };
+
+            if dirty.len() <= INCREMENTAL_REMESH_KEY_BATCH {
+                let Some(viewer) = v.as_mut() else {
+                    return Err("viewer not ready".into());
+                };
+                let (ok, rperf) = viewer.remesh_opaque_chunks(
+                    &dirty,
+                    &file.voxels,
+                    if show_work { Some(app) } else { None },
+                );
+                mesh_buckets_ms = rperf.buckets_ms;
+                mesh_greedy_ms = rperf.greedy_ms;
+                mesh_greedy_gpu_ms = rperf.greedy_gpu_ms;
+                mesh_greedy_cpu_ms = rperf.greedy_cpu_ms;
+                mesh_chunk_buffers_ms = rperf.chunk_buffers_ms;
+                mesh_full_chunked_rebuild_ms = rperf.full_chunked_rebuild_ms;
+                if ok {
+                    viewer.last_mesh_route = "cpu_chunked_incremental".to_string();
+                }
+            } else {
+                drop(v);
+                let mut rperf_acc = render::RemeshOpaquePerf::default();
+                let mut ok_acc = true;
+                for (bi, batch) in dirty.chunks(INCREMENTAL_REMESH_KEY_BATCH).enumerate() {
+                    if bi > 0 {
+                        std::thread::yield_now();
+                    }
+                    let mut v2 = state.viewer.lock();
+                    let Some(viewer2) = v2.as_mut() else {
+                        return Err("viewer not ready".into());
+                    };
+                    let (ok, rperf) = viewer2.remesh_opaque_chunks(
+                        batch,
+                        &file.voxels,
+                        if show_work { Some(app) } else { None },
+                    );
+                    merge_remesh_opaque_perf(&mut rperf_acc, &rperf);
+                    ok_acc = ok_acc && ok;
+                    if ok {
+                        viewer2.last_mesh_route = "cpu_chunked_incremental".to_string();
+                    }
+                    drop(v2);
+                }
+                mesh_buckets_ms = rperf_acc.buckets_ms;
+                mesh_greedy_ms = rperf_acc.greedy_ms;
+                mesh_greedy_gpu_ms = rperf_acc.greedy_gpu_ms;
+                mesh_greedy_cpu_ms = rperf_acc.greedy_cpu_ms;
+                mesh_chunk_buffers_ms = rperf_acc.chunk_buffers_ms;
+                mesh_full_chunked_rebuild_ms = rperf_acc.full_chunked_rebuild_ms;
+                v = state.viewer.lock();
+                let Some(viewer) = v.as_mut() else {
+                    return Err("viewer not ready".into());
+                };
+                if ok_acc {
+                    viewer.last_mesh_route = "cpu_chunked_incremental".to_string();
+                }
             }
         } else {
-            let t_pipe = Instant::now();
-            let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects, file.grid_size);
-            mesh_pipeline_ms = t_pipe.elapsed().as_secs_f64() * 1000.0;
+            let nv = file.voxels.len();
+            let off_thread = nv >= OFF_THREAD_GREEDY_MESH_MIN_VOXELS
+                || deltas.len() >= OFF_THREAD_GREEDY_MESH_MIN_DELTAS;
+            if off_thread {
+                let grid_size = file.grid_size;
+                let voxels = file.voxels.clone();
+                let objects = file.objects.clone();
+                let token = state.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                drop(fg);
+                drop(v);
+                let prepared_result =
+                    off_thread_prepare_greedy_rebuild(app, grid_size, voxels, objects);
+                v = state.viewer.lock();
+                let Some(viewer) = v.as_mut() else {
+                    return Err("viewer not ready".into());
+                };
+                fg = state.current_file.lock();
+                let Some(file) = fg.as_ref() else {
+                    return Err("no model loaded".into());
+                };
+                let t_pipe = Instant::now();
+                match prepared_result {
+                    Ok(prepared) => {
+                        if state.mesh_refresh_generation.load(Ordering::SeqCst) != token {
+                            let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects, file.grid_size);
+                        } else {
+                            let _ = viewer.apply_prepared_greedy_rebuild(prepared);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(target: "voxelle", "off-thread greedy prep failed ({e}); rebuilding inline");
+                        let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects, file.grid_size);
+                    }
+                }
+                mesh_pipeline_ms = t_pipe.elapsed().as_secs_f64() * 1000.0;
+            } else {
+                let Some(viewer) = v.as_mut() else {
+                    return Err("viewer not ready".into());
+                };
+                let t_pipe = Instant::now();
+                let _ = viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects, file.grid_size);
+                mesh_pipeline_ms = t_pipe.elapsed().as_secs_f64() * 1000.0;
+            }
         }
         *state.voxel_edit_stats_cache.lock() = Some(voxel_stats);
     }
-    // Release `current_file` before `selection_menu_sync_enabled_for_scene` (and any other helper
-    // that locks `current_file`). We still hold `viewer` — `parking_lot::Mutex` is not reentrant.
+    // Release `current_file` before other helpers that lock it. Release `viewer` before any
+    // follow-up that might contend with the render/preview paths (menu sync is lock-free; keeping
+    // `drop(v)` avoids blocking other work on the viewer mutex).
     drop(fg);
     let mesh_ms = t_mesh.elapsed().as_secs_f64() * 1000.0;
 
-    let t_preview_clear = Instant::now();
-    clear_preview_mesh_sync_cache(viewer, state);
-    let preview_clear_ms = t_preview_clear.elapsed().as_secs_f64() * 1000.0;
-
-    let mesh_route = viewer.last_mesh_route.clone();
+    let (preview_clear_ms, mesh_route) = {
+        let Some(viewer) = v.as_mut() else {
+            return Err("viewer not ready".into());
+        };
+        let t_preview_clear = Instant::now();
+        clear_preview_mesh_sync_cache(viewer, state);
+        let preview_clear_ms = t_preview_clear.elapsed().as_secs_f64() * 1000.0;
+        (preview_clear_ms, viewer.last_mesh_route.clone())
+    };
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
     *state.last_edit_perf.lock() = Some(EditPerfBreakdown {
         apply_edit_ms,
@@ -2185,8 +2474,13 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
 
     *state.last_scene_bounds.lock() = Some(bounds);
 
+    drop(v);
+
     #[cfg(desktop)]
-    selection_menu_sync_enabled_for_scene(app, state.as_ref());
+    {
+        let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+        selection_menu_sync_enabled_for_scene(app, has_voxels, has_selection);
+    }
     Ok(())
 }
 
@@ -2202,9 +2496,12 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
     };
     let fg = state.current_file.lock();
     let Some(file) = fg.as_ref() else {
+        drop(fg);
+        drop(v);
         #[cfg(desktop)]
         if let Some(a) = app {
-            selection_menu_sync_enabled_for_scene(a, state.as_ref());
+            let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+            selection_menu_sync_enabled_for_scene(a, has_voxels, has_selection);
         }
         return Ok(());
     };
@@ -2222,9 +2519,12 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
         viewer.last_mesh_route = "clear".to_string();
         *state.voxel_edit_stats_cache.lock() = None;
         drop(wp);
+        drop(fg);
+        drop(v);
         #[cfg(desktop)]
         if let Some(a) = app {
-            selection_menu_sync_enabled_for_scene(a, state.as_ref());
+            let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+            selection_menu_sync_enabled_for_scene(a, has_voxels, has_selection);
         }
         return Ok(());
     }
@@ -2262,9 +2562,12 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
     }
     *state.voxel_edit_stats_cache.lock() = Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
     drop(wp);
+    drop(fg);
+    drop(v);
     #[cfg(desktop)]
     if let Some(a) = app {
-        selection_menu_sync_enabled_for_scene(a, state.as_ref());
+        let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+        selection_menu_sync_enabled_for_scene(a, has_voxels, has_selection);
     }
     Ok(())
 }
@@ -2615,6 +2918,27 @@ fn view_menu_sync_show_borders(
     Ok(())
 }
 
+/// Keeps **View → Full-window GPU viewport (experimental)** in sync with webview / `localStorage`.
+#[tauri::command]
+fn view_menu_sync_full_surface_viewport(
+    app: AppHandle,
+    enabled: bool,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        if let Some(menu) = app.try_state::<SelectionMenuState>() {
+            menu.full_surface_viewport
+                .set_checked(enabled)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, enabled);
+    }
+    Ok(())
+}
+
 /// Keeps the native **Match Material** menu checkbox in sync with app state.
 #[tauri::command]
 fn selection_menu_sync_match_material(
@@ -2891,6 +3215,12 @@ struct StrokeAnchorAtScreen {
     nx: f32,
     ny: f32,
     tool: voxel_edit::EditTool,
+    #[serde(default = "default_stroke_snap_to_surface_arg")]
+    stroke_snap_to_surface: bool,
+}
+
+fn default_stroke_snap_to_surface_arg() -> bool {
+    true
 }
 
 /// Anchor voxel for multi-click stroke geometry (add → placement cell; remove/paint → solid under ray).
@@ -2917,14 +3247,17 @@ fn voxel_stroke_anchor_coord_at_screen(
     };
     let cam = state.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let c = match args.tool {
-        voxel_edit::EditTool::Add => {
-            voxel_edit::preview_add_cell(file, vmap, &cam, w, h, sx, sy)
-        }
-        voxel_edit::EditTool::Remove | voxel_edit::EditTool::Paint => {
-            voxel_edit::preview_remove_cell(file, vmap, &cam, w, h, sx, sy)
-        }
-    };
+    let c = voxel_edit::anchor_for_stroke_edit(
+        args.tool,
+        args.stroke_snap_to_surface,
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        sx,
+        sy,
+    );
     Ok(c.map(|(x, y, z)| [x, y, z]))
 }
 
@@ -2939,14 +3272,17 @@ fn pick_cell_for_ping(
     sy: f32,
 ) -> Option<(i32, i32, i32)> {
     match mode {
-        PreviewMode::Add => voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy),
+        PreviewMode::Add => voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c),
         PreviewMode::Remove | PreviewMode::Paint | PreviewMode::Select => {
-            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy)
+            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
         }
-        PreviewMode::Navigate | PreviewMode::Fly | PreviewMode::Squishy => {
-            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy)
-                .or_else(|| voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy))
-        }
+        PreviewMode::Navigate | PreviewMode::Fly | PreviewMode::Squishy => voxel_edit::preview_remove_cell(
+            file, vmap, cam, w, h, sx, sy,
+        )
+        .map(|(c, _)| c)
+        .or_else(|| {
+            voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
+        }),
     }
 }
 
@@ -3199,6 +3535,32 @@ fn voxel_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(), String> 
     Ok(())
 }
 
+/// Clear stroke preview GPU/state **without** starting a new stroke (`stroke_active` stays false).
+/// Used when exiting cuboid/cylinder depth phase (Done / Escape / new gesture) so the next
+/// `voxel_edit_at_screen` is not mistaken for an in-stroke edit.
+#[tauri::command]
+fn voxel_stroke_preview_reset(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    *state.stroke_active.lock() = false;
+    state.stroke_buffer.lock().clear();
+    state.stroke_preview_union.lock().clear();
+    *state.stroke_preview_last_args.lock() = None;
+    state
+        .stroke_preview_suppresses_hover
+        .store(false, Ordering::Relaxed);
+    state.sculpt_stroke_replay.lock().clear();
+    {
+        let mut v = state.viewer.lock();
+        if let Some(viewer) = v.as_mut() {
+            clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
+        }
+    }
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
 const STROKE_PREVIEW_MAX_CELLS: usize = 25_000;
 
 /// Empty-cells-only preview (air along stroke): dimmer fill than occupied shell.
@@ -3243,6 +3605,7 @@ fn stroke_preview_meshes_for_union(
     tool: voxel_edit::EditTool,
     union: &AHashSet<greedy_mesh::VoxelCoord>,
     voxel_map: &AHashMap<greedy_mesh::VoxelCoord, usize>,
+    file: &voxelle::VoxelleFile,
     debug_pick_highlight: bool,
     palette_rgb: u32,
 ) -> (greedy_mesh::MeshBuffers, greedy_mesh::MeshBuffers) {
@@ -3304,7 +3667,11 @@ fn stroke_preview_meshes_for_union(
         } else {
             wem
         };
-        let s = greedy_mesh::preview_cube_mesh(
+        let oid = voxel_map
+            .get(&(cx, cy, cz))
+            .map(|&vi| file.voxels[vi].object_id)
+            .unwrap_or(file.active_object_id);
+        let mut s = greedy_mesh::preview_cube_mesh(
             cx as f32,
             cy as f32,
             cz as f32,
@@ -3312,7 +3679,7 @@ fn stroke_preview_meshes_for_union(
             [srf, sgf, sbf],
             fill_mat_k,
         );
-        let w = greedy_mesh::preview_cube_wireframe_mesh(
+        let mut w = greedy_mesh::preview_cube_wireframe_mesh(
             cx as f32,
             cy as f32,
             cz as f32,
@@ -3320,9 +3687,129 @@ fn stroke_preview_meshes_for_union(
             [wrf, wgf, wbf],
             wire_mat_k,
         );
+        let m = object_world_matrix(&file.objects, oid);
+        greedy_mesh::transform_mesh_buffers(&mut s, m);
+        greedy_mesh::transform_mesh_buffers(&mut w, m);
         greedy_mesh::append_mesh_buffers(&mut solid, s);
         greedy_mesh::append_mesh_buffers(&mut wire, w);
     }
+    (solid, wire)
+}
+
+/// Saturated yellow corners for polygon / polygonHull placement (web `polygonPointsMaterial` parity).
+fn append_polygon_vertex_marker_meshes(
+    solid: &mut greedy_mesh::MeshBuffers,
+    wire: &mut greedy_mesh::MeshBuffers,
+    verts: &[[i32; 3]],
+    vmap: &AHashMap<greedy_mesh::VoxelCoord, usize>,
+    file: &voxelle::VoxelleFile,
+    debug_pick_highlight: bool,
+) {
+    if verts.is_empty() {
+        return;
+    }
+    let (vr, vg, vb, wr, wg, wb, size, wem) = if debug_pick_highlight {
+        (1.0_f32, 0.12, 0.1, 0.55, 0.0, 0.0, 0.56, 3.5)
+    } else {
+        (1.0, 0.92, 0.12, 0.42, 0.4, 0.06, 0.53, 2.0)
+    };
+    for &[cx, cy, cz] in verts {
+        let ghost = !vmap.contains_key(&(cx, cy, cz));
+        let (srf, sgf, sbf, wrf, wgf, wbf) = if ghost {
+            (
+                vr * PREVIEW_GHOST_FILL_MUL,
+                vg * PREVIEW_GHOST_FILL_MUL,
+                vb * PREVIEW_GHOST_FILL_MUL,
+                wr * PREVIEW_GHOST_WIRE_MUL,
+                wg * PREVIEW_GHOST_WIRE_MUL,
+                wb * PREVIEW_GHOST_WIRE_MUL,
+            )
+        } else {
+            (vr, vg, vb, wr, wg, wb)
+        };
+        let oid = vmap
+            .get(&(cx, cy, cz))
+            .map(|&vi| file.voxels[vi].object_id)
+            .unwrap_or(file.active_object_id);
+        let mut s = greedy_mesh::preview_cube_mesh(
+            cx as f32,
+            cy as f32,
+            cz as f32,
+            size,
+            [srf, sgf, sbf],
+            1.0,
+        );
+        let mut w = greedy_mesh::preview_cube_wireframe_mesh(
+            cx as f32,
+            cy as f32,
+            cz as f32,
+            size,
+            [wrf, wgf, wbf],
+            wem,
+        );
+        let m = object_world_matrix(&file.objects, oid);
+        greedy_mesh::transform_mesh_buffers(&mut s, m);
+        greedy_mesh::transform_mesh_buffers(&mut w, m);
+        greedy_mesh::append_mesh_buffers(solid, s);
+        greedy_mesh::append_mesh_buffers(wire, w);
+    }
+}
+
+/// Local-space center for the hover cube: use ray–cell **face hit** so the wireframe sits under the cursor
+/// on oblique surfaces (voxel center projects elsewhere).
+fn local_cell_face_hit_for_preview(
+    cam: &OrbitCamera,
+    w: f32,
+    h: f32,
+    sx: f32,
+    sy: f32,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    object_id: u32,
+    objects: &[voxelle::SceneObject],
+) -> glam::Vec3 {
+    let (o, d) = voxel_edit::screen_to_world_ray(cam, w, h, sx, sy);
+    let m = object_world_matrix(objects, object_id);
+    voxel_edit::local_ray_entry_on_voxel_cell(o, d, cx, cy, cz, m).unwrap_or_else(|| {
+        glam::Vec3::new(cx as f32, cy as f32, cz as f32)
+    })
+}
+
+fn preview_single_cell_world(
+    file: &voxelle::VoxelleFile,
+    lx: f32,
+    ly: f32,
+    lz: f32,
+    object_id: u32,
+    sr: f32,
+    sg: f32,
+    sb: f32,
+    wr: f32,
+    wg: f32,
+    wb: f32,
+    size: f32,
+    wem: f32,
+) -> (greedy_mesh::MeshBuffers, greedy_mesh::MeshBuffers) {
+    let mut solid = greedy_mesh::preview_cube_mesh(
+        lx,
+        ly,
+        lz,
+        size,
+        [sr, sg, sb],
+        1.0,
+    );
+    let mut wire = greedy_mesh::preview_cube_wireframe_mesh(
+        lx,
+        ly,
+        lz,
+        size,
+        [wr, wg, wb],
+        wem,
+    );
+    let m = object_world_matrix(&file.objects, object_id);
+    greedy_mesh::transform_mesh_buffers(&mut solid, m);
+    greedy_mesh::transform_mesh_buffers(&mut wire, m);
     (solid, wire)
 }
 
@@ -3417,12 +3904,32 @@ fn voxel_stroke_preview_at_screen(
         .lock() = Some(args.clone());
 
     let (solid, wire) = {
-        let union = state.stroke_preview_union.lock();
+        let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
+        let union = state.stroke_preview_union.lock();
+        let Some(file) = fg.as_ref() else {
+            return Ok(());
+        };
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        stroke_preview_meshes_for_union(args.tool, &union, vmap, false, args.color)
+        let (mut s, mut w) =
+            stroke_preview_meshes_for_union(args.tool, &union, vmap, file, false, args.color);
+        if matches!(
+            args.stroke_mode,
+            stroke_modes::DrawStrokeMode::Polygon | stroke_modes::DrawStrokeMode::PolygonHull
+        ) && !args.stroke_aux.polygon_vertices.is_empty()
+        {
+            append_polygon_vertex_marker_meshes(
+                &mut s,
+                &mut w,
+                &args.stroke_aux.polygon_vertices,
+                vmap,
+                file,
+                false,
+            );
+        }
+        (s, w)
     };
 
     {
@@ -3479,7 +3986,21 @@ fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Resul
         return Ok(());
     }
 
-    if !union.is_empty() {
+    // Solid cuboid / cylinder: plane-drag preview only; depth + commit via `voxel_edit_at_screen` (web parity).
+    let skip_solid_extrusion_plane_preview_commit = matches!(
+        &last_args,
+        Some(a)
+            if matches!(
+                a.stroke_mode,
+                stroke_modes::DrawStrokeMode::Cuboid | stroke_modes::DrawStrokeMode::Cylinder
+            ) && match a.stroke_mode {
+                stroke_modes::DrawStrokeMode::Cuboid => a.stroke_aux.cuboid_depth.is_none(),
+                stroke_modes::DrawStrokeMode::Cylinder => a.stroke_aux.cylinder_depth.is_none(),
+                _ => false,
+            }
+    );
+
+    if !union.is_empty() && !skip_solid_extrusion_plane_preview_commit {
         if let Some(args) = last_args {
             let material = voxelle::MaterialId::from_str_id(&args.material);
             let deltas = {
@@ -3602,22 +4123,30 @@ fn merge_coords_into_selection(
 }
 
 fn emit_selection_updated<R: Runtime>(app: &AppHandle<R>, state: &Arc<ViewerState>) {
-    let n = state.selection_cells.lock().len() as u32;
+    let has_voxels = state
+        .current_file
+        .lock()
+        .as_ref()
+        .map(|f| !f.voxels.is_empty())
+        .unwrap_or(false);
+    let n = {
+        let s = state.selection_cells.lock();
+        s.len() as u32
+    };
+    let has_selection = n > 0;
     let _ = app.emit_to(
         EventTarget::webview_window("main"),
         "voxelle-selection-updated",
         n,
     );
     #[cfg(desktop)]
-    selection_menu_sync_enabled_for_scene(app, state.as_ref());
+    selection_menu_sync_enabled_for_scene(app, has_voxels, has_selection);
 }
 
-/// Disables Selection menu entries when there are no voxels and/or no active selection (same rules as web).
+/// Snapshot for [`selection_menu_sync_enabled_for_scene`]: lock `current_file` then `selection_cells`
+/// (fixed order — do not invert elsewhere) to avoid AB-BA with code that uses both.
 #[cfg(desktop)]
-fn selection_menu_sync_enabled_for_scene<R: Runtime>(app: &AppHandle<R>, state: &ViewerState) {
-    let Some(menu) = app.try_state::<SelectionMenuState>() else {
-        return;
-    };
+fn scene_menu_flags(state: &ViewerState) -> (bool, bool) {
     let has_voxels = state
         .current_file
         .lock()
@@ -3625,6 +4154,21 @@ fn selection_menu_sync_enabled_for_scene<R: Runtime>(app: &AppHandle<R>, state: 
         .map(|f| !f.voxels.is_empty())
         .unwrap_or(false);
     let has_selection = !state.selection_cells.lock().is_empty();
+    (has_voxels, has_selection)
+}
+
+/// Disables Selection menu entries when there are no voxels and/or no active selection (same rules as web).
+/// Does not lock [`ViewerState`]: pass [`scene_menu_flags`] (or explicit booleans) so callers never
+/// nest this under `viewer` / `current_file` guards.
+#[cfg(desktop)]
+fn selection_menu_sync_enabled_for_scene<R: Runtime>(
+    app: &AppHandle<R>,
+    has_voxels: bool,
+    has_selection: bool,
+) {
+    let Some(menu) = app.try_state::<SelectionMenuState>() else {
+        return;
+    };
 
     let apply = |item: &tauri::menu::MenuItem<tauri::Wry>, enabled: bool| {
         let _ = item.set_enabled(enabled);
@@ -3644,7 +4188,7 @@ fn selection_menu_sync_enabled_for_scene<R: Runtime>(app: &AppHandle<R>, state: 
     apply(&menu.sel_deselect_empty, has_selection);
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SelectionStrokeAtScreen {
     nx: f32,
@@ -3714,7 +4258,7 @@ fn selection_stroke_end(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> R
 }
 
 #[tauri::command]
-fn selection_stroke_at_screen(
+async fn selection_stroke_at_screen(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
     args: SelectionStrokeAtScreen,
@@ -3736,69 +4280,70 @@ fn selection_stroke_at_screen(
     };
     let interaction = args.interaction.as_str();
 
-    let coords: Vec<greedy_mesh::VoxelCoord> = {
-        let fg = state.current_file.lock();
-        let Some(file) = fg.as_ref() else {
-            return Err("no model loaded".into());
-        };
-        let vm = state.voxel_map.lock();
-        let Some(vmap) = vm.as_ref() else {
-            return Err("voxel index not ready".into());
-        };
-        let cam = state.camera.lock();
-
-        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-        let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
-            (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
-            _ => None,
-        };
-        let stroke_segment_prev = match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
-            (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
-            _ => None,
-        };
-
+    let coords: Vec<greedy_mesh::VoxelCoord> =
         if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
             match interaction {
-                "selectCoplanar" => voxel_edit::coplanar_connected_from_screen(
-                    file, vmap, &cam, w, h, sx, sy,
-                )
-                .unwrap_or_default(),
-                "selectCoplanarEmpty" => voxel_edit::coplanar_empty_connected_from_screen(
-                    file, vmap, &cam, w, h, sx, sy,
-                )
-                .unwrap_or_default(),
-                _ => {
-                    let mut c = voxel_edit::flood_fill_selection_coords(
-                        file,
-                        vmap,
-                        &cam,
-                        w,
-                        h,
-                        sx,
-                        sy,
-                        args.fill_select_diagonals,
-                        args.fill_respects_color,
-                        args.match_material,
-                    );
-                    if interaction == "selectByColor" {
-                        if let Some(seed) =
-                            voxel_edit::pick_voxel_at_screen(file, vmap, &cam, w, h, sx, sy)
-                        {
-                            c = voxel_edit::filter_coords_by_seed_color(
-                                file,
-                                vmap,
-                                &c,
-                                seed,
-                                args.match_material,
-                            );
-                        } else {
-                            c.clear();
-                        }
+                "selectCoplanar" | "selectCoplanarEmpty" => {
+                    let fg = state.current_file.lock();
+                    let Some(file) = fg.as_ref() else {
+                        return Err("no model loaded".into());
+                    };
+                    let vm = state.voxel_map.lock();
+                    let Some(vmap) = vm.as_ref() else {
+                        return Err("voxel index not ready".into());
+                    };
+                    let cam = state.camera.lock();
+                    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+                    match interaction {
+                        "selectCoplanar" => voxel_edit::coplanar_connected_from_screen(
+                            file, vmap, &cam, w, h, sx, sy,
+                        )
+                        .unwrap_or_default(),
+                        _ => voxel_edit::coplanar_empty_connected_from_screen(
+                            file, vmap, &cam, w, h, sx, sy,
+                        )
+                        .unwrap_or_default(),
                     }
-                    c
+                }
+                _ => {
+                    state.fill_operation_cancel.store(false, Ordering::Relaxed);
+                    emit_work_progress(&app, 0.08, "Selection fill…");
+                    tokio::task::yield_now().await;
+                    let state_cl = Arc::clone(state.inner());
+                    let app_cl = app.clone();
+                    let args_cl = args.clone();
+                    let res = tokio::task::spawn_blocking(move || {
+                        selection_fill_flood_coords_blocking(&state_cl, &app_cl, w, h, &args_cl)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?;
+                    let coords_inner = res.map_err(|e| {
+                        emit_work_progress(&app, 1.0, "");
+                        e
+                    })?;
+                    emit_work_progress(&app, 1.0, "");
+                    coords_inner
                 }
             }
         } else if interaction == "selectCoplanarEmpty" {
+            let fg = state.current_file.lock();
+            let Some(file) = fg.as_ref() else {
+                return Err("no model loaded".into());
+            };
+            let vm = state.voxel_map.lock();
+            let Some(vmap) = vm.as_ref() else {
+                return Err("voxel index not ready".into());
+            };
+            let cam = state.camera.lock();
+            let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+            let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
+                (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
+                _ => None,
+            };
+            let stroke_segment_prev = match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
+                (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
+                _ => None,
+            };
             let c = voxel_edit::selection_stroke_sample_empty_coords(
                 file,
                 vmap,
@@ -3820,6 +4365,24 @@ fn selection_stroke_at_screen(
                 file, vmap, &cam, w, h, sx, sy, &c,
             )
         } else {
+            let fg = state.current_file.lock();
+            let Some(file) = fg.as_ref() else {
+                return Err("no model loaded".into());
+            };
+            let vm = state.voxel_map.lock();
+            let Some(vmap) = vm.as_ref() else {
+                return Err("voxel index not ready".into());
+            };
+            let cam = state.camera.lock();
+            let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+            let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
+                (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
+                _ => None,
+            };
+            let stroke_segment_prev = match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
+                (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
+                _ => None,
+            };
             let mut c = voxel_edit::selection_stroke_sample_coords(
                 file,
                 vmap,
@@ -3861,8 +4424,7 @@ fn selection_stroke_at_screen(
                 _ => {}
             }
             c
-        }
-    };
+        };
 
     if coords.is_empty() {
         return Ok(0);
@@ -4417,7 +4979,7 @@ fn get_selection_combine_mode(
     Ok(*state.selection_combine_mode.lock())
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct VoxelFillAtScreen {
     nx: f32,
@@ -4428,7 +4990,338 @@ struct VoxelFillAtScreen {
 }
 
 #[tauri::command]
-fn voxel_fill_at_screen(
+fn voxel_fill_cancel(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    state.fill_operation_cancel.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+fn run_voxel_fill_paint_blocking(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    w: f32,
+    h: f32,
+    args: &VoxelFillAtScreen,
+    material: voxelle::MaterialId,
+) -> Result<Vec<voxel_edit::VoxelEditDelta>, String> {
+    let cancel = state.fill_operation_cancel.as_ref();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let mut fg = state.current_file.lock();
+    let mut vm = state.voxel_map.lock();
+    let Some(file) = fg.as_mut() else {
+        return Err(String::from("no model loaded"));
+    };
+    let Some(vmap) = vm.as_mut() else {
+        return Err(String::from("voxel index not ready"));
+    };
+    let cam = state.camera.lock();
+    let large = voxel_edit::flood_fill_selection_region_exceeds_threshold(
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        sx,
+        sy,
+        false,
+        true,
+        args.match_material,
+        false,
+        stroke_modes::PlaneAxis::Auto,
+        voxel_edit::FILL_UNCONSTRAINED_LARGE_THRESHOLD,
+        Some(cancel),
+    )
+    .map_err(|_| String::from("fill cancelled"))?;
+    if large {
+        emit_work_progress(
+            app,
+            0.12,
+            "Large fill — exploring… (Escape to cancel)",
+        );
+    }
+    let app_pb = app.clone();
+    let mut progress_ticks: usize = 0;
+    let mut on_progress = move |n: usize| {
+        emit_work_progress(&app_pb, 0.25, format!("Fill — {n} cells"));
+        progress_ticks = progress_ticks.wrapping_add(1);
+        if progress_ticks % 4 == 0 {
+            std::thread::yield_now();
+        }
+    };
+    let o = voxel_edit::flood_fill_paint_at_screen(
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        sx,
+        sy,
+        args.color,
+        material,
+        args.match_material,
+        false,
+        true,
+        false,
+        stroke_modes::PlaneAxis::Auto,
+        Some(cancel),
+        &mut on_progress,
+    )?;
+    if o.cancelled {
+        return Err(String::from("fill cancelled"));
+    }
+    if o.hit_absolute_cap {
+        return Err(String::from(
+            "fill region too large — constrain to a plane or reduce scope",
+        ));
+    }
+    Ok(o.deltas)
+}
+
+fn run_fill_deltas_blocking(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    w: f32,
+    h: f32,
+    args: &VoxelEditAtScreen,
+    material: voxelle::MaterialId,
+) -> Result<Vec<voxel_edit::VoxelEditDelta>, String> {
+    let cancel = state.fill_operation_cancel.as_ref();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let unconstrained = !args.stroke_aux.constrain_to_plane;
+
+    let mut fg = state.current_file.lock();
+    let mut vm = state.voxel_map.lock();
+    let Some(file) = fg.as_mut() else {
+        return Err("no model loaded".into());
+    };
+    let Some(vmap) = vm.as_mut() else {
+        return Err("voxel index not ready".into());
+    };
+    let cam = state.camera.lock();
+
+    if unconstrained {
+        let large = match args.tool {
+            voxel_edit::EditTool::Add => voxel_edit::flood_fill_empty_region_exceeds_threshold(
+                file,
+                vmap,
+                &cam,
+                w,
+                h,
+                sx,
+                sy,
+                args.fill_select_diagonals,
+                false,
+                args.plane_axis,
+                voxel_edit::FILL_UNCONSTRAINED_LARGE_THRESHOLD,
+                Some(cancel),
+            ),
+            _ => voxel_edit::flood_fill_selection_region_exceeds_threshold(
+                file,
+                vmap,
+                &cam,
+                w,
+                h,
+                sx,
+                sy,
+                args.fill_select_diagonals,
+                args.fill_respects_color,
+                args.match_material,
+                false,
+                args.plane_axis,
+                voxel_edit::FILL_UNCONSTRAINED_LARGE_THRESHOLD,
+                Some(cancel),
+            ),
+        }
+        .map_err(|_| "fill cancelled".to_string())?;
+        if large {
+            emit_work_progress(
+                app,
+                0.12,
+                "Large fill — exploring… (Escape to cancel)",
+            );
+        }
+    }
+
+    let app_pb = app.clone();
+    let mut progress_ticks: usize = 0;
+    let mut on_progress = move |n: usize| {
+        emit_work_progress(&app_pb, 0.25, format!("Fill — {n} cells"));
+        progress_ticks = progress_ticks.wrapping_add(1);
+        if progress_ticks % 4 == 0 {
+            std::thread::yield_now();
+        }
+    };
+
+    let outcome = match args.tool {
+        voxel_edit::EditTool::Paint => voxel_edit::flood_fill_paint_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.color,
+            material,
+            args.match_material,
+            args.fill_select_diagonals,
+            args.fill_respects_color,
+            args.stroke_aux.constrain_to_plane,
+            args.plane_axis,
+            Some(cancel),
+            &mut on_progress,
+        )?,
+        voxel_edit::EditTool::Remove => voxel_edit::flood_fill_remove_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.fill_select_diagonals,
+            args.fill_respects_color,
+            args.match_material,
+            args.stroke_aux.constrain_to_plane,
+            args.plane_axis,
+            Some(cancel),
+            &mut on_progress,
+        )?,
+        voxel_edit::EditTool::Add => voxel_edit::flood_fill_empty_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.fill_select_diagonals,
+            args.color,
+            material,
+            args.stroke_aux.constrain_to_plane,
+            args.plane_axis,
+            Some(cancel),
+            &mut on_progress,
+        )?,
+    };
+
+    if outcome.cancelled {
+        return Err("fill cancelled".into());
+    }
+    if outcome.hit_absolute_cap {
+        return Err(
+            "fill region too large — constrain to a plane or reduce scope".into(),
+        );
+    }
+    Ok(outcome.deltas)
+}
+
+fn selection_fill_flood_coords_blocking(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    w: f32,
+    h: f32,
+    args: &SelectionStrokeAtScreen,
+) -> Result<Vec<greedy_mesh::VoxelCoord>, String> {
+    let cancel = state.fill_operation_cancel.as_ref();
+    let fg = state.current_file.lock();
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let vm = state.voxel_map.lock();
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let cam = state.camera.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let interaction = args.interaction.as_str();
+
+    let unconstrained = !args.stroke_aux.constrain_to_plane;
+    if unconstrained {
+        let large = voxel_edit::flood_fill_selection_region_exceeds_threshold(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            args.fill_select_diagonals,
+            args.fill_respects_color,
+            args.match_material,
+            false,
+            args.plane_axis,
+            voxel_edit::FILL_UNCONSTRAINED_LARGE_THRESHOLD,
+            Some(cancel),
+        )
+        .map_err(|_| "fill cancelled".to_string())?;
+        if large {
+            emit_work_progress(
+                app,
+                0.12,
+                "Large selection fill — exploring… (Escape to cancel)",
+            );
+        }
+    }
+
+    let app_pb = app.clone();
+    let mut progress_ticks: usize = 0;
+    let mut on_progress = move |n: usize| {
+        emit_work_progress(
+            &app_pb,
+            0.25,
+            format!("Selection fill — {n} cells"),
+        );
+        progress_ticks = progress_ticks.wrapping_add(1);
+        if progress_ticks % 4 == 0 {
+            std::thread::yield_now();
+        }
+    };
+
+    let o = voxel_edit::flood_fill_selection_coords_with_control(
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        sx,
+        sy,
+        args.fill_select_diagonals,
+        args.fill_respects_color,
+        args.match_material,
+        args.stroke_aux.constrain_to_plane,
+        args.plane_axis,
+        Some(cancel),
+        &mut on_progress,
+    );
+
+    if o.cancelled {
+        return Ok(Vec::new());
+    }
+    if o.hit_absolute_cap {
+        return Err(
+            "fill region too large — constrain to a plane or reduce scope".into(),
+        );
+    }
+
+    let mut c = o.coords;
+    if interaction == "selectByColor" {
+        if let Some(seed) = voxel_edit::pick_voxel_at_screen(file, vmap, &cam, w, h, sx, sy) {
+            c = voxel_edit::filter_coords_by_seed_color(
+                file,
+                vmap,
+                &c,
+                seed,
+                args.match_material,
+            );
+        } else {
+            c.clear();
+        }
+    }
+    Ok(c)
+}
+
+#[tauri::command]
+async fn voxel_fill_at_screen(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
     args: VoxelFillAtScreen,
@@ -4443,33 +5336,26 @@ fn voxel_fill_at_screen(
         (w as f32, h as f32)
     };
     let material = voxelle::MaterialId::from_str_id(&args.material);
-    let deltas = {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
-        let Some(file) = fg.as_mut() else {
-            return Err("no model loaded".into());
-        };
-        let Some(vmap) = vm.as_mut() else {
-            return Err("voxel index not ready".into());
-        };
-        let cam = state.camera.lock();
-        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-        voxel_edit::flood_fill_paint_at_screen(
-            file,
-            vmap,
-            &cam,
-            w,
-            h,
-            sx,
-            sy,
-            args.color,
-            material,
-            args.match_material,
-        )?
-    };
+    state.fill_operation_cancel.store(false, Ordering::Relaxed);
+    emit_work_progress(&app, 0.08, "Fill…");
+    tokio::task::yield_now().await;
+    let state_cl = Arc::clone(state.inner());
+    let app_cl = app.clone();
+    let args_cl = args.clone();
+    let deltas_result = tokio::task::spawn_blocking(move || {
+        run_voxel_fill_paint_blocking(&state_cl, &app_cl, w, h, &args_cl, material)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let deltas = deltas_result.map_err(|e| {
+        emit_work_progress(&app, 1.0, "");
+        e
+    })?;
     if deltas.is_empty() {
+        emit_work_progress(&app, 1.0, "");
         return Ok(false);
     }
+    tokio::task::yield_now().await;
     finish_voxel_edit_gpu_deltas(
         &state,
         &deltas,
@@ -4478,6 +5364,7 @@ fn voxel_fill_at_screen(
         &app,
         VoxelGpuRefreshReason::SoloEdit,
     )?;
+    emit_work_progress(&app, 1.0, "");
     let cm = Arc::clone(&state.collab);
     let mut cb = cm.lock();
     if cb.is_client() {
@@ -4718,6 +5605,7 @@ fn voxel_sculpt_stroke_at_screen(
             args.brush_radius,
             args.brush_shape,
             args.spray_density,
+            args.brush_clip_bottom_half,
             line,
             seg,
             args.terrain_op,
@@ -4836,6 +5724,7 @@ fn commit_sculpt_stroke_replay(
                 args.brush_radius,
                 args.brush_shape,
                 args.spray_density,
+                args.brush_clip_bottom_half,
                 line,
                 seg,
                 args.terrain_op,
@@ -4953,6 +5842,7 @@ fn voxel_sculpt_stroke_preview_at_screen(
                 args.brush_strength,
                 args.brush_falloff,
                 args.stroke_seed,
+                args.brush_clip_bottom_half,
             )
         }
     };
@@ -4977,12 +5867,16 @@ fn voxel_sculpt_stroke_preview_at_screen(
 
     // Palette-colored preview for every sculpt mode (gouge/smooth used to use Remove red).
     let (solid, wire) = {
-        let union = state.stroke_preview_union.lock();
+        let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
+        let union = state.stroke_preview_union.lock();
+        let Some(file) = fg.as_ref() else {
+            return Ok(());
+        };
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, false, args.color)
+        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, args.color)
     };
 
     {
@@ -5549,7 +6443,7 @@ fn squishy_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Result<(), St
 }
 
 #[tauri::command]
-fn voxel_edit_at_screen(
+async fn voxel_edit_at_screen(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
     args: VoxelEditAtScreen,
@@ -5564,43 +6458,56 @@ fn voxel_edit_at_screen(
         (w as f32, h as f32)
     };
 
-    let t_apply_start = Instant::now();
     let material = voxelle::MaterialId::from_str_id(&args.material);
-    let deltas = {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
-        let Some(file) = fg.as_mut() else {
-            return Err("no model loaded".into());
-        };
-        let Some(vmap) = vm.as_mut() else {
-            return Err("voxel index not ready".into());
-        };
-        let cam = state.camera.lock();
-        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-        let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
-            (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
-            _ => None,
-        };
-        let stroke_segment_prev = match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
-            (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
-            _ => None,
-        };
-        if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill)
-            && matches!(args.tool, voxel_edit::EditTool::Paint)
-        {
-            voxel_edit::flood_fill_paint_at_screen(
-                file,
-                vmap,
-                &cam,
-                w,
-                h,
-                sx,
-                sy,
-                args.color,
-                material,
-                args.match_material,
-            )?
-        } else {
+
+    #[cfg(desktop)]
+    if !matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
+        eprintln_extrusion_stroke_checkpoint("voxel_edit begin", &args, None, None);
+    }
+
+    let (deltas, apply_edit_ms) = if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
+        state.fill_operation_cancel.store(false, Ordering::Relaxed);
+        emit_work_progress(&app, 0.08, "Fill…");
+        tokio::task::yield_now().await;
+        let state_cl = Arc::clone(state.inner());
+        let app_cl = app.clone();
+        let args_cl = args.clone();
+        let blocking = tokio::task::spawn_blocking(move || {
+            let t_apply_start = Instant::now();
+            let r = run_fill_deltas_blocking(&state_cl, &app_cl, w, h, &args_cl, material);
+            let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
+            (r, apply_edit_ms)
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        let (deltas_res, apply_edit_ms) = blocking;
+        let deltas = deltas_res.map_err(|e| {
+            emit_work_progress(&app, 1.0, "");
+            e
+        })?;
+        (deltas, apply_edit_ms)
+    } else {
+        let t_apply_start = Instant::now();
+        let deltas = {
+            let mut fg = state.current_file.lock();
+            let mut vm = state.voxel_map.lock();
+            let Some(file) = fg.as_mut() else {
+                return Err("no model loaded".into());
+            };
+            let Some(vmap) = vm.as_mut() else {
+                return Err("voxel index not ready".into());
+            };
+            let cam = state.camera.lock();
+            let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+            let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
+                (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
+                _ => None,
+            };
+            let stroke_segment_prev =
+                match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
+                    (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
+                    _ => None,
+                };
             voxel_edit::apply_edit(
                 file,
                 vmap,
@@ -5621,14 +6528,28 @@ fn voxel_edit_at_screen(
                 args.plane_axis,
                 &args.stroke_aux,
             )?
-        }
+        };
+        let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
+        #[cfg(desktop)]
+        eprintln_extrusion_stroke_checkpoint(
+            "voxel_edit apply_edit done",
+            &args,
+            Some(deltas.len()),
+            Some(apply_edit_ms),
+        );
+        (deltas, apply_edit_ms)
     };
-    let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
 
     if deltas.is_empty() {
+        if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
+            emit_work_progress(&app, 1.0, "");
+        }
         return Ok(false);
     }
 
+    if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
+        tokio::task::yield_now().await;
+    }
     finish_voxel_edit_gpu_deltas(
         &state,
         &deltas,
@@ -5637,6 +6558,11 @@ fn voxel_edit_at_screen(
         &app,
         VoxelGpuRefreshReason::SoloEdit,
     )?;
+    #[cfg(desktop)]
+    eprintln_last_edit_perf_line(state.inner().as_ref());
+    if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
+        emit_work_progress(&app, 1.0, "");
+    }
 
     let stroke_on = *state.stroke_active.lock();
     if stroke_on {
@@ -6665,7 +7591,7 @@ fn prepare_preview_mesh(
 
         let add_anchor = if session_snap.mode == generators::SquishyMode::Add {
             if session_snap.add_snap_to_surface {
-                voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy)
+                voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
             } else {
                 voxel_edit::pick_solid_coord_at_screen(file, vmap, cam, w, h, sx, sy)
             }
@@ -6729,6 +7655,7 @@ fn prepare_preview_mesh(
             voxel_edit::EditTool::Add,
             &set,
             vmap,
+            file,
             dbg,
             hover.color,
         );
@@ -6758,36 +7685,90 @@ fn prepare_preview_mesh(
     let ctx = &*hover;
 
     if matches!(mode, PreviewMode::Select) {
+        let poly_placing = matches!(
+            ctx.stroke_mode,
+            stroke_modes::DrawStrokeMode::Polygon | stroke_modes::DrawStrokeMode::PolygonHull
+        ) && !ctx.stroke_aux.polygon_vertices.is_empty()
+            && ctx.use_brush_preview;
+        if poly_placing {
+            let material = voxelle::MaterialId::from_str_id(&ctx.material);
+            let targets = voxel_edit::collect_stroke_preview_targets(
+                file,
+                vmap,
+                cam,
+                w,
+                h,
+                sx,
+                sy,
+                voxel_edit::EditTool::Remove,
+                ctx.color,
+                material,
+                ctx.brush_radius,
+                ctx.brush_shape,
+                ctx.spray_density,
+                None,
+                None,
+                ctx.stroke_mode,
+                ctx.plane_axis,
+                &ctx.stroke_aux,
+            );
+            let key = hash_brush_hover_targets(mode, ctx, &targets, vmap, dbg);
+            if preview_overlay_cache_key_get(state) == Some(key) {
+                return PreviewMeshPrepared::Noop;
+            }
+            let set: AHashSet<_> = targets.iter().copied().collect();
+            let (mut solid, mut wire) = if targets.is_empty() {
+                (
+                    greedy_mesh::MeshBuffers::default(),
+                    greedy_mesh::MeshBuffers::default(),
+                )
+            } else {
+                stroke_preview_meshes_for_union(
+                    voxel_edit::EditTool::Remove,
+                    &set,
+                    vmap,
+                    file,
+                    dbg,
+                    ctx.color,
+                )
+            };
+            append_polygon_vertex_marker_meshes(
+                &mut solid,
+                &mut wire,
+                &ctx.stroke_aux.polygon_vertices,
+                vmap,
+                file,
+                dbg,
+            );
+            if solid.positions.is_empty() {
+                return PreviewMeshPrepared::Clear;
+            }
+            return PreviewMeshPrepared::Upload {
+                cache_key: key,
+                solid,
+                wire,
+            };
+        }
         let key_cell = voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy);
         let key = match key_cell {
-            Some((cx, cy, cz)) => hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0),
+            Some(((cx, cy, cz), oid)) => {
+                hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0, oid, sx, sy)
+            }
             None => hash_preview_miss(mode, dbg),
         };
         if preview_overlay_cache_key_get(state) == Some(key) {
             return PreviewMeshPrepared::Noop;
         }
-        if let Some((cx, cy, cz)) = key_cell {
+        if let Some(((cx, cy, cz), oid)) = key_cell {
             let (sr, sg, sb, wr, wg, wb, size, wem) = if dbg {
                 (1.0f32, 0.12, 0.1, 0.55, 0.0, 0.0, 0.56f32, 3.5f32)
             } else {
                 // Fixed blue for selection hover — not the active palette.
                 (0.35, 0.55, 0.98, 0.05, 0.08, 0.2, 0.53, 2.0)
             };
-            let solid = greedy_mesh::preview_cube_mesh(
-                cx as f32,
-                cy as f32,
-                cz as f32,
-                size,
-                [sr, sg, sb],
-                1.0,
-            );
-            let wire = greedy_mesh::preview_cube_wireframe_mesh(
-                cx as f32,
-                cy as f32,
-                cz as f32,
-                size,
-                [wr, wg, wb],
-                wem,
+            let p = local_cell_face_hit_for_preview(cam, w, h, sx, sy, cx, cy, cz, oid, &file.objects);
+            let (solid, wire) = preview_single_cell_world(
+                file, p.x, p.y, p.z, oid, sr, sg, sb, wr, wg, wb, size, wem,
             );
             return PreviewMeshPrepared::Upload {
                 cache_key: key,
@@ -6822,8 +7803,8 @@ fn prepare_preview_mesh(
             _ => None,
         };
         let key = match key_cell {
-            Some((cx, cy, cz)) => {
-                hash_single_cell_preview(mode, cx, cy, cz, mode_tag, dbg, ctx.color)
+            Some(((cx, cy, cz), oid)) => {
+                hash_single_cell_preview(mode, cx, cy, cz, mode_tag, dbg, ctx.color, oid, sx, sy)
             }
             None => hash_preview_miss(mode, dbg),
         };
@@ -6831,24 +7812,12 @@ fn prepare_preview_mesh(
             return PreviewMeshPrepared::Noop;
         }
         match key_cell {
-            Some((cx, cy, cz)) => {
+            Some(((cx, cy, cz), oid)) => {
                 let (sr, sg, sb, wr, wg, wb, size, wem) =
                     preview_tool_colors(tool, dbg, ctx.color);
-                let solid = greedy_mesh::preview_cube_mesh(
-                    cx as f32,
-                    cy as f32,
-                    cz as f32,
-                    size,
-                    [sr, sg, sb],
-                    1.0,
-                );
-                let wire = greedy_mesh::preview_cube_wireframe_mesh(
-                    cx as f32,
-                    cy as f32,
-                    cz as f32,
-                    size,
-                    [wr, wg, wb],
-                    wem,
+                let p = local_cell_face_hit_for_preview(cam, w, h, sx, sy, cx, cy, cz, oid, &file.objects);
+                let (solid, wire) = preview_single_cell_world(
+                    file, p.x, p.y, p.z, oid, sr, sg, sb, wr, wg, wb, size, wem,
                 );
                 return PreviewMeshPrepared::Upload {
                     cache_key: key,
@@ -6885,11 +7854,32 @@ fn prepare_preview_mesh(
     if preview_overlay_cache_key_get(state) == Some(key) {
         return PreviewMeshPrepared::Noop;
     }
-    if targets.is_empty() {
+    let poly_corners = matches!(
+        ctx.stroke_mode,
+        stroke_modes::DrawStrokeMode::Polygon | stroke_modes::DrawStrokeMode::PolygonHull
+    ) && !ctx.stroke_aux.polygon_vertices.is_empty();
+    if targets.is_empty() && !poly_corners {
         return PreviewMeshPrepared::Clear;
     }
     let set: AHashSet<_> = targets.iter().copied().collect();
-    let (solid, wire) = stroke_preview_meshes_for_union(tool, &set, vmap, dbg, ctx.color);
+    let (mut solid, mut wire) = if targets.is_empty() {
+        (
+            greedy_mesh::MeshBuffers::default(),
+            greedy_mesh::MeshBuffers::default(),
+        )
+    } else {
+        stroke_preview_meshes_for_union(tool, &set, vmap, file, dbg, ctx.color)
+    };
+    if poly_corners {
+        append_polygon_vertex_marker_meshes(
+            &mut solid,
+            &mut wire,
+            &ctx.stroke_aux.polygon_vertices,
+            vmap,
+            file,
+            dbg,
+        );
+    }
     if solid.positions.is_empty() {
         PreviewMeshPrepared::Clear
     } else {
@@ -6983,6 +7973,8 @@ pub struct SelectionMenuState {
     pub match_material: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub viewport_cursor_debug: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub view_show_borders: tauri::menu::CheckMenuItem<tauri::Wry>,
+    /// Experimental: GPU viewport uses full swapchain; webview picks with window-normalized coords.
+    pub full_surface_viewport: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub sel_all: tauri::menu::MenuItem<tauri::Wry>,
     pub sel_by_color: tauri::menu::MenuItem<tauri::Wry>,
     pub sel_connected: tauri::menu::MenuItem<tauri::Wry>,
@@ -7192,6 +8184,14 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
     let view_render_ray =
         MenuItem::with_id(app, "menu_view_render_ray", "Ray (WebGPU)", true, None::<&str>)?;
     let sep_view_extras = PredefinedMenuItem::separator(app)?;
+    let view_full_surface_viewport = CheckMenuItem::with_id(
+        app,
+        "menu_view_full_surface_viewport",
+        "Full-window GPU viewport (experimental)",
+        true,
+        false,
+        None::<&str>,
+    )?;
     let view_show_borders = CheckMenuItem::with_id(
         app,
         "menu_view_show_borders",
@@ -7255,6 +8255,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
                 sub.append(&ortho_view_item)?;
                 sub.append(&view_render_ray)?;
                 sub.append(&sep_view_extras)?;
+                sub.append(&view_full_surface_viewport)?;
                 sub.append(&view_show_borders)?;
                 sub.append(&sep_view_stamp)?;
                 sub.append(&view_stamp_book)?;
@@ -7277,6 +8278,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
                 &ortho_view_item,
                 &view_render_ray,
                 &sep_view_extras,
+                &view_full_surface_viewport,
                 &view_show_borders,
                 &sep_view_stamp,
                 &view_stamp_book,
@@ -7547,6 +8549,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
         match_material: menu_sel_match_material.clone(),
         viewport_cursor_debug: debug_viewport_cursor.clone(),
         view_show_borders: view_show_borders.clone(),
+        full_surface_viewport: view_full_surface_viewport.clone(),
         sel_all: menu_sel_all.clone(),
         sel_by_color: menu_sel_by_color.clone(),
         sel_connected: menu_sel_connected.clone(),
@@ -7654,6 +8657,48 @@ fn copy_performance_data_to_clipboard(state: &Arc<ViewerState>) -> Result<(), St
         .map_err(|e| e.to_string())?
         .set_text(text)
         .map_err(|e| e.to_string())
+}
+
+/// stderr one-liners for cuboid/cylinder depth commits — visible in `tauri dev` when the webview is wedged.
+#[cfg(desktop)]
+fn eprintln_extrusion_stroke_checkpoint(
+    label: &str,
+    args: &VoxelEditAtScreen,
+    deltas_len: Option<usize>,
+    apply_ms: Option<f64>,
+) {
+    if !matches!(
+        args.stroke_mode,
+        stroke_modes::DrawStrokeMode::Cuboid | stroke_modes::DrawStrokeMode::Cylinder
+    ) {
+        return;
+    }
+    if let (Some(n), Some(ms)) = (deltas_len, apply_ms) {
+        eprintln!(
+            "[voxelle] {label} stroke={:?} deltas={n} apply_ms={ms:.1}",
+            args.stroke_mode
+        );
+    } else {
+        eprintln!(
+            "[voxelle] {label} stroke={:?} cuboid_depth={:?} cylinder_depth={:?}",
+            args.stroke_mode,
+            args.stroke_aux.cuboid_depth,
+            args.stroke_aux.cylinder_depth
+        );
+    }
+}
+
+#[cfg(desktop)]
+fn eprintln_last_edit_perf_line(state: &ViewerState) {
+    if let Some(e) = state.last_edit_perf.lock().clone() {
+        eprintln!(
+            "[voxelle] voxel_edit GPU refresh total_ms={:.1} mesh_ms={:.1} route={} apply_ms={:.1}",
+            e.total_ms,
+            e.mesh_ms,
+            e.mesh_route,
+            e.apply_edit_ms
+        );
+    }
 }
 
 /// Ok/Cancel prompt **without** parenting to the webview window. The JS `confirm` API always
@@ -8162,8 +9207,29 @@ pub fn run() {
         grid_overlay_cache_key: Mutex::new(None),
         selection_overlay_cache_key: Mutex::new(None),
         preview_overlay_cache_key: Mutex::new(None),
+        fill_operation_cancel: Arc::new(AtomicBool::new(false)),
     });
     let vs = viewer_state.clone();
+
+    #[cfg(all(desktop, unix))]
+    {
+        let st = viewer_state.clone();
+        let _ = std::thread::Builder::new()
+            .name("voxelle-sigusr1-perf".into())
+            .spawn(move || {
+                use signal_hook::consts::SIGUSR1;
+                use signal_hook::iterator::Signals;
+                let Ok(mut signals) = Signals::new([SIGUSR1]) else {
+                    return;
+                };
+                for _ in signals.forever() {
+                    let text = performance_report_text(st.as_ref());
+                    eprintln!(
+                        "--- voxelle SIGUSR1 performance dump (paste for bugs) ---\n{text}\n--- end dump ---"
+                    );
+                }
+            });
+    }
 
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -8237,6 +9303,10 @@ pub fn run() {
                 );
             } else if event.id() == "debug_copy_performance" {
                 let state = app.state::<Arc<ViewerState>>();
+                eprintln!(
+                    "--- Debug → Copy performance info (terminal backup) ---\n{}\n--- end ---",
+                    performance_report_text(state.inner())
+                );
                 if let Err(e) = copy_performance_data_to_clipboard(state.inner()) {
                     eprintln!("copy performance data: {e}");
                 }
@@ -8300,6 +9370,17 @@ pub fn run() {
                     "voxelle-rendering-mode-changed",
                     "ray",
                 );
+            } else if event.id() == "menu_view_full_surface_viewport" {
+                #[cfg(desktop)]
+                if let Some(sel) = app.try_state::<SelectionMenuState>() {
+                    if let Ok(enabled) = sel.full_surface_viewport.is_checked() {
+                        let _ = app.emit_to(
+                            EventTarget::webview_window("main"),
+                            "voxelle-full-surface-viewport",
+                            enabled,
+                        );
+                    }
+                }
             } else if event.id() == "menu_view_show_borders" {
                 #[cfg(desktop)]
                 if let Some(sel) = app.try_state::<SelectionMenuState>() {
@@ -8423,7 +9504,8 @@ pub fn run() {
             {
                 let selection_menu_state = install_app_menu(app.handle())?;
                 app.manage(selection_menu_state);
-                selection_menu_sync_enabled_for_scene(app.handle(), vs.as_ref());
+                let (has_voxels, has_selection) = scene_menu_flags(vs.as_ref());
+                selection_menu_sync_enabled_for_scene(app.handle(), has_voxels, has_selection);
             }
 
             let window = app.get_webview_window("main").expect("main window");
@@ -8478,10 +9560,12 @@ pub fn run() {
             world_to_viewport_pixels,
             sync_preview_input,
             voxel_stroke_begin,
+            voxel_stroke_preview_reset,
             voxel_stroke_preview_at_screen,
             voxel_stroke_end,
             voxel_pick_color_at_screen,
             voxel_edit_at_screen,
+            voxel_fill_cancel,
             voxel_undo,
             voxel_redo,
             save_voxelle,
@@ -8505,6 +9589,7 @@ pub fn run() {
             set_orthographic,
             get_show_grid_borders,
             view_menu_sync_show_borders,
+            view_menu_sync_full_surface_viewport,
             selection_menu_sync_match_material,
             debug_menu_sync_viewport_cursor_overlay,
             set_tone_mapping,
@@ -8782,6 +9867,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         grid_overlay_cache_key: Mutex::new(None),
         selection_overlay_cache_key: Mutex::new(None),
         preview_overlay_cache_key: Mutex::new(None),
+        fill_operation_cancel: Arc::new(AtomicBool::new(false)),
     })
 }
 

@@ -1,8 +1,3 @@
-import type {
-  Dispatch,
-  MutableRefObject,
-  SetStateAction,
-} from "react";
 import { AreaShapeControls } from "./AreaShapeControls";
 import type {
   DrawStrokeModeApi,
@@ -30,18 +25,13 @@ export type DrawPaneSelectionToolOptionsProps = {
   setFillSelectDiagonals: (v: boolean) => void;
   fillRespectsColor: boolean;
   setFillRespectsColor: (v: boolean) => void;
-  strokePolygonVerts: [number, number, number][];
-  setStrokePolygonVerts: Dispatch<
-    SetStateAction<[number, number, number][]>
-  >;
-  strokePolygonLastScreenRef: MutableRefObject<{
-    nx: number;
-    ny: number;
-  } | null>;
   sprayDensity: number;
   setSprayDensity: (n: number) => void;
   brushShape: BrushShape;
   setBrushShape: (s: BrushShape) => void;
+  /** Clip brush to the outward side of the face under the cursor (axis from ray hit). */
+  brushClipBottomHalf: boolean;
+  setBrushClipBottomHalf: (v: boolean) => void;
   brushRadius: number;
   setBrushRadius: (n: number) => void;
   selectionStrokeSnapToSurface: boolean;
@@ -56,7 +46,6 @@ export type DrawPaneSelectionToolOptionsProps = {
   setSpraySizeRange: (v: boolean) => void;
   fillConstrainToPlane: boolean;
   setFillConstrainToPlane: (v: boolean) => void;
-  onApplyPolygonSelection: () => void;
 };
 
 /**
@@ -87,12 +76,6 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
       onFillSelectDiagonalsChange={p.setFillSelectDiagonals}
       fillRespectsColor={p.fillRespectsColor}
       onFillRespectsColorChange={p.setFillRespectsColor}
-      strokePolygonVerts={p.strokePolygonVerts}
-      onClearPolygon={() => {
-        p.setStrokePolygonVerts([]);
-        p.strokePolygonLastScreenRef.current = null;
-      }}
-      onApplyPolygon={p.onApplyPolygonSelection}
       sprayDensity={p.sprayDensity}
       onSprayDensityChange={p.setSprayDensity}
       spraySliderMode="selection"
@@ -172,6 +155,20 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               </button>
             ))}
           </div>
+          <label
+            className="tool-options-checkbox-row"
+            style={{ marginTop: "0.35rem" }}
+          >
+            <input
+              type="checkbox"
+              checked={p.brushClipBottomHalf}
+              onChange={(ev) =>
+                p.setBrushClipBottomHalf(ev.target.checked)
+              }
+              disabled={p.loading || p.workBusy}
+            />
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+          </label>
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
@@ -310,6 +307,20 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               </button>
             ))}
           </div>
+          <label
+            className="tool-options-checkbox-row"
+            style={{ marginTop: "0.35rem" }}
+          >
+            <input
+              type="checkbox"
+              checked={p.brushClipBottomHalf}
+              onChange={(ev) =>
+                p.setBrushClipBottomHalf(ev.target.checked)
+              }
+              disabled={p.loading || p.workBusy}
+            />
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+          </label>
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
@@ -400,48 +411,6 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             >
               Circle: first click center, second click edge.
             </p>
-          </div>
-        ) : null}
-        {p.drawStrokeMode === "polygonHull" ? (
-          <div className="tool-options-section">
-            <p
-              style={{
-                margin: "0 0 0.35rem",
-                fontSize: "0.85rem",
-                opacity: 0.9,
-              }}
-            >
-              Vertices: {p.strokePolygonVerts.length}. Click to add corners;
-              Apply with three or more.
-            </p>
-            <div
-              className="tool-options-shape-row"
-              style={{ flexWrap: "wrap" }}
-            >
-              <button
-                type="button"
-                className="tool-options-shape-btn"
-                disabled={p.loading || p.workBusy}
-                onClick={() => {
-                  p.setStrokePolygonVerts([]);
-                  p.strokePolygonLastScreenRef.current = null;
-                }}
-              >
-                Clear
-              </button>
-              <button
-                type="button"
-                className="tool-options-shape-btn"
-                disabled={
-                  p.loading ||
-                  p.workBusy ||
-                  p.strokePolygonVerts.length < 3
-                }
-                onClick={() => p.onApplyPolygonSelection()}
-              >
-                Apply
-              </button>
-            </div>
           </div>
         ) : null}
       </>
@@ -539,6 +508,20 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               </button>
             ))}
           </div>
+          <label
+            className="tool-options-checkbox-row"
+            style={{ marginTop: "0.35rem" }}
+          >
+            <input
+              type="checkbox"
+              checked={p.brushClipBottomHalf}
+              onChange={(ev) =>
+                p.setBrushClipBottomHalf(ev.target.checked)
+              }
+              disabled={p.loading || p.workBusy}
+            />
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+          </label>
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
@@ -624,7 +607,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               className="tool-options-hint"
               style={{ margin: 0, fontSize: "0.85rem", opacity: 0.9 }}
             >
-              Cuboid: two opposite corners.
+              Cuboid: drag on a face, set depth, Done.
             </p>
           </div>
         ) : null}
@@ -634,51 +617,8 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               className="tool-options-hint"
               style={{ margin: 0, fontSize: "0.85rem", opacity: 0.9 }}
             >
-              Cylinder: axis start then end (uses brush radius).
+              Cylinder: drag on a face, set depth, Done.
             </p>
-          </div>
-        ) : null}
-        {(p.drawStrokeMode === "polygon" ||
-          p.drawStrokeMode === "polygonHull") ? (
-          <div className="tool-options-section">
-            <p
-              style={{
-                margin: "0 0 0.35rem",
-                fontSize: "0.85rem",
-                opacity: 0.9,
-              }}
-            >
-              Vertices: {p.strokePolygonVerts.length}. Click to add corners;
-              Apply with three or more.
-            </p>
-            <div
-              className="tool-options-shape-row"
-              style={{ flexWrap: "wrap" }}
-            >
-              <button
-                type="button"
-                className="tool-options-shape-btn"
-                disabled={p.loading || p.workBusy}
-                onClick={() => {
-                  p.setStrokePolygonVerts([]);
-                  p.strokePolygonLastScreenRef.current = null;
-                }}
-              >
-                Clear
-              </button>
-              <button
-                type="button"
-                className="tool-options-shape-btn"
-                disabled={
-                  p.loading ||
-                  p.workBusy ||
-                  p.strokePolygonVerts.length < 3
-                }
-                onClick={() => p.onApplyPolygonSelection()}
-              >
-                Apply
-              </button>
-            </div>
           </div>
         ) : null}
       </>
@@ -700,6 +640,27 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             />
             <span>Constrain to plane</span>
           </label>
+          {p.fillConstrainToPlane ? (
+            <label
+              className="tool-options-range-label"
+              style={{ marginTop: "0.5rem", display: "block" }}
+            >
+              <span>Plane</span>
+              <select
+                value={p.planeAxis}
+                onChange={(ev) =>
+                  p.setPlaneAxis(ev.target.value as PlaneAxisApi)
+                }
+                disabled={p.loading || p.workBusy}
+              >
+                <option value="auto">Auto (face)</option>
+                <option value="x">X</option>
+                <option value="y">Y</option>
+                <option value="z">Z</option>
+                <option value="camera">Camera (view)</option>
+              </select>
+            </label>
+          ) : null}
         </div>
         <hr
           style={{
@@ -795,6 +756,20 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
               </button>
             ))}
           </div>
+          <label
+            className="tool-options-checkbox-row"
+            style={{ marginTop: "0.35rem" }}
+          >
+            <input
+              type="checkbox"
+              checked={p.brushClipBottomHalf}
+              onChange={(ev) =>
+                p.setBrushClipBottomHalf(ev.target.checked)
+              }
+              disabled={p.loading || p.workBusy}
+            />
+            <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+          </label>
           <label
             className="tool-options-checkbox-row"
             style={{ marginTop: "0.5rem" }}
@@ -902,6 +877,20 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             </button>
           ))}
         </div>
+        <label
+          className="tool-options-checkbox-row"
+          style={{ marginTop: "0.35rem" }}
+        >
+          <input
+            type="checkbox"
+            checked={p.brushClipBottomHalf}
+            onChange={(ev) =>
+              p.setBrushClipBottomHalf(ev.target.checked)
+            }
+            disabled={p.loading || p.workBusy}
+          />
+          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">Outer half (face)</span>
+        </label>
         <label className="tool-options-range-label">
           <span>Size</span>
           <input

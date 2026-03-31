@@ -5,10 +5,27 @@ use crate::greedy_mesh::VoxelCoord;
 use crate::stroke_modes::{
     stroke_anchor_centers_with_mode, DrawStrokeMode, PlaneAxis, StrokeAux,
 };
+use crate::voxelle::scene::{
+    is_object_visible, object_world_matrix, scene_objects_identity_for_bounds_fast_path,
+};
 use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use ahash::{AHashMap, AHashSet};
-use glam::{Vec3, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 use std::collections::{HashSet, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Polygon / polygonHull area uses exact lattice fill (web parity). Brush radius must not thicken
+/// the filled region — otherwise each interior cell is expanded into a thick brush footprint.
+#[inline]
+fn brush_radius_for_area_polygon_stroke(
+    stroke_mode: DrawStrokeMode,
+    brush_radius: u32,
+) -> u32 {
+    match stroke_mode {
+        DrawStrokeMode::Polygon | DrawStrokeMode::PolygonHull => 0,
+        _ => brush_radius,
+    }
+}
 
 pub fn screen_to_world_ray(
     camera: &OrbitCamera,
@@ -87,6 +104,95 @@ pub fn in_grid(x: i32, y: i32, z: i32, grid_size: i32) -> bool {
     x >= lo && x <= hi && y >= lo && y <= hi && z >= lo && z <= hi
 }
 
+/// Web parity with `MAX_GRID_SIZE` in `store/core.ts`: symmetric grid about origin, capped for safety.
+pub const MAX_GRID_SIZE: i32 = 65536;
+
+#[inline]
+fn min_grid_size_for_max_abs(max_abs: i32) -> i32 {
+    (2 * (max_abs + 1)).max(1)
+}
+
+/// Ray/pick volume: at least the file’s declared grid and enough extent to include all voxels plus one
+/// shell layer (so “add in front of face” works when looking at the outer boundary).
+pub fn effective_ray_grid_size(file: &VoxelleFile) -> i32 {
+    let base = file.grid_size.max(1);
+    let mut max_a = 0i32;
+    for v in &file.voxels {
+        max_a = max_a.max(v.x.abs()).max(v.y.abs()).max(v.z.abs());
+    }
+    let content_slack = 2 * (max_a + 2);
+    base.max(content_slack).min(MAX_GRID_SIZE)
+}
+
+pub(crate) fn min_grid_size_for_centers_offsets(
+    centers: &[(i32, i32, i32)],
+    offsets: &[(i32, i32, i32)],
+) -> i32 {
+    let mut max_abs = 0i32;
+    for &(cx, cy, cz) in centers {
+        for &(dx, dy, dz) in offsets {
+            let x = cx + dx;
+            let y = cy + dy;
+            let z = cz + dz;
+            max_abs = max_abs.max(x.abs()).max(y.abs()).max(z.abs());
+        }
+    }
+    min_grid_size_for_max_abs(max_abs)
+}
+
+fn min_grid_size_for_coords(coords: &[(i32, i32, i32)]) -> i32 {
+    let mut max_abs = 0i32;
+    for &(x, y, z) in coords {
+        max_abs = max_abs.max(x.abs()).max(y.abs()).max(z.abs());
+    }
+    min_grid_size_for_max_abs(max_abs)
+}
+
+/// Grow `file.grid_size` so centered bounds fit all stroke cells (web `ensureGridFitsPositions`).
+pub(crate) fn ensure_grid_fits_centers_offsets(
+    file: &mut VoxelleFile,
+    centers: &[(i32, i32, i32)],
+    offsets: &[(i32, i32, i32)],
+) {
+    let need = min_grid_size_for_centers_offsets(centers, offsets);
+    if need > file.grid_size.max(1) {
+        file.grid_size = need.min(MAX_GRID_SIZE);
+    }
+}
+
+pub(crate) fn ensure_grid_fits_coords(
+    file: &mut VoxelleFile,
+    coords: impl Iterator<Item = (i32, i32, i32)>,
+) {
+    let mut max_abs = 0i32;
+    for (x, y, z) in coords {
+        max_abs = max_abs.max(x.abs()).max(y.abs()).max(z.abs());
+    }
+    let need = min_grid_size_for_max_abs(max_abs);
+    if need > file.grid_size.max(1) {
+        file.grid_size = need.min(MAX_GRID_SIZE);
+    }
+}
+
+#[inline]
+pub(crate) fn ensure_grid_fits_coord(file: &mut VoxelleFile, x: i32, y: i32, z: i32) {
+    let max_abs = x.abs().max(y.abs()).max(z.abs());
+    let need = min_grid_size_for_max_abs(max_abs);
+    if need > file.grid_size.max(1) {
+        file.grid_size = need.min(MAX_GRID_SIZE);
+    }
+}
+
+/// For preview / sampling without mutating `file`: pretend grid is large enough for stroke geometry.
+pub(crate) fn stroke_clip_grid_size(
+    file: &VoxelleFile,
+    centers: &[(i32, i32, i32)],
+    offsets: &[(i32, i32, i32)],
+) -> i32 {
+    let need = min_grid_size_for_centers_offsets(centers, offsets);
+    file.grid_size.max(1).max(need).min(MAX_GRID_SIZE)
+}
+
 fn ray_aabb_intersect(origin: Vec3, dir: Vec3, bmin: Vec3, bmax: Vec3) -> Option<(f32, f32)> {
     let mut tmin = f32::NEG_INFINITY;
     let mut tmax = f32::INFINITY;
@@ -114,6 +220,55 @@ fn ray_aabb_intersect(origin: Vec3, dir: Vec3, bmin: Vec3, bmax: Vec3) -> Option
         }
     }
     Some((tmin, tmax))
+}
+
+/// Local-space entry point on the voxel cell AABB (same convention as [`world_ray_entry_on_voxel_cell`]).
+/// Callers that build **local** geometry (e.g. hover mesh) should use this — not `inverse(M) * world_hit`,
+/// which reintroduces floating-point drift vs the slab math.
+pub fn local_ray_entry_on_voxel_cell(
+    origin_world: Vec3,
+    dir_world: Vec3,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    world_from_local: Mat4,
+) -> Option<Vec3> {
+    let inv = world_from_local.inverse();
+    let o_l = inv.transform_point3(origin_world);
+    let d_l = inv.transform_vector3(dir_world);
+    if d_l.length_squared() < 1e-18 {
+        return None;
+    }
+    let bmin = Vec3::new(cx as f32 - 0.5, cy as f32 - 0.5, cz as f32 - 0.5);
+    let bmax = Vec3::new(cx as f32 + 0.5, cy as f32 + 0.5, cz as f32 + 0.5);
+    let (t_enter, t_exit) = ray_aabb_intersect(o_l, d_l, bmin, bmax)?;
+    if t_exit < 0.0 {
+        return None;
+    }
+    let t_hit = if t_enter >= 0.0 {
+        t_enter
+    } else if t_exit >= 0.0 {
+        0.0
+    } else {
+        return None;
+    };
+    Some(o_l + d_l * t_hit)
+}
+
+/// World-space point where the ray first enters the axis-aligned voxel cell `(cx,cy,cz)` in **local**
+/// object space (cell is `[c-0.5,c+0.5]` per axis), transformed by `world_from_local`.
+/// Matches the face the DDA/marcher crosses when entering that cell from outside; falls back usefully
+/// when the ray origin is already inside the cell (`t_hit = 0` in local space).
+pub fn world_ray_entry_on_voxel_cell(
+    origin_world: Vec3,
+    dir_world: Vec3,
+    cx: i32,
+    cy: i32,
+    cz: i32,
+    world_from_local: Mat4,
+) -> Option<Vec3> {
+    local_ray_entry_on_voxel_cell(origin_world, dir_world, cx, cy, cz, world_from_local)
+        .map(|p_l| world_from_local.transform_point3(p_l))
 }
 
 fn exit_t_axis(ox: f32, dx: f32, c: i32, t_min: f32) -> f32 {
@@ -177,6 +332,70 @@ pub(crate) fn ray_first_solid(
     None
 }
 
+/// Like [`ray_first_solid`], but voxel indices are **object-local** while `origin` / `dir` are in **world**
+/// space — matching GPU meshing ([`crate::greedy_mesh::build_greedy_mesh`] applies [`object_world_matrix`] per object).
+///
+/// The third tuple element is the **object id** for the winning hit (for transforming local preview geometry).
+pub(crate) fn ray_first_solid_scene(
+    origin: Vec3,
+    dir: Vec3,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    grid_size: i32,
+) -> Option<((i32, i32, i32), Option<(i32, i32, i32)>, u32)> {
+    let objs = &file.objects;
+    if objs.is_empty() || scene_objects_identity_for_bounds_fast_path(objs) {
+        return ray_first_solid(origin, dir, voxel_map, grid_size).map(|(c, prev)| {
+            let oid = voxel_map
+                .get(&c)
+                .map(|&vi| file.voxels[vi].object_id)
+                .unwrap_or(0);
+            (c, prev, oid)
+        });
+    }
+
+    let mut oids = AHashSet::with_capacity(voxel_map.len().min(256));
+    for &vi in voxel_map.values() {
+        oids.insert(file.voxels[vi].object_id);
+    }
+
+    let mut best_t = f32::INFINITY;
+    let mut best: Option<((i32, i32, i32), Option<(i32, i32, i32)>, u32)> = None;
+
+    for oid in oids {
+        if !is_object_visible(objs, oid) {
+            continue;
+        }
+        let mut sub_map = AHashMap::with_capacity(voxel_map.len().min(4096));
+        for (&k, &vi) in voxel_map.iter() {
+            if file.voxels[vi].object_id == oid {
+                sub_map.insert(k, vi);
+            }
+        }
+        if sub_map.is_empty() {
+            continue;
+        }
+        let m = object_world_matrix(objs, oid);
+        let inv = m.inverse();
+        let o_l = inv.transform_point3(origin);
+        let d_l = inv.transform_vector3(dir);
+        if d_l.length_squared() < 1e-18 {
+            continue;
+        }
+        let d_l = d_l.normalize();
+        let Some((hit, prev)) = ray_first_solid(o_l, d_l, &sub_map, grid_size) else {
+            continue;
+        };
+        let wc = m.transform_point3(Vec3::new(hit.0 as f32, hit.1 as f32, hit.2 as f32));
+        let t = (wc - origin).dot(dir);
+        if t >= 0.0 && t < best_t {
+            best_t = t;
+            best = Some((hit, prev, oid));
+        }
+    }
+    best
+}
+
 /// `true` if the ray from the screen point hits any solid voxel before exiting the grid (same test as edit/remove).
 pub fn probe_solid_hit(
     file: &VoxelleFile,
@@ -190,9 +409,9 @@ pub fn probe_solid_hit(
     if file.voxels.is_empty() {
         return false;
     }
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    ray_first_solid(origin, dir, voxel_map, grid_size).is_some()
+    ray_first_solid_scene(origin, dir, file, voxel_map, grid_size).is_some()
 }
 
 /// First solid voxel along the ray (for selection toggle).
@@ -208,12 +427,13 @@ pub fn pick_solid_coord_at_screen(
     if file.voxels.is_empty() {
         return None;
     }
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    ray_first_solid(origin, dir, voxel_map, grid_size).map(|(c, _)| c)
+    ray_first_solid_scene(origin, dir, file, voxel_map, grid_size).map(|(c, _, _)| c)
 }
 
 /// Cell where an add would place (empty cell in front of first solid along the ray), if valid.
+/// Second tuple element is the **object id** for that cell (same object as the ray hit).
 pub fn preview_add_cell(
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
@@ -222,23 +442,26 @@ pub fn preview_add_cell(
     height: f32,
     sx: f32,
     sy: f32,
-) -> Option<(i32, i32, i32)> {
+) -> Option<((i32, i32, i32), u32)> {
     if file.voxels.is_empty() {
         return None;
     }
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let (_hit, prev) = ray_first_solid(origin, dir, voxel_map, grid_size)?;
+    let (_hit, prev, oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
     let (px, py, pz) = prev?;
-    if in_grid(px, py, pz, grid_size) && !voxel_map.contains_key(&(px, py, pz)) {
-        Some((px, py, pz))
+    if !voxel_map.contains_key(&(px, py, pz)) {
+        Some(((px, py, pz), oid))
     } else {
         None
     }
 }
 
-/// Solid voxel the ray would remove, if any.
-pub fn preview_remove_cell(
+/// Same as [`anchor_for_edit`]. `stroke_snap_to_surface` only affects add brush alignment
+/// ([`adjust_add_centers_for_surface_snap_brush`]), not this ray anchor.
+pub(crate) fn anchor_for_stroke_edit(
+    tool: EditTool,
+    _snap_to_surface: bool,
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
@@ -247,12 +470,26 @@ pub fn preview_remove_cell(
     sx: f32,
     sy: f32,
 ) -> Option<(i32, i32, i32)> {
+    anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
+}
+
+/// Solid voxel the ray would remove, if any.
+/// Second tuple element is the hit voxel's **object id** (for world-space preview).
+pub fn preview_remove_cell(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<((i32, i32, i32), u32)> {
     if file.voxels.is_empty() {
         return None;
     }
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    ray_first_solid(origin, dir, voxel_map, grid_size).map(|(h, _)| h)
+    ray_first_solid_scene(origin, dir, file, voxel_map, grid_size).map(|(h, _, oid)| (h, oid))
 }
 
 #[inline]
@@ -267,9 +504,9 @@ pub(crate) fn anchor_for_edit(
     sy: f32,
 ) -> Option<(i32, i32, i32)> {
     match tool {
-        EditTool::Add => preview_add_cell(file, voxel_map, camera, width, height, sx, sy),
+        EditTool::Add => preview_add_cell(file, voxel_map, camera, width, height, sx, sy).map(|(c, _)| c),
         EditTool::Remove | EditTool::Paint => {
-            preview_remove_cell(file, voxel_map, camera, width, height, sx, sy)
+            preview_remove_cell(file, voxel_map, camera, width, height, sx, sy).map(|(c, _)| c)
         }
     }
 }
@@ -345,7 +582,242 @@ pub fn neighbors_6(c: VoxelCoord) -> [VoxelCoord; 6] {
     ]
 }
 
-/// Flood-fill paint: 6-connected voxels matching seed color (and optionally material).
+/// Remove a single solid voxel (swap-remove); same semantics as [`apply_edit`] remove.
+/// Web parity: unconstrained fills that would exceed this many cells show a “large fill” path.
+pub const FILL_UNCONSTRAINED_LARGE_THRESHOLD: usize = 256;
+/// Cooperative cancel / progress checks during BFS (dequeue steps).
+pub const FILL_BFS_PROGRESS_INTERVAL: usize = 2048;
+/// Cheap cancel poll every N dequeues. Duplicates in the queue can inflate dequeues vs. `out.len()`,
+/// so this must be much smaller than [`FILL_BFS_PROGRESS_INTERVAL`] or Escape/Cancel lags badly.
+pub const FILL_BFS_CANCEL_CHECK_INTERVAL: usize = 32;
+/// Cancel/yield cadence during the fast “would this unconstrained fill be large?” probe (separate BFS).
+pub const FILL_THRESHOLD_PROBE_CANCEL_INTERVAL: usize = 32;
+/// Hard safety cap — refuse to allocate or apply beyond this (matches web “don’t freeze” intent).
+pub const FILL_ABSOLUTE_MAX_CELLS: usize = 50_000_000;
+
+/// Result of a cancellable flood over solid selection coords.
+#[derive(Debug)]
+pub struct FillCoordOutcome {
+    pub coords: Vec<VoxelCoord>,
+    pub cancelled: bool,
+    pub hit_absolute_cap: bool,
+}
+
+/// Result of flood fill edits (remove / paint / empty-add).
+#[derive(Debug)]
+pub struct FloodFillEditOutcome {
+    pub deltas: Vec<VoxelEditDelta>,
+    pub cancelled: bool,
+    pub hit_absolute_cap: bool,
+}
+
+pub fn remove_voxel_at_coord(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    coord: VoxelCoord,
+) -> Option<VoxelEditDelta> {
+    let Some(&remove_idx) = voxel_map.get(&coord) else {
+        return None;
+    };
+    let removed_voxel = file.voxels[remove_idx];
+    let last = file.voxels.len() - 1;
+    if remove_idx != last {
+        file.voxels.swap(remove_idx, last);
+        let moved = file.voxels[remove_idx];
+        voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+    }
+    file.voxels.pop();
+    voxel_map.remove(&coord);
+    Some(VoxelEditDelta::Removed {
+        voxel: removed_voxel,
+    })
+}
+
+/// Flood-fill remove: connected solid region from screen pick (same region as selection fill).
+pub fn flood_fill_remove_at_screen(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    fill_diagonals: bool,
+    fill_respects_color: bool,
+    match_material: bool,
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: impl FnMut(usize),
+) -> Result<FloodFillEditOutcome, String> {
+    let o = flood_fill_selection_coords_with_control(
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        fill_diagonals,
+        fill_respects_color,
+        match_material,
+        fill_constrain_plane,
+        plane_axis,
+        cancel,
+        &mut on_progress,
+    );
+    if o.cancelled {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: true,
+            hit_absolute_cap: false,
+        });
+    }
+    if o.hit_absolute_cap {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: true,
+        });
+    }
+    let coords = o.coords;
+    let mut out = Vec::with_capacity(coords.len());
+    for c in coords {
+        if let Some(d) = remove_voxel_at_coord(file, voxel_map, c) {
+            out.push(d);
+        }
+    }
+    Ok(FloodFillEditOutcome {
+        deltas: out,
+        cancelled: false,
+        hit_absolute_cap: false,
+    })
+}
+
+/// Flood-fill add: connected **empty** cells from add-placement seed (air in front of first solid).
+pub fn flood_fill_empty_at_screen(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    fill_diagonals: bool,
+    color: u32,
+    material: MaterialId,
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: impl FnMut(usize),
+) -> Result<FloodFillEditOutcome, String> {
+    // Fixed bound for BFS: do not grow `file.grid_size` during the walk (that made `in_grid` unbounded).
+    let grid_limit = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_limit) else {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: false,
+        });
+    };
+    let Some(seed) = prev else {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: false,
+        });
+    };
+    if voxel_map.contains_key(&seed) {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: false,
+        });
+    }
+    if !in_grid(seed.0, seed.1, seed.2, grid_limit) {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: false,
+        });
+    }
+    let face_axis = face_axis_from_prev_hit(seed, hit);
+    let cam_forward = camera_view_forward(camera);
+    ensure_grid_fits_coord(file, seed.0, seed.1, seed.2);
+    let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
+    let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
+    queue.push_back(seed);
+    let mut out: Vec<VoxelEditDelta> = Vec::new();
+    let mut steps: usize = 0;
+
+    while let Some(c) = queue.pop_front() {
+        steps += 1;
+        if steps % FILL_BFS_CANCEL_CHECK_INTERVAL == 0 {
+            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return Ok(FloodFillEditOutcome {
+                    deltas: out,
+                    cancelled: true,
+                    hit_absolute_cap: false,
+                });
+            }
+        }
+        if steps % FILL_BFS_PROGRESS_INTERVAL == 0 {
+            on_progress(out.len());
+        }
+        if visited.contains(&c) {
+            continue;
+        }
+        visited.insert(c);
+        if voxel_map.contains_key(&c) {
+            continue;
+        }
+        if out.len() >= FILL_ABSOLUTE_MAX_CELLS {
+            return Ok(FloodFillEditOutcome {
+                deltas: out,
+                cancelled: false,
+                hit_absolute_cap: true,
+            });
+        }
+        // `out.len()` is strictly below cap here
+        let nv = Voxel {
+            x: c.0,
+            y: c.1,
+            z: c.2,
+            color,
+            material,
+            object_id: file.active_object_id,
+        };
+        let idx = file.voxels.len();
+        file.voxels.push(nv);
+        voxel_map.insert(c, idx);
+        out.push(VoxelEditDelta::Added(nv));
+
+        let neigh: Vec<VoxelCoord> = if fill_diagonals {
+            neighbors_26(c)
+        } else {
+            neighbors_6(c).to_vec()
+        };
+        for n in neigh {
+            if !in_grid(n.0, n.1, n.2, grid_limit) {
+                continue;
+            }
+            if fill_constrain_plane && !voxel_in_fill_plane(n, seed, plane_axis, face_axis, cam_forward) {
+                continue;
+            }
+            if !visited.contains(&n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    Ok(FloodFillEditOutcome {
+        deltas: out,
+        cancelled: false,
+        hit_absolute_cap: false,
+    })
+}
+
+/// Flood-fill paint: same connected region as selection fill, then recolor.
 pub fn flood_fill_paint_at_screen(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
@@ -357,37 +829,53 @@ pub fn flood_fill_paint_at_screen(
     new_color: u32,
     new_material: MaterialId,
     match_material: bool,
-) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
-    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
-        return Ok(Vec::new());
-    };
-    let Some(&seed_idx) = voxel_map.get(&hit) else {
-        return Ok(Vec::new());
-    };
-    let seed = file.voxels[seed_idx];
-    let tc = seed.color;
-    let tm = seed.material;
-
-    let mut out: Vec<VoxelEditDelta> = Vec::new();
-    let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
-    let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
-    visited.insert(hit);
-    queue.push_back(hit);
-
-    while let Some(c) = queue.pop_front() {
+    fill_diagonals: bool,
+    fill_respects_color: bool,
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+    cancel: Option<&AtomicBool>,
+    mut on_progress: impl FnMut(usize),
+) -> Result<FloodFillEditOutcome, String> {
+    let o = flood_fill_selection_coords_with_control(
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        fill_diagonals,
+        fill_respects_color,
+        match_material,
+        fill_constrain_plane,
+        plane_axis,
+        cancel,
+        &mut on_progress,
+    );
+    if o.cancelled {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: true,
+            hit_absolute_cap: false,
+        });
+    }
+    if o.hit_absolute_cap {
+        return Ok(FloodFillEditOutcome {
+            deltas: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: true,
+        });
+    }
+    let coords = o.coords;
+    let mut out = Vec::with_capacity(coords.len());
+    for c in coords {
         let Some(&idx) = voxel_map.get(&c) else {
             continue;
         };
-        let v = file.voxels[idx];
-        if v.color != tc || (match_material && v.material != tm) {
+        let before = file.voxels[idx];
+        if before.color == new_color && before.material == new_material {
             continue;
         }
-        if v.color == new_color && v.material == new_material {
-            continue;
-        }
-        let before = v;
         let after = Voxel {
             color: new_color,
             material: new_material,
@@ -395,17 +883,12 @@ pub fn flood_fill_paint_at_screen(
         };
         file.voxels[idx] = after;
         out.push(VoxelEditDelta::Painted { before, after });
-
-        for n in neighbors_6(c) {
-            if !in_grid(n.0, n.1, n.2, grid_size) {
-                continue;
-            }
-            if visited.insert(n) {
-                queue.push_back(n);
-            }
-        }
     }
-    Ok(out)
+    Ok(FloodFillEditOutcome {
+        deltas: out,
+        cancelled: false,
+        hit_absolute_cap: false,
+    })
 }
 
 /// 6-connected solid voxels matching the seed hit's color (and optionally material) — selection / flood without edits.
@@ -419,9 +902,9 @@ pub fn connected_solid_same_color_from_screen(
     sy: f32,
     match_material: bool,
 ) -> Option<Vec<VoxelCoord>> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+    let Some((hit, _, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
         return None;
     };
     let Some(&seed_idx) = voxel_map.get(&hit) else {
@@ -472,9 +955,9 @@ pub fn coplanar_empty_connected_from_screen(
     sx: f32,
     sy: f32,
 ) -> Option<Vec<VoxelCoord>> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let (hit, prev) = ray_first_solid(origin, dir, voxel_map, grid_size)?;
+    let (hit, prev, _oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
     let prev = prev?;
     let (axis, fixed) = plane_axis_fixed(prev, hit)?;
     if voxel_map.contains_key(&prev) {
@@ -520,8 +1003,33 @@ pub fn coplanar_empty_connected_from_screen(
     }
 }
 
+/// When `clip_half_normal` is `Some(n)` (axis-aligned), keep only offsets with `o·n >= 0` (outward from the hit face).
+fn brush_clip_half_normal_from_screen(
+    clip: bool,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<(i32, i32, i32)> {
+    if !clip {
+        return None;
+    }
+    Some(
+        outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy)
+            .unwrap_or((0, 1, 0)),
+    )
+}
+
 /// Inclusive brush radius in voxels from the stroke center: `0` = single cell only.
-pub fn brush_offset_cells(shape: BrushShape, radius: u32) -> Vec<(i32, i32, i32)> {
+/// Optional `clip_half_normal`: axis-aligned outward normal — keep offsets with `dx*nx+dy*ny+dz*nz >= 0`.
+pub fn brush_offset_cells(
+    shape: BrushShape,
+    radius: u32,
+    clip_half_normal: Option<(i32, i32, i32)>,
+) -> Vec<(i32, i32, i32)> {
     let r = radius as i32;
     if r <= 0 {
         return vec![(0, 0, 0)];
@@ -561,8 +1069,70 @@ pub fn brush_offset_cells(shape: BrushShape, radius: u32) -> Vec<(i32, i32, i32)
             }
         }
     }
+    if let Some(n) = clip_half_normal {
+        out.retain(|o| o.0 * n.0 + o.1 * n.1 + o.2 * n.2 >= 0);
+    }
     out.sort_by_key(|(a, b, c)| (a.abs() + b.abs() + c.abs(), *a, *b, *c));
     out
+}
+
+/// Voxel steps from brush center to the deepest part of the footprint toward the solid, along
+/// `-outward_normal`. `outward_normal` is axis-aligned (from [`outward_face_normal_from_screen_ray`]).
+fn brush_footprint_extent_toward_solid(
+    shape: BrushShape,
+    radius: u32,
+    outward_normal: (i32, i32, i32),
+    clip_half_normal: Option<(i32, i32, i32)>,
+) -> i32 {
+    let offsets = brush_offset_cells(shape, radius, clip_half_normal);
+    let mut min_dot = 0i32;
+    for o in offsets {
+        let d = o.0 * outward_normal.0 + o.1 * outward_normal.1 + o.2 * outward_normal.2;
+        min_dot = min_dot.min(d);
+    }
+    -min_dot
+}
+
+/// Snap-to-surface uses the empty cell in front of the solid as the *contact* cell. Shift add
+/// brush centers along the face outward normal so the footprint sits on that plane instead of
+/// straddling it (orb half-embedded).
+fn adjust_add_centers_for_surface_snap_brush(
+    centers: Vec<VoxelCoord>,
+    tool: EditTool,
+    brush_shape: BrushShape,
+    brush_radius: u32,
+    stroke_aux: &StrokeAux,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+) -> Vec<VoxelCoord> {
+    if !matches!(tool, EditTool::Add)
+        || !stroke_aux.stroke_snap_to_surface
+        || brush_radius == 0
+    {
+        return centers;
+    }
+    let Some(n) = outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy)
+    else {
+        return centers;
+    };
+    let clip_half = if stroke_aux.brush_clip_bottom_half {
+        Some(n)
+    } else {
+        None
+    };
+    let ext = brush_footprint_extent_toward_solid(brush_shape, brush_radius, n, clip_half);
+    if ext == 0 {
+        return centers;
+    }
+    centers
+        .into_iter()
+        .map(|c| (c.0 + n.0 * ext, c.1 + n.1 * ext, c.2 + n.2 * ext))
+        .collect()
 }
 
 pub fn pick_voxel_at_screen(
@@ -577,9 +1147,9 @@ pub fn pick_voxel_at_screen(
     if file.voxels.is_empty() {
         return None;
     }
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let (hit, _) = ray_first_solid(origin, dir, voxel_map, grid_size)?;
+    let (hit, _, _oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
     let idx = *voxel_map.get(&hit)?;
     Some(file.voxels[idx])
 }
@@ -612,8 +1182,18 @@ pub fn apply_edit(
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
-    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
+    let clip_half = brush_clip_half_normal_from_screen(
+        stroke_aux.brush_clip_bottom_half,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
     let spray = spray_density.clamp(0.0, 1.0);
     let centers = stroke_anchor_centers_with_mode(
         stroke_mode,
@@ -631,9 +1211,26 @@ pub fn apply_edit(
         stroke_line_start,
         stroke_segment_prev,
     );
+    let centers = adjust_add_centers_for_surface_snap_brush(
+        centers,
+        tool,
+        brush_shape,
+        brush_radius,
+        stroke_aux,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
     if centers.is_empty() {
         return Ok(Vec::new());
     }
+
+    ensure_grid_fits_centers_offsets(file, &centers, &offsets);
+    let grid_size = file.grid_size.max(1);
 
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
@@ -742,7 +1339,13 @@ pub fn stroke_preview_accumulates_samples(
     stroke_line_start: Option<(f32, f32)>,
 ) -> bool {
     match stroke_mode {
-        DrawStrokeMode::Plane | DrawStrokeMode::Spray => true,
+        // Area shapes from drag origin → current: each preview is already the full footprint; unioning
+        // would keep cells from earlier corners (e.g. a diagonal pass), inflating the minimum size.
+        DrawStrokeMode::Plane
+        | DrawStrokeMode::Circle
+        | DrawStrokeMode::Cuboid
+        | DrawStrokeMode::Cylinder => stroke_line_start.is_none(),
+        DrawStrokeMode::Spray => true,
         DrawStrokeMode::Precise => false,
         DrawStrokeMode::Line => stroke_line_start.is_none(),
         _ => false,
@@ -815,7 +1418,8 @@ pub fn collect_stroke_edit_targets(
 
 /// Geometric brush footprint for hover / stroke **preview** meshes only.
 ///
-/// Same centers/offsets/spray as [`collect_stroke_edit_targets`]. **Remove** and **Paint** include
+/// Same centers/offsets/spray as [`collect_stroke_edit_targets`], except **Fill** uses a single
+/// seed cell (no brush expansion), matching the click commit. **Remove** and **Paint** include
 /// every in-grid cell in the footprint (occupied and empty) so the full brush shape is visible in
 /// air; [`collect_stroke_edit_targets`] still applies Paint no-op filtering for commits.
 #[allow(clippy::too_many_arguments)]
@@ -839,8 +1443,55 @@ pub fn collect_stroke_preview_targets(
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
 ) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
-    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    // Fill commits a single seed voxel; brush footprint does not apply. `Fill` returns no centers
+    // from `stroke_anchor_centers_with_mode`, so without this branch hover preview would be empty.
+    if stroke_mode == DrawStrokeMode::Fill {
+        let snap = stroke_aux.stroke_snap_to_surface;
+        let Some((cx, cy, cz)) = anchor_for_stroke_edit(
+            tool,
+            snap,
+            file,
+            voxel_map,
+            camera,
+            width,
+            height,
+            sx,
+            sy,
+        ) else {
+            return Vec::new();
+        };
+        let ma = cx.abs().max(cy.abs()).max(cz.abs());
+        let grid_size = file
+            .grid_size
+            .max(1)
+            .max(min_grid_size_for_max_abs(ma))
+            .min(MAX_GRID_SIZE);
+        if !in_grid(cx, cy, cz, grid_size) {
+            return Vec::new();
+        }
+        return match tool {
+            EditTool::Add => {
+                if voxel_map.contains_key(&(cx, cy, cz)) {
+                    Vec::new()
+                } else {
+                    vec![(cx, cy, cz)]
+                }
+            }
+            EditTool::Remove | EditTool::Paint => vec![(cx, cy, cz)],
+        };
+    }
+    let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
+    let clip_half = brush_clip_half_normal_from_screen(
+        stroke_aux.brush_clip_bottom_half,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
     let spray = spray_density.clamp(0.0, 1.0);
     let centers = stroke_anchor_centers_with_mode(
         stroke_mode,
@@ -858,9 +1509,24 @@ pub fn collect_stroke_preview_targets(
         stroke_line_start,
         stroke_segment_prev,
     );
+    let centers = adjust_add_centers_for_surface_snap_brush(
+        centers,
+        tool,
+        brush_shape,
+        brush_radius,
+        stroke_aux,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
     if centers.is_empty() {
         return Vec::new();
     }
+    let grid_size = stroke_clip_grid_size(file, &centers, &offsets);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelCoord> = Vec::new();
 
@@ -919,6 +1585,7 @@ pub fn apply_edits_to_coords(
     material: MaterialId,
     coords: &AHashSet<VoxelCoord>,
 ) -> Vec<VoxelEditDelta> {
+    ensure_grid_fits_coords(file, coords.iter().copied());
     let grid_size = file.grid_size.max(1);
     let mut out: Vec<VoxelEditDelta> = Vec::new();
 
@@ -1006,8 +1673,18 @@ pub fn selection_stroke_sample_coords(
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
 ) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
-    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
+    let clip_half = brush_clip_half_normal_from_screen(
+        stroke_aux.brush_clip_bottom_half,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
     let spray = spray_density.clamp(0.0, 1.0);
     let tool = EditTool::Remove;
     let centers = stroke_anchor_centers_with_mode(
@@ -1029,6 +1706,7 @@ pub fn selection_stroke_sample_coords(
     if centers.is_empty() {
         return Vec::new();
     }
+    let grid_size = stroke_clip_grid_size(file, &centers, &offsets);
 
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelCoord> = Vec::new();
@@ -1074,8 +1752,18 @@ pub fn selection_stroke_sample_empty_coords(
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
 ) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
-    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
+    let clip_half = brush_clip_half_normal_from_screen(
+        stroke_aux.brush_clip_bottom_half,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
     let spray = spray_density.clamp(0.0, 1.0);
     let tool = EditTool::Add;
     let centers = stroke_anchor_centers_with_mode(
@@ -1097,6 +1785,7 @@ pub fn selection_stroke_sample_empty_coords(
     if centers.is_empty() {
         return Vec::new();
     }
+    let grid_size = stroke_clip_grid_size(file, &centers, &offsets);
 
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelCoord> = Vec::new();
@@ -1134,9 +1823,9 @@ pub fn filter_coords_coplanar_empty_from_screen(
     sy: f32,
     coords: &[VoxelCoord],
 ) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+    let Some((hit, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
         return Vec::new();
     };
     let Some(prev) = prev else {
@@ -1170,9 +1859,66 @@ fn neighbors_26(c: VoxelCoord) -> Vec<VoxelCoord> {
     v
 }
 
+fn camera_view_forward(cam: &OrbitCamera) -> Vec3 {
+    let eye = cam.smooth_eye();
+    let t = cam.smooth_target;
+    (t - eye).normalize()
+}
+
+/// Face entry axis 0|1|2 from air cell `prev` to solid `hit` (6-connected step).
+fn face_axis_from_prev_hit(prev: VoxelCoord, hit: VoxelCoord) -> Option<usize> {
+    let dx = hit.0 - prev.0;
+    let dy = hit.1 - prev.1;
+    let dz = hit.2 - prev.2;
+    if dx.abs() + dy.abs() + dz.abs() != 1 {
+        return None;
+    }
+    if dx != 0 {
+        Some(0)
+    } else if dy != 0 {
+        Some(1)
+    } else {
+        Some(2)
+    }
+}
+
+/// Web `selection.ts` `voxelInConstrainPlane` — `seed` is the fill origin (solid hit or empty seed).
+fn voxel_in_fill_plane(
+    cell: VoxelCoord,
+    seed: VoxelCoord,
+    plane_axis: PlaneAxis,
+    face_axis: Option<usize>,
+    cam_forward: Vec3,
+) -> bool {
+    let (nx, ny, nz) = cell;
+    let (sx, sy, sz) = seed;
+    match plane_axis {
+        PlaneAxis::X => nx == sx,
+        PlaneAxis::Y => ny == sy,
+        PlaneAxis::Z => nz == sz,
+        PlaneAxis::Auto => {
+            let ax = face_axis.unwrap_or(1);
+            match ax {
+                0 => nx == sx,
+                1 => ny == sy,
+                _ => nz == sz,
+            }
+        }
+        PlaneAxis::Camera => {
+            let dx = (nx - sx) as f32;
+            let dy = (ny - sy) as f32;
+            let dz = (nz - sz) as f32;
+            let dot = dx * cam_forward.x + dy * cam_forward.y + dz * cam_forward.z;
+            dot.abs() < 0.5
+        }
+    }
+}
+
 /// Flood BFS over solid voxels from screen pick (selection fill). `respect_color`: only like-colored
 /// to seed; if false, include any solid connected in the chosen adjacency.
-pub fn flood_fill_selection_coords(
+///
+/// Cooperative cancel (Escape) and progress; stops at [`FILL_ABSOLUTE_MAX_CELLS`] with `hit_absolute_cap`.
+pub fn flood_fill_selection_coords_with_control(
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
@@ -1183,25 +1929,54 @@ pub fn flood_fill_selection_coords(
     fill_diagonals: bool,
     respect_color: bool,
     match_material: bool,
-) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+    cancel: Option<&AtomicBool>,
+    on_progress: &mut impl FnMut(usize),
+) -> FillCoordOutcome {
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
-        return Vec::new();
+    let Some((hit, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
+        return FillCoordOutcome {
+            coords: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: false,
+        };
     };
     let Some(&seed_idx) = voxel_map.get(&hit) else {
-        return Vec::new();
+        return FillCoordOutcome {
+            coords: Vec::new(),
+            cancelled: false,
+            hit_absolute_cap: false,
+        };
     };
     let seed_v = file.voxels[seed_idx];
     let tc = seed_v.color;
     let tm = seed_v.material;
 
+    let face_axis = prev.and_then(|p| face_axis_from_prev_hit(p, hit));
+    let cam_forward = camera_view_forward(camera);
+
     let mut out: Vec<VoxelCoord> = Vec::new();
     let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
     let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
+    let mut steps: usize = 0;
     queue.push_back(hit);
 
     while let Some(c) = queue.pop_front() {
+        steps += 1;
+        if steps % FILL_BFS_CANCEL_CHECK_INTERVAL == 0 {
+            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return FillCoordOutcome {
+                    coords: out,
+                    cancelled: true,
+                    hit_absolute_cap: false,
+                };
+            }
+        }
+        if steps % FILL_BFS_PROGRESS_INTERVAL == 0 {
+            on_progress(out.len());
+        }
         if visited.contains(&c) {
             continue;
         }
@@ -1215,6 +1990,13 @@ pub fn flood_fill_selection_coords(
                 continue;
             }
         }
+        if out.len() >= FILL_ABSOLUTE_MAX_CELLS {
+            return FillCoordOutcome {
+                coords: out,
+                cancelled: false,
+                hit_absolute_cap: true,
+            };
+        }
         out.push(c);
 
         let neigh: Vec<VoxelCoord> = if fill_diagonals {
@@ -1226,12 +2008,219 @@ pub fn flood_fill_selection_coords(
             if !in_grid(n.0, n.1, n.2, grid_size) {
                 continue;
             }
+            if fill_constrain_plane && !voxel_in_fill_plane(n, hit, plane_axis, face_axis, cam_forward) {
+                continue;
+            }
             if !visited.contains(&n) {
                 queue.push_back(n);
             }
         }
     }
-    out
+    FillCoordOutcome {
+        coords: out,
+        cancelled: false,
+        hit_absolute_cap: false,
+    }
+}
+
+/// Fast check: would an unconstrained solid flood from this pick exceed `threshold` cells?
+/// [`Err(())`] means the caller’s [`AtomicBool`] cancel flag was set (Escape / Cancel).
+pub fn flood_fill_selection_region_exceeds_threshold(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    fill_diagonals: bool,
+    respect_color: bool,
+    match_material: bool,
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+    threshold: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<bool, ()> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
+        return Ok(false);
+    };
+    let Some(&seed_idx) = voxel_map.get(&hit) else {
+        return Ok(false);
+    };
+    let seed_v = file.voxels[seed_idx];
+    let tc = seed_v.color;
+    let tm = seed_v.material;
+
+    let face_axis = prev.and_then(|p| face_axis_from_prev_hit(p, hit));
+    let cam_forward = camera_view_forward(camera);
+
+    let mut matched: usize = 0;
+    let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
+    let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
+    let mut steps: usize = 0;
+    queue.push_back(hit);
+
+    while let Some(c) = queue.pop_front() {
+        steps += 1;
+        if steps % FILL_THRESHOLD_PROBE_CANCEL_INTERVAL == 0 {
+            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return Err(());
+            }
+            std::thread::yield_now();
+        }
+        if visited.contains(&c) {
+            continue;
+        }
+        visited.insert(c);
+        let Some(&idx) = voxel_map.get(&c) else {
+            continue;
+        };
+        let v = file.voxels[idx];
+        if respect_color {
+            if v.color != tc || (match_material && v.material != tm) {
+                continue;
+            }
+        }
+        matched += 1;
+        if matched > threshold {
+            return Ok(true);
+        }
+
+        let neigh: Vec<VoxelCoord> = if fill_diagonals {
+            neighbors_26(c)
+        } else {
+            neighbors_6(c).to_vec()
+        };
+        for n in neigh {
+            if !in_grid(n.0, n.1, n.2, grid_size) {
+                continue;
+            }
+            if fill_constrain_plane && !voxel_in_fill_plane(n, hit, plane_axis, face_axis, cam_forward) {
+                continue;
+            }
+            if !visited.contains(&n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Fast check for empty-cell flood (add fill): would region exceed `threshold` empty cells?
+/// [`Err(())`] means cancel.
+pub fn flood_fill_empty_region_exceeds_threshold(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    fill_diagonals: bool,
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+    threshold: usize,
+    cancel: Option<&AtomicBool>,
+) -> Result<bool, ()> {
+    let grid_limit = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((hit, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_limit) else {
+        return Ok(false);
+    };
+    let Some(seed) = prev else {
+        return Ok(false);
+    };
+    if voxel_map.contains_key(&seed) {
+        return Ok(false);
+    }
+    if !in_grid(seed.0, seed.1, seed.2, grid_limit) {
+        return Ok(false);
+    }
+    let face_axis = face_axis_from_prev_hit(seed, hit);
+    let cam_forward = camera_view_forward(camera);
+
+    let mut matched: usize = 0;
+    let mut visited: AHashSet<VoxelCoord> = AHashSet::new();
+    let mut queue: VecDeque<VoxelCoord> = VecDeque::new();
+    let mut steps: usize = 0;
+    queue.push_back(seed);
+
+    while let Some(c) = queue.pop_front() {
+        steps += 1;
+        if steps % FILL_THRESHOLD_PROBE_CANCEL_INTERVAL == 0 {
+            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+                return Err(());
+            }
+            std::thread::yield_now();
+        }
+        if visited.contains(&c) {
+            continue;
+        }
+        visited.insert(c);
+        if voxel_map.contains_key(&c) {
+            continue;
+        }
+        matched += 1;
+        if matched > threshold {
+            return Ok(true);
+        }
+
+        let neigh: Vec<VoxelCoord> = if fill_diagonals {
+            neighbors_26(c)
+        } else {
+            neighbors_6(c).to_vec()
+        };
+        for n in neigh {
+            if !in_grid(n.0, n.1, n.2, grid_limit) {
+                continue;
+            }
+            if fill_constrain_plane && !voxel_in_fill_plane(n, seed, plane_axis, face_axis, cam_forward) {
+                continue;
+            }
+            if !visited.contains(&n) {
+                queue.push_back(n);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Flood BFS over solid voxels from screen pick (selection fill). `respect_color`: only like-colored
+/// to seed; if false, include any solid connected in the chosen adjacency.
+#[allow(dead_code)] // Used by tests; convenience wrapper around [`flood_fill_selection_coords_with_control`].
+pub fn flood_fill_selection_coords(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    fill_diagonals: bool,
+    respect_color: bool,
+    match_material: bool,
+    fill_constrain_plane: bool,
+    plane_axis: PlaneAxis,
+) -> Vec<VoxelCoord> {
+    flood_fill_selection_coords_with_control(
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        fill_diagonals,
+        respect_color,
+        match_material,
+        fill_constrain_plane,
+        plane_axis,
+        None,
+        &mut |_| {},
+    )
+    .coords
 }
 
 /// Keep only coords whose voxels match `seed` color (and optionally material).
@@ -1265,9 +2254,9 @@ pub fn filter_coords_coplanar_solid_from_screen(
     sy: f32,
     coords: &[VoxelCoord],
 ) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+    let Some((hit, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
         return Vec::new();
     };
     let Some(prev) = prev else {
@@ -1517,9 +2506,19 @@ pub fn collect_sculpt_stroke_footprint(
     spray_density: f32,
     stroke_line_start: Option<(f32, f32)>,
     stroke_segment_prev: Option<(f32, f32)>,
+    brush_clip_bottom_half: bool,
 ) -> Vec<VoxelCoord> {
-    let grid_size = file.grid_size.max(1);
-    let offsets = brush_offset_cells(brush_shape, brush_radius);
+    let clip_half = brush_clip_half_normal_from_screen(
+        brush_clip_bottom_half,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+    );
+    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half);
     let spray = spray_density.clamp(0.0, 1.0);
 
     let spine = stroke_anchor_centers_sculpt(
@@ -1537,6 +2536,7 @@ pub fn collect_sculpt_stroke_footprint(
     if spine.is_empty() {
         return Vec::new();
     }
+    let grid_size = stroke_clip_grid_size(file, &spine, &offsets);
 
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut footprint: Vec<VoxelCoord> = Vec::new();
@@ -1831,9 +2831,9 @@ pub fn outward_face_normal_from_screen_ray(
     sx: f32,
     sy: f32,
 ) -> Option<(i32, i32, i32)> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let (hit, prev) = ray_first_solid(origin, dir, voxel_map, grid_size)?;
+    let (hit, prev, _oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
     let prev = prev?;
     Some((prev.0 - hit.0, prev.1 - hit.1, prev.2 - hit.2))
 }
@@ -1949,7 +2949,11 @@ pub fn compute_wall_sculpt_footprint(
         base_positions
     };
 
-    let grid_size = file.grid_size.max(1);
+    let grid_size = file
+        .grid_size
+        .max(1)
+        .max(min_grid_size_for_coords(&out))
+        .min(MAX_GRID_SIZE);
     out.retain(|&(x, y, z)| in_grid(x, y, z, grid_size));
 
     filter_sculpt_footprint_stochastic(
@@ -1980,6 +2984,7 @@ pub fn sculpt_stroke_effective_footprint(
     brush_strength: u32,
     brush_falloff: u32,
     stroke_seed: u32,
+    brush_clip_bottom_half: bool,
 ) -> Vec<VoxelCoord> {
     let footprint = collect_sculpt_stroke_footprint(
         file,
@@ -1995,6 +3000,7 @@ pub fn sculpt_stroke_effective_footprint(
         spray_density,
         stroke_line_start,
         stroke_segment_prev,
+        brush_clip_bottom_half,
     );
     if footprint.is_empty() {
         return footprint;
@@ -2040,6 +3046,7 @@ pub fn apply_sculpt_stroke(
     brush_radius: u32,
     brush_shape: BrushShape,
     spray_density: f32,
+    brush_clip_bottom_half: bool,
     stroke_line_start: Option<(f32, f32)>,
     stroke_segment_prev: Option<(f32, f32)>,
     terrain_op: Option<TerrainSculptOp>,
@@ -2057,7 +3064,6 @@ pub fn apply_sculpt_stroke(
     wall_lock_start_height: bool,
     wall_axis_align: bool,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
     let footprint = if mode == SculptStrokeMode::Wall {
         compute_wall_sculpt_footprint(
             file,
@@ -2098,11 +3104,15 @@ pub fn apply_sculpt_stroke(
             brush_strength,
             brush_falloff,
             stroke_seed,
+            brush_clip_bottom_half,
         )
     };
     if footprint.is_empty() {
         return Ok(Vec::new());
     }
+
+    ensure_grid_fits_coords(file, footprint.iter().copied());
+    let grid_size = file.grid_size.max(1);
 
     let spine = stroke_anchor_centers_sculpt(
         mode,
@@ -2506,9 +3516,9 @@ pub fn coplanar_connected_from_screen(
     if file.voxels.is_empty() {
         return None;
     }
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let (hit, prev) = ray_first_solid(origin, dir, voxel_map, grid_size)?;
+    let (hit, prev, _oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
     let prev = prev?;
     let (axis, fixed) = plane_axis_fixed(prev, hit)?;
     if !voxel_map.contains_key(&hit) {
@@ -2594,14 +3604,22 @@ pub fn stamp_clipboard_at_screen(
     color: u32,
     material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((_, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+    let Some((_, prev, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
         return Ok(Vec::new());
     };
     let Some((ax, ay, az)) = prev else {
         return Ok(Vec::new());
     };
+    ensure_grid_fits_coords(
+        file,
+        clip
+            .entries
+            .iter()
+            .map(|e| (ax + e.0, ay + e.1, az + e.2)),
+    );
+    let grid_size = file.grid_size.max(1);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
     for &(dx, dy, dz, _src_color, _src_mat) in &clip.entries {
@@ -2644,9 +3662,9 @@ pub fn punch_clipboard_at_screen(
     sy: f32,
     clip: &StampClipboard,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+    let Some((hit, _, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
         return Ok(Vec::new());
     };
     let (hx, hy, hz) = hit;
@@ -2690,16 +3708,17 @@ pub fn sculpt_raise_at_screen(
     color: u32,
     material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, _)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+    let Some((hit, _, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size) else {
         return Ok(Vec::new());
     };
     let (hx, hy, hz) = hit;
     let x = hx;
     let y = hy + 1;
     let z = hz;
-    if !in_grid(x, y, z, grid_size) || voxel_map.contains_key(&(x, y, z)) {
+    ensure_grid_fits_coord(file, x, y, z);
+    if voxel_map.contains_key(&(x, y, z)) {
         return Ok(Vec::new());
     }
     let nv = Voxel {
@@ -2719,6 +3738,18 @@ pub fn sculpt_raise_at_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brush_extent_toward_solid_matches_radius_for_axis_aligned_normals() {
+        assert_eq!(
+            brush_footprint_extent_toward_solid(BrushShape::Sphere, 4, (0, 1, 0), None),
+            4
+        );
+        assert_eq!(
+            brush_footprint_extent_toward_solid(BrushShape::Cube, 3, (1, 0, 0), None),
+            3
+        );
+    }
 
     #[test]
     fn world_to_voxel_negative() {
@@ -2958,6 +3989,7 @@ mod tests {
             0,
             BrushShape::Sphere,
             0.0,
+            false,
             None,
             None,
             None,
@@ -2977,5 +4009,220 @@ mod tests {
         )
         .unwrap();
         assert!(!deltas.is_empty());
+    }
+
+    #[test]
+    fn remove_voxel_at_coord_swap_remove_updates_map() {
+        let mut file = VoxelleFile {
+            version: 4,
+            grid_size: 8,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            lighting: None,
+            voxels: vec![
+                Voxel {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    color: 0xff0000,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                },
+                Voxel {
+                    x: 1,
+                    y: 0,
+                    z: 0,
+                    color: 0x00ff00,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                },
+            ],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        vm.insert((0, 0, 0), 0);
+        vm.insert((1, 0, 0), 1);
+        assert!(remove_voxel_at_coord(&mut file, &mut vm, (0, 0, 0)).is_some());
+        assert_eq!(file.voxels.len(), 1);
+        assert_eq!(vm.len(), 1);
+        assert!(vm.contains_key(&(1, 0, 0)));
+        assert!(!vm.contains_key(&(0, 0, 0)));
+    }
+
+    #[test]
+    fn flood_fill_remove_deletes_full_same_color_region() {
+        let mut file = VoxelleFile {
+            version: 4,
+            grid_size: 16,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            lighting: None,
+            voxels: vec![
+                Voxel {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    color: 0xff0000,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                },
+                Voxel {
+                    x: 1,
+                    y: 0,
+                    z: 0,
+                    color: 0xff0000,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                },
+            ],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        vm.insert((0, 0, 0), 0);
+        vm.insert((1, 0, 0), 1);
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let w = 256.0_f32;
+        let h = 256.0_f32;
+        let sx = 128.0_f32;
+        let sy = 128.0_f32;
+        let n = flood_fill_remove_at_screen(
+            &mut file,
+            &mut vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            false,
+            true,
+            false,
+            false,
+            PlaneAxis::Auto,
+            None,
+            |_| {},
+        )
+        .unwrap()
+        .deltas
+        .len();
+        assert_eq!(n, 2, "expected both red voxels removed");
+        assert!(vm.is_empty());
+    }
+
+    #[test]
+    fn flood_fill_respects_color_false_spans_colors() {
+        let file = VoxelleFile {
+            version: 4,
+            grid_size: 16,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            lighting: None,
+            voxels: vec![
+                Voxel {
+                    x: 0,
+                    y: 0,
+                    z: 0,
+                    color: 0xff0000,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                },
+                Voxel {
+                    x: 1,
+                    y: 0,
+                    z: 0,
+                    color: 0x00ff00,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                },
+            ],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        vm.insert((0, 0, 0), 0);
+        vm.insert((1, 0, 0), 1);
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let w = 256.0_f32;
+        let h = 256.0_f32;
+        let sx = 128.0_f32;
+        let sy = 128.0_f32;
+        let coords = flood_fill_selection_coords(
+            &file,
+            &vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            false,
+            false,
+            false,
+            false,
+            PlaneAxis::Auto,
+        );
+        assert_eq!(
+            coords.len(),
+            2,
+            "with respects_color false, both solids should connect"
+        );
+    }
+
+    #[test]
+    fn flood_fill_empty_places_adjacent_air() {
+        let mut file = VoxelleFile {
+            version: 4,
+            grid_size: 16,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            lighting: None,
+            voxels: vec![Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xff0000,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            }],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        vm.insert((0, 0, 0), 0);
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let w = 256.0_f32;
+        let h = 256.0_f32;
+        let sx = 128.0_f32;
+        let sy = 128.0_f32;
+        let n = flood_fill_empty_at_screen(
+            &mut file,
+            &mut vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            false,
+            0xabcdef,
+            MaterialId::Plastic,
+            false,
+            PlaneAxis::Auto,
+            None,
+            |_| {},
+        )
+        .unwrap()
+        .deltas
+        .len();
+        assert!(n >= 1, "expected at least one empty cell filled in front of solid");
     }
 }

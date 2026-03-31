@@ -27,7 +27,7 @@ pub fn squishy_metaball_at_screen(
     material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = file.grid_size.max(1);
-    let Some(anchor) = preview_add_cell(file, voxel_map, camera, width, height, sx, sy) else {
+    let Some((anchor, _oid)) = preview_add_cell(file, voxel_map, camera, width, height, sx, sy) else {
         return Ok(Vec::new());
     };
     let r = radius.max(2).min(10) as f32;

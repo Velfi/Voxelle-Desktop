@@ -1,6 +1,9 @@
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
-use crate::voxel_edit::{in_grid, ray_first_solid, screen_to_world_ray, VoxelEditDelta};
+use crate::voxel_edit::{
+    effective_ray_grid_size, ensure_grid_fits_coord, ray_first_solid, screen_to_world_ray,
+    VoxelEditDelta,
+};
 use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
@@ -19,7 +22,6 @@ fn hash3(x: i32, y: i32, z: i32, seed: i32) -> f32 {
 pub fn generate_rock_cluster_deltas(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
-    grid_size: i32,
     face_empty: VoxelCoord,
     solid: VoxelCoord,
     seed: i32,
@@ -59,9 +61,7 @@ pub fn generate_rock_cluster_deltas(
                 let x = cx + dx;
                 let y = cy + dy;
                 let z = cz + dz;
-                if !in_grid(x, y, z, grid_size) {
-                    continue;
-                }
+                ensure_grid_fits_coord(file, x, y, z);
                 if !seen.insert((x, y, z)) {
                     continue;
                 }
@@ -101,7 +101,7 @@ pub fn generator_rocks_at_screen(
     color: u32,
     material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
+    let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
     let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
         return Ok(Vec::new());
@@ -112,7 +112,6 @@ pub fn generator_rocks_at_screen(
     Ok(generate_rock_cluster_deltas(
         file,
         voxel_map,
-        grid_size,
         face_empty,
         solid,
         seed,

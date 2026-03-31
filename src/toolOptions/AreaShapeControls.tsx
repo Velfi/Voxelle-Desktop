@@ -14,9 +14,6 @@ export type AreaShapeControlsProps = {
   onFillSelectDiagonalsChange: (v: boolean) => void;
   fillRespectsColor: boolean;
   onFillRespectsColorChange: (v: boolean) => void;
-  strokePolygonVerts: [number, number, number][];
-  onClearPolygon: () => void;
-  onApplyPolygon: () => void;
   sprayDensity: number;
   onSprayDensityChange: (v: number) => void;
   /** Selection paths: show spray slider when stroke mode is `spray` or density &gt; 0. Sculpt: density only. */
@@ -74,6 +71,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             <option value="x">X</option>
             <option value="y">Y</option>
             <option value="z">Z</option>
+            <option value="camera">Camera (view)</option>
           </select>
         </label>
       ) : null}
@@ -117,45 +115,6 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
           </label>
         </div>
       ) : null}
-      {(p.drawStrokeMode === "polygon" || p.drawStrokeMode === "polygonHull") ? (
-        <div style={{ marginTop: "0.35rem" }}>
-          <p
-            style={{
-              margin: "0 0 0.35rem",
-              fontSize: "0.85rem",
-              opacity: 0.9,
-            }}
-          >
-            Vertices: {p.strokePolygonVerts.length}. Click to add corners; Apply
-            with three or more.
-          </p>
-          <div
-            className="tool-options-shape-row"
-            style={{ flexWrap: "wrap" }}
-          >
-            <button
-              type="button"
-              className="tool-options-shape-btn"
-              disabled={p.loading || p.workBusy}
-              onClick={p.onClearPolygon}
-            >
-              Clear
-            </button>
-            <button
-              type="button"
-              className="tool-options-shape-btn"
-              disabled={
-                p.loading ||
-                p.workBusy ||
-                p.strokePolygonVerts.length < 3
-              }
-              onClick={p.onApplyPolygon}
-            >
-              Apply
-            </button>
-          </div>
-        </div>
-      ) : null}
       {p.drawStrokeMode === "circle" ? (
         <p
           style={{
@@ -175,7 +134,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             opacity: 0.9,
           }}
         >
-          Cuboid: two opposite corners.
+          Cuboid: drag on a face to set the rectangle, then adjust depth and tap Done.
         </p>
       ) : null}
       {p.drawStrokeMode === "cylinder" ? (
@@ -186,7 +145,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             opacity: 0.9,
           }}
         >
-          Cylinder: axis start then end (uses brush radius).
+          Cylinder: drag on a face to set the disk, then adjust depth and tap Done.
         </p>
       ) : null}
       {showSpraySlider ? (
