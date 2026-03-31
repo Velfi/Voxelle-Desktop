@@ -303,22 +303,241 @@ struct PostBlurUniform {
     blur_dir: [f32; 4],
 }
 
+/// sRGB hex (#rrggbb or rrggbb) → linear RGB (0–1).
+fn hex_to_linear_rgb(hex: &str) -> (f32, f32, f32) {
+    let s = hex.trim_start_matches('#');
+    let n = u32::from_str_radix(s, 16).unwrap_or(0xffffff);
+    let srgb = |c: u32| -> f32 {
+        let v = (c & 0xff) as f32 / 255.0;
+        v.powf(2.2)
+    };
+    (srgb(n >> 16), srgb(n >> 8), srgb(n))
+}
+
+/// All mood effect parameters sent from the React frontend.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoodParams {
+    // vignette (desktop-only)
+    #[serde(default)]
+    pub vignette: f32,
+    // grain
+    #[serde(default)]
+    pub grain_enabled: bool,
+    #[serde(default = "default_grain_strength")]
+    pub grain_strength: f32,
+    #[serde(default = "default_true")]
+    pub grain_animated: bool,
+    #[serde(default = "default_one")]
+    pub grain_speed: f32,
+    #[serde(default = "default_true")]
+    pub grain_colorful: bool,
+    // atmosphere
+    #[serde(default)]
+    pub atm_enabled: bool,
+    #[serde(default = "default_atm_color")]
+    pub atm_color: String,
+    #[serde(default = "default_atm_thickness")]
+    pub atm_thickness: f32,
+    #[serde(default = "default_atm_density")]
+    pub atm_density: f32,
+    #[serde(default = "default_true")]
+    pub atm_aerial: bool,
+    #[serde(default)]
+    pub atm_positive_side: bool,
+    #[serde(default)]
+    pub atm_plane_nx: f32,
+    #[serde(default)]
+    pub atm_plane_ny: f32,
+    #[serde(default)]
+    pub atm_plane_nz: f32,
+    #[serde(default)]
+    pub atm_plane_c: f32,
+    #[serde(default)]
+    pub atm_height_bias: f32,
+    #[serde(default = "default_atm_height_falloff")]
+    pub atm_height_falloff: f32,
+    #[serde(default)]
+    pub atm_drift_enabled: bool,
+    #[serde(default = "default_drift_amount")]
+    pub atm_drift_amount: f32,
+    #[serde(default = "default_drift_scale")]
+    pub atm_drift_scale: f32,
+    #[serde(default = "default_drift_speed")]
+    pub atm_drift_speed: f32,
+    // distance tint
+    #[serde(default)]
+    pub dt_enabled: bool,
+    #[serde(default = "default_dt_near_color")]
+    pub dt_near_color: String,
+    #[serde(default = "default_dt_mid_color")]
+    pub dt_mid_color: String,
+    #[serde(default = "default_dt_far_color")]
+    pub dt_far_color: String,
+    #[serde(default = "default_dt_near_dist")]
+    pub dt_near_dist: f32,
+    #[serde(default = "default_dt_far_dist")]
+    pub dt_far_dist: f32,
+    #[serde(default = "default_dt_strength")]
+    pub dt_strength: f32,
+    // sun shafts
+    #[serde(default)]
+    pub ss_enabled: bool,
+    #[serde(default = "default_ss_strength")]
+    pub ss_strength: f32,
+    #[serde(default = "default_ss_decay")]
+    pub ss_decay: f32,
+    #[serde(default = "default_ss_density")]
+    pub ss_density: f32,
+    #[serde(default = "default_ss_weight")]
+    pub ss_weight: f32,
+    #[serde(default = "default_ss_samples")]
+    pub ss_samples: f32,
+}
+
+fn default_true() -> bool { true }
+fn default_one() -> f32 { 1.0 }
+fn default_grain_strength() -> f32 { 0.12 }
+fn default_atm_color() -> String { "#c8d4e0".into() }
+fn default_atm_thickness() -> f32 { 28.0 }
+fn default_atm_density() -> f32 { 0.85 }
+fn default_atm_height_falloff() -> f32 { 120.0 }
+fn default_drift_amount() -> f32 { 0.2 }
+fn default_drift_scale() -> f32 { 0.02 }
+fn default_drift_speed() -> f32 { 0.2 }
+fn default_dt_near_color() -> String { "#ffffff".into() }
+fn default_dt_mid_color() -> String { "#c8d4e0".into() }
+fn default_dt_far_color() -> String { "#8fa3bf".into() }
+fn default_dt_near_dist() -> f32 { 16.0 }
+fn default_dt_far_dist() -> f32 { 140.0 }
+fn default_dt_strength() -> f32 { 0.6 }
+fn default_ss_strength() -> f32 { 0.7 }
+fn default_ss_decay() -> f32 { 0.92 }
+fn default_ss_density() -> f32 { 0.8 }
+fn default_ss_weight() -> f32 { 0.6 }
+fn default_ss_samples() -> f32 { 32.0 }
+
+impl Default for MoodParams {
+    fn default() -> Self {
+        Self {
+            vignette: 0.0,
+            grain_enabled: false,
+            grain_strength: default_grain_strength(),
+            grain_animated: true,
+            grain_speed: 1.0,
+            grain_colorful: true,
+            atm_enabled: false,
+            atm_color: default_atm_color(),
+            atm_thickness: default_atm_thickness(),
+            atm_density: default_atm_density(),
+            atm_aerial: true,
+            atm_positive_side: false,
+            atm_plane_nx: 0.0,
+            atm_plane_ny: 0.0,
+            atm_plane_nz: 0.0,
+            atm_plane_c: 0.0,
+            atm_height_bias: 0.0,
+            atm_height_falloff: default_atm_height_falloff(),
+            atm_drift_enabled: false,
+            atm_drift_amount: default_drift_amount(),
+            atm_drift_scale: default_drift_scale(),
+            atm_drift_speed: default_drift_speed(),
+            dt_enabled: false,
+            dt_near_color: default_dt_near_color(),
+            dt_mid_color: default_dt_mid_color(),
+            dt_far_color: default_dt_far_color(),
+            dt_near_dist: default_dt_near_dist(),
+            dt_far_dist: default_dt_far_dist(),
+            dt_strength: default_dt_strength(),
+            ss_enabled: false,
+            ss_strength: default_ss_strength(),
+            ss_decay: default_ss_decay(),
+            ss_density: default_ss_density(),
+            ss_weight: default_ss_weight(),
+            ss_samples: default_ss_samples(),
+        }
+    }
+}
+
 /// Matches `post_composite.wgsl` `PostCompositeOpts` and Voxelle web tone mapping ids (neutral…reinhard).
+/// Layout: 14 vec4 rows = 224 bytes.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct PostCompositeOpts {
+    // --- Row 0 ---
     tone_mode: u32,
-    grain_strength: f32,
-    vignette_strength: f32,
-    distance_tint_strength: f32,
-    /// Extra horizon fog (web atmosphere tool).
-    atmosphere_strength: f32,
-    /// Stylized radial streak (web sun shafts).
-    sun_shaft_strength: f32,
     /// 1 = premultiplied alpha from scene energy (cold-start logo over webview).
     transparent_bg: f32,
     /// Exposure in EV stops (`rgb *= 2^ev` before tone mapping).
     exposure_ev: f32,
+    /// Monotonic seconds since viewer creation (for animated effects).
+    time_seconds: f32,
+    // --- Row 1: vignette + grain basics ---
+    vignette_strength: f32,
+    grain_enabled: f32,
+    grain_strength: f32,
+    grain_animated: f32,
+    // --- Row 2: grain continued ---
+    grain_speed: f32,
+    /// 1.0 = colorful (per-channel noise), 0.0 = monochrome.
+    grain_colorful: f32,
+    _pad2a: f32,
+    _pad2b: f32,
+    // --- Row 3: atmosphere controls ---
+    atm_enabled: f32,
+    atm_thickness: f32,
+    atm_density: f32,
+    /// 0 = plane, 1 = aerial.
+    atm_spatial_mode: f32,
+    // --- Row 4: atmosphere color + mode ---
+    atm_color_r: f32,
+    atm_color_g: f32,
+    atm_color_b: f32,
+    /// 0 = slab, 1 = positiveSide.
+    atm_mode: f32,
+    // --- Row 5: atmosphere plane ---
+    atm_plane_nx: f32,
+    atm_plane_ny: f32,
+    atm_plane_nz: f32,
+    atm_plane_c: f32,
+    // --- Row 6: atmosphere height + drift ---
+    atm_height_bias: f32,
+    atm_height_falloff: f32,
+    atm_drift_enabled: f32,
+    atm_drift_amount: f32,
+    // --- Row 7: drift continued ---
+    atm_drift_scale: f32,
+    atm_drift_speed: f32,
+    _pad7a: f32,
+    _pad7b: f32,
+    // --- Row 8: distance tint controls ---
+    dt_enabled: f32,
+    dt_near_dist: f32,
+    dt_far_dist: f32,
+    dt_strength: f32,
+    // --- Row 9-11: distance tint colors ---
+    dt_near_r: f32,
+    dt_near_g: f32,
+    dt_near_b: f32,
+    _pad9: f32,
+    dt_mid_r: f32,
+    dt_mid_g: f32,
+    dt_mid_b: f32,
+    _pad10: f32,
+    dt_far_r: f32,
+    dt_far_g: f32,
+    dt_far_b: f32,
+    _pad11: f32,
+    // --- Row 12: sun shafts ---
+    ss_enabled: f32,
+    ss_strength: f32,
+    ss_decay: f32,
+    ss_density: f32,
+    // --- Row 13: sun shafts continued ---
+    ss_weight: f32,
+    ss_samples: f32,
+    ss_sun_uv_x: f32,
+    ss_sun_uv_y: f32,
 }
 
 pub struct WgpuViewer {
@@ -425,6 +644,8 @@ pub struct WgpuViewer {
     auto_exposure_enabled: bool,
     /// Smoothed \( \log_2(\text{target}/\bar{L}) \) from metering.
     auto_exposure_smoothed: f32,
+    /// Monotonic clock for animated shader effects (grain, atmosphere drift).
+    creation_instant: std::time::Instant,
 
     /// When true, draw [`pipeline_start_screen_bg`] instead of sky (default true until a scene load sets [`ViewerState::start_screen_logo_transparent`] false).
     start_screen_transparent: bool,
@@ -479,6 +700,7 @@ pub struct WgpuViewer {
     pub selection_overlay_cache_key: Option<u64>,
 
     sampler_linear: wgpu::Sampler,
+    sampler_depth: wgpu::Sampler,
     sampler_comparison: wgpu::Sampler,
     #[allow(dead_code)]
     sampler_nearest: wgpu::Sampler,
@@ -1156,6 +1378,34 @@ impl WgpuViewer {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // depth texture for world-space mood effects
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    // GlobalState (storage) for camera matrices
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
                             has_dynamic_offset: false,
                             min_binding_size: None,
                         },
@@ -1886,16 +2136,9 @@ impl WgpuViewer {
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
-        let post_composite_opts = PostCompositeOpts {
-            tone_mode: 0,
-            grain_strength: 0.0,
-            vignette_strength: 0.0,
-            distance_tint_strength: 0.0,
-            atmosphere_strength: 0.0,
-            sun_shaft_strength: 0.0,
-            transparent_bg: 0.0,
-            exposure_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
-        };
+        let mut post_composite_opts: PostCompositeOpts = bytemuck::Zeroable::zeroed();
+        post_composite_opts.tone_mode = 0;
+        post_composite_opts.exposure_ev = default_lit.exposure_ev.clamp(-5.0, 5.0);
         let post_composite_opts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("post_composite_opts"),
             contents: bytemuck::bytes_of(&post_composite_opts),
@@ -1915,6 +2158,12 @@ impl WgpuViewer {
         });
         let sampler_nearest = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("nearest"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let sampler_depth = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("depth_non_filter"),
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
@@ -2067,6 +2316,18 @@ impl WgpuViewer {
                     binding: 3,
                     resource: post_composite_opts_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&sampler_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: global_buffer.as_entire_binding(),
+                },
             ],
         });
 
@@ -2208,8 +2469,10 @@ impl WgpuViewer {
             preview_cache_key: None,
             selection_overlay_cache_key: None,
             sampler_linear,
+            sampler_depth,
             sampler_comparison,
             sampler_nearest,
+            creation_instant: std::time::Instant::now(),
             mesh_greedy_pipeline: None,
             mesh_greedy_bind_layout: None,
             mesh_greedy_pl_version: 0,
@@ -2330,20 +2593,67 @@ impl WgpuViewer {
         );
     }
 
-    /// Film grain, edge vignette, screen-space distance tint, atmosphere, sun shafts (0–1 each).
-    pub fn set_mood_params(
-        &mut self,
-        grain: f32,
-        vignette: f32,
-        distance_tint: f32,
-        atmosphere: f32,
-        sun_shafts: f32,
-    ) {
-        self.post_composite_opts.grain_strength = grain.clamp(0.0, 1.0);
-        self.post_composite_opts.vignette_strength = vignette.clamp(0.0, 1.0);
-        self.post_composite_opts.distance_tint_strength = distance_tint.clamp(0.0, 1.0);
-        self.post_composite_opts.atmosphere_strength = atmosphere.clamp(0.0, 1.0);
-        self.post_composite_opts.sun_shaft_strength = sun_shafts.clamp(0.0, 1.0);
+    /// Update all mood/post-processing parameters and push to GPU.
+    pub fn set_mood_params(&mut self, p: &MoodParams) {
+        let o = &mut self.post_composite_opts;
+        // Vignette
+        o.vignette_strength = p.vignette.clamp(0.0, 1.0);
+        // Grain
+        o.grain_enabled = if p.grain_enabled { 1.0 } else { 0.0 };
+        o.grain_strength = p.grain_strength.clamp(0.0, 0.5);
+        o.grain_animated = if p.grain_animated { 1.0 } else { 0.0 };
+        o.grain_speed = p.grain_speed.clamp(0.0, 4.0);
+        o.grain_colorful = if p.grain_colorful { 1.0 } else { 0.0 };
+        // Atmosphere
+        o.atm_enabled = if p.atm_enabled { 1.0 } else { 0.0 };
+        o.atm_thickness = p.atm_thickness.max(0.1);
+        o.atm_density = p.atm_density.clamp(0.0, 1.0);
+        o.atm_spatial_mode = if p.atm_aerial { 1.0 } else { 0.0 };
+        let (ar, ag, ab) = hex_to_linear_rgb(&p.atm_color);
+        o.atm_color_r = ar;
+        o.atm_color_g = ag;
+        o.atm_color_b = ab;
+        o.atm_mode = if p.atm_positive_side { 1.0 } else { 0.0 };
+        o.atm_plane_nx = p.atm_plane_nx;
+        o.atm_plane_ny = p.atm_plane_ny;
+        o.atm_plane_nz = p.atm_plane_nz;
+        o.atm_plane_c = p.atm_plane_c;
+        o.atm_height_bias = p.atm_height_bias;
+        o.atm_height_falloff = p.atm_height_falloff.max(1.0);
+        o.atm_drift_enabled = if p.atm_drift_enabled { 1.0 } else { 0.0 };
+        o.atm_drift_amount = p.atm_drift_amount.clamp(0.0, 1.0);
+        o.atm_drift_scale = p.atm_drift_scale;
+        o.atm_drift_speed = p.atm_drift_speed;
+        // Distance tint
+        o.dt_enabled = if p.dt_enabled { 1.0 } else { 0.0 };
+        let (nr, ng, nb) = hex_to_linear_rgb(&p.dt_near_color);
+        o.dt_near_r = nr;
+        o.dt_near_g = ng;
+        o.dt_near_b = nb;
+        let (mr, mg, mb) = hex_to_linear_rgb(&p.dt_mid_color);
+        o.dt_mid_r = mr;
+        o.dt_mid_g = mg;
+        o.dt_mid_b = mb;
+        let (fr, fg, fb) = hex_to_linear_rgb(&p.dt_far_color);
+        o.dt_far_r = fr;
+        o.dt_far_g = fg;
+        o.dt_far_b = fb;
+        o.dt_near_dist = p.dt_near_dist.max(0.0);
+        o.dt_far_dist = p.dt_far_dist.max(0.0);
+        o.dt_strength = p.dt_strength.clamp(0.0, 1.0);
+        // Sun shafts
+        o.ss_enabled = if p.ss_enabled { 1.0 } else { 0.0 };
+        o.ss_strength = p.ss_strength.clamp(0.0, 10.0);
+        o.ss_decay = p.ss_decay.clamp(0.5, 0.99);
+        o.ss_density = p.ss_density.clamp(0.1, 1.5);
+        o.ss_weight = p.ss_weight.clamp(0.0, 1.5);
+        o.ss_samples = p.ss_samples.clamp(20.0, 56.0);
+        // sun_uv computed per-frame from light direction
+        self.flush_composite_opts();
+    }
+
+    /// Push current composite opts to GPU.
+    fn flush_composite_opts(&self) {
         self.queue.write_buffer(
             &self.post_composite_opts_buf,
             0,
@@ -2544,6 +2854,18 @@ impl WgpuViewer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.post_composite_opts_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.global_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -2819,11 +3141,13 @@ impl WgpuViewer {
                 }
             }
 
-            let core = cache
+            let mut core_vec: Vec<Voxel> = cache
                 .buckets
                 .get(key)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
+                .map(|b| b.values().copied().collect())
+                .unwrap_or_default();
+            core_vec.sort_unstable_by_key(|v| (v.x, v.y, v.z));
+            let core: &[Voxel] = &core_vec;
 
             let mut used_gpu = false;
             if use_gpu_chunk && !core.is_empty() {
@@ -3904,7 +4228,7 @@ impl WgpuViewer {
         }
     }
 
-    pub fn update_uniforms(&self, camera: &OrbitCamera) {
+    pub fn update_uniforms(&mut self, camera: &OrbitCamera) {
         let w = self.viewport_width.max(1) as f32;
         let h = self.viewport_height.max(1) as f32;
         let proj = camera.proj_matrix(w, h);
@@ -3961,6 +4285,20 @@ impl WgpuViewer {
         };
         self.queue
             .write_buffer(&self.global_buffer, 0, bytemuck::bytes_of(&gs));
+
+        // Sun shafts: project light direction to screen UV for ray marching origin.
+        let far_pt = glam::Vec4::new(
+            eye.x + self.light_dir.x * 1000.0,
+            eye.y + self.light_dir.y * 1000.0,
+            eye.z + self.light_dir.z * 1000.0,
+            1.0,
+        );
+        let clip = vp * far_pt;
+        if clip.w.abs() > 1e-6 {
+            let ndc = clip / clip.w;
+            self.post_composite_opts.ss_sun_uv_x = ndc.x * 0.5 + 0.5;
+            self.post_composite_opts.ss_sun_uv_y = 1.0 - (ndc.y * 0.5 + 0.5);
+        }
     }
 
     fn draw_indexed_mesh(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -4397,6 +4735,8 @@ impl WgpuViewer {
 
         self.post_composite_opts.transparent_bg = 0.0;
         self.sync_composite_exposure_ev();
+        // Animated effects: monotonic time
+        self.post_composite_opts.time_seconds = self.creation_instant.elapsed().as_secs_f32();
         self.queue.write_buffer(
             &self.post_composite_opts_buf,
             0,

@@ -561,6 +561,202 @@ pub enum ExtrudeEndCap {
     Pointed,
 }
 
+/// Direction reference for straight-line extrude (matches web `branchExtrudeRef`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExtrudeDirectionRef {
+    /// View plane: drag maps through camera right/up.
+    #[default]
+    Camera,
+    /// Dominant axis of the start face normal (falls back to camera if no face).
+    Auto,
+    /// World ±X, sign from drag vs view plane.
+    X,
+    /// World ±Y, sign from drag vs view plane.
+    Y,
+    /// World ±Z, sign from drag vs view plane.
+    Z,
+}
+
+/// Resolve the world-space extrusion direction from screen drag, camera, and direction reference.
+/// Matches web `resolveBranchExtrudeDirection`.
+pub fn resolve_extrude_direction(
+    dir_ref: ExtrudeDirectionRef,
+    camera: &OrbitCamera,
+    screen_dx: f32,
+    screen_dy: f32,
+    face_normal: Option<(i32, i32, i32)>,
+) -> Vec3 {
+    let eye = camera.smooth_eye();
+    let target = camera.smooth_target;
+    let view_dir = (target - eye).normalize_or_zero();
+    let world_up = Vec3::Y;
+    let right = view_dir.cross(world_up).normalize_or_zero();
+    let up = right.cross(view_dir).normalize_or_zero();
+    // Map screen drag to camera-relative world direction
+    let raw = right * screen_dx + up * screen_dy;
+
+    let axis_sign_from_drag = |axis: Vec3| -> f32 {
+        let d = raw.dot(axis);
+        if d.abs() < 1e-9 { 1.0 } else if d > 0.0 { 1.0 } else { -1.0 }
+    };
+
+    let snap_normal_to_axis = |n: (i32, i32, i32)| -> Vec3 {
+        let ax = n.0.abs();
+        let ay = n.1.abs();
+        let az = n.2.abs();
+        if ax >= ay && ax >= az {
+            Vec3::new(n.0.signum() as f32, 0.0, 0.0)
+        } else if ay >= ax && ay >= az {
+            Vec3::new(0.0, n.1.signum() as f32, 0.0)
+        } else {
+            Vec3::new(0.0, 0.0, n.2.signum() as f32)
+        }
+    };
+
+    match dir_ref {
+        ExtrudeDirectionRef::Camera => {
+            let len = raw.length();
+            if len > 1e-6 {
+                raw / len
+            } else {
+                up.normalize_or_zero()
+            }
+        }
+        ExtrudeDirectionRef::Auto => {
+            if let Some(n) = face_normal {
+                let axis = snap_normal_to_axis(n);
+                let sign = axis_sign_from_drag(axis);
+                axis * sign
+            } else {
+                // Fallback to camera mode
+                let len = raw.length();
+                if len > 1e-6 { raw / len } else { up.normalize_or_zero() }
+            }
+        }
+        ExtrudeDirectionRef::X => {
+            let axis = Vec3::X;
+            let sign = axis_sign_from_drag(axis);
+            axis * sign
+        }
+        ExtrudeDirectionRef::Y => {
+            let axis = Vec3::Y;
+            let sign = axis_sign_from_drag(axis);
+            axis * sign
+        }
+        ExtrudeDirectionRef::Z => {
+            let axis = Vec3::Z;
+            let sign = axis_sign_from_drag(axis);
+            axis * sign
+        }
+    }
+}
+
+/// Generate a straight-line path of voxel coordinates from `origin` along `direction`.
+/// Matches web `getRayDirectionPath`.
+pub fn get_ray_direction_path(
+    origin: VoxelCoord,
+    direction: Vec3,
+    length: u32,
+) -> Vec<VoxelCoord> {
+    if length == 0 {
+        return vec![origin];
+    }
+    let len = direction.length();
+    if len < 1e-9 {
+        return vec![origin];
+    }
+    let nd = direction / len;
+    let mut positions = Vec::with_capacity(length as usize + 1);
+    let mut seen = AHashSet::with_capacity(length as usize + 1);
+    for i in 0..=length {
+        let x = (origin.0 as f32 + i as f32 * nd.x).round() as i32;
+        let y = (origin.1 as f32 + i as f32 * nd.y).round() as i32;
+        let z = (origin.2 as f32 + i as f32 * nd.z).round() as i32;
+        let c = (x, y, z);
+        if seen.insert(c) {
+            positions.push(c);
+        }
+    }
+    positions
+}
+
+/// Compute the extrude footprint for a straight-line ray spine.
+/// This handles both cube and cylinder profiles, matching the web version's behavior.
+pub fn extrude_ray_footprint(
+    spine: &[VoxelCoord],
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    brush_strength: u32,
+    brush_falloff: u32,
+    stroke_seed: u32,
+    extrude_profile: ExtrudeProfile,
+    extrude_end_cap: ExtrudeEndCap,
+    extrude_taper: bool,
+    extrude_taper_start: f32,
+    extrude_taper_end: f32,
+) -> Vec<VoxelCoord> {
+    if spine.is_empty() {
+        return Vec::new();
+    }
+    if extrude_profile == ExtrudeProfile::Cylinder {
+        let r = brush_radius as f32 * 0.5 + 0.5;
+        let footprint = if extrude_taper {
+            let start_r = extrude_taper_start.max(0.0);
+            let end_r = extrude_taper_end.max(0.0);
+            extrude_tapered_cylinder_footprint(spine, start_r, end_r, extrude_end_cap)
+        } else {
+            extrude_uniform_cylinder_footprint(spine, r, extrude_end_cap)
+        };
+        filter_sculpt_footprint_stochastic(
+            footprint, spine, brush_radius, brush_falloff, brush_strength, stroke_seed,
+        )
+    } else {
+        // Cube profile: use generic brush offsets applied to each spine point
+        let offsets = brush_offset_cells(brush_shape, brush_radius, None, None);
+        let mut out = Vec::new();
+        let mut seen = AHashSet::new();
+        for &(cx, cy, cz) in spine {
+            for &(ox, oy, oz) in &offsets {
+                let c = (cx + ox, cy + oy, cz + oz);
+                if seen.insert(c) {
+                    out.push(c);
+                }
+            }
+        }
+        filter_sculpt_footprint_stochastic(
+            out, spine, brush_radius, brush_falloff, brush_strength, stroke_seed,
+        )
+    }
+}
+
+/// Pick the add-position and outward face normal at a screen point (for extrude ray start).
+pub fn pick_extrude_start(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<(VoxelCoord, Option<(i32, i32, i32)>)> {
+    if file.voxels.is_empty() {
+        return None;
+    }
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let (hit, prev, _oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
+    // Add-position: the empty cell just before the solid hit (or hit itself if no prev)
+    let add_pos = prev.unwrap_or(hit);
+    // Face normal: difference between add-position and the solid hit
+    let face_n = if let Some(p) = prev {
+        Some((p.0 - hit.0, p.1 - hit.1, p.2 - hit.2))
+    } else {
+        None
+    };
+    Some((add_pos, face_n))
+}
+
 #[inline]
 fn spray_passes(cell: (i32, i32, i32), spray: f32) -> bool {
     if spray <= 0.0 {
@@ -4781,6 +4977,11 @@ mod tests {
             4,
             50,
             None,
+            ExtrudeProfile::Cube,
+            ExtrudeEndCap::Flat,
+            false,
+            0.0,
+            1.0,
         )
         .unwrap();
         assert!(!deltas.is_empty());

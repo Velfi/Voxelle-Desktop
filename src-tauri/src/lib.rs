@@ -23,7 +23,7 @@ pub mod voxelle;
 
 use camera::OrbitCamera;
 use gpu_brick::{BrickCellWrite, GpuVoxelBrick};
-use render::{compute_greedy_rebuild_cpu, PreparedGreedyRebuild, PreparedOpaqueUpload, WgpuViewer};
+use render::{compute_greedy_rebuild_cpu, MoodParams, PreparedGreedyRebuild, PreparedOpaqueUpload, WgpuViewer};
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -44,6 +44,88 @@ use voxelle::{
     decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, start_shape::StartShape,
 };
 use voxelle::scene::object_world_matrix;
+
+/// Convert file-format `MoodSettings` → GPU-ready `MoodParams`.
+fn mood_settings_to_params(m: &voxelle::MoodSettings) -> MoodParams {
+    MoodParams {
+        vignette: m.vignette,
+        grain_enabled: m.grain_enabled,
+        grain_strength: m.grain_strength,
+        grain_animated: m.grain_animated,
+        grain_speed: m.grain_speed,
+        grain_colorful: m.grain_colorful,
+        atm_enabled: m.atm_enabled,
+        atm_color: m.atm_color.clone(),
+        atm_thickness: m.atm_thickness,
+        atm_density: m.atm_density,
+        atm_aerial: m.atm_aerial,
+        atm_positive_side: m.atm_positive_side,
+        atm_plane_nx: m.atm_plane_nx,
+        atm_plane_ny: m.atm_plane_ny,
+        atm_plane_nz: m.atm_plane_nz,
+        atm_plane_c: m.atm_plane_c,
+        atm_height_bias: m.atm_height_bias,
+        atm_height_falloff: m.atm_height_falloff,
+        atm_drift_enabled: m.atm_drift_enabled,
+        atm_drift_amount: m.atm_drift_amount,
+        atm_drift_scale: m.atm_drift_scale,
+        atm_drift_speed: m.atm_drift_speed,
+        dt_enabled: m.dt_enabled,
+        dt_near_color: m.dt_near_color.clone(),
+        dt_mid_color: m.dt_mid_color.clone(),
+        dt_far_color: m.dt_far_color.clone(),
+        dt_near_dist: m.dt_near_dist,
+        dt_far_dist: m.dt_far_dist,
+        dt_strength: m.dt_strength,
+        ss_enabled: m.ss_enabled,
+        ss_strength: m.ss_strength,
+        ss_decay: m.ss_decay,
+        ss_density: m.ss_density,
+        ss_weight: m.ss_weight,
+        ss_samples: m.ss_samples,
+    }
+}
+
+/// Convert `MoodParams` (from frontend) → file-format `MoodSettings`.
+fn mood_params_to_settings(p: &MoodParams) -> voxelle::MoodSettings {
+    voxelle::MoodSettings {
+        vignette: p.vignette,
+        grain_enabled: p.grain_enabled,
+        grain_strength: p.grain_strength,
+        grain_animated: p.grain_animated,
+        grain_speed: p.grain_speed,
+        grain_colorful: p.grain_colorful,
+        atm_enabled: p.atm_enabled,
+        atm_color: p.atm_color.clone(),
+        atm_thickness: p.atm_thickness,
+        atm_density: p.atm_density,
+        atm_aerial: p.atm_aerial,
+        atm_positive_side: p.atm_positive_side,
+        atm_plane_nx: p.atm_plane_nx,
+        atm_plane_ny: p.atm_plane_ny,
+        atm_plane_nz: p.atm_plane_nz,
+        atm_plane_c: p.atm_plane_c,
+        atm_height_bias: p.atm_height_bias,
+        atm_height_falloff: p.atm_height_falloff,
+        atm_drift_enabled: p.atm_drift_enabled,
+        atm_drift_amount: p.atm_drift_amount,
+        atm_drift_scale: p.atm_drift_scale,
+        atm_drift_speed: p.atm_drift_speed,
+        dt_enabled: p.dt_enabled,
+        dt_near_color: p.dt_near_color.clone(),
+        dt_mid_color: p.dt_mid_color.clone(),
+        dt_far_color: p.dt_far_color.clone(),
+        dt_near_dist: p.dt_near_dist,
+        dt_far_dist: p.dt_far_dist,
+        dt_strength: p.dt_strength,
+        ss_enabled: p.ss_enabled,
+        ss_strength: p.ss_strength,
+        ss_decay: p.ss_decay,
+        ss_density: p.ss_density,
+        ss_weight: p.ss_weight,
+        ss_samples: p.ss_samples,
+    }
+}
 
 struct FpsCounter {
     period_start: Option<Instant>,
@@ -260,8 +342,7 @@ fn union_dirty_chunk_keys_for_deltas(
             voxel_edit::VoxelEditDelta::Removed { voxel } => (voxel.x, voxel.y, voxel.z),
             voxel_edit::VoxelEditDelta::Painted { after, .. } => (after.x, after.y, after.z),
         };
-        let center = greedy_mesh::chunk_key_from_world(x, y, z, origin, cs);
-        for k in greedy_mesh::dirty_chunk_keys_3x3(center) {
+        for k in greedy_mesh::dirty_chunk_keys_for_voxel(x, y, z, origin, cs) {
             set.insert(k);
         }
     }
@@ -312,21 +393,39 @@ fn scene_bounds_for_edits(
     if deltas.len() == 1 {
         return scene_bounds_for_edit(state, file, &deltas[0]);
     }
-    let all_paint = deltas
-        .iter()
-        .all(|d| matches!(d, voxel_edit::VoxelEditDelta::Painted { .. }));
-    if all_paint {
-        let guard = state.last_scene_bounds.lock();
-        if let Some(prev) = guard.as_ref() {
-            return Ok(*prev);
-        }
-    }
+    // Multi-delta fast path: try incremental update from cached bounds.
     let default_objs = voxelle::default_scene_objects();
     let objs: &[voxelle::SceneObject] = if file.objects.is_empty() {
         default_objs.as_slice()
     } else {
         &file.objects
     };
+    if voxelle::scene::scene_objects_identity_for_bounds_fast_path(objs) {
+        let guard = state.last_scene_bounds.lock();
+        if let Some(prev) = guard.as_ref() {
+            let mut bounds = *prev;
+            let mut needs_full_recompute = false;
+            for d in deltas {
+                match d {
+                    voxel_edit::VoxelEditDelta::Added(v) => {
+                        bounds = greedy_mesh::mesh_bounds_expand_with_voxel(&bounds, v);
+                    }
+                    voxel_edit::VoxelEditDelta::Removed { voxel } => {
+                        if !greedy_mesh::mesh_bounds_remove_is_strict_interior(
+                            &bounds, voxel.x, voxel.y, voxel.z,
+                        ) {
+                            needs_full_recompute = true;
+                            break;
+                        }
+                    }
+                    voxel_edit::VoxelEditDelta::Painted { .. } => {}
+                }
+            }
+            if !needs_full_recompute {
+                return Ok(bounds);
+            }
+        }
+    }
     Ok(
         greedy_mesh::mesh_bounds_from_voxels_world(&file.voxels, objs)
             .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&file.voxels))
@@ -512,6 +611,12 @@ struct PreviewHoverContext {
     generator_cloth_stiffness_scale: f64,
     generator_cloth_iterations: u32,
     generator_cloth_constraint_passes: u32,
+    generator_rock_size: i32,
+    generator_rock_roughness: f32,
+    generator_rock_seed: i32,
+    generator_grass_density: i32,
+    generator_grass_max_height: i32,
+    generator_grass_seed: i32,
 }
 
 impl Default for PreviewHoverContext {
@@ -539,6 +644,12 @@ impl Default for PreviewHoverContext {
             generator_cloth_stiffness_scale: 1.0,
             generator_cloth_iterations: 0,
             generator_cloth_constraint_passes: 2,
+            generator_rock_size: 4,
+            generator_rock_roughness: 0.45,
+            generator_rock_seed: 42,
+            generator_grass_density: 4,
+            generator_grass_max_height: 3,
+            generator_grass_seed: 42,
         }
     }
 }
@@ -706,6 +817,8 @@ pub struct ViewerState {
     pub stroke_preview_suppresses_hover: AtomicBool,
     /// Throttled sculpt samples during drag; replayed on pointer up as one undo step.
     pub(crate) sculpt_stroke_replay: Mutex<Vec<SculptStrokeAtScreenArgs>>,
+    /// Stored ray spine for straight-line extrude (used by ray-based extrude preview/recompute).
+    pub(crate) extrude_ray_spine: Mutex<Option<Vec<greedy_mesh::VoxelCoord>>>,
     pub collab: Arc<Mutex<collab::CollabRuntime>>,
     /// Smoothed peer camera presence for frustum rendering (lerped each frame).
     pub smooth_presence: Mutex<HashMap<u32, collab::CameraPresence>>,
@@ -732,6 +845,10 @@ pub struct ViewerState {
     pub selection_cells: Mutex<AHashSet<greedy_mesh::VoxelCoord>>,
     /// Snapshot at `selection_stroke_begin` for undo + detecting no-op end.
     pub selection_stroke_before: Mutex<Option<AHashSet<greedy_mesh::VoxelCoord>>>,
+    /// Accumulates all coords touched during a single stroke so that intersect
+    /// mode can union the per-sample coords and apply the intersection once
+    /// (rather than shrinking the selection on every pointer-move sample).
+    pub selection_stroke_accum: Mutex<Option<AHashSet<greedy_mesh::VoxelCoord>>>,
     pub selection_combine_mode: Mutex<SelectionCombineMode>,
     /// Matches native "Match Material" for color / connected selection (synced with menu + webview).
     pub selection_match_material: Mutex<bool>,
@@ -1661,7 +1778,7 @@ fn unload_current_project<R: Runtime>(state: &Arc<ViewerState>, app: &AppHandle<
     *state.grid_overlay_cache_key.lock() = None;
     viewer.clear_collab_peer_lines();
     viewer.clear_ping_mesh();
-    viewer.set_mood_params(0.0, 0.0, 0.0, 0.0, 0.0);
+    viewer.set_mood_params(&MoodParams::default());
     drop(v);
 
     *state.last_scene_bounds.lock() = Some(prepared.bounds);
@@ -1676,6 +1793,7 @@ fn unload_current_project<R: Runtime>(state: &Arc<ViewerState>, app: &AppHandle<
 
     *state.selection_cells.lock() = AHashSet::default();
     *state.selection_stroke_before.lock() = None;
+    *state.selection_stroke_accum.lock() = None;
     *state.selection_combine_mode.lock() = SelectionCombineMode::default();
     *state.stamp_clipboard.lock() = None;
     *state.stroke_buffer.lock() = Vec::new();
@@ -2045,7 +2163,7 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
         Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels))
     };
     let voxel_map = greedy_mesh::voxel_map_indices(&file.voxels);
-    let mood = file.mood;
+    let mood = file.mood.clone();
     let lighting = file.lighting.clone().unwrap_or_default();
     {
         let mut cf = state.current_file.lock();
@@ -2061,13 +2179,7 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
     viewer.upload_prepared_opaque(opaque);
     clear_preview_mesh_sync_cache(viewer, state.as_ref());
     if let Some(m) = mood {
-        viewer.set_mood_params(
-            m.grain,
-            m.vignette,
-            m.distance_tint,
-            m.atmosphere,
-            m.sun_shafts,
-        );
+        viewer.set_mood_params(&mood_settings_to_params(&m));
     }
     viewer.apply_lighting_settings(&lighting);
 
@@ -2130,7 +2242,7 @@ pub(crate) fn emit_voxelle_loaded<R: Runtime>(
         Ordering::Release,
     );
     let (mood, lighting) = match state.current_file.lock().as_ref() {
-        Some(f) => (f.mood, f.lighting.clone()),
+        Some(f) => (f.mood.clone(), f.lighting.clone()),
         None => (None, None),
     };
     let _ = app.emit(
@@ -2281,6 +2393,17 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
         }
     }
     let brick_ms = t_brick.elapsed().as_secs_f64() * 1000.0;
+
+    // Release locks so the render loop can present the brick update before the
+    // potentially slower mesh rebuild. This gives instant visual feedback.
+    drop(fg);
+    drop(v);
+    std::thread::yield_now();
+    v = state.viewer.lock();
+    fg = state.current_file.lock();
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
 
     if show_work {
         emit_work_progress(app, 0.38, "Rebuilding mesh…");
@@ -3057,47 +3180,21 @@ fn set_tone_mapping(state: State<'_, Arc<ViewerState>>, mode: u32) -> Result<(),
     Ok(())
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MoodParamsArgs {
-    grain: f32,
-    vignette: f32,
-    /// Screen-space distance tint (0–1), lerps toward horizon color toward edges.
-    distance_tint: f32,
-    #[serde(default)]
-    atmosphere: f32,
-    #[serde(default)]
-    sun_shafts: f32,
-}
-
 #[tauri::command]
 fn set_mood_params(
     state: State<'_, Arc<ViewerState>>,
-    args: MoodParamsArgs,
+    args: MoodParams,
 ) -> Result<(), String> {
     let mut v = state.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
-    viewer.set_mood_params(
-        args.grain,
-        args.vignette,
-        args.distance_tint,
-        args.atmosphere,
-        args.sun_shafts,
-    );
+    viewer.set_mood_params(&args);
     drop(v);
-    let m = voxelle::MoodSettings {
-        grain: args.grain,
-        vignette: args.vignette,
-        distance_tint: args.distance_tint,
-        atmosphere: args.atmosphere,
-        sun_shafts: args.sun_shafts,
-    };
     {
         let mut cf = state.current_file.lock();
         if let Some(f) = cf.as_mut() {
-            f.mood = Some(m);
+            f.mood = Some(mood_params_to_settings(&args));
         }
     }
     Ok(())
@@ -4078,6 +4175,7 @@ fn voxel_stroke_preview_at_screen(
 #[tauri::command]
 fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
     *state.stroke_active.lock() = false;
+    *state.extrude_ray_spine.lock() = None;
     let had_stroke_preview = state
         .stroke_preview_suppresses_hover
         .swap(false, Ordering::Relaxed);
@@ -4305,6 +4403,38 @@ fn merge_coords_into_selection(
     }
 }
 
+/// Applies a single stroke sample to the selection, using the accumulator for
+/// intersect mode so that successive samples union their coords before
+/// intersecting with the original (`before`) selection.
+///
+/// Returns the new selection size, or `None` if coords were empty and no
+/// accumulator was active (caller should skip the emit).
+fn apply_selection_stroke_sample(
+    sel: &mut AHashSet<greedy_mesh::VoxelCoord>,
+    coords: Vec<greedy_mesh::VoxelCoord>,
+    mode: SelectionCombineMode,
+    accum: &mut Option<AHashSet<greedy_mesh::VoxelCoord>>,
+    before: &Option<AHashSet<greedy_mesh::VoxelCoord>>,
+) -> Option<u32> {
+    if matches!(mode, SelectionCombineMode::Intersect) {
+        if let Some(accum_set) = accum.as_mut() {
+            accum_set.extend(coords.iter().copied());
+            if let Some(before_set) = before.as_ref() {
+                *sel = before_set.iter().copied().filter(|c| accum_set.contains(c)).collect();
+                return Some(sel.len() as u32);
+            }
+        }
+        // No active stroke — fall through to direct merge.
+    }
+
+    if coords.is_empty() {
+        return None;
+    }
+
+    merge_coords_into_selection(sel, coords, mode);
+    Some(sel.len() as u32)
+}
+
 fn emit_selection_updated<R: Runtime>(app: &AppHandle<R>, state: &Arc<ViewerState>) {
     let has_voxels = state
         .current_file
@@ -4418,11 +4548,15 @@ fn selection_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(), Stri
     *state
         .selection_stroke_before
         .lock() = Some(snap);
+    *state.selection_stroke_accum.lock() = Some(AHashSet::new());
     Ok(())
 }
 
 #[tauri::command]
 fn selection_stroke_end(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    // NOTE: Do NOT clear selection_stroke_accum here — a fire-and-forget
+    // selection_stroke_at_screen invoke may still be in flight and needs the
+    // accumulator.  The accum is overwritten by the next selection_stroke_begin.
     let before = state
         .selection_stroke_before
         .lock()
@@ -4609,18 +4743,27 @@ async fn selection_stroke_at_screen(
             c
         };
 
-    if coords.is_empty() {
-        return Ok(0);
-    }
-
-    let mode = *state
-        .selection_combine_mode
-        .lock();
+    let mode = *state.selection_combine_mode.lock();
+    let mut accum_guard = state.selection_stroke_accum.lock();
+    let before_guard = state.selection_stroke_before.lock();
     let mut sel = state.selection_cells.lock();
-    merge_coords_into_selection(&mut sel, coords, mode);
-    let n = sel.len() as u32;
+
+    let result = apply_selection_stroke_sample(
+        &mut sel,
+        coords,
+        mode,
+        &mut accum_guard,
+        &before_guard,
+    );
+
+    let n = result.unwrap_or(0);
     drop(sel);
-    emit_selection_updated(&app, state.inner());
+    drop(before_guard);
+    drop(accum_guard);
+
+    if result.is_some() {
+        emit_selection_updated(&app, state.inner());
+    }
     Ok(n)
 }
 
@@ -6139,6 +6282,211 @@ fn voxel_sculpt_stroke_preview_at_screen(
     Ok(())
 }
 
+// ── Extrude ray-based preview (straight-line extrude matching web) ─────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtrudeRayPreviewArgs {
+    /// Screen position of pointer down (normalized 0..1).
+    start_nx: f32,
+    start_ny: f32,
+    /// Screen drag delta in physical pixels (right = +dx, up = +dy).
+    screen_dx: f32,
+    screen_dy: f32,
+    /// Direction reference mode.
+    direction_ref: voxel_edit::ExtrudeDirectionRef,
+    // Extrude shape params:
+    color: u32,
+    material: String,
+    brush_radius: u32,
+    #[serde(default)]
+    brush_shape: voxel_edit::BrushShape,
+    #[serde(default = "default_brush_strength_sculpt")]
+    brush_strength: u32,
+    #[serde(default)]
+    brush_falloff: u32,
+    #[serde(default)]
+    stroke_seed: u32,
+    #[serde(default)]
+    extrude_profile: voxel_edit::ExtrudeProfile,
+    #[serde(default)]
+    extrude_end_cap: voxel_edit::ExtrudeEndCap,
+    #[serde(default)]
+    extrude_taper: bool,
+    #[serde(default)]
+    extrude_taper_start: f32,
+    #[serde(default)]
+    extrude_taper_end: f32,
+}
+
+#[tauri::command]
+fn extrude_ray_preview(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: ExtrudeRayPreviewArgs,
+) -> Result<(), String> {
+    {
+        let cm = state.collab.lock();
+        if cm.is_client() {
+            return Ok(());
+        }
+    }
+
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(());
+        };
+        viewer.viewport_size()
+    };
+    let w = w as f32;
+    let h = h as f32;
+
+    // Raycast from start position to find add-position + face normal.
+    let (start_sx, start_sy) = viewport_texels_from_norm(args.start_nx, args.start_ny, w, h);
+    let (start_coord, face_normal) = {
+        let fg = state.current_file.lock();
+        let vm = state.voxel_map.lock();
+        let Some(file) = fg.as_ref() else { return Ok(()); };
+        let Some(vmap) = vm.as_ref() else { return Ok(()); };
+        let cam = state.camera.lock();
+        match voxel_edit::pick_extrude_start(file, vmap, &cam, w, h, start_sx, start_sy) {
+            Some(v) => v,
+            None => return Ok(()),
+        }
+    };
+
+    // Resolve extrusion direction from screen drag + camera.
+    let cam = state.camera.lock();
+    let direction = voxel_edit::resolve_extrude_direction(
+        args.direction_ref,
+        &cam,
+        args.screen_dx,
+        args.screen_dy,
+        face_normal,
+    );
+    drop(cam);
+
+    // Compute length from drag distance (matches web: sqrt(dx²+dy²) / 6).
+    let drag_dist = (args.screen_dx * args.screen_dx + args.screen_dy * args.screen_dy).sqrt();
+    let length = (drag_dist / 6.0).round().max(0.0) as u32;
+
+    // Generate straight-line spine.
+    let spine = voxel_edit::get_ray_direction_path(start_coord, direction, length);
+
+    // Compute footprint.
+    let footprint = voxel_edit::extrude_ray_footprint(
+        &spine,
+        args.brush_radius,
+        args.brush_shape,
+        args.brush_strength,
+        args.brush_falloff,
+        args.stroke_seed,
+        args.extrude_profile,
+        args.extrude_end_cap,
+        args.extrude_taper,
+        args.extrude_taper_start,
+        args.extrude_taper_end,
+    );
+
+    // Store spine for recompute.
+    *state.extrude_ray_spine.lock() = Some(spine);
+
+    // Store a synthetic sculpt replay entry so voxel_stroke_end recognizes this as an extrude
+    // and commits from the preview union.
+    {
+        let mut replay = state.sculpt_stroke_replay.lock();
+        if replay.is_empty() {
+            replay.push(SculptStrokeAtScreenArgs {
+                nx: args.start_nx,
+                ny: args.start_ny,
+                sculpt_mode: voxel_edit::SculptStrokeMode::Extrude,
+                color: args.color,
+                material: args.material.clone(),
+                brush_radius: args.brush_radius,
+                brush_shape: args.brush_shape,
+                spray_density: 0.0,
+                brush_clip_bottom_half: false,
+                stroke_line_start_nx: None,
+                stroke_line_start_ny: None,
+                stroke_segment_prev_nx: None,
+                stroke_segment_prev_ny: None,
+                terrain_op: None,
+                terrain_base_y: 0,
+                terrain_strength: 50,
+                terrain_smooth_radius: 0,
+                smooth_neighbor_passes: 1,
+                brush_strength: args.brush_strength,
+                brush_falloff: args.brush_falloff,
+                stroke_seed: args.stroke_seed,
+                wall_area_shape: Default::default(),
+                spray_direction: Default::default(),
+                wall_width_index: 0,
+                wall_height_vox: 2,
+                wall_lock_start_height: false,
+                wall_axis_align: false,
+                sculpt_smooth_variant: Default::default(),
+                smooth_neighbor_radius: 0,
+                smooth_aggressiveness: 100,
+                smooth_laplacian_iterations: 4,
+                smooth_laplacian_relax_pct: 50,
+                wall_polygon_vertices: None,
+                extrude_profile: args.extrude_profile,
+                extrude_end_cap: args.extrude_end_cap,
+                extrude_taper: args.extrude_taper,
+                extrude_taper_start: args.extrude_taper_start,
+                extrude_taper_end: args.extrude_taper_end,
+            });
+        } else {
+            // Update the existing replay entry with latest extrude params.
+            let entry = &mut replay[0];
+            entry.extrude_profile = args.extrude_profile;
+            entry.extrude_end_cap = args.extrude_end_cap;
+            entry.extrude_taper = args.extrude_taper;
+            entry.extrude_taper_start = args.extrude_taper_start;
+            entry.extrude_taper_end = args.extrude_taper_end;
+        }
+    }
+
+    // Replace preview union entirely (not accumulate — full recompute each move).
+    {
+        let mut union = state.stroke_preview_union.lock();
+        union.clear();
+        for c in &footprint {
+            union.insert(*c);
+        }
+    }
+
+    state.stroke_preview_suppresses_hover.store(true, Ordering::Relaxed);
+
+    // Generate and upload preview mesh.
+    let (solid, wire) = {
+        let fg = state.current_file.lock();
+        let vm = state.voxel_map.lock();
+        let Some(file) = fg.as_ref() else { return Ok(()); };
+        let Some(vmap) = vm.as_ref() else { return Ok(()); };
+        let union = state.stroke_preview_union.lock();
+        stroke_preview_meshes_for_union(
+            voxel_edit::EditTool::Add, &union, vmap, file, false, args.color,
+        )
+    };
+
+    {
+        let mut v = state.viewer.lock();
+        let Some(viewer) = v.as_mut() else { return Ok(()); };
+        if solid.positions.is_empty() {
+            clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
+        } else {
+            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.preview_cache_key = None;
+            *state.preview_overlay_cache_key.lock() = None;
+        }
+    }
+
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
 // ── Extrude phase: recompute preview with new settings ────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -6159,35 +6507,46 @@ fn extrude_recompute_preview(
     state: State<'_, Arc<ViewerState>>,
     args: ExtrudeRecomputeArgs,
 ) -> Result<(), String> {
-    // Re-run the stored sculpt replay with overridden extrude settings.
+    // Use stored ray spine if available (new ray-based extrude path).
+    let spine_opt = state.extrude_ray_spine.lock().clone();
     let replay = state.sculpt_stroke_replay.lock().clone();
     if replay.is_empty() {
         return Ok(());
     }
-    let color = replay[0].color;
+    let first = &replay[0];
+    let color = first.color;
 
-    // Re-generate footprint from each replay sample with new extrude params.
-    let mut union: ahash::AHashSet<greedy_mesh::VoxelCoord> = ahash::AHashSet::new();
-    {
+    let union: ahash::AHashSet<greedy_mesh::VoxelCoord> = if let Some(spine) = &spine_opt {
+        // Ray-based extrude: recompute footprint from stored spine with new settings.
+        let footprint = voxel_edit::extrude_ray_footprint(
+            spine,
+            first.brush_radius,
+            first.brush_shape,
+            first.brush_strength,
+            first.brush_falloff,
+            first.stroke_seed,
+            args.extrude_profile,
+            args.extrude_end_cap,
+            args.extrude_taper,
+            args.extrude_taper_start,
+            args.extrude_taper_end,
+        );
+        footprint.into_iter().collect()
+    } else {
+        // Legacy freeform fallback: replay frame-by-frame.
+        let mut union: ahash::AHashSet<greedy_mesh::VoxelCoord> = ahash::AHashSet::new();
         let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
-        let Some(file) = fg.as_ref() else {
-            return Ok(());
-        };
-        let Some(vmap) = vm.as_ref() else {
-            return Ok(());
-        };
+        let Some(file) = fg.as_ref() else { return Ok(()); };
+        let Some(vmap) = vm.as_ref() else { return Ok(()); };
         let cam = state.camera.lock();
         let (w, h) = {
             let v = state.viewer.lock();
-            let Some(viewer) = v.as_ref() else {
-                return Ok(());
-            };
+            let Some(viewer) = v.as_ref() else { return Ok(()); };
             viewer.viewport_size()
         };
         let w = w as f32;
         let h = h as f32;
-
         for sample in &replay {
             let (sx, sy) = viewport_texels_from_norm(sample.nx, sample.ny, w, h);
             let line = match (sample.stroke_line_start_nx, sample.stroke_line_start_ny) {
@@ -6199,36 +6558,20 @@ fn extrude_recompute_preview(
                 _ => None,
             };
             let footprint = voxel_edit::sculpt_stroke_effective_footprint(
-                file,
-                vmap,
-                &cam,
-                w,
-                h,
-                sx,
-                sy,
-                sample.sculpt_mode,
-                sample.brush_radius,
-                sample.brush_shape,
-                sample.spray_density,
-                line,
-                seg,
-                sample.brush_strength,
-                sample.brush_falloff,
-                sample.stroke_seed,
+                file, vmap, &cam, w, h, sx, sy,
+                sample.sculpt_mode, sample.brush_radius, sample.brush_shape,
+                sample.spray_density, line, seg,
+                sample.brush_strength, sample.brush_falloff, sample.stroke_seed,
                 sample.brush_clip_bottom_half,
-                args.extrude_profile,
-                args.extrude_end_cap,
-                args.extrude_taper,
-                args.extrude_taper_start,
-                args.extrude_taper_end,
+                args.extrude_profile, args.extrude_end_cap,
+                args.extrude_taper, args.extrude_taper_start, args.extrude_taper_end,
             );
-            for c in footprint {
-                union.insert(c);
-            }
+            for c in footprint { union.insert(c); }
         }
-    }
+        union
+    };
 
-    // Also update the stored replay args with new extrude settings so commit uses them.
+    // Update stored replay args with new extrude settings so commit uses them.
     {
         let mut replay_mut = state.sculpt_stroke_replay.lock();
         for sample in replay_mut.iter_mut() {
@@ -6252,20 +6595,14 @@ fn extrude_recompute_preview(
     let (solid, wire) = {
         let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
-        let Some(file) = fg.as_ref() else {
-            return Ok(());
-        };
-        let Some(vmap) = vm.as_ref() else {
-            return Ok(());
-        };
+        let Some(file) = fg.as_ref() else { return Ok(()); };
+        let Some(vmap) = vm.as_ref() else { return Ok(()); };
         stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, color)
     };
 
     {
         let mut v = state.viewer.lock();
-        let Some(viewer) = v.as_mut() else {
-            return Ok(());
-        };
+        let Some(viewer) = v.as_mut() else { return Ok(()); };
         if solid.positions.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
         } else {
@@ -8461,6 +8798,31 @@ struct SyncPreviewInput {
     generator_cloth_iterations: u32,
     #[serde(default = "default_cloth_constraint_passes_u32")]
     generator_cloth_constraint_passes: u32,
+    #[serde(default = "default_rock_size")]
+    generator_rock_size: i32,
+    #[serde(default = "default_rock_roughness")]
+    generator_rock_roughness: f32,
+    #[serde(default = "default_rock_seed")]
+    generator_rock_seed: i32,
+    #[serde(default = "default_grass_density")]
+    generator_grass_density: i32,
+    #[serde(default = "default_grass_max_height")]
+    generator_grass_max_height: i32,
+    #[serde(default = "default_grass_seed")]
+    generator_grass_seed: i32,
+}
+
+fn default_rock_roughness() -> f32 {
+    0.45
+}
+fn default_rock_seed() -> i32 {
+    42
+}
+fn default_grass_max_height() -> i32 {
+    3
+}
+fn default_grass_seed() -> i32 {
+    42
 }
 
 fn default_cloth_tension_preview() -> f32 {
@@ -8518,6 +8880,12 @@ fn sync_preview_input(
         ph.generator_cloth_stiffness_scale = args.generator_cloth_stiffness_scale;
         ph.generator_cloth_iterations = args.generator_cloth_iterations;
         ph.generator_cloth_constraint_passes = args.generator_cloth_constraint_passes;
+        ph.generator_rock_size = args.generator_rock_size;
+        ph.generator_rock_roughness = args.generator_rock_roughness;
+        ph.generator_rock_seed = args.generator_rock_seed;
+        ph.generator_grass_density = args.generator_grass_density;
+        ph.generator_grass_max_height = args.generator_grass_max_height;
+        ph.generator_grass_seed = args.generator_grass_seed;
     }
     if args.nx < 0.0 {
         *state.preview_cursor.lock() = None;
@@ -8968,6 +9336,52 @@ fn hash_generator_cloth_hover(
     h.finish()
 }
 
+fn hash_generator_rock_hover(
+    sx: f32,
+    sy: f32,
+    size: i32,
+    roughness: f32,
+    seed: i32,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x72u8.hash(&mut h); // 'r' for rock
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    size.hash(&mut h);
+    roughness.to_bits().hash(&mut h);
+    seed.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+fn hash_generator_grass_hover(
+    sx: f32,
+    sy: f32,
+    density: i32,
+    max_height: i32,
+    seed: i32,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x67u8.hash(&mut h); // 'g' for grass
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    density.hash(&mut h);
+    max_height.hash(&mut h);
+    seed.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
 fn prepare_preview_mesh(
     state: &ViewerState,
     cam: &OrbitCamera,
@@ -9228,6 +9642,92 @@ fn prepare_preview_mesh(
                         }
                     }
                 }
+                "rocks" => {
+                    let cells = crate::generators::preview_rock_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        ctx.generator_rock_seed,
+                        ctx.generator_rock_size,
+                        ctx.generator_rock_roughness,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_rock_hover(
+                            sx,
+                            sy,
+                            ctx.generator_rock_size,
+                            ctx.generator_rock_roughness,
+                            ctx.generator_rock_seed,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        let set: AHashSet<_> = cells.iter().copied().collect();
+                        let (solid, wire) = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &set,
+                            vmap,
+                            file,
+                            dbg,
+                            ctx.color,
+                        );
+                        return PreviewMeshPrepared::Upload {
+                            cache_key: key,
+                            solid,
+                            wire,
+                        };
+                    }
+                }
+                "grass" => {
+                    let cells = crate::generators::preview_grass_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        ctx.generator_grass_seed,
+                        ctx.generator_grass_density,
+                        ctx.generator_grass_max_height,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_grass_hover(
+                            sx,
+                            sy,
+                            ctx.generator_grass_density,
+                            ctx.generator_grass_max_height,
+                            ctx.generator_grass_seed,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        let set: AHashSet<_> = cells.iter().copied().collect();
+                        let (solid, wire) = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &set,
+                            vmap,
+                            file,
+                            dbg,
+                            ctx.color,
+                        );
+                        return PreviewMeshPrepared::Upload {
+                            cache_key: key,
+                            solid,
+                            wire,
+                        };
+                    }
+                }
                 _ => {}
             }
         }
@@ -9315,9 +9815,10 @@ fn prepare_preview_mesh(
                 // Fixed blue for selection hover — not the active palette.
                 (0.35, 0.55, 0.98, 0.05, 0.08, 0.2, 0.53, 2.0)
             };
-            let p = local_cell_face_hit_for_preview(cam, w, h, sx, sy, cx, cy, cz, oid, &file.objects);
+            // Grid-snap: render at integer cell center (same as brush preview)
+            // instead of the face-hit float, so the highlight locks to the voxel.
             let (solid, wire) = preview_single_cell_world(
-                file, p.x, p.y, p.z, oid, sr, sg, sb, wr, wg, wb, size, wem,
+                file, cx as f32, cy as f32, cz as f32, oid, sr, sg, sb, wr, wg, wb, size, wem,
             );
             return PreviewMeshPrepared::Upload {
                 cache_key: key,
@@ -10783,6 +11284,7 @@ pub fn run() {
         stroke_preview_last_args: Mutex::new(None),
         stroke_preview_suppresses_hover: AtomicBool::new(false),
         sculpt_stroke_replay: Mutex::new(Vec::new()),
+        extrude_ray_spine: Mutex::new(None),
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
         smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
@@ -10797,6 +11299,7 @@ pub fn run() {
         fly_last_physics: Mutex::new(None),
         selection_cells: Mutex::new(AHashSet::new()),
         selection_stroke_before: Mutex::new(None),
+        selection_stroke_accum: Mutex::new(None),
         selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
         selection_match_material: Mutex::new(false),
         stamp_clipboard: Mutex::new(None),
@@ -11238,6 +11741,7 @@ pub fn run() {
             voxel_sculpt_raise_at_screen,
             voxel_sculpt_stroke_at_screen,
             voxel_sculpt_stroke_preview_at_screen,
+            extrude_ray_preview,
             extrude_recompute_preview,
             generator_rocks_at_screen,
             generator_grass_at_screen,
@@ -11458,6 +11962,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         stroke_preview_last_args: Mutex::new(None),
         stroke_preview_suppresses_hover: AtomicBool::new(false),
         sculpt_stroke_replay: Mutex::new(Vec::new()),
+        extrude_ray_spine: Mutex::new(None),
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
         smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
@@ -11472,6 +11977,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         fly_last_physics: Mutex::new(None),
         selection_cells: Mutex::new(AHashSet::new()),
         selection_stroke_before: Mutex::new(None),
+        selection_stroke_accum: Mutex::new(None),
         selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
         selection_match_material: Mutex::new(false),
         stamp_clipboard: Mutex::new(None),
@@ -11559,5 +12065,184 @@ mod edit_perf_tests {
         let voxels = vec![voxel_at(0, 0, 0, 0), added];
         let s = resolve_voxel_edit_stats(&voxels, &delta, cache);
         assert_eq!(s.common_object_id, None);
+    }
+
+    // ── merge_coords_into_selection ─────────────────────────────────
+
+    #[test]
+    fn merge_replace_clears_and_sets() {
+        let mut sel: AHashSet<greedy_mesh::VoxelCoord> =
+            [(0, 0, 0), (1, 1, 1)].into_iter().collect();
+        merge_coords_into_selection(
+            &mut sel,
+            vec![(2, 2, 2)],
+            SelectionCombineMode::Replace,
+        );
+        assert_eq!(sel, [(2, 2, 2)].into_iter().collect());
+    }
+
+    #[test]
+    fn merge_add_unions() {
+        let mut sel: AHashSet<greedy_mesh::VoxelCoord> =
+            [(0, 0, 0)].into_iter().collect();
+        merge_coords_into_selection(
+            &mut sel,
+            vec![(1, 1, 1)],
+            SelectionCombineMode::Add,
+        );
+        assert_eq!(sel, [(0, 0, 0), (1, 1, 1)].into_iter().collect());
+    }
+
+    #[test]
+    fn merge_subtract_removes() {
+        let mut sel: AHashSet<greedy_mesh::VoxelCoord> =
+            [(0, 0, 0), (1, 1, 1)].into_iter().collect();
+        merge_coords_into_selection(
+            &mut sel,
+            vec![(1, 1, 1)],
+            SelectionCombineMode::Subtract,
+        );
+        assert_eq!(sel, [(0, 0, 0)].into_iter().collect());
+    }
+
+    #[test]
+    fn merge_intersect_keeps_overlap() {
+        let mut sel: AHashSet<greedy_mesh::VoxelCoord> =
+            [(0, 0, 0), (1, 1, 1), (2, 2, 2)].into_iter().collect();
+        merge_coords_into_selection(
+            &mut sel,
+            vec![(1, 1, 1), (2, 2, 2), (3, 3, 3)],
+            SelectionCombineMode::Intersect,
+        );
+        assert_eq!(sel, [(1, 1, 1), (2, 2, 2)].into_iter().collect());
+    }
+
+    // ── apply_selection_stroke_sample (accumulator) ─────────────────
+
+    /// Simulates a full stroke: begin → N samples → verify selection.
+    /// With intersect mode, successive samples should union their coords
+    /// against the original `before` snapshot rather than shrinking.
+    #[test]
+    fn intersect_stroke_accumulates_across_samples() {
+        // Original selection: A B C D
+        let a = (0, 0, 0);
+        let b = (1, 0, 0);
+        let c = (2, 0, 0);
+        let d = (3, 0, 0);
+        let before: AHashSet<greedy_mesh::VoxelCoord> =
+            [a, b, c, d].into_iter().collect();
+
+        // stroke_begin: snapshot before, create empty accumulator
+        let mut sel = before.clone();
+        let mut accum: Option<AHashSet<greedy_mesh::VoxelCoord>> =
+            Some(AHashSet::new());
+        let before_snap = Some(before);
+
+        // Sample 1: spray hits only A
+        let r = apply_selection_stroke_sample(
+            &mut sel,
+            vec![a],
+            SelectionCombineMode::Intersect,
+            &mut accum,
+            &before_snap,
+        );
+        assert!(r.is_some());
+        assert_eq!(sel, [a].into_iter().collect());
+        // Accum should contain A
+        assert!(accum.as_ref().unwrap().contains(&a));
+
+        // Sample 2: spray hits only C
+        let r = apply_selection_stroke_sample(
+            &mut sel,
+            vec![c],
+            SelectionCombineMode::Intersect,
+            &mut accum,
+            &before_snap,
+        );
+        assert!(r.is_some());
+        // Selection should be before ∩ {A, C} = {A, C}
+        assert_eq!(sel, [a, c].into_iter().collect());
+
+        // Sample 3: spray hits D and B
+        let r = apply_selection_stroke_sample(
+            &mut sel,
+            vec![d, b],
+            SelectionCombineMode::Intersect,
+            &mut accum,
+            &before_snap,
+        );
+        assert!(r.is_some());
+        // Selection should be before ∩ {A, B, C, D} = {A, B, C, D}
+        assert_eq!(sel, [a, b, c, d].into_iter().collect());
+    }
+
+    /// Without an accumulator (no active stroke), intersect should work
+    /// directly on the current selection (single-click fallthrough).
+    #[test]
+    fn intersect_no_stroke_falls_through_to_direct_merge() {
+        let a = (0, 0, 0);
+        let b = (1, 0, 0);
+        let c = (2, 0, 0);
+        let mut sel: AHashSet<greedy_mesh::VoxelCoord> =
+            [a, b, c].into_iter().collect();
+        let mut accum: Option<AHashSet<greedy_mesh::VoxelCoord>> = None;
+        let before: Option<AHashSet<greedy_mesh::VoxelCoord>> = None;
+
+        let r = apply_selection_stroke_sample(
+            &mut sel,
+            vec![b],
+            SelectionCombineMode::Intersect,
+            &mut accum,
+            &before,
+        );
+        assert!(r.is_some());
+        assert_eq!(sel, [b].into_iter().collect());
+    }
+
+    /// Empty coords with active accumulator should still recompute
+    /// selection (accum unchanged, but selection is re-derived).
+    #[test]
+    fn intersect_empty_sample_preserves_accum_state() {
+        let a = (0, 0, 0);
+        let b = (1, 0, 0);
+        let before: AHashSet<greedy_mesh::VoxelCoord> =
+            [a, b].into_iter().collect();
+        let mut sel = before.clone();
+        let mut accum: Option<AHashSet<greedy_mesh::VoxelCoord>> =
+            Some([a].into_iter().collect());
+        let before_snap = Some(before);
+
+        // Empty sample — accum stays {A}, sel = before ∩ {A} = {A}
+        let r = apply_selection_stroke_sample(
+            &mut sel,
+            vec![],
+            SelectionCombineMode::Intersect,
+            &mut accum,
+            &before_snap,
+        );
+        assert!(r.is_some());
+        assert_eq!(sel, [a].into_iter().collect());
+    }
+
+    /// Non-intersect modes should ignore the accumulator entirely.
+    #[test]
+    fn add_mode_ignores_accumulator() {
+        let a = (0, 0, 0);
+        let b = (1, 0, 0);
+        let mut sel: AHashSet<greedy_mesh::VoxelCoord> =
+            [a].into_iter().collect();
+        let mut accum: Option<AHashSet<greedy_mesh::VoxelCoord>> =
+            Some(AHashSet::new());
+        let before = Some([a].into_iter().collect());
+
+        let r = apply_selection_stroke_sample(
+            &mut sel,
+            vec![b],
+            SelectionCombineMode::Add,
+            &mut accum,
+            &before,
+        );
+        assert!(r.is_some());
+        assert_eq!(sel, [a, b].into_iter().collect());
     }
 }

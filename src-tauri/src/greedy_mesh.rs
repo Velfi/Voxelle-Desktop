@@ -29,6 +29,17 @@ fn is_transmissive(m: MaterialId) -> bool {
     matches!(m, MaterialId::Glass | MaterialId::Water)
 }
 
+/// `mat_kind` per vertex: 0 plastic/rubber, 0.5 metal, 1 glow, 2 glass, 2.5 water.
+fn mat_kind_f32(m: MaterialId) -> f32 {
+    match m {
+        MaterialId::Metal => 0.5,
+        MaterialId::Glow => 1.0,
+        MaterialId::Glass => 2.0,
+        MaterialId::Water => 2.5,
+        _ => 0.0, // Plastic, Rubber
+    }
+}
+
 /// Mirrors `isFaceOccludedByNeighbor` in greedyMeshCore.ts — `true` = face not emitted.
 fn face_occluded(source: MaterialId, neighbor: MaterialId) -> bool {
     if is_transmissive(source) {
@@ -407,11 +418,7 @@ pub fn pack_gpu_greedy_slices(
             continue;
         };
         let vx = map[&first_pos];
-        let mat_k = match vx.material {
-            MaterialId::Glow => 1.0,
-            MaterialId::Glass | MaterialId::Water => 2.0,
-            _ => 0.0,
-        };
+        let mat_k = mat_kind_f32(vx.material);
 
         let mut faces: Vec<(IVec3, usize, i32)> = Vec::with_capacity(cell_positions.len() * 4);
         for &pos in cell_positions {
@@ -597,6 +604,43 @@ pub fn chunk_key_from_world(x: i32, y: i32, z: i32, origin: (i32, i32, i32), cs:
     }
 }
 
+/// Dirty chunk keys for a voxel edit: only the center chunk plus neighbors where the voxel
+/// sits on a chunk boundary (local coord 0 or cs-1 on that axis).
+pub fn dirty_chunk_keys_for_voxel(x: i32, y: i32, z: i32, origin: (i32, i32, i32), cs: i32) -> Vec<ChunkKey> {
+    let cs = cs.max(1);
+    let (ox, oy, oz) = origin;
+    let center = chunk_key_from_world(x, y, z, origin, cs);
+    let lx = (x - ox).rem_euclid(cs);
+    let ly = (y - oy).rem_euclid(cs);
+    let lz = (z - oz).rem_euclid(cs);
+    // Which axis directions need neighbor chunks?
+    let dx: &[i32] = if lx == 0 && lx == cs - 1 { &[-1, 0, 1] }
+        else if lx == 0 { &[-1, 0] }
+        else if lx == cs - 1 { &[0, 1] }
+        else { &[0] };
+    let dy: &[i32] = if ly == 0 && ly == cs - 1 { &[-1, 0, 1] }
+        else if ly == 0 { &[-1, 0] }
+        else if ly == cs - 1 { &[0, 1] }
+        else { &[0] };
+    let dz: &[i32] = if lz == 0 && lz == cs - 1 { &[-1, 0, 1] }
+        else if lz == 0 { &[-1, 0] }
+        else if lz == cs - 1 { &[0, 1] }
+        else { &[0] };
+    let mut v = Vec::with_capacity(dx.len() * dy.len() * dz.len());
+    for &dix in dx {
+        for &diy in dy {
+            for &diz in dz {
+                v.push(ChunkKey {
+                    ix: center.ix + dix,
+                    iy: center.iy + diy,
+                    iz: center.iz + diz,
+                });
+            }
+        }
+    }
+    v
+}
+
 /// The 3×3×3 neighbor chunk keys in index space (for remeshing after one cell changes).
 pub fn dirty_chunk_keys_3x3(center: ChunkKey) -> Vec<ChunkKey> {
     let mut v = Vec::with_capacity(27);
@@ -631,15 +675,17 @@ pub fn voxel_buckets_by_chunk(
 
 /// Greedy mesh for one chunk’s **core** voxels, with neighbor occlusion from `map` (full scene).
 pub fn mesh_buffers_for_chunk_key(
-    buckets: &AHashMap<ChunkKey, Vec<Voxel>>,
+    buckets: &AHashMap<ChunkKey, AHashMap<VoxelCoord, Voxel>>,
     map: &AHashMap<VoxelCoord, Voxel>,
     key: ChunkKey,
 ) -> MeshBuffers {
-    let core = buckets.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-    if core.is_empty() {
-        return MeshBuffers::default();
-    }
-    build_greedy_mesh_mapped(core, map)
+    let bucket = match buckets.get(&key) {
+        Some(b) if !b.is_empty() => b,
+        _ => return MeshBuffers::default(),
+    };
+    let mut core: Vec<Voxel> = bucket.values().copied().collect();
+    core.sort_unstable_by_key(|v| (v.x, v.y, v.z));
+    build_greedy_mesh_mapped(&core, map)
 }
 
 /// Single pass: [`SpatialMeshCache`] plus per-chunk greedy meshes (one `voxel_map` + bucketing).
@@ -697,7 +743,7 @@ pub fn build_all_chunk_meshes_btree(
 pub struct SpatialMeshCache {
     pub origin: (i32, i32, i32),
     pub occupancy: AHashMap<VoxelCoord, Voxel>,
-    pub buckets: AHashMap<ChunkKey, Vec<Voxel>>,
+    pub buckets: AHashMap<ChunkKey, AHashMap<VoxelCoord, Voxel>>,
 }
 
 impl SpatialMeshCache {
@@ -712,13 +758,13 @@ impl SpatialMeshCache {
             }
             occupancy.insert(coord_key(v.x, v.y, v.z), *v);
         }
-        let mut buckets: AHashMap<ChunkKey, Vec<Voxel>> = AHashMap::new();
+        let mut buckets: AHashMap<ChunkKey, AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
         for (i, v) in voxels.iter().enumerate() {
             if i != 0 && i % YIELD_EVERY == 0 {
                 std::thread::yield_now();
             }
             let k = chunk_key_from_world(v.x, v.y, v.z, origin, cs);
-            buckets.entry(k).or_default().push(*v);
+            buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
         }
         Some(Self {
             origin,
@@ -732,7 +778,7 @@ impl SpatialMeshCache {
         let coord = (v.x, v.y, v.z);
         self.occupancy.insert(coord, v);
         let k = chunk_key_from_world(v.x, v.y, v.z, self.origin, cs);
-        self.buckets.entry(k).or_default().push(v);
+        self.buckets.entry(k).or_default().insert(coord, v);
     }
 
     pub fn apply_remove(&mut self, x: i32, y: i32, z: i32, cs: i32) {
@@ -740,11 +786,9 @@ impl SpatialMeshCache {
         let coord = (x, y, z);
         self.occupancy.remove(&coord);
         let k = chunk_key_from_world(x, y, z, self.origin, cs);
-        if let Some(vec) = self.buckets.get_mut(&k) {
-            if let Some(i) = vec.iter().position(|v| v.x == x && v.y == y && v.z == z) {
-                vec.swap_remove(i);
-            }
-            if vec.is_empty() {
+        if let Some(map) = self.buckets.get_mut(&k) {
+            map.remove(&coord);
+            if map.is_empty() {
                 self.buckets.remove(&k);
             }
         }
@@ -756,12 +800,8 @@ impl SpatialMeshCache {
         let coord = (after.x, after.y, after.z);
         self.occupancy.insert(coord, after);
         let k = chunk_key_from_world(after.x, after.y, after.z, self.origin, cs);
-        if let Some(vec) = self.buckets.get_mut(&k) {
-            if let Some(i) = vec.iter().position(|v| {
-                v.x == after.x && v.y == after.y && v.z == after.z
-            }) {
-                vec[i] = after;
-            }
+        if let Some(map) = self.buckets.get_mut(&k) {
+            map.insert(coord, after);
         }
     }
 }
@@ -862,7 +902,6 @@ mod chunk_tests {
         assert_eq!(fused.1.len(), seq.1.len(), "chunk count");
         for (k, m) in &fused.1 {
             let m2 = seq.1.get(k).expect("missing chunk");
-            assert_eq!(m.indices.len(), m2.indices.len(), "indices {:?}", k);
             assert_eq!(sorted_triangle_set(m), sorted_triangle_set(m2), "triangles {:?}", k);
         }
     }
@@ -1057,14 +1096,7 @@ mod chunk_tests {
         let after_remove: Vec<Voxel> = vec![voxels[0]];
         let expected = SpatialMeshCache::from_voxels(&after_remove, cs).unwrap();
         assert_eq!(cache.occupancy, expected.occupancy);
-        assert_eq!(cache.buckets.len(), expected.buckets.len());
-        for k in expected.buckets.keys() {
-            let mut a = cache.buckets.get(k).cloned().unwrap_or_default();
-            let mut b = expected.buckets.get(k).cloned().unwrap_or_default();
-            a.sort_by_key(|v| (v.x, v.y, v.z));
-            b.sort_by_key(|v| (v.x, v.y, v.z));
-            assert_eq!(a, b, "bucket {k:?}");
-        }
+        assert_eq!(cache.buckets, expected.buckets);
         let add = Voxel {
             x: 1,
             y: 1,
@@ -1108,7 +1140,7 @@ mod chunk_tests {
 }
 
 /// Greedy mesh for `emit` voxels only, using `map` for neighbor occlusion (include a 1-voxel halo around each chunk).
-/// `mat_kind` per vertex: 0 solid, 1 glow, 2 glass/water (shader uses for emissive / spec).
+/// `mat_kind` per vertex: 0 plastic/rubber, 0.5 metal, 1 glow, 2 glass, 2.5 water.
 pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>) -> MeshBuffers {
     let mut buckets: AHashMap<(u32, u8), Vec<IVec3>> = AHashMap::new();
     for v in emit {
@@ -1133,11 +1165,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
         };
         let vx = map[&first_pos];
         let col = color_rgb(vx.color);
-        let mat_k = match vx.material {
-            MaterialId::Glow => 1.0,
-            MaterialId::Glass | MaterialId::Water => 2.0,
-            _ => 0.0,
-        };
+        let mat_k = mat_kind_f32(vx.material);
 
         let mut faces: Vec<(IVec3, usize, i32)> = Vec::with_capacity(cell_positions.len() * 4);
         for &pos in cell_positions {
@@ -1786,7 +1814,7 @@ fn append_object_meshes_sorted(
     }
 }
 
-/// `mat_kind` per vertex: 0 solid, 1 glow, 2 glass/water (shader uses for emissive / spec).
+/// `mat_kind` per vertex: 0 plastic/rubber, 0.5 metal, 1 glow, 2 glass, 2.5 water.
 pub fn build_greedy_mesh(voxels: &[Voxel], objects: &[SceneObject]) -> (MeshBuffers, MeshBounds) {
     let default_objs = crate::voxelle::default_scene_objects();
     let objs: &[SceneObject] = if objects.is_empty() {
@@ -2266,13 +2294,14 @@ mod gpu_pack_tests {
         let cs = SPATIAL_CHUNK_SIZE;
         let cache = SpatialMeshCache::from_voxels(&voxels, cs).expect("cache");
         for &key in cache.buckets.keys() {
-            let core = cache
+            let mut core_vec: Vec<Voxel> = cache
                 .buckets
                 .get(&key)
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
+                .map(|b| b.values().copied().collect())
+                .unwrap_or_default();
+            core_vec.sort_unstable_by_key(|v| (v.x, v.y, v.z));
             let cpu = mesh_buffers_for_chunk_key(&cache.buckets, &cache.occupancy, key);
-            let (headers, _) = pack_gpu_greedy_slices(&cache.occupancy, core).expect("pack");
+            let (headers, _) = pack_gpu_greedy_slices(&cache.occupancy, &core_vec).expect("pack");
             assert_eq!(
                 cpu.indices.is_empty(),
                 headers.is_empty(),

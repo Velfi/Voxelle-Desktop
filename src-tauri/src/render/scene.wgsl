@@ -175,12 +175,6 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let l = normalize(g.light_dir.xyz);
     let v = normalize(g.cam_pos.xyz - in.world_pos);
     let base = in.color;
-    var glow = 0.0;
-    var spec_amt = 0.12;
-    if (in.mat_kind > 0.5 && in.mat_kind < 1.5) {
-        glow = 0.6;
-        spec_amt = 0.08;
-    }
     let h = normalize(l + v);
     let ndl = max(dot(n, l), 0.0);
     let sh = shadow_visibility(in.world_pos, n);
@@ -188,11 +182,39 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let amb = g.light_params.x;
     let sun = g.light_params.y;
     let sc = g.sun_color.xyz;
-    let spec_blinn = pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh * sun;
     let ao_h = pow(max(in.vertex_ao, 0.001), VERTEX_AO_GAMMA);
-    var rgb = base * (hemi * 0.30 * ao_h * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
-    rgb = rgb + base * glow;
-    let glow_mask = select(0.0, 1.0, in.mat_kind > 0.5 && in.mat_kind < 1.5);
+    let ndh = max(dot(n, h), 0.0);
+    let ndv = max(dot(n, v), 0.0);
+
+    let is_metal = in.mat_kind > 0.25 && in.mat_kind < 0.75;
+    let is_glow  = in.mat_kind > 0.75 && in.mat_kind < 1.25;
+
+    var rgb: vec3<f32>;
+    var glow_mask = 0.0;
+
+    if (is_metal) {
+        // Metallic PBR: tinted specular from base color, sharp highlight, strong Fresnel.
+        let f0 = base * 0.96 + vec3<f32>(0.04);
+        let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndv, 5.0);
+        let spec_power = pow(ndh, 96.0);
+        let spec = fresnel * spec_power * 1.8 * sh * sun;
+        // Metallic diffuse is minimal (energy absorbed); ambient reflections via hemi.
+        let ambient_refl = base * hemi * 0.72 * ao_h * amb;
+        let direct = base * 0.15 * ndl * sh * sun * sc;
+        rgb = ambient_refl + direct + spec * sc;
+    } else if (is_glow) {
+        // Self-illuminated: emissive color + subtle ambient for shape readability.
+        let emissive = base * 2.8;
+        let shape = base * (hemi * 0.12 * ao_h * amb + 0.18 * ndl * sh * sun * sc);
+        let spec_glow = pow(ndh, 24.0) * 0.06 * sh * sun;
+        rgb = emissive + shape + sc * spec_glow;
+        glow_mask = 1.0;
+    } else {
+        // Plastic / rubber.
+        let spec_blinn = pow(ndh, 32.0) * 0.12 * sh * sun;
+        rgb = base * (hemi * 0.30 * ao_h * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
+    }
+
     out.color = vec4<f32>(rgb, glow_mask);
     let vn = (g.inv_view * vec4<f32>(n, 0.0)).xyz;
     let nn = normalize(vn) * 0.5 + 0.5;

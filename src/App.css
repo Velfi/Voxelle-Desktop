@@ -717,7 +717,6 @@ body,
   padding: 0.2rem 0.5rem;
   font-size: 0.72rem;
   line-height: 1.2;
-  color: rgba(255, 240, 210, 0.96);
   background: rgb(var(--theme-accent-rgb) / 0.22);
   border: 1px solid rgb(var(--theme-accent-rgb) / 0.38);
   border-radius: 4px;
@@ -1882,12 +1881,15 @@ body,
   color: var(--app-text-strong);
   background: var(--app-overlay-scrim);
   border: 1.5px solid var(--peer-color);
-  box-shadow: inset 0 0 0 100px color-mix(in srgb, var(--peer-color) 18%, transparent);
+  box-shadow: inset 0 0 0 100px
+    color-mix(in srgb, var(--peer-color) 18%, transparent);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: left 0.12s ease-out, top 0.12s ease-out;
+  transition:
+    left 0.12s ease-out,
+    top 0.12s ease-out;
   will-change: left, top;
 }
 
@@ -2372,6 +2374,49 @@ body,
   color: var(--app-text-strong);
   border-color: rgb(var(--theme-accent-rgb) / 0.32);
   background: rgb(var(--theme-accent-rgb) / 0.12);
+}
+
+.inspector-copy-invite-btn {
+  margin: 0 0 0.35rem;
+  padding: 0.4rem 0.5rem;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--app-text);
+  background: var(--app-control-surface);
+  border: 1px solid var(--app-control-border);
+  border-radius: 6px;
+  cursor: pointer;
+  width: 100%;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.inspector-copy-invite-label {
+  font-weight: 500;
+  color: var(--app-text-strong);
+}
+
+.inspector-copy-invite-url {
+  font-size: 0.68rem;
+  color: var(--app-text-muted);
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+}
+
+.inspector-copy-invite-btn:hover {
+  background: var(--app-control-surface-hover);
+  border-color: var(--app-control-border-strong);
+}
+
+.inspector-copy-invite-btn:hover .inspector-copy-invite-url {
+  color: var(--app-text);
+}
+
+.inspector-copy-invite-btn:focus-visible {
+  outline: 2px solid var(--theme-focus-ring);
+  outline-offset: 1px;
 }
 
 .inspector-collab-hint {

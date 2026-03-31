@@ -149,25 +149,145 @@ pub struct Scene {
     pub orthographic: bool,
 }
 
-/// Post-process mood stored under `scene.mood` in BSON (matches `set_mood_params` / GPU uniforms).
-#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Post-process mood stored under `scene.mood` in BSON.
+/// Rich per-effect settings matching the web Voxelle implementation.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MoodSettings {
-    pub grain: f32,
+    // vignette (desktop-only)
+    #[serde(default)]
     pub vignette: f32,
-    pub distance_tint: f32,
-    pub atmosphere: f32,
-    pub sun_shafts: f32,
+    // grain
+    #[serde(default)]
+    pub grain_enabled: bool,
+    #[serde(default)]
+    pub grain_strength: f32,
+    #[serde(default = "default_true")]
+    pub grain_animated: bool,
+    #[serde(default = "default_one")]
+    pub grain_speed: f32,
+    #[serde(default = "default_true")]
+    pub grain_colorful: bool,
+    // atmosphere
+    #[serde(default)]
+    pub atm_enabled: bool,
+    #[serde(default = "default_atm_color")]
+    pub atm_color: String,
+    #[serde(default = "default_28")]
+    pub atm_thickness: f32,
+    #[serde(default = "default_085")]
+    pub atm_density: f32,
+    #[serde(default = "default_true")]
+    pub atm_aerial: bool,
+    #[serde(default)]
+    pub atm_positive_side: bool,
+    #[serde(default)]
+    pub atm_plane_nx: f32,
+    #[serde(default)]
+    pub atm_plane_ny: f32,
+    #[serde(default)]
+    pub atm_plane_nz: f32,
+    #[serde(default)]
+    pub atm_plane_c: f32,
+    #[serde(default)]
+    pub atm_height_bias: f32,
+    #[serde(default = "default_120")]
+    pub atm_height_falloff: f32,
+    #[serde(default)]
+    pub atm_drift_enabled: bool,
+    #[serde(default = "default_02")]
+    pub atm_drift_amount: f32,
+    #[serde(default = "default_002")]
+    pub atm_drift_scale: f32,
+    #[serde(default = "default_02")]
+    pub atm_drift_speed: f32,
+    // distance tint
+    #[serde(default)]
+    pub dt_enabled: bool,
+    #[serde(default = "default_dt_near")]
+    pub dt_near_color: String,
+    #[serde(default = "default_dt_mid")]
+    pub dt_mid_color: String,
+    #[serde(default = "default_dt_far")]
+    pub dt_far_color: String,
+    #[serde(default = "default_16")]
+    pub dt_near_dist: f32,
+    #[serde(default = "default_140")]
+    pub dt_far_dist: f32,
+    #[serde(default = "default_06")]
+    pub dt_strength: f32,
+    // sun shafts
+    #[serde(default)]
+    pub ss_enabled: bool,
+    #[serde(default = "default_07")]
+    pub ss_strength: f32,
+    #[serde(default = "default_092")]
+    pub ss_decay: f32,
+    #[serde(default = "default_08")]
+    pub ss_density: f32,
+    #[serde(default = "default_06")]
+    pub ss_weight: f32,
+    #[serde(default = "default_32")]
+    pub ss_samples: f32,
 }
+
+fn default_true() -> bool { true }
+fn default_one() -> f32 { 1.0 }
+fn default_atm_color() -> String { "#c8d4e0".into() }
+fn default_28() -> f32 { 28.0 }
+fn default_085() -> f32 { 0.85 }
+fn default_120() -> f32 { 120.0 }
+fn default_02() -> f32 { 0.2 }
+fn default_002() -> f32 { 0.02 }
+fn default_dt_near() -> String { "#ffffff".into() }
+fn default_dt_mid() -> String { "#c8d4e0".into() }
+fn default_dt_far() -> String { "#8fa3bf".into() }
+fn default_16() -> f32 { 16.0 }
+fn default_140() -> f32 { 140.0 }
+fn default_06() -> f32 { 0.6 }
+fn default_07() -> f32 { 0.7 }
+fn default_092() -> f32 { 0.92 }
+fn default_08() -> f32 { 0.8 }
+fn default_32() -> f32 { 32.0 }
 
 impl Default for MoodSettings {
     fn default() -> Self {
         Self {
-            grain: 0.0,
             vignette: 0.0,
-            distance_tint: 0.0,
-            atmosphere: 0.0,
-            sun_shafts: 0.0,
+            grain_enabled: false,
+            grain_strength: 0.12,
+            grain_animated: true,
+            grain_speed: 1.0,
+            grain_colorful: true,
+            atm_enabled: false,
+            atm_color: default_atm_color(),
+            atm_thickness: 28.0,
+            atm_density: 0.85,
+            atm_aerial: true,
+            atm_positive_side: false,
+            atm_plane_nx: 0.0,
+            atm_plane_ny: 0.0,
+            atm_plane_nz: 0.0,
+            atm_plane_c: 0.0,
+            atm_height_bias: 0.0,
+            atm_height_falloff: 120.0,
+            atm_drift_enabled: false,
+            atm_drift_amount: 0.2,
+            atm_drift_scale: 0.02,
+            atm_drift_speed: 0.2,
+            dt_enabled: false,
+            dt_near_color: default_dt_near(),
+            dt_mid_color: default_dt_mid(),
+            dt_far_color: default_dt_far(),
+            dt_near_dist: 16.0,
+            dt_far_dist: 140.0,
+            dt_strength: 0.6,
+            ss_enabled: false,
+            ss_strength: 0.7,
+            ss_decay: 0.92,
+            ss_density: 0.8,
+            ss_weight: 0.6,
+            ss_samples: 32.0,
         }
     }
 }
@@ -365,28 +485,43 @@ fn bson_f32(b: &Bson) -> Option<f32> {
 }
 
 /// Read `scene.mood` from a full scene document. Returns `None` if the `mood` key is absent.
+/// Handles both old (bare-float) and new (rich nested) formats.
 pub fn parse_mood_from_scene_optional(scene: &Document) -> Option<MoodSettings> {
     let m = scene.get_document("mood").ok()?;
-    Some(MoodSettings {
-        grain: m.get("grain").and_then(|b| bson_f32(b)).unwrap_or(0.0),
-        vignette: m.get("vignette").and_then(|b| bson_f32(b)).unwrap_or(0.0),
-        distance_tint: m
-            .get("distanceTint")
-            .and_then(|b| bson_f32(b))
-            .unwrap_or(0.0),
-        atmosphere: m.get("atmosphere").and_then(|b| bson_f32(b)).unwrap_or(0.0),
-        sun_shafts: m.get("sunShafts").and_then(|b| bson_f32(b)).unwrap_or(0.0),
-    })
+    // Detect old format: bare `grain` float at top level with no `grainEnabled` key.
+    let is_old = m.get("grainEnabled").is_none() && m.get("grain").is_some();
+    if is_old {
+        let grain_v = m.get("grain").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let vig_v = m.get("vignette").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let dt_v = m.get("distanceTint").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let atm_v = m.get("atmosphere").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let ss_v = m.get("sunShafts").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let mut ms = MoodSettings::default();
+        ms.vignette = vig_v;
+        if grain_v > 0.001 {
+            ms.grain_enabled = true;
+            ms.grain_strength = grain_v.clamp(0.0, 0.5);
+        }
+        if atm_v > 0.001 {
+            ms.atm_enabled = true;
+            ms.atm_density = atm_v;
+        }
+        if dt_v > 0.001 {
+            ms.dt_enabled = true;
+            ms.dt_strength = dt_v;
+        }
+        if ss_v > 0.001 {
+            ms.ss_enabled = true;
+            ms.ss_strength = ss_v * 10.0; // old range was 0–1, new is 0–10
+        }
+        return Some(ms);
+    }
+    // New format: full serde deserialisation via BSON → serde.
+    bson::from_document(m.clone()).ok()
 }
 
 fn mood_to_bson_document(m: &MoodSettings) -> Document {
-    bson::doc! {
-        "grain": m.grain as f64,
-        "vignette": m.vignette as f64,
-        "distanceTint": m.distance_tint as f64,
-        "atmosphere": m.atmosphere as f64,
-        "sunShafts": m.sun_shafts as f64,
-    }
+    bson::to_document(m).unwrap_or_default()
 }
 
 fn raw_bson_to_f32(b: RawBsonRef<'_>) -> Option<f32> {
@@ -402,38 +537,26 @@ fn parse_mood_from_raw_file_bytes(bytes: &[u8]) -> Option<MoodSettings> {
     let doc = RawDocument::from_bytes(bytes).ok()?;
     let scene = doc.get_document("scene").ok()?;
     let mood = scene.get_document("mood").ok()?;
-    Some(MoodSettings {
-        grain: mood
-            .get("grain")
-            .ok()
-            .flatten()
-            .and_then(raw_bson_to_f32)
-            .unwrap_or(0.0),
-        vignette: mood
-            .get("vignette")
-            .ok()
-            .flatten()
-            .and_then(raw_bson_to_f32)
-            .unwrap_or(0.0),
-        distance_tint: mood
-            .get("distanceTint")
-            .ok()
-            .flatten()
-            .and_then(raw_bson_to_f32)
-            .unwrap_or(0.0),
-        atmosphere: mood
-            .get("atmosphere")
-            .ok()
-            .flatten()
-            .and_then(raw_bson_to_f32)
-            .unwrap_or(0.0),
-        sun_shafts: mood
-            .get("sunShafts")
-            .ok()
-            .flatten()
-            .and_then(raw_bson_to_f32)
-            .unwrap_or(0.0),
-    })
+    // Detect old format: bare `grain` float with no `grainEnabled`.
+    let has_grain_enabled = mood.get("grainEnabled").ok().flatten().is_some();
+    if !has_grain_enabled {
+        // Old bare-float format
+        let grain_v = mood.get("grain").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
+        let vig_v = mood.get("vignette").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
+        let dt_v = mood.get("distanceTint").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
+        let atm_v = mood.get("atmosphere").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
+        let ss_v = mood.get("sunShafts").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
+        let mut ms = MoodSettings::default();
+        ms.vignette = vig_v;
+        if grain_v > 0.001 { ms.grain_enabled = true; ms.grain_strength = grain_v.clamp(0.0, 0.5); }
+        if atm_v > 0.001 { ms.atm_enabled = true; ms.atm_density = atm_v; }
+        if dt_v > 0.001 { ms.dt_enabled = true; ms.dt_strength = dt_v; }
+        if ss_v > 0.001 { ms.ss_enabled = true; ms.ss_strength = ss_v * 10.0; }
+        return Some(ms);
+    }
+    // New format: convert raw to owned Document, then serde
+    let owned = bson::from_slice::<Document>(mood.as_bytes()).ok()?;
+    bson::from_document(owned).ok()
 }
 
 fn parse_mood_from_file_bytes(bytes: &[u8]) -> Option<MoodSettings> {

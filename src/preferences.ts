@@ -68,6 +68,8 @@ export type VoxelleDesktopPreferences = {
   autosaveKeepCount: number;
   /** UI chrome: follow OS, force light (paper), or force dark. */
   appearanceTheme: AppearanceTheme;
+  /** Automatically reopen the last project when the app starts. */
+  reopenLastProject: boolean;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -83,6 +85,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   autosaveIntervalSecs: 120,
   autosaveKeepCount: 5,
   appearanceTheme: "auto",
+  reopenLastProject: false,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -257,6 +260,10 @@ export function loadPreferences(): VoxelleDesktopPreferences {
       appearanceTheme: isAppearanceTheme(o.appearanceTheme)
         ? o.appearanceTheme
         : DEFAULTS.appearanceTheme,
+      reopenLastProject:
+        typeof o.reopenLastProject === "boolean"
+          ? o.reopenLastProject
+          : DEFAULTS.reopenLastProject,
     };
   } catch {
     return { ...DEFAULTS };
@@ -289,6 +296,7 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.autosaveIntervalSecs = prefs.autosaveIntervalSecs;
     merged.autosaveKeepCount = prefs.autosaveKeepCount;
     merged.appearanceTheme = prefs.appearanceTheme;
+    merged.reopenLastProject = prefs.reopenLastProject;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

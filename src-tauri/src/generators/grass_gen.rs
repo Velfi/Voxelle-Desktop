@@ -89,6 +89,76 @@ pub fn generate_grass_on_face_deltas(
     out
 }
 
+/// Preview-only: compute the set of voxel coords grass would occupy,
+/// without mutating the file. Used for hover preview.
+pub fn preview_grass_coords(
+    face_empty: VoxelCoord,
+    solid: VoxelCoord,
+    seed: i32,
+    density: i32,
+    max_height: i32,
+) -> Vec<VoxelCoord> {
+    let nx = face_empty.0 - solid.0;
+    let ny = face_empty.1 - solid.1;
+    let nz = face_empty.2 - solid.2;
+    if nx.abs() + ny.abs() + nz.abs() != 1 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut seen: HashSet<VoxelCoord> = HashSet::new();
+    let spread = density.max(1).min(8);
+    let mh = max_height.max(1).min(8);
+    for u in -spread..=spread {
+        for v in -spread..=spread {
+            if rnd(u + seed, v, seed) > 0.4 {
+                continue;
+            }
+            let base = if nx != 0 {
+                (face_empty.0, face_empty.1 + u, face_empty.2 + v)
+            } else if ny != 0 {
+                (face_empty.0 + u, face_empty.1, face_empty.2 + v)
+            } else {
+                (face_empty.0 + u, face_empty.1 + v, face_empty.2)
+            };
+            let h = 1 + (rnd(base.1, base.2, seed + 9) * mh as f32) as i32;
+            for t in 0..h {
+                let coord = (base.0 + nx * t, base.1 + ny * t, base.2 + nz * t);
+                if seen.insert(coord) {
+                    out.push(coord);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Preview grass from screen coordinates (for hover preview).
+pub fn preview_grass_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    density: i32,
+    max_height: i32,
+) -> Vec<VoxelCoord> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(face_empty) = prev else {
+        return Vec::new();
+    };
+    preview_grass_coords(face_empty, solid, seed, density, max_height)
+        .into_iter()
+        .filter(|c| !voxel_map.contains_key(c))
+        .collect()
+}
+
 pub fn generator_grass_at_screen(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,

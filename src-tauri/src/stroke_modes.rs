@@ -1610,6 +1610,37 @@ fn circle_plane_axis_two_click(
     }
 }
 
+/// When depth is negative and the tool is Add, flip the anchor and face normal
+/// so the cuboid/cylinder extrudes through the clicked surface into the empty
+/// space on the far side.  For Remove (and positive depth) the original
+/// geometry is returned unchanged.
+fn flip_depth_anchor_if_needed(
+    tool: EditTool,
+    depth: i32,
+    a: VoxelCoord,
+    b: VoxelCoord,
+    hit: VoxelCoord,
+    prev: VoxelCoord,
+) -> (VoxelCoord, VoxelCoord, i32, i32, i32, i32) {
+    if depth < 0 && matches!(tool, EditTool::Add) {
+        // Shift anchor from `prev` (empty space) to `hit` (surface),
+        // reverse the face normal, and use |depth|.
+        let dx = hit.0 - prev.0;
+        let dy = hit.1 - prev.1;
+        let dz = hit.2 - prev.2;
+        (
+            (a.0 + dx, a.1 + dy, a.2 + dz),
+            (b.0 + dx, b.1 + dy, b.2 + dz),
+            dx,
+            dy,
+            dz,
+            depth.abs(),
+        )
+    } else {
+        (a, b, prev.0 - hit.0, prev.1 - hit.1, prev.2 - hit.2, depth)
+    }
+}
+
 /// Stroke anchor cells for draw/remove/paint (brush applied per center afterward).
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_anchor_centers_with_mode(
@@ -1793,13 +1824,19 @@ pub fn stroke_anchor_centers_with_mode(
                         plane_axis,
                         snap,
                     ) {
+                        // Negative depth + Add: flip anchor & normal so the
+                        // cuboid extrudes through the surface into empty space
+                        // on the far side, letting users "grow down" as well
+                        // as up.
+                        let (fa, fb, fnx, fny, fnz, fd) =
+                            flip_depth_anchor_if_needed(tool, depth, a, b, hit, prev);
                         return axis_aligned_cuboid_from_plane(
-                            a,
-                            b,
-                            prev.0 - hit.0,
-                            prev.1 - hit.1,
-                            prev.2 - hit.2,
-                            depth,
+                            fa,
+                            fb,
+                            fnx,
+                            fny,
+                            fnz,
+                            fd,
                             aux.plane_hollow,
                             wall,
                             plane_ax,
@@ -1853,13 +1890,15 @@ pub fn stroke_anchor_centers_with_mode(
                         snap,
                     ) {
                         let taper = aux.cylinder_taper_pct.unwrap_or(0).clamp(0, 100);
+                        let (fa, fb, fnx, fny, fnz, fd) =
+                            flip_depth_anchor_if_needed(tool, depth, a, b, hit, prev);
                         return axis_aligned_cylinder_from_plane(
-                            a,
-                            b,
-                            prev.0 - hit.0,
-                            prev.1 - hit.1,
-                            prev.2 - hit.2,
-                            depth,
+                            fa,
+                            fb,
+                            fnx,
+                            fny,
+                            fnz,
+                            fd,
                             taper,
                             aux.plane_hollow,
                             wall,
@@ -2005,6 +2044,91 @@ mod tests {
         let top = disk_in_axis_plane((0, 0, 1), 2, 2);
         assert_eq!(cyl.len(), base.len() + top.len());
         assert!(cyl.iter().all(|&p| p.2 == 0 || p.2 == 1));
+    }
+
+    #[test]
+    fn axis_aligned_cuboid_negative_depth_extends_opposite() {
+        // Face +Z: a single-voxel plane at z=0, depth -2 should extend to z=-1 and z=-2.
+        let result = axis_aligned_cuboid_from_plane(
+            (0, 0, 0),
+            (0, 0, 0),
+            0,
+            0,
+            -1, // face normal pointing -Z (flipped for negative depth Add)
+            2,  // |depth|
+            false,
+            1,
+            2,
+        );
+        assert_eq!(result.len(), 3);
+        assert!(result.contains(&(0, 0, 0)));
+        assert!(result.contains(&(0, 0, -1)));
+        assert!(result.contains(&(0, 0, -2)));
+    }
+
+    #[test]
+    fn flip_depth_anchor_add_negative_flips() {
+        let a = (0, 1, 0); // prev (empty above surface)
+        let b = (2, 1, 3); // corner in the drag plane
+        let hit = (0, 0, 0);
+        let prev = (0, 1, 0);
+        let (fa, fb, fnx, fny, fnz, fd) =
+            flip_depth_anchor_if_needed(EditTool::Add, -3, a, b, hit, prev);
+        assert_eq!(fa, (0, 0, 0)); // shifted to hit
+        assert_eq!(fb, (2, 0, 3)); // shifted same offset
+        assert_eq!((fnx, fny, fnz), (0, -1, 0)); // normal reversed
+        assert_eq!(fd, 3); // |depth|
+    }
+
+    #[test]
+    fn flip_depth_anchor_remove_negative_unchanged() {
+        let a = (0, 0, 0); // hit (surface) for Remove
+        let b = (2, 0, 3);
+        let hit = (0, 0, 0);
+        let prev = (0, 1, 0);
+        let (fa, fb, fnx, fny, fnz, fd) =
+            flip_depth_anchor_if_needed(EditTool::Remove, -3, a, b, hit, prev);
+        // Remove keeps original geometry
+        assert_eq!(fa, (0, 0, 0));
+        assert_eq!(fb, (2, 0, 3));
+        assert_eq!((fnx, fny, fnz), (0, 1, 0));
+        assert_eq!(fd, -3);
+    }
+
+    #[test]
+    fn flip_depth_anchor_add_positive_unchanged() {
+        let a = (0, 1, 0);
+        let b = (2, 1, 3);
+        let hit = (0, 0, 0);
+        let prev = (0, 1, 0);
+        let (fa, fb, fnx, fny, fnz, fd) =
+            flip_depth_anchor_if_needed(EditTool::Add, 3, a, b, hit, prev);
+        // Positive depth keeps original geometry
+        assert_eq!(fa, (0, 1, 0));
+        assert_eq!(fb, (2, 1, 3));
+        assert_eq!((fnx, fny, fnz), (0, 1, 0));
+        assert_eq!(fd, 3);
+    }
+
+    #[test]
+    fn axis_aligned_cylinder_negative_depth_extends_opposite() {
+        // Face +Z: center (0,0,0), edge (2,0,0), depth=-1 with flipped normal (0,0,-1)
+        // should produce disks at z=0 and z=-1.
+        let cyl = axis_aligned_cylinder_from_plane(
+            (0, 0, 0),
+            (2, 0, 0),
+            0,
+            0,
+            -1, // flipped normal
+            1,  // |depth|
+            0,
+            false,
+            1,
+        );
+        assert!(cyl.iter().all(|&p| p.2 == 0 || p.2 == -1));
+        let base = disk_in_axis_plane((0, 0, 0), 2, 2);
+        let top = disk_in_axis_plane((0, 0, -1), 2, 2);
+        assert_eq!(cyl.len(), base.len() + top.len());
     }
 
     #[test]

@@ -39,23 +39,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let l = normalize(-u.light_dir.xyz);
     let v = normalize(u.cam_pos.xyz - in.world_pos);
     let h = normalize(l + v);
-    var base = in.color;
-    var glow = 0.0;
-    var spec = 0.0;
-    if in.mat_kind > 0.5 && in.mat_kind < 1.5 {
-        glow = 0.6;
-    } else if in.mat_kind > 1.5 {
-        spec = 0.35;
-        base = mix(base, vec3<f32>(1.0), 0.15);
-    } else {
-        ,,,,
-        spec = 0.12;
-    }
+    let base = in.color;
     let ndl = max(dot(n, l), 0.0);
+    let ndh = max(dot(n, h), 0.0);
+    let ndv = max(dot(n, v), 0.0);
     let amb = 0.28;
-    let diff = ndl * 0.72;
-    let spec_term = pow(max(dot(n, h), 0.0), 32.0) * spec;
-    var rgb = base * (amb + diff) + vec3<f32>(spec_term) + base * glow;
+
+    let is_metal = in.mat_kind > 0.25 && in.mat_kind < 0.75;
+    let is_glow  = in.mat_kind > 0.75 && in.mat_kind < 1.25;
+
+    var rgb: vec3<f32>;
+    if (is_metal) {
+        let f0 = base * 0.96 + vec3<f32>(0.04);
+        let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndv, 5.0);
+        let spec = fresnel * pow(ndh, 96.0) * 1.8;
+        let ambient_refl = base * 0.72 * amb;
+        rgb = ambient_refl + base * 0.15 * ndl + spec;
+    } else if (is_glow) {
+        let emissive = base * 2.8;
+        let shape = base * (amb * 0.12 + 0.18 * ndl);
+        rgb = emissive + shape;
+    } else if (in.mat_kind > 1.5) {
+        let spec = pow(ndh, 32.0) * 0.35;
+        let tinted = mix(base, vec3<f32>(1.0), 0.15);
+        rgb = tinted * (amb + ndl * 0.72) + vec3<f32>(spec);
+    } else {
+        let spec = pow(ndh, 32.0) * 0.12;
+        rgb = base * (amb + ndl * 0.72) + vec3<f32>(spec);
+    }
     rgb = rgb / (rgb + vec3<f32>(1.0));
     return vec4<f32>(pow(rgb, vec3<f32>(1.0 / 2.2)), 1.0);
 }

@@ -63,11 +63,9 @@ fn mood_scene_roundtrip() {
         scene: Default::default(),
         scene_extra: None,
         mood: Some(MoodSettings {
-            grain: 0.1,
+            grain_strength: 0.1,
             vignette: 0.2,
-            distance_tint: 0.3,
-            atmosphere: 0.4,
-            sun_shafts: 0.5,
+            ..Default::default()
         }),
         lighting: None,
         voxels: vec![],

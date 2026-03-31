@@ -55,6 +55,95 @@ const VOXELLE_DESKTOP_VERSION = packageJson.version;
 /** Desktop viewer: cap new-project grid edge length (web allows larger). */
 const MAX_GRID_SIZE = 256;
 
+// ── Mood state ──────────────────────────────────────────────────────
+interface MoodState {
+  // vignette (desktop-only)
+  vignette: number;
+  // grain
+  grainEnabled: boolean;
+  grainStrength: number;
+  grainAnimated: boolean;
+  grainSpeed: number;
+  grainColorful: boolean;
+  // atmosphere
+  atmEnabled: boolean;
+  atmColor: string;
+  atmThickness: number;
+  atmDensity: number;
+  atmAerial: boolean;
+  atmPositiveSide: boolean;
+  atmPlaneNx: number;
+  atmPlaneNy: number;
+  atmPlaneNz: number;
+  atmPlaneC: number;
+  atmHeightBias: number;
+  atmHeightFalloff: number;
+  atmDriftEnabled: boolean;
+  atmDriftAmount: number;
+  atmDriftScale: number;
+  atmDriftSpeed: number;
+  // distance tint
+  dtEnabled: boolean;
+  dtNearColor: string;
+  dtMidColor: string;
+  dtFarColor: string;
+  dtNearDist: number;
+  dtFarDist: number;
+  dtStrength: number;
+  // sun shafts
+  ssEnabled: boolean;
+  ssStrength: number;
+  ssDecay: number;
+  ssDensity: number;
+  ssWeight: number;
+  ssSamples: number;
+}
+
+function defaultMoodState(): MoodState {
+  return {
+    vignette: 0,
+    grainEnabled: false,
+    grainStrength: 0.12,
+    grainAnimated: true,
+    grainSpeed: 1,
+    grainColorful: true,
+    atmEnabled: false,
+    atmColor: "#c8d4e0",
+    atmThickness: 28,
+    atmDensity: 0.85,
+    atmAerial: true,
+    atmPositiveSide: false,
+    atmPlaneNx: 0,
+    atmPlaneNy: 0,
+    atmPlaneNz: 0,
+    atmPlaneC: 0,
+    atmHeightBias: 0,
+    atmHeightFalloff: 120,
+    atmDriftEnabled: false,
+    atmDriftAmount: 0.2,
+    atmDriftScale: 0.02,
+    atmDriftSpeed: 0.2,
+    dtEnabled: false,
+    dtNearColor: "#ffffff",
+    dtMidColor: "#c8d4e0",
+    dtFarColor: "#8fa3bf",
+    dtNearDist: 16,
+    dtFarDist: 140,
+    dtStrength: 0.6,
+    ssEnabled: false,
+    ssStrength: 0.7,
+    ssDecay: 0.92,
+    ssDensity: 0.8,
+    ssWeight: 0.6,
+    ssSamples: 32,
+  };
+}
+
+/** Helper: update one mood field. */
+function moodWith(prev: MoodState, patch: Partial<MoodState>): MoodState {
+  return { ...prev, ...patch };
+}
+
 const LS_RENDERING_MODE = "voxelleDesktopRenderingMode";
 const LS_SIDEBAR_EXPANDED = "voxelleSidebarExpanded";
 const LS_RIGHT_SIDEBAR_EXPANDED = "voxelleRightSidebarExpanded";
@@ -519,11 +608,7 @@ function App() {
   const flyPendingLookDyRef = useRef(0);
   const [interactionMode, setInteractionMode] =
     useState<InteractionMode>("navigate");
-  const [moodGrain, setMoodGrain] = useState(0);
-  const [moodVignette, setMoodVignette] = useState(0);
-  const [moodDistanceTint, setMoodDistanceTint] = useState(0);
-  const [moodAtmosphere, setMoodAtmosphere] = useState(0);
-  const [moodSunShafts, setMoodSunShafts] = useState(0);
+  const [mood, setMood] = useState<MoodState>(() => defaultMoodState());
   const [selectionCount, setSelectionCount] = useState(0);
   const [viewportCursorDebugEnabled, setViewportCursorDebugEnabled] = useState(
     () => {
@@ -640,13 +725,19 @@ function App() {
   const extrudePhase = useStrokePhase<Record<string, never>>({
     phases: ["settings"],
     onCancel: () => {
+      extrudeStartNormRef.current = null;
       void invoke("voxel_stroke_end").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: () => {
+      extrudeStartNormRef.current = null;
       void invoke("voxel_stroke_end").catch(() => {});
     },
   });
+  /** Stored normalized viewport start position for ray-based extrude (persists across re-drags). */
+  const extrudeStartNormRef = useRef<{ nx: number; ny: number } | null>(null);
+  /** True while the user is re-dragging the extrude endpoint during the settings phase. */
+  const extrudeRedragRef = useRef(false);
   /** Inline depth field: draft while focused; +/- still updates value + draft when editing. */
   const [extrusionDepthEditing, setExtrusionDepthEditing] = useState(false);
   const [extrusionDepthDraft, setExtrusionDepthDraft] = useState("");
@@ -657,6 +748,67 @@ function App() {
     nx: number;
     ny: number;
   } | null>(null);
+  /** Rope phased tool: click two points → adjust tension/sag → Done/Cancel. */
+  const ropePhase = useStrokePhase<{
+    nx1: number;
+    ny1: number;
+    nx2: number;
+    ny2: number;
+  }>({
+    phases: ["settings"],
+    onCancel: () => {
+      setRopeFirstScreen(null);
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
+    onCommit: (snap) => {
+      const { nx1, ny1, nx2, ny2 } = snap.data;
+      void invoke("generator_rope_at_screen", {
+        args: {
+          nx1,
+          ny1,
+          nx2,
+          ny2,
+          sag: ropeSagRef.current,
+          tension: ropeTensionRef.current,
+          brushRadius: ropeBrushRadiusIndexRef.current,
+          brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
+          color: activeColorRef.current,
+          material: activeMaterialRef.current,
+        },
+      }).catch(() => {});
+      setRopeFirstScreen(null);
+    },
+  });
+  /** Cloth phased tool: click 3+ pins → settings overlay → Done/Cancel. */
+  const clothPhase = useStrokePhase<Record<string, never>>({
+    phases: ["settings"],
+    onCancel: () => {
+      setClothPins([]);
+      clothPinsRef.current = [];
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
+    onCommit: () => {
+      const pins = clothPinsRef.current;
+      if (pins.length < 3) return;
+      void invoke("generator_cloth_from_pins_cmd", {
+        args: {
+          pins: pins.map((p) => [p[0], p[1], p[2]]),
+          tension: clothTensionRef.current,
+          gravityDirection: clothGravityDirectionRef.current,
+          brushRadius: ropeBrushRadiusIndexRef.current,
+          brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
+          color: activeColorRef.current,
+          material: activeMaterialRef.current,
+          gravityScale: clothSimGravityPctRef.current / 100,
+          stiffnessScale: clothSimStiffnessPctRef.current / 100,
+          clothIterations: clothSimIterationsRef.current,
+          clothConstraintPasses: clothSimConstraintPassesRef.current,
+        },
+      }).catch(() => {});
+      setClothPins([]);
+      clothPinsRef.current = [];
+    },
+  });
   const [ropeSag, setRopeSag] = useState(2.5);
   /** 0 = loose, 1 = taut (web ropeTension). */
   const [ropeTension, setRopeTension] = useState(0.5);
@@ -713,6 +865,11 @@ function App() {
   const [sculptBrushShapeUi, setSculptBrushShapeUi] =
     useState<SculptBrushShapeUi>("circle");
   // Extrude-specific params
+  const [extrudeDirectionRef, setExtrudeDirectionRef] = useState<
+    "camera" | "auto" | "x" | "y" | "z"
+  >("camera");
+  const extrudeDirectionRefRef = useRef<"camera" | "auto" | "x" | "y" | "z">("camera");
+  extrudeDirectionRefRef.current = extrudeDirectionRef;
   const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">(
     "cube",
   );
@@ -1117,13 +1274,7 @@ function App() {
           const o = p as {
             path: string;
             startScreenLogo?: boolean;
-            mood?: {
-              grain: number;
-              vignette: number;
-              distanceTint: number;
-              atmosphere: number;
-              sunShafts: number;
-            };
+            mood?: Partial<MoodState>;
           };
           if (o.startScreenLogo) {
             setPathLabel("");
@@ -1133,17 +1284,9 @@ function App() {
             setStartScreenLogoLoaded(false);
           }
           if (o.mood) {
-            setMoodGrain(o.mood.grain);
-            setMoodVignette(o.mood.vignette);
-            setMoodDistanceTint(o.mood.distanceTint);
-            setMoodAtmosphere(o.mood.atmosphere);
-            setMoodSunShafts(o.mood.sunShafts);
+            setMood(moodWith(defaultMoodState(), o.mood));
           } else {
-            setMoodGrain(0);
-            setMoodVignette(0);
-            setMoodDistanceTint(0);
-            setMoodAtmosphere(0);
-            setMoodSunShafts(0);
+            setMood(defaultMoodState());
           }
         }
         setLoading(false);
@@ -1787,6 +1930,11 @@ function App() {
   const clothSimStiffnessPctRef = useRef(clothSimStiffnessPct);
   const clothSimIterationsRef = useRef(clothSimIterations);
   const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
+  const rockRoughnessRef = useRef(rockRoughness);
+  const grassDensityRef = useRef(grassDensity);
+  const grassMaxHeightRef = useRef(grassMaxHeight);
+  const rockPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
+  const grassPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
   useEffect(() => {
     ropeFirstScreenRef.current = ropeFirstScreen;
   }, [ropeFirstScreen]);
@@ -1820,6 +1968,15 @@ function App() {
   useEffect(() => {
     clothSimConstraintPassesRef.current = clothSimConstraintPasses;
   }, [clothSimConstraintPasses]);
+  useEffect(() => {
+    rockRoughnessRef.current = rockRoughness;
+  }, [rockRoughness]);
+  useEffect(() => {
+    grassDensityRef.current = grassDensity;
+  }, [grassDensity]);
+  useEffect(() => {
+    grassMaxHeightRef.current = grassMaxHeight;
+  }, [grassMaxHeight]);
   useEffect(() => {
     squishyModeRef.current = squishyMode;
   }, [squishyMode]);
@@ -2011,7 +2168,12 @@ function App() {
   }
 
   /** Payload for `sync_preview_input` — must match Rust `SyncPreviewInput` (camelCase). */
-  function buildSyncPreviewPayload(nx: number, ny: number, modeStr: string) {
+  function buildSyncPreviewPayload(_nx: number, _ny: number, modeStr: string) {
+    // During rope settings phase, lock the hover position to the stored
+    // second endpoint so the rope preview stays fixed while adjusting params.
+    const rSnap = ropePhase.ref.current;
+    const nx = rSnap ? rSnap.data.nx2 : _nx;
+    const ny = rSnap ? rSnap.data.ny2 : _ny;
     const im = interactionModeRef.current;
     const isSculpt = im === "sculpt";
     const isGenerator = im === "generator";
@@ -2062,6 +2224,12 @@ function App() {
             generatorClothStiffnessScale: clothSimStiffnessPctRef.current / 100,
             generatorClothIterations: clothSimIterationsRef.current,
             generatorClothConstraintPasses: clothSimConstraintPassesRef.current,
+            generatorRockSize: Math.max(1, generatorSphereRadiusRef.current),
+            generatorRockRoughness: rockRoughnessRef.current,
+            generatorRockSeed: rockPreviewSeedRef.current,
+            generatorGrassDensity: grassDensityRef.current,
+            generatorGrassMaxHeight: grassMaxHeightRef.current,
+            generatorGrassSeed: grassPreviewSeedRef.current,
           }
         : {}),
     };
@@ -2079,9 +2247,9 @@ function App() {
       lineStart?: { nx: number; ny: number } | null;
       brushPrev?: { nx: number; ny: number } | null;
     },
-  ) {
+  ): Promise<void> {
     const dispatch = getStrokeDispatch(interactionModeRef.current);
-    if (!dispatch) return;
+    if (!dispatch) return Promise.resolve();
     const lineStart = opts?.lineStart;
     const brushPrev = opts?.brushPrev;
     const isFill = drawStrokeModeRef.current === "fill";
@@ -2112,7 +2280,7 @@ function App() {
         : {}),
     };
     if (dispatch.kind === "edit") {
-      void invoke("voxel_edit_at_screen", {
+      return invoke("voxel_edit_at_screen", {
         args: {
           ...sharedArgs,
           tool: dispatch.tool,
@@ -2120,14 +2288,14 @@ function App() {
           material: activeMaterialRef.current,
         },
       })
-        .catch((e) => {
+        .catch((e: unknown) => {
           console.error("[voxelle] voxel_edit_at_screen error", e);
         })
         .finally(() => {
           if (isFill) endFillOperation();
-        });
+        }) as Promise<void>;
     } else {
-      void invoke<number>("selection_stroke_at_screen", {
+      return invoke<number>("selection_stroke_at_screen", {
         args: {
           ...sharedArgs,
           interaction: dispatch.interaction,
@@ -2280,26 +2448,6 @@ function App() {
     });
   }
 
-  function commitClothGenerator() {
-    const pins = clothPinsRef.current;
-    if (pins.length < 3) return;
-    void invoke("generator_cloth_from_pins_cmd", {
-      args: {
-        pins: pins.map((p) => [p[0], p[1], p[2]]),
-        tension: clothTension,
-        gravityDirection: clothGravityDirection,
-        brushRadius: ropeBrushRadiusIndex,
-        brushShape: sculptBrushShapeToRust(ropeBrushShapeUi),
-        color: activeColorRef.current,
-        material: activeMaterialRef.current,
-        gravityScale: clothSimGravityPct / 100,
-        stiffnessScale: clothSimStiffnessPct / 100,
-        clothIterations: clothSimIterations,
-        clothConstraintPasses: clothSimConstraintPasses,
-      },
-    }).catch(() => {});
-    setClothPins([]);
-  }
 
   function applyPolygonStrokeFill() {
     if (strokePolygonVerts.length < 3) return;
@@ -2536,6 +2684,31 @@ function App() {
       .catch(() => setLastSessionInfo(null))
       .finally(() => setLastSessionReady(true));
   }, []);
+
+  useEffect(() => {
+    if (!lastSessionReady || !lastSessionInfo?.lastDocumentPath) return;
+    const p = loadPreferences();
+    if (!p.reopenLastProject) return;
+    const info = lastSessionInfo;
+    const doc = info.lastDocumentPath;
+    const auto = info.autosavePath;
+    const useAutosave =
+      info.autosaveExists &&
+      auto != null &&
+      auto !== "" &&
+      (!info.documentExists || info.autosaveNewerThanDocument);
+    if (useAutosave) {
+      void invoke("load_voxelle_recovery", {
+        args: { documentPath: doc, autosavePath: auto },
+      }).catch((err) => {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      });
+    } else if (info.documentExists) {
+      void invoke("load_voxelle_path", { path: doc }).catch((err) => {
+        setLoadError(err instanceof Error ? err.message : String(err));
+      });
+    }
+  }, [lastSessionReady, lastSessionInfo]);
 
   useEffect(() => {
     const p = loadPreferences();
@@ -2832,8 +3005,10 @@ function App() {
     const im = interactionModeRef.current;
     if (im !== "generator") return;
     if (interactionBlockedRef.current) return;
-    const p = lastViewportPickNormRef.current;
-    if (p == null) return;
+    // During rope settings phase, buildSyncPreviewPayload overrides nx/ny to
+    // the stored second endpoint, so even a dummy (0,0) works.  For cloth the
+    // preview is pin-based and doesn't use hover coords.
+    const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
     void invoke("sync_preview_input", {
       args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(im)),
     }).catch(() => {});
@@ -2853,6 +3028,9 @@ function App() {
     clothSimConstraintPasses,
     generatorSphereRadius,
     activeColor,
+    rockRoughness,
+    grassDensity,
+    grassMaxHeight,
   ]);
 
   useEffect(() => {
@@ -2872,22 +3050,8 @@ function App() {
   }, [matchMaterialSelectColor]);
 
   useEffect(() => {
-    void invoke("set_mood_params", {
-      args: {
-        grain: moodGrain,
-        vignette: moodVignette,
-        distanceTint: moodDistanceTint,
-        atmosphere: moodAtmosphere,
-        sunShafts: moodSunShafts,
-      },
-    }).catch(() => {});
-  }, [
-    moodGrain,
-    moodVignette,
-    moodDistanceTint,
-    moodAtmosphere,
-    moodSunShafts,
-  ]);
+    void invoke("set_mood_params", { args: mood }).catch(() => {});
+  }, [mood]);
 
   useEffect(() => {
     if (interactionMode !== "fly") {
@@ -3175,7 +3339,18 @@ function App() {
     probingRef.current = true;
     gestureRef.current = null;
 
-    // Cancel extrude phase on any new viewport click.
+    // Extrude settings phase: re-drag to reposition endpoint instead of cancelling.
+    if (
+      extrudePhase.ref.current &&
+      interactionModeRef.current === "sculpt" &&
+      sculptStrokeModeRef.current === "extrude" &&
+      e.button === 0
+    ) {
+      extrudeRedragRef.current = true;
+      probingRef.current = false;
+      return;
+    }
+    // Cancel extrude phase on any other click.
     if (extrudePhase.ref.current) {
       extrudePhase.cancel();
     }
@@ -3251,14 +3426,16 @@ function App() {
         mode === "generator" ||
         mode === "squishy") &&
       e.button === 0;
-    // Fill mode skips drag entirely and commits on pointer-up via a screen
-    // coordinate alone, so it never needs the async pick probe.  Skipping the
-    // probe avoids a race where onPointerUp fires while the probe is still
-    // in-flight, causing the click to be silently discarded (the "click twice
-    // to fill" bug).
-    const skipProbeForFill =
-      isDrawOrSelect && drawStrokeModeRef.current === "fill";
-    if (isDrawOrSelect && !skipProbeForFill) {
+    // Fill and selection modes skip the async pick probe — they commit on
+    // pointer-up via a screen coordinate alone, so the Rust side handles
+    // misses gracefully.  Skipping the probe avoids a race where onPointerUp
+    // fires while the probe is still in-flight, causing the click to be
+    // silently discarded (the "click twice to fill/select" bug).
+    const skipProbe =
+      isDrawOrSelect &&
+      (drawStrokeModeRef.current === "fill" ||
+        getStrokeDispatch(mode)?.kind === "selection");
+    if (isDrawOrSelect && !skipProbe) {
       try {
         hitSolid = await invoke<boolean>("voxel_pick_probe", {
           args: { nx, ny },
@@ -3267,7 +3444,7 @@ function App() {
         hitSolid = false;
       }
     }
-    if (skipProbeForFill) {
+    if (skipProbe) {
       hitSolid = true;
     }
 
@@ -3611,6 +3788,47 @@ function App() {
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
       return;
     }
+    // Extrude re-drag: reposition endpoint during settings phase.
+    if (extrudeRedragRef.current && e.buttons && pointerStartRef.current) {
+      const now = Date.now();
+      if (now - lastStrokeEditMsRef.current >= 24) {
+        lastStrokeEditMsRef.current = now;
+        const startNorm = extrudeStartNormRef.current;
+        if (startNorm) {
+          const dpr = window.devicePixelRatio || 1;
+          const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
+          const screenDy = (pointerStartRef.current.y - e.clientY) * dpr;
+          void invoke("extrude_ray_preview", {
+            args: {
+              startNx: startNorm.nx,
+              startNy: startNorm.ny,
+              screenDx,
+              screenDy,
+              directionRef: extrudeDirectionRefRef.current,
+              color: activeColorRef.current,
+              material: activeMaterialRef.current,
+              brushRadius: sculptBrushRadiusRef.current,
+              brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+              brushStrength: sculptBrushStrengthRef.current,
+              brushFalloff: sculptBrushFalloffRef.current,
+              strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
+              extrudeProfile: extrudeProfileRef.current,
+              extrudeEndCap: extrudeEndCapRef.current,
+              extrudeTaper: extrudeTaperRef.current,
+              extrudeTaperStart: extrudeTaperRef.current
+                ? extrudeTaperStartRef.current
+                : 0,
+              extrudeTaperEnd: extrudeTaperRef.current
+                ? extrudeTaperEndRef.current
+                : 0,
+            },
+          }).catch((err) => {
+            console.error("[extrude_ray_preview re-drag]", err);
+          });
+        }
+      }
+      return;
+    }
     if (
       gestureRef.current &&
       gestureRef.current.pointerId === e.pointerId &&
@@ -3714,16 +3932,63 @@ function App() {
         if (now - lastStrokeEditMsRef.current >= 24) {
           lastStrokeEditMsRef.current = now;
           dragDidEditRef.current = true;
-          const sculptBrushPrev = lastStrokeNormRef.current;
-          void invoke("voxel_sculpt_stroke_preview_at_screen", {
-            args: buildSculptStrokeInvokeArgs(px, py, {
-              strokeSegmentPrev: sculptBrushPrev,
-            }),
-          })
-            .finally(() => {
-              lastStrokeNormRef.current = { nx: px, ny: py };
+          if (
+            sculptStrokeModeRef.current === "extrude" &&
+            pointerStartRef.current &&
+            (strokeViewportStartRef.current || extrudeRedragRef.current)
+          ) {
+            // Ray-based extrude: compute screen delta and send to Rust.
+            // Use stored start position for re-drags during settings phase.
+            const startNorm =
+              extrudeStartNormRef.current ?? strokeViewportStartRef.current;
+            if (startNorm) {
+              // On first drag, persist the start position for later re-drags.
+              if (!extrudeStartNormRef.current && strokeViewportStartRef.current) {
+                extrudeStartNormRef.current = { ...strokeViewportStartRef.current };
+              }
+              const dpr = window.devicePixelRatio || 1;
+              const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
+              const screenDy = (pointerStartRef.current.y - e.clientY) * dpr; // screen up = +
+              void invoke("extrude_ray_preview", {
+                args: {
+                  startNx: startNorm.nx,
+                  startNy: startNorm.ny,
+                  screenDx,
+                  screenDy,
+                  directionRef: extrudeDirectionRefRef.current,
+                  color: activeColorRef.current,
+                  material: activeMaterialRef.current,
+                  brushRadius: sculptBrushRadiusRef.current,
+                  brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+                  brushStrength: sculptBrushStrengthRef.current,
+                  brushFalloff: sculptBrushFalloffRef.current,
+                  strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
+                  extrudeProfile: extrudeProfileRef.current,
+                  extrudeEndCap: extrudeEndCapRef.current,
+                  extrudeTaper: extrudeTaperRef.current,
+                  extrudeTaperStart: extrudeTaperRef.current
+                    ? extrudeTaperStartRef.current
+                    : 0,
+                  extrudeTaperEnd: extrudeTaperRef.current
+                    ? extrudeTaperEndRef.current
+                    : 0,
+                },
+              }).catch((err) => {
+                console.error("[extrude_ray_preview]", err);
+              });
+            }
+          } else {
+            const sculptBrushPrev = lastStrokeNormRef.current;
+            void invoke("voxel_sculpt_stroke_preview_at_screen", {
+              args: buildSculptStrokeInvokeArgs(px, py, {
+                strokeSegmentPrev: sculptBrushPrev,
+              }),
             })
-            .catch(() => {});
+              .finally(() => {
+                lastStrokeNormRef.current = { nx: px, ny: py };
+              })
+              .catch(() => {});
+          }
         }
       }
       return;
@@ -3781,6 +4046,12 @@ function App() {
 
   const onPointerUp = (e: React.PointerEvent) => {
     logPlaneStrokeDebug("up:received", e);
+    // Extrude re-drag: stay in settings phase after repositioning endpoint.
+    if (extrudeRedragRef.current) {
+      extrudeRedragRef.current = false;
+      pointerStartRef.current = null;
+      return;
+    }
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
       probingRef.current = false;
       resetPointerGesture("probe-up", e);
@@ -3864,26 +4135,22 @@ function App() {
               },
             }).catch(() => {});
           } else if (gk === "cloth") {
-            void handleClothPinClick(nx, ny);
+            if (!clothPhase.active) {
+              void handleClothPinClick(nx, ny);
+            }
           } else if (gk === "rope") {
-            if (!ropeFirstScreen) {
+            if (ropePhase.active) {
+              // Already in settings phase — ignore clicks
+            } else if (!ropeFirstScreen) {
               setRopeFirstScreen({ nx, ny });
             } else {
-              void invoke("generator_rope_at_screen", {
-                args: {
-                  nx1: ropeFirstScreen.nx,
-                  ny1: ropeFirstScreen.ny,
-                  nx2: nx,
-                  ny2: ny,
-                  sag: ropeSag,
-                  tension: ropeTension,
-                  brushRadius: ropeBrushRadiusIndex,
-                  brushShape: sculptBrushShapeToRust(ropeBrushShapeUi),
-                  color: activeColorRef.current,
-                  material: activeMaterialRef.current,
-                },
-              }).catch(() => {});
-              setRopeFirstScreen(null);
+              // Enter settings phase instead of immediately generating
+              ropePhase.enter("settings", {
+                nx1: ropeFirstScreen.nx,
+                ny1: ropeFirstScreen.ny,
+                nx2: nx,
+                ny2: ny,
+              });
             }
           } else if (gk === "ashlar") {
             void invoke("generator_ashlar_at_screen", {
@@ -4143,6 +4410,10 @@ function App() {
           });
         }
         // Single-click handling (no drag)
+        // For selection strokes, we must wait for the stroke invoke to
+        // complete before calling selection_stroke_end, otherwise the
+        // end command can race ahead and clear the accumulator.
+        let clickStrokePromise: Promise<void> | null = null;
         if (!dragDidEditRef.current && moved < 5) {
           if (
             (sm === "cuboid" || sm === "cylinder") &&
@@ -4171,7 +4442,7 @@ function App() {
             void invokeSelectionSpecialClick(dispatch.interaction, nx, ny);
           } else {
             const lineStart = strokeViewportLineStartNorm();
-            runStrokeAtScreen(nx, ny, {}, { lineStart });
+            clickStrokePromise = runStrokeAtScreen(nx, ny, {}, { lineStart });
           }
         }
         logPlaneStrokeDebug("up:stroke-end", e, {
@@ -4183,8 +4454,15 @@ function App() {
         if (dispatch.kind === "edit") {
           void invoke("voxel_stroke_end").catch(() => {});
         } else {
-          void invoke("selection_stroke_end").catch(() => {});
-          selectionStrokeBegunRef.current = false;
+          const endSelection = () => {
+            void invoke("selection_stroke_end").catch(() => {});
+            selectionStrokeBegunRef.current = false;
+          };
+          if (clickStrokePromise) {
+            void clickStrokePromise.then(endSelection);
+          } else {
+            endSelection();
+          }
         }
         lastStrokeNormRef.current = null;
       } else if (m === "sculpt") {
@@ -4530,20 +4808,17 @@ function App() {
     sculptStrokeMode === "wall" &&
     wallAreaShape === "polygon";
 
-  const showClothGeneratorHud =
-    showEditorChrome &&
-    interactionMode === "generator" &&
-    toolsPane === "generators" &&
-    generatorKind === "cloth";
-
   const showViewportTopCenterStack =
     showEditorChrome &&
     (viewportTopCenterHud != null ||
       cuboidPhase.active ||
       cylinderPhase.active ||
+      extrudePhase.active ||
+      ropePhase.active ||
+      clothPhase.active ||
+      (generatorKind === "cloth" && clothPins.length > 0) ||
       showPolygonPhaseHud ||
-      showWallSculptPolygonHud ||
-      showClothGeneratorHud);
+      showWallSculptPolygonHud);
 
   const selectionMethod = deriveSelectionMethod({
     drawStrokeMode,
@@ -5114,8 +5389,13 @@ function App() {
                               disabled={loading || workBusy}
                               onClick={() => {
                                 setGeneratorKind(id);
-                                setRopeFirstScreen(null);
-                                setClothPins([]);
+                                if (ropePhase.active) ropePhase.cancel();
+                                else setRopeFirstScreen(null);
+                                if (clothPhase.active) clothPhase.cancel();
+                                else {
+                                  setClothPins([]);
+                                  clothPinsRef.current = [];
+                                }
                               }}
                             >
                               <span className="sidebar-mode-label">
@@ -5132,21 +5412,39 @@ function App() {
                           interactionMode={interactionMode}
                           setInteractionMode={setInteractionMode}
                         />
-                        {generatorKind === "rope" && ropeFirstScreen ? (
+                        {generatorKind === "rope" &&
+                        ropeFirstScreen &&
+                        !ropePhase.active ? (
                           <p
                             className="sidebar-pane-hint sidebar-toolpanel-hint"
                             role="status"
                           >
-                            Click second point to finish rope.
+                            Click second point for rope.
                           </p>
                         ) : null}
-                        {generatorKind === "cloth" ? (
+                        {generatorKind === "rope" && ropePhase.active ? (
                           <p
                             className="sidebar-pane-hint sidebar-toolpanel-hint"
                             role="status"
                           >
-                            Cloth: click the surface to add pins (3+ corners),
-                            then Apply in tool options.
+                            Adjust tension and sag, then Done.
+                          </p>
+                        ) : null}
+                        {generatorKind === "cloth" && !clothPhase.active ? (
+                          <p
+                            className="sidebar-pane-hint sidebar-toolpanel-hint"
+                            role="status"
+                          >
+                            Cloth: click surface to add pins (3+ corners), then
+                            Done.
+                          </p>
+                        ) : null}
+                        {generatorKind === "cloth" && clothPhase.active ? (
+                          <p
+                            className="sidebar-pane-hint sidebar-toolpanel-hint"
+                            role="status"
+                          >
+                            Adjust settings, then Done.
                           </p>
                         ) : null}
                         {generatorKind === "roof" ? (
@@ -5665,6 +5963,185 @@ function App() {
                     </button>
                   </div>
                 ) : null}
+                {/* Cloth placing phase: pin count + Done/Cancel */}
+                {generatorKind === "cloth" &&
+                !clothPhase.active &&
+                clothPins.length > 0 ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Cloth pin placement"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
+                      Cloth
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--app-text-muted)",
+                      }}
+                    >
+                      {clothPins.length} pin{clothPins.length !== 1 ? "s" : ""}
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => {
+                        setClothPins([]);
+                        clothPinsRef.current = [];
+                        void invoke("voxel_stroke_preview_reset").catch(
+                          () => {},
+                        );
+                      }}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={clothPins.length < 3}
+                      onClick={() => clothPhase.enter("settings", {})}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ) : null}
+                {/* Cloth settings phase: tension slider + Done/Cancel */}
+                {clothPhase.active ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Cloth settings"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
+                      Cloth
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--app-text-muted)",
+                      }}
+                    >
+                      Tension
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={clothTension}
+                      onChange={(ev) =>
+                        setClothTension(Number(ev.target.value))
+                      }
+                      style={{ width: 80 }}
+                      title="0 = loose drape, 1 = stiff"
+                    />
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        minWidth: "2.2em",
+                        textAlign: "right",
+                      }}
+                    >
+                      {clothTension.toFixed(2)}
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => clothPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => clothPhase.commit()}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ) : null}
+                {/* Rope settings phase: tension + sag sliders + Done/Cancel */}
+                {ropePhase.active ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Rope settings"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
+                      Rope
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--app-text-muted)",
+                      }}
+                    >
+                      Tension
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={ropeTension}
+                      onChange={(ev) =>
+                        setRopeTension(Number(ev.target.value))
+                      }
+                      style={{ width: 60 }}
+                      title="0 = loose, 1 = taut"
+                    />
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        minWidth: "2.2em",
+                        textAlign: "right",
+                      }}
+                    >
+                      {ropeTension.toFixed(2)}
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--app-text-muted)",
+                      }}
+                    >
+                      Sag
+                    </span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={8}
+                      step={0.1}
+                      value={ropeSag}
+                      onChange={(ev) => setRopeSag(Number(ev.target.value))}
+                      style={{ width: 60 }}
+                    />
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        minWidth: "1.6em",
+                        textAlign: "right",
+                      }}
+                    >
+                      {ropeSag.toFixed(1)}
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => ropePhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => ropePhase.commit()}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ) : null}
                 {showWallSculptPolygonHud ? (
                   <div
                     className="viewport-polygon-phase-bar"
@@ -5695,37 +6172,6 @@ function App() {
                         onClick={() => commitWallSculptPolygonStroke()}
                       >
                         Done
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-                {showClothGeneratorHud ? (
-                  <div
-                    className="viewport-polygon-phase-bar"
-                    role="dialog"
-                    aria-label="Cloth pins"
-                  >
-                    <p className="viewport-polygon-phase-hint">
-                      Cloth: {clothPins.length} pin
-                      {clothPins.length === 1 ? "" : "s"}. Click surface to add
-                      or toggle; need 3+ for Apply (tool options).
-                    </p>
-                    <div className="viewport-polygon-phase-actions">
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy}
-                        onClick={() => setClothPins([])}
-                      >
-                        Clear
-                      </button>
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy || clothPins.length < 3}
-                        onClick={() => commitClothGenerator()}
-                      >
-                        Apply
                       </button>
                     </div>
                   </div>
@@ -6152,6 +6598,53 @@ function App() {
                       ) : null}
                       {sculptStrokeMode === "extrude" ? (
                         <>
+                          <div
+                            className="tool-options-heading"
+                            style={{ marginTop: "0.35rem" }}
+                          >
+                            Direction
+                          </div>
+                          <div
+                            className="tool-options-shape-row"
+                            role="group"
+                            aria-label="Extrude direction reference"
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
+                              gap: "0.25rem",
+                            }}
+                          >
+                            {(
+                              [
+                                ["auto", "Auto"],
+                                ["camera", "Cam"],
+                                ["x", "X"],
+                                ["y", "Y"],
+                                ["z", "Z"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  extrudeDirectionRef === id
+                                    ? "tool-options-shape-btn is-active"
+                                    : "tool-options-shape-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() => setExtrudeDirectionRef(id)}
+                                title={
+                                  id === "auto"
+                                    ? "Along dominant axis of start face"
+                                    : id === "camera"
+                                      ? "View plane: drag maps through camera right/up"
+                                      : `World ±${id.toUpperCase()} (sign from drag)`
+                                }
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
                           <div
                             className="tool-options-heading"
                             style={{ marginTop: "0.35rem" }}
@@ -7051,15 +7544,6 @@ function App() {
                           {clothSimConstraintPasses}
                         </span>
                       </label>
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        style={{ marginTop: "0.5rem", width: "100%" }}
-                        disabled={loading || workBusy || clothPins.length < 3}
-                        onClick={() => commitClothGenerator()}
-                      >
-                        Apply cloth
-                      </button>
                     </>
                   ) : null}
                   {generatorKind === "ashlar" ? (
@@ -7524,75 +8008,236 @@ function App() {
               ) : null}
               {toolsPane === "mood" ? (
                 <div className="tool-options-section">
-                  <div className="tool-options-heading">Mood</div>
-                  <label className="tool-options-range-label">
-                    <span>Grain</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={moodGrain}
-                      onChange={(ev) => setMoodGrain(Number(ev.target.value))}
-                      disabled={loading || workBusy}
-                    />
+                  {/* ── Grain ────────────────────────────── */}
+                  <div className="tool-options-heading">Grain</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input type="checkbox" checked={mood.grainEnabled}
+                      onChange={(ev) => setMood((p) => moodWith(p, { grainEnabled: ev.target.checked }))}
+                      disabled={loading || workBusy} />
+                    <span>Enable grain</span>
                   </label>
+                  {mood.grainEnabled && <>
+                    <label className="tool-options-range-label">
+                      <span>Strength</span>
+                      <input type="range" min={0} max={0.5} step={0.01} value={mood.grainStrength}
+                        onChange={(ev) => setMood((p) => moodWith(p, { grainStrength: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <input type="checkbox" checked={mood.grainAnimated}
+                        onChange={(ev) => setMood((p) => moodWith(p, { grainAnimated: ev.target.checked }))}
+                        disabled={loading || workBusy} />
+                      <span>Animated</span>
+                    </label>
+                    {mood.grainAnimated && (
+                      <label className="tool-options-range-label">
+                        <span>Speed</span>
+                        <input type="range" min={0} max={4} step={0.1} value={mood.grainSpeed}
+                          onChange={(ev) => setMood((p) => moodWith(p, { grainSpeed: Number(ev.target.value) }))}
+                          disabled={loading || workBusy} />
+                      </label>
+                    )}
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                      <input type="checkbox" checked={mood.grainColorful}
+                        onChange={(ev) => setMood((p) => moodWith(p, { grainColorful: ev.target.checked }))}
+                        disabled={loading || workBusy} />
+                      <span>Colorful</span>
+                    </label>
+                  </>}
+
+                  {/* ── Vignette ─────────────────────────── */}
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Vignette</div>
                   <label className="tool-options-range-label">
-                    <span>Vignette</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={moodVignette}
-                      onChange={(ev) =>
-                        setMoodVignette(Number(ev.target.value))
-                      }
-                      disabled={loading || workBusy}
-                    />
+                    <span>Strength</span>
+                    <input type="range" min={0} max={1} step={0.02} value={mood.vignette}
+                      onChange={(ev) => setMood((p) => moodWith(p, { vignette: Number(ev.target.value) }))}
+                      disabled={loading || workBusy} />
                   </label>
-                  <label className="tool-options-range-label">
-                    <span>Distance tint</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={moodDistanceTint}
-                      onChange={(ev) =>
-                        setMoodDistanceTint(Number(ev.target.value))
-                      }
-                      disabled={loading || workBusy}
-                    />
+
+                  {/* ── Atmosphere ────────────────────────── */}
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Atmosphere</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input type="checkbox" checked={mood.atmEnabled}
+                      onChange={(ev) => setMood((p) => moodWith(p, { atmEnabled: ev.target.checked }))}
+                      disabled={loading || workBusy} />
+                    <span>Enable atmosphere</span>
                   </label>
-                  <label className="tool-options-range-label">
-                    <span>Atmosphere</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={moodAtmosphere}
-                      onChange={(ev) =>
-                        setMoodAtmosphere(Number(ev.target.value))
-                      }
-                      disabled={loading || workBusy}
-                    />
+                  {mood.atmEnabled && <>
+                    <label className="tool-options-range-label">
+                      <span>Color</span>
+                      <input type="color" value={mood.atmColor}
+                        onChange={(ev) => setMood((p) => moodWith(p, { atmColor: ev.target.value }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Thickness</span>
+                      <input type="range" min={1} max={200} step={1} value={mood.atmThickness}
+                        onChange={(ev) => setMood((p) => moodWith(p, { atmThickness: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Density</span>
+                      <input type="range" min={0} max={1} step={0.02} value={mood.atmDensity}
+                        onChange={(ev) => setMood((p) => moodWith(p, { atmDensity: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.25rem" }}>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                        <input type="radio" name="atm-spatial" checked={mood.atmAerial}
+                          onChange={() => setMood((p) => moodWith(p, { atmAerial: true }))}
+                          disabled={loading || workBusy} />
+                        <span>Aerial</span>
+                      </label>
+                      <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                        <input type="radio" name="atm-spatial" checked={!mood.atmAerial}
+                          onChange={() => setMood((p) => moodWith(p, { atmAerial: false }))}
+                          disabled={loading || workBusy} />
+                        <span>Plane</span>
+                      </label>
+                    </div>
+                    {!mood.atmAerial && (
+                      <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.25rem" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                          <input type="radio" name="atm-mode" checked={!mood.atmPositiveSide}
+                            onChange={() => setMood((p) => moodWith(p, { atmPositiveSide: false }))}
+                            disabled={loading || workBusy} />
+                          <span>Layer (slab)</span>
+                        </label>
+                        <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
+                          <input type="radio" name="atm-mode" checked={mood.atmPositiveSide}
+                            onChange={() => setMood((p) => moodWith(p, { atmPositiveSide: true }))}
+                            disabled={loading || workBusy} />
+                          <span>Above face</span>
+                        </label>
+                      </div>
+                    )}
+                    <label className="tool-options-range-label">
+                      <span>Height bias</span>
+                      <input type="range" min={-200} max={200} step={1} value={mood.atmHeightBias}
+                        onChange={(ev) => setMood((p) => moodWith(p, { atmHeightBias: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Height falloff</span>
+                      <input type="range" min={10} max={400} step={1} value={mood.atmHeightFalloff}
+                        onChange={(ev) => setMood((p) => moodWith(p, { atmHeightFalloff: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
+                      <input type="checkbox" checked={mood.atmDriftEnabled}
+                        onChange={(ev) => setMood((p) => moodWith(p, { atmDriftEnabled: ev.target.checked }))}
+                        disabled={loading || workBusy} />
+                      <span>Drift</span>
+                    </label>
+                    {mood.atmDriftEnabled && <>
+                      <label className="tool-options-range-label">
+                        <span>Amount</span>
+                        <input type="range" min={0} max={1} step={0.02} value={mood.atmDriftAmount}
+                          onChange={(ev) => setMood((p) => moodWith(p, { atmDriftAmount: Number(ev.target.value) }))}
+                          disabled={loading || workBusy} />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Scale</span>
+                        <input type="range" min={0.001} max={0.1} step={0.001} value={mood.atmDriftScale}
+                          onChange={(ev) => setMood((p) => moodWith(p, { atmDriftScale: Number(ev.target.value) }))}
+                          disabled={loading || workBusy} />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Speed</span>
+                        <input type="range" min={0} max={2} step={0.02} value={mood.atmDriftSpeed}
+                          onChange={(ev) => setMood((p) => moodWith(p, { atmDriftSpeed: Number(ev.target.value) }))}
+                          disabled={loading || workBusy} />
+                      </label>
+                    </>}
+                  </>}
+
+                  {/* ── Distance tint ────────────────────── */}
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Distance tint</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input type="checkbox" checked={mood.dtEnabled}
+                      onChange={(ev) => setMood((p) => moodWith(p, { dtEnabled: ev.target.checked }))}
+                      disabled={loading || workBusy} />
+                    <span>Enable distance tint</span>
                   </label>
-                  <label className="tool-options-range-label">
-                    <span>Sun shafts</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={moodSunShafts}
-                      onChange={(ev) =>
-                        setMoodSunShafts(Number(ev.target.value))
-                      }
-                      disabled={loading || workBusy}
-                    />
+                  {mood.dtEnabled && <>
+                    <label className="tool-options-range-label">
+                      <span>Near color</span>
+                      <input type="color" value={mood.dtNearColor}
+                        onChange={(ev) => setMood((p) => moodWith(p, { dtNearColor: ev.target.value }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Mid color</span>
+                      <input type="color" value={mood.dtMidColor}
+                        onChange={(ev) => setMood((p) => moodWith(p, { dtMidColor: ev.target.value }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Far color</span>
+                      <input type="color" value={mood.dtFarColor}
+                        onChange={(ev) => setMood((p) => moodWith(p, { dtFarColor: ev.target.value }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Near distance</span>
+                      <input type="range" min={1} max={200} step={1} value={mood.dtNearDist}
+                        onChange={(ev) => setMood((p) => moodWith(p, { dtNearDist: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Far distance</span>
+                      <input type="range" min={1} max={400} step={1} value={mood.dtFarDist}
+                        onChange={(ev) => setMood((p) => moodWith(p, { dtFarDist: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Strength</span>
+                      <input type="range" min={0} max={1} step={0.02} value={mood.dtStrength}
+                        onChange={(ev) => setMood((p) => moodWith(p, { dtStrength: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                  </>}
+
+                  {/* ── Sun shafts ────────────────────────── */}
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Sun shafts</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <input type="checkbox" checked={mood.ssEnabled}
+                      onChange={(ev) => setMood((p) => moodWith(p, { ssEnabled: ev.target.checked }))}
+                      disabled={loading || workBusy} />
+                    <span>Enable sun shafts</span>
                   </label>
+                  {mood.ssEnabled && <>
+                    <label className="tool-options-range-label">
+                      <span>Strength</span>
+                      <input type="range" min={0} max={10} step={0.1} value={mood.ssStrength}
+                        onChange={(ev) => setMood((p) => moodWith(p, { ssStrength: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Decay</span>
+                      <input type="range" min={0.5} max={0.99} step={0.01} value={mood.ssDecay}
+                        onChange={(ev) => setMood((p) => moodWith(p, { ssDecay: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Density</span>
+                      <input type="range" min={0.1} max={1.5} step={0.02} value={mood.ssDensity}
+                        onChange={(ev) => setMood((p) => moodWith(p, { ssDensity: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Weight</span>
+                      <input type="range" min={0} max={1.5} step={0.02} value={mood.ssWeight}
+                        onChange={(ev) => setMood((p) => moodWith(p, { ssWeight: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                    <label className="tool-options-range-label">
+                      <span>Samples</span>
+                      <input type="range" min={20} max={56} step={1} value={mood.ssSamples}
+                        onChange={(ev) => setMood((p) => moodWith(p, { ssSamples: Number(ev.target.value) }))}
+                        disabled={loading || workBusy} />
+                    </label>
+                  </>}
                 </div>
               ) : null}
             </div>
@@ -7919,24 +8564,26 @@ function App() {
                   {collabActive ? (
                     <div className="inspector-collaboration">
                       <h4 className="inspector-heading">Session</h4>
-                      <p
-                        className={`inspector-session-status${hostWsUrl ? " is-live" : ""}`}
-                        role="status"
-                        aria-live="polite"
-                      >
-                        {hostWsUrl
-                          ? "Guests can use the link in the status bar."
-                          : "You're a guest."}
-                      </p>
                       {hostWsUrl ? (
                         <>
-                          <p className="collab-hint inspector-collab-hint">
-                            Nearby:
-                          </p>
-                          <p className="collab-hint inspector-collab-hint">
-                            {" "}
-                            <code>{hostWsUrl}</code>
-                          </p>
+                          <button
+                            type="button"
+                            className="inspector-copy-invite-btn"
+                            onClick={copyHostingJoinAddress}
+                            title={hostingCopied ? "Copied" : "Copy invite link"}
+                          >
+                            <span className="inspector-copy-invite-label">
+                              {hostingCopied ? "Copied!" : "Copy invite link"}
+                            </span>
+                            <code className="inspector-copy-invite-url">
+                              {hostWanUrl ?? hostWsUrl}
+                            </code>
+                          </button>
+                          {hostWanUrl ? (
+                            <p className="collab-hint inspector-collab-hint">
+                              Nearby: <code>{hostWsUrl}</code>
+                            </p>
+                          ) : null}
                           {prefsEnableUpnp && natPending ? (
                             <p
                               className="collab-hint collab-hint-muted inspector-collab-hint"
@@ -7944,16 +8591,6 @@ function App() {
                             >
                               Checking your router…
                             </p>
-                          ) : null}
-                          {hostWanUrl ? (
-                            <>
-                              <p className="collab-hint inspector-collab-hint">
-                                Internet:
-                              </p>
-                              <p className="collab-hint inspector-collab-hint">
-                                <code>{hostWanUrl}</code>
-                              </p>
-                            </>
                           ) : null}
                           {natError ? (
                             <p

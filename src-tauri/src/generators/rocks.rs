@@ -86,6 +86,80 @@ pub fn generate_rock_cluster_deltas(
     out
 }
 
+/// Preview-only: compute the set of voxel coords a rock cluster would occupy,
+/// without mutating the file. Used for hover preview.
+pub fn preview_rock_cluster_coords(
+    face_empty: VoxelCoord,
+    solid: VoxelCoord,
+    seed: i32,
+    size: i32,
+    roughness: f32,
+) -> Vec<VoxelCoord> {
+    let nx = (face_empty.0 - solid.0).signum();
+    let ny = (face_empty.1 - solid.1).signum();
+    let nz = (face_empty.2 - solid.2).signum();
+    let r = size.max(1).min(12);
+    let lump = roughness.clamp(0.0, 1.0) * 0.45;
+    let sx = 0.75 + hash3(seed, 1, 0, 0) * 0.5;
+    let sy = 0.75 + hash3(seed, 2, 0, 0) * 0.5;
+    let sz = 0.75 + hash3(seed, 3, 0, 0) * 0.5;
+    let cx = face_empty.0 + nx * (r / 2 + 1);
+    let cy = face_empty.1 + ny * (r / 2 + 1);
+    let cz = face_empty.2 + nz * (r / 2 + 1);
+    let mut out = Vec::new();
+    let mut seen: HashSet<VoxelCoord> = HashSet::new();
+    let rmax = r + 2;
+    for dx in -rmax..=rmax {
+        for dy in -rmax..=rmax {
+            for dz in -rmax..=rmax {
+                let px = dx as f32 / sx;
+                let py = dy as f32 / sy;
+                let pz = dz as f32 / sz;
+                let d = (px * px + py * py + pz * pz).sqrt();
+                let n = hash3(dx + seed, dy, dz, seed);
+                let perturb = (n - 0.5) * 2.0 * lump;
+                let re = r as f32 * (1.0 + perturb);
+                if d > re {
+                    continue;
+                }
+                let coord = (cx + dx, cy + dy, cz + dz);
+                if seen.insert(coord) {
+                    out.push(coord);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Preview rock cluster from screen coordinates (for hover preview).
+pub fn preview_rock_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    size: i32,
+    roughness: f32,
+) -> Vec<VoxelCoord> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(face_empty) = prev else {
+        return Vec::new();
+    };
+    // Filter out coords that already have voxels
+    preview_rock_cluster_coords(face_empty, solid, seed, size, roughness)
+        .into_iter()
+        .filter(|c| !voxel_map.contains_key(c))
+        .collect()
+}
+
 /// Face-click rocks generator (web parity).
 pub fn generator_rocks_at_screen(
     file: &mut VoxelleFile,

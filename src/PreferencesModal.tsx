@@ -68,6 +68,12 @@ export function PreferencesModal({
     onFpsCounterChange?.(checked);
   };
 
+  const onReopenLastProject = (checked: boolean) => {
+    const next = { ...prefs, reopenLastProject: checked };
+    setPrefs(next);
+    savePreferences(next);
+  };
+
   const onTone = (value: ToneMappingPreference) => {
     const next = { ...prefs, toneMapping: value };
     setPrefs(next);
@@ -200,6 +206,14 @@ export function PreferencesModal({
               onChange={(e) => onFps(e.target.checked)}
             />
             FPS overlay
+          </label>
+          <label className="prefs-checkbox-label">
+            <input
+              type="checkbox"
+              checked={prefs.reopenLastProject}
+              onChange={(e) => onReopenLastProject(e.target.checked)}
+            />
+            Automatically reopen last project on startup
           </label>
           <label className="prefs-select-label">
             <span className="prefs-select-label-text">Appearance</span>
