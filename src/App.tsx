@@ -69,6 +69,8 @@ type ViewportCursorDebugPayload = {
   rayDirX: number | null;
   rayDirY: number | null;
   rayDirZ: number | null;
+  projCubeNx: number | null;
+  projCubeNy: number | null;
 };
 
 /** Browser pointer position for the debug overlay (CSS pixels). */
@@ -179,7 +181,7 @@ function userFacingUpdaterError(err: unknown): string {
 }
 
 /** Must match Rust `ONGOING_UNSAVED_PROJECT_LABEL` (`get_last_session_info`). */
-const ONGOING_UNSAVED_PROJECT_LABEL = "An ongoing unsaved project";
+const ONGOING_UNSAVED_PROJECT_LABEL = "An unsaved project";
 
 /** Optional note when reopening (backup vs file). */
 function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
@@ -188,7 +190,7 @@ function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
     info.lastDocumentPath === ONGOING_UNSAVED_PROJECT_LABEL &&
     info.autosaveExists
   ) {
-    return "Restoring unsaved work from backup.";
+    return "The project is an autosave and will be overwritten by your next autosave.";
   }
   if (!info.documentExists && info.autosaveExists) {
     return "Couldn't find the file — opened your backup instead.";
@@ -1758,6 +1760,24 @@ function App() {
     return "select";
   }
 
+  /**
+   * Normalized viewport coords of pointer down for strokes that need a drag origin.
+   * Line style always; brush style for plane/circle/cuboid/etc. (Surface/Solid), but not Spray
+   * (Spray uses segment prev only). Without this, Rust never sees `strokeLineStart*` for Surface.
+   */
+  function strokeViewportLineStartNorm(): { nx: number; ny: number } | null {
+    const start = strokeViewportStartRef.current;
+    if (!start) return null;
+    if (strokeDrawStyleRef.current === "line") return start;
+    if (
+      strokeDrawStyleRef.current === "brush" &&
+      drawStrokeModeRef.current !== "spray"
+    ) {
+      return start;
+    }
+    return null;
+  }
+
   function runSelectionStrokeAtScreen(
     nx: number,
     ny: number,
@@ -2750,10 +2770,7 @@ function App() {
           lastStrokeEditMsRef.current = now;
           dragDidEditRef.current = true;
           const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
-          const lineStart =
-            strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
-              ? strokeViewportStartRef.current
-              : null;
+          const lineStart = strokeViewportLineStartNorm();
           const brushPrev =
             strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
               ? lastStrokeNormRef.current
@@ -2808,10 +2825,7 @@ function App() {
         if (now - lastStrokeEditMsRef.current >= 24) {
           lastStrokeEditMsRef.current = now;
           dragDidEditRef.current = true;
-          const lineStart =
-            strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
-              ? strokeViewportStartRef.current
-              : null;
+          const lineStart = strokeViewportLineStartNorm();
           const brushPrev =
             strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
               ? lastStrokeNormRef.current
@@ -3161,10 +3175,7 @@ function App() {
             void handleStrokeAnchorClick(nx, ny);
           } else {
             const tool = m === "add" ? "add" : m === "remove" ? "remove" : "paint";
-            const lineStart =
-              strokeDrawStyleRef.current === "line" && strokeViewportStartRef.current
-                ? strokeViewportStartRef.current
-                : null;
+            const lineStart = strokeViewportLineStartNorm();
             void invoke("voxel_edit_at_screen", {
               args: {
                 nx,
@@ -3790,7 +3801,7 @@ function App() {
                             setSprayDensity(s.sprayDensity);
                             setStrokeFamilyVariant(s.strokeFamilyVariant);
                           }}
-                          title="Brush along the drag (web Surface)"
+                          title="Plane / circle / polygon in the face plane (web Surface)"
                         >
                           <span className="sidebar-mode-label">Surface</span>
                         </button>
@@ -3809,7 +3820,7 @@ function App() {
                             setSprayDensity(s.sprayDensity);
                             setStrokeFamilyVariant(s.strokeFamilyVariant);
                           }}
-                          title="Solid volume stroke (line; placeholder for future volume behavior)"
+                          title="Solid volume: cube/cylinder/polygon (web Solid)"
                         >
                           <span className="sidebar-mode-label">Solid</span>
                         </button>
@@ -3887,13 +3898,15 @@ function App() {
                   {toolsPane === "sculpt" ? (
                     <>
                       <div className="sidebar-section-label">Sculpt mode</div>
-                      <div className="sidebar-mode-grid sidebar-sculpt-mode-grid">
+                      <div className="sidebar-mode-grid">
                         {(
                           [
                             ["draw", "Draw"],
                             ["gouge", "Scrape"],
                             ["smooth", "Smooth"],
+                            ["wall", "Wall"],
                             ["extrude", "Extrude"],
+                            ["terrain", "Terrain"],
                           ] as const
                         ).map(([id, label]) => (
                           <button
@@ -3903,26 +3916,6 @@ function App() {
                               sculptStrokeMode === id
                                 ? "sidebar-mode-btn is-active"
                                 : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy || interactionMode !== "sculpt"}
-                            onClick={() => setSculptStrokeMode(id)}
-                          >
-                            <span className="sidebar-mode-label">{label}</span>
-                          </button>
-                        ))}
-                        {(
-                          [
-                            ["wall", "Wall"],
-                            ["terrain", "Terrain"],
-                          ] as const
-                        ).map(([id, label]) => (
-                          <button
-                            key={id}
-                            type="button"
-                            className={
-                              sculptStrokeMode === id
-                                ? "sidebar-mode-btn is-active sidebar-sculpt-mode-wide"
-                                : "sidebar-mode-btn sidebar-sculpt-mode-wide"
                             }
                             disabled={loading || workBusy || interactionMode !== "sculpt"}
                             onClick={() => setSculptStrokeMode(id)}
@@ -4169,6 +4162,18 @@ function App() {
                   viewportCursorDebugRust.previewNy != null
                     ? `${(viewportCursorDebugJs.nx - viewportCursorDebugRust.previewNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.previewNy).toFixed(5)}`
                     : "—"}
+                </div>
+                <div>
+                  proj cube{" "}
+                  {viewportCursorDebugRust?.projCubeNx != null &&
+                  viewportCursorDebugRust.projCubeNy != null
+                    ? `${viewportCursorDebugRust.projCubeNx.toFixed(5)}, ${viewportCursorDebugRust.projCubeNy.toFixed(5)}`
+                    : "—"}
+                  {viewportCursorDebugJs &&
+                  viewportCursorDebugRust?.projCubeNx != null &&
+                  viewportCursorDebugRust.projCubeNy != null
+                    ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCubeNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCubeNy).toFixed(5)}`
+                    : ""}
                 </div>
                 <div>
                   viewport{" "}

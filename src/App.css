@@ -522,15 +522,6 @@ body,
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
-/** Sculpt mode: row of four + row of two half-width tiles. */
-.sidebar-sculpt-mode-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.sidebar-sculpt-mode-wide {
-  grid-column: span 2;
-}
-
 /** Single column — stacked buttons (Tool column beside Selection). */
 .sidebar-mode-grid-stacked {
   grid-template-columns: 1fr;
@@ -1672,6 +1663,13 @@ body,
 
 .viewport-cursor-debug-mark-rust {
   border-color: #ff4081;
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.85),
+    inset 0 0 0 1px rgba(0, 0, 0, 0.5);
+}
+
+.viewport-cursor-debug-mark-proj {
+  border-color: #00e676;
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.85),
     inset 0 0 0 1px rgba(0, 0, 0, 0.5);

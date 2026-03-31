@@ -28,6 +28,8 @@ var shadow_cmp: sampler_comparison;
 
 const HEMI_SKY: vec3<f32> = vec3<f32>(0.722, 0.831, 0.910);
 const HEMI_GROUND: vec3<f32> = vec3<f32>(0.290, 0.333, 0.408);
+/// Slightly lifts dark baked AO creases after vertex interpolation (`vertex_ao`).
+const VERTEX_AO_GAMMA: f32 = 0.9;
 
 @group(1) @binding(0)
 var hdr_bg: texture_2d<f32>;
@@ -137,7 +139,8 @@ fn transmission_shade(
     let amb = g.light_params.x;
     let sun = g.light_params.y;
     let sc = g.sun_color.xyz;
-    let lit = base * (hemi * 0.28 * vertex_ao * amb + 0.55 * ndl * shadow_visibility(world, n) * sun * sc);
+    let ao_h = pow(max(vertex_ao, 0.001), VERTEX_AO_GAMMA);
+    let lit = base * (hemi * 0.28 * ao_h * amb + 0.55 * ndl * shadow_visibility(world, n) * sun * sc);
     let refr = bg * base * net_t * (vec3<f32>(1.0) - fresnel);
     let spec = pow(max(dot(normalize(l + v), n), 0.0), 48.0) * 0.2 * sun;
     return mix(refr, lit + sc * spec, 0.15);
@@ -186,7 +189,8 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let sun = g.light_params.y;
     let sc = g.sun_color.xyz;
     let spec_blinn = pow(max(dot(n, h), 0.0), 32.0) * spec_amt * sh * sun;
-    var rgb = base * (hemi * 0.30 * in.vertex_ao * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
+    let ao_h = pow(max(in.vertex_ao, 0.001), VERTEX_AO_GAMMA);
+    var rgb = base * (hemi * 0.30 * ao_h * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
     rgb = rgb + base * glow;
     let glow_mask = select(0.0, 1.0, in.mat_kind > 0.5 && in.mat_kind < 1.5);
     out.color = vec4<f32>(rgb, glow_mask);
@@ -196,15 +200,28 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     return out;
 }
 
-/// Hover preview: readable on light scenes — avoid heavy Reinhard (was washing out edges).
+/// Hover/stroke preview voxels (see product spec):
+/// - Slightly transparent in-front pass; darker when depth-occluded or when overlapping an occupied cell.
+/// - Vertex color comes from Rust: palette (add/paint/sculpt), fixed red (remove), fixed blue (select).
+/// - Wireframe uses the same tint; drawn with an unbiased depth pipeline so it can be occluded by scene mesh.
 /// `mat_kind` > 1.5 marks edge outline geometry (`preview_cube_wireframe_mesh`); use **dark** vertex colors.
-const PREVIEW_ALPHA_FRONT: f32 = 0.9;
-const PREVIEW_ALPHA_OCCLUDED: f32 = 0.82;
-/// Edge lines: nearly opaque so they read as a wireframe, not more fill.
-const PREVIEW_ALPHA_EDGE: f32 = 0.98;
-const PREVIEW_ALPHA_EDGE_OCCLUDED: f32 = 0.94;
-/// `0x5577ee` — matches web `previewOccludedMaterial` / `applyAddShapeOccludedPreviewTint`.
-const PREVIEW_OCCLUDED_BLUE: vec3<f32> = vec3<f32>(0.333333, 0.466667, 0.933333);
+const PREVIEW_ALPHA_FRONT: f32 = 0.82;
+const PREVIEW_ALPHA_OCCLUDED: f32 = 0.70;
+/// Edge lines: slightly more opaque than fill so the cage reads; still blends as glass.
+const PREVIEW_ALPHA_EDGE: f32 = 0.90;
+const PREVIEW_ALPHA_EDGE_OCCLUDED: f32 = 0.82;
+/// Darkening for x-ray / overlap — **neutral** (hue-preserving), not a fixed blue tint.
+const PREVIEW_OCCLUDED_DIM: f32 = 0.46;
+const PREVIEW_OVERLAP_DIM: f32 = 0.52;
+/// Rust tags Paint/Remove empty-footprint preview with `mat_kind` in these bands (see `lib.rs`).
+fn is_preview_ghost_fill_paint_remove(mat: f32) -> bool {
+    return mat > 1.02 && mat < 1.14;
+}
+fn is_preview_ghost_wire_paint_remove(mat: f32) -> bool {
+    return mat > 1.55 && mat < 1.85;
+}
+/// 75% transparent (25% opaque) vs default preview glass.
+const PREVIEW_GHOST_PR_ALPHA_MUL: f32 = 0.25;
 
 fn preview_tonemap(rgb: vec3<f32>) -> vec3<f32> {
     return rgb / (rgb * vec3<f32>(0.42) + vec3<f32>(1.0));
@@ -216,8 +233,8 @@ fn preview_edge_rgb(in_color: vec3<f32>) -> vec3<f32> {
     return preview_tonemap(boosted);
 }
 
-/// In-front preview (`LessEqual` depth): unlit, semi-transparent. Darken when the preview
-/// voxel cell is occupied so overlap with existing solids matches the occluded/x-ray tone.
+/// In-front preview (`LessEqual` depth): unlit, semi-transparent. When the preview cell overlaps an
+/// existing voxel (`occ`), darken the tint (same hue as vertex color).
 @fragment
 fn fs_preview_front_mrt(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
@@ -225,36 +242,50 @@ fn fs_preview_front_mrt(in: VertexOut) -> OpaqueOut {
     let cell = vec3<i32>(floor(in.world_pos + vec3<f32>(0.5)));
     let occ = is_occupied(brick_fetch(cell));
     if (is_edge) {
-        let rgb = preview_edge_rgb(in.color * select(1.0, 0.92, occ));
-        let a = select(PREVIEW_ALPHA_EDGE, PREVIEW_ALPHA_EDGE_OCCLUDED, occ);
+        let rgb = preview_edge_rgb(in.color * select(1.0, 0.80, occ));
+        var a = select(PREVIEW_ALPHA_EDGE, PREVIEW_ALPHA_EDGE_OCCLUDED, occ);
+        if (is_preview_ghost_wire_paint_remove(in.mat_kind)) {
+            a = a * PREVIEW_GHOST_PR_ALPHA_MUL;
+        }
         out.color = vec4<f32>(rgb, a);
     } else if (occ) {
-        let dim = in.color * 0.62;
-        let rgb_lin = mix(dim, PREVIEW_OCCLUDED_BLUE, 0.4);
-        let rgb = preview_tonemap(rgb_lin);
-        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_OCCLUDED);
+        var a = PREVIEW_ALPHA_OCCLUDED;
+        if (is_preview_ghost_fill_paint_remove(in.mat_kind)) {
+            a = a * PREVIEW_GHOST_PR_ALPHA_MUL;
+        }
+        let rgb = preview_tonemap(in.color * PREVIEW_OVERLAP_DIM);
+        out.color = vec4<f32>(rgb, a);
     } else {
-        let rgb = preview_tonemap(saturate(in.color * 1.12));
-        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_FRONT);
+        var a = PREVIEW_ALPHA_FRONT;
+        if (is_preview_ghost_fill_paint_remove(in.mat_kind)) {
+            a = a * PREVIEW_GHOST_PR_ALPHA_MUL;
+        }
+        let rgb = preview_tonemap(saturate(in.color * 1.06));
+        out.color = vec4<f32>(rgb, a);
     }
     out.gbuf_n = vec4<f32>(0.0);
     return out;
 }
 
-/// X-ray pass: only where cube is behind scene geometry (`depthFunc` Greater in Three).
+/// X-ray pass: only where preview is behind scene geometry (`depthCompare` Greater).
 @fragment
 fn fs_preview_occluded_mrt(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
     let is_edge = in.mat_kind > 1.5;
     if (is_edge) {
-        // Do **not** mix occluded blue into outline — that hid edges (same hue as fill).
-        let rgb = preview_edge_rgb(in.color * 0.92);
-        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_EDGE_OCCLUDED);
+        let rgb = preview_edge_rgb(in.color * 0.80);
+        var a = PREVIEW_ALPHA_EDGE_OCCLUDED;
+        if (is_preview_ghost_wire_paint_remove(in.mat_kind)) {
+            a = a * PREVIEW_GHOST_PR_ALPHA_MUL;
+        }
+        out.color = vec4<f32>(rgb, a);
     } else {
-        let dim = in.color * 0.62;
-        let rgb_lin = mix(dim, PREVIEW_OCCLUDED_BLUE, 0.4);
-        let rgb = preview_tonemap(rgb_lin);
-        out.color = vec4<f32>(rgb, PREVIEW_ALPHA_OCCLUDED);
+        let rgb = preview_tonemap(in.color * PREVIEW_OCCLUDED_DIM);
+        var a = PREVIEW_ALPHA_OCCLUDED;
+        if (is_preview_ghost_fill_paint_remove(in.mat_kind)) {
+            a = a * PREVIEW_GHOST_PR_ALPHA_MUL;
+        }
+        out.color = vec4<f32>(rgb, a);
     }
     out.gbuf_n = vec4<f32>(0.0);
     return out;

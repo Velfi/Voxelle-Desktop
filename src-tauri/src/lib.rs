@@ -474,6 +474,7 @@ fn hash_single_cell_preview(
     cz: i32,
     tag: u8,
     debug_overlay: bool,
+    palette_color: u32,
 ) -> u64 {
     let mut h = AHasher::default();
     mode.hash(&mut h);
@@ -482,6 +483,7 @@ fn hash_single_cell_preview(
     cz.hash(&mut h);
     tag.hash(&mut h);
     debug_overlay.hash(&mut h);
+    palette_color.hash(&mut h);
     h.finish()
 }
 
@@ -502,10 +504,12 @@ fn hash_squishy_preview(
     gizmo_drag: bool,
     delete_hover_id: Option<u32>,
     debug_overlay: bool,
+    palette_color: u32,
 ) -> u64 {
     let mut h = AHasher::default();
     PreviewMode::Squishy.hash(&mut h);
     debug_overlay.hash(&mut h);
+    palette_color.hash(&mut h);
     sx.to_bits().hash(&mut h);
     sy.to_bits().hash(&mut h);
     preview_radius_i.hash(&mut h);
@@ -537,6 +541,7 @@ fn hash_brush_hover_targets(
     mode: PreviewMode,
     ctx: &PreviewHoverContext,
     targets: &[greedy_mesh::VoxelCoord],
+    voxel_map: &AHashMap<greedy_mesh::VoxelCoord, usize>,
     debug_overlay: bool,
 ) -> u64 {
     let mut sorted: Vec<_> = targets.to_vec();
@@ -554,6 +559,9 @@ fn hash_brush_hover_targets(
     ctx.material.hash(&mut h);
     ctx.match_material.hash(&mut h);
     sorted.hash(&mut h);
+    for c in &sorted {
+        voxel_map.contains_key(c).hash(&mut h);
+    }
     if let Ok(s) = serde_json::to_string(&ctx.stroke_aux) {
         s.hash(&mut h);
     }
@@ -713,6 +721,9 @@ struct ViewportCursorDebug {
     ray_dir_x: Option<f32>,
     ray_dir_y: Option<f32>,
     ray_dir_z: Option<f32>,
+    /// Preview cube world center projected back to normalized viewport coords.
+    proj_cube_nx: Option<f32>,
+    proj_cube_ny: Option<f32>,
 }
 
 /// #region agent log
@@ -804,6 +815,32 @@ fn get_viewport_cursor_debug(
         "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
     }));
     // #endregion
+    let (proj_cube_nx, proj_cube_ny) = match (texel_sx, texel_sy) {
+        (Some(sx), Some(sy)) => {
+            let file_guard = state.current_file.lock();
+            let vmap_guard = state.voxel_map.lock();
+            match (file_guard.as_ref(), vmap_guard.as_ref()) {
+                (Some(file), Some(vmap)) if !file.voxels.is_empty() => {
+                    let grid_size = file.grid_size.max(1);
+                    let (o, d) = voxel_edit::screen_to_world_ray(&cam, wf, hf, sx, sy);
+                    match voxel_edit::ray_first_solid(o, d, vmap, grid_size) {
+                        Some(((cx, cy, cz), _normal)) => {
+                            let wcx = cx as f32 + 0.5;
+                            let wcy = cy as f32 + 0.5;
+                            let wcz = cz as f32 + 0.5;
+                            match voxel_edit::world_to_viewport_pixels(&cam, wf, hf, wcx, wcy, wcz) {
+                                Some((px, py)) => (Some(px / wf), Some(py / hf)),
+                                None => (None, None),
+                            }
+                        }
+                        None => (None, None),
+                    }
+                }
+                _ => (None, None),
+            }
+        }
+        _ => (None, None),
+    };
     Ok(ViewportCursorDebug {
         viewport_width: vw,
         viewport_height: vh,
@@ -817,6 +854,8 @@ fn get_viewport_cursor_debug(
         ray_dir_x,
         ray_dir_y,
         ray_dir_z,
+        proj_cube_nx,
+        proj_cube_ny,
     })
 }
 
@@ -3162,49 +3201,124 @@ fn voxel_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(), String> 
 
 const STROKE_PREVIEW_MAX_CELLS: usize = 25_000;
 
-/// Solid + wire RGB, cube half-extent, wire thickness scale — hover and stroke preview cubes.
+/// Empty-cells-only preview (air along stroke): dimmer fill than occupied shell.
+const PREVIEW_GHOST_FILL_MUL: f32 = 0.55;
+const PREVIEW_GHOST_WIRE_MUL: f32 = 0.62;
+/// Paint/Remove ghosts: [`scene.wgsl`] `is_preview_ghost_*_paint_remove` — 75% transparent fill/wire.
+const PREVIEW_GHOST_MAT_KIND_FILL_PAINT_REMOVE: f32 = 1.08;
+const PREVIEW_GHOST_MAT_KIND_WIRE_PAINT_REMOVE: f32 = 1.72;
+
+/// Solid + wire RGB, cube half-extent, wire `mat_kind` — hover and stroke preview cubes.
+///
+/// Appearance (GPU [`scene.wgsl`] `fs_preview_*`): slightly transparent fill; darker when occluded or
+/// overlapping solids; Paint/Remove empty-footprint uses `mat_kind` bands for extra transparency;
+/// wireframe depth-tested so it can be hidden by scene mesh.
+///
+/// - **Add / Paint / sculpt** (and squishy Add-style preview): `palette_rgb` packed `0xRRGGBB`.
+/// - **Remove**: fixed red (ignore `palette_rgb`).
+/// - **Select** single-cell preview: fixed blue in [`prepare_preview_mesh`] (not this helper).
+/// - **Debug pick highlight**: fixed high-contrast red.
 fn preview_tool_colors(
     tool: voxel_edit::EditTool,
     debug_pick_highlight: bool,
+    palette_rgb: u32,
 ) -> (f32, f32, f32, f32, f32, f32, f32, f32) {
     if debug_pick_highlight {
         // Bright red fill, dark red wire — stands out for viewport cursor debug.
         return (1.0, 0.12, 0.1, 0.55, 0.0, 0.0, 0.56, 3.5);
     }
     match tool {
-        voxel_edit::EditTool::Add => (0.25f32, 0.92, 0.4, 0.02, 0.09, 0.05, 0.5f32, 2.0f32),
         voxel_edit::EditTool::Remove => (0.95, 0.28, 0.22, 0.14, 0.03, 0.03, 0.53, 2.0),
-        voxel_edit::EditTool::Paint => (0.35, 0.55, 0.98, 0.05, 0.08, 0.2, 0.53, 2.0),
+        voxel_edit::EditTool::Add | voxel_edit::EditTool::Paint => {
+            let [sr, sg, sb] = voxelle::rgb24_u32_to_linear_rgb3(palette_rgb);
+            let wr = (sr * 0.22).max(0.02);
+            let wg = (sg * 0.22).max(0.02);
+            let wb = (sb * 0.22).max(0.02);
+            (sr, sg, sb, wr, wg, wb, 0.53, 2.0)
+        }
     }
 }
 
 fn stroke_preview_meshes_for_union(
     tool: voxel_edit::EditTool,
     union: &AHashSet<greedy_mesh::VoxelCoord>,
+    voxel_map: &AHashMap<greedy_mesh::VoxelCoord, usize>,
     debug_pick_highlight: bool,
+    palette_rgb: u32,
 ) -> (greedy_mesh::MeshBuffers, greedy_mesh::MeshBuffers) {
+    // Occupied cells: shell only (large solid previews stay cheap). Empty footprint cells: always
+    // included (full brush volume in air). Stroke commit still uses the full union in
+    // [`voxel_stroke_end`].
+    let mut occupied = AHashSet::with_capacity(union.len().min(65_536));
+    let mut empty_only = AHashSet::with_capacity(union.len().min(65_536));
+    for &c in union.iter() {
+        if voxel_map.contains_key(&c) {
+            occupied.insert(c);
+        } else {
+            empty_only.insert(c);
+        }
+    }
+    let shell_occ = greedy_mesh::filter_voxel_set_to_shell(&occupied);
+    let mut sorted: Vec<greedy_mesh::VoxelCoord> =
+        shell_occ.into_iter().chain(empty_only.into_iter()).collect();
+    if sorted.is_empty() {
+        return (
+            greedy_mesh::MeshBuffers::default(),
+            greedy_mesh::MeshBuffers::default(),
+        );
+    }
+    sorted.sort_unstable_by_key(|&c| {
+        let ghost = !voxel_map.contains_key(&c);
+        (ghost, c.0, c.1, c.2)
+    });
     let mut solid = greedy_mesh::MeshBuffers::default();
     let mut wire = greedy_mesh::MeshBuffers::default();
     let (sr, sg, sb, wr, wg, wb, size, wem) =
-        preview_tool_colors(tool, debug_pick_highlight);
-    let mut sorted: Vec<_> = union.iter().copied().collect();
-    sorted.sort_unstable_by_key(|&(x, y, z)| (x, y, z));
+        preview_tool_colors(tool, debug_pick_highlight, palette_rgb);
     for (cx, cy, cz) in sorted.into_iter().take(STROKE_PREVIEW_MAX_CELLS) {
+        let ghost = !voxel_map.contains_key(&(cx, cy, cz));
+        let (srf, sgf, sbf, wrf, wgf, wbf) = if ghost {
+            (
+                sr * PREVIEW_GHOST_FILL_MUL,
+                sg * PREVIEW_GHOST_FILL_MUL,
+                sb * PREVIEW_GHOST_FILL_MUL,
+                wr * PREVIEW_GHOST_WIRE_MUL,
+                wg * PREVIEW_GHOST_WIRE_MUL,
+                wb * PREVIEW_GHOST_WIRE_MUL,
+            )
+        } else {
+            (sr, sg, sb, wr, wg, wb)
+        };
+        let ghost_pr = ghost
+            && matches!(
+                tool,
+                voxel_edit::EditTool::Remove | voxel_edit::EditTool::Paint
+            );
+        let fill_mat_k = if ghost_pr {
+            PREVIEW_GHOST_MAT_KIND_FILL_PAINT_REMOVE
+        } else {
+            1.0
+        };
+        let wire_mat_k = if ghost_pr {
+            PREVIEW_GHOST_MAT_KIND_WIRE_PAINT_REMOVE
+        } else {
+            wem
+        };
         let s = greedy_mesh::preview_cube_mesh(
             cx as f32,
             cy as f32,
             cz as f32,
             size,
-            [sr, sg, sb],
-            1.0,
+            [srf, sgf, sbf],
+            fill_mat_k,
         );
         let w = greedy_mesh::preview_cube_wireframe_mesh(
             cx as f32,
             cy as f32,
             cz as f32,
             size,
-            [wr, wg, wb],
-            wem,
+            [wrf, wgf, wbf],
+            wire_mat_k,
         );
         greedy_mesh::append_mesh_buffers(&mut solid, s);
         greedy_mesh::append_mesh_buffers(&mut wire, w);
@@ -3259,7 +3373,7 @@ fn voxel_stroke_preview_at_screen(
             (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
             _ => None,
         };
-        voxel_edit::collect_stroke_edit_targets(
+        let targets = voxel_edit::collect_stroke_preview_targets(
             file,
             vmap,
             &cam,
@@ -3278,7 +3392,8 @@ fn voxel_stroke_preview_at_screen(
             args.stroke_mode,
             args.plane_axis,
             &args.stroke_aux,
-        )
+        );
+        targets
     };
 
     {
@@ -3303,7 +3418,11 @@ fn voxel_stroke_preview_at_screen(
 
     let (solid, wire) = {
         let union = state.stroke_preview_union.lock();
-        stroke_preview_meshes_for_union(args.tool, &union, false)
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(());
+        };
+        stroke_preview_meshes_for_union(args.tool, &union, vmap, false, args.color)
     };
 
     {
@@ -3615,29 +3734,29 @@ fn selection_stroke_at_screen(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
-    };
-    let vm = state.voxel_map.lock();
-    let Some(vmap) = vm.as_ref() else {
-        return Err("voxel index not ready".into());
-    };
-    let cam = state.camera.lock();
-
-    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
-        (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
-        _ => None,
-    };
-    let stroke_segment_prev = match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
-        (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
-        _ => None,
-    };
-
     let interaction = args.interaction.as_str();
 
-    let coords: Vec<greedy_mesh::VoxelCoord> =
+    let coords: Vec<greedy_mesh::VoxelCoord> = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        let stroke_line_start = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
+            (Some(lnx), Some(lny)) => Some(viewport_texels_from_norm(lnx, lny, w, h)),
+            _ => None,
+        };
+        let stroke_segment_prev = match (args.stroke_segment_prev_nx, args.stroke_segment_prev_ny) {
+            (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
+            _ => None,
+        };
+
         if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill) {
             match interaction {
                 "selectCoplanar" => voxel_edit::coplanar_connected_from_screen(
@@ -3742,7 +3861,8 @@ fn selection_stroke_at_screen(
                 _ => {}
             }
             c
-        };
+        }
+    };
 
     if coords.is_empty() {
         return Ok(0);
@@ -3773,18 +3893,20 @@ fn selection_toggle_at_screen(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
+    let maybe_coord: Option<greedy_mesh::VoxelCoord> = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        voxel_edit::pick_solid_coord_at_screen(file, vmap, &cam, w, h, sx, sy)
     };
-    let vm = state.voxel_map.lock();
-    let Some(vmap) = vm.as_ref() else {
-        return Err("voxel index not ready".into());
-    };
-    let cam = state.camera.lock();
-    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let Some(c) = voxel_edit::pick_solid_coord_at_screen(file, vmap, &cam, w, h, sx, sy)
-    else {
+    let Some(c) = maybe_coord else {
         return Ok(false);
     };
     let mode = *state.selection_combine_mode.lock();
@@ -3932,25 +4054,27 @@ fn selection_add_by_color_at_screen(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
+    let coords: Vec<greedy_mesh::VoxelCoord> = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        let Some(v) = voxel_edit::pick_voxel_at_screen(file, vmap, &cam, w, h, sx, sy) else {
+            return Ok(0);
+        };
+        voxel_edit::coords_matching_color(
+            file,
+            v.color,
+            args.match_material,
+            v.material,
+        )
     };
-    let vm = state.voxel_map.lock();
-    let Some(vmap) = vm.as_ref() else {
-        return Err("voxel index not ready".into());
-    };
-    let cam = state.camera.lock();
-    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let Some(v) = voxel_edit::pick_voxel_at_screen(file, vmap, &cam, w, h, sx, sy) else {
-        return Ok(0);
-    };
-    let coords = voxel_edit::coords_matching_color(
-        file,
-        v.color,
-        args.match_material,
-        v.material,
-    );
     let mode = *state.selection_combine_mode.lock();
     let mut sel = state.selection_cells.lock();
     merge_coords_into_selection(&mut sel, coords, mode);
@@ -3974,20 +4098,23 @@ fn selection_add_coplanar_at_screen(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
-    };
-    let vm = state.voxel_map.lock();
-    let Some(vmap) = vm.as_ref() else {
-        return Err("voxel index not ready".into());
-    };
-    let cam = state.camera.lock();
-    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let Some(coords) = voxel_edit::coplanar_connected_from_screen(
-        file, vmap, &cam, w, h, sx, sy,
-    ) else {
-        return Ok(0);
+    let coords: Vec<greedy_mesh::VoxelCoord> = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        let Some(c) = voxel_edit::coplanar_connected_from_screen(
+            file, vmap, &cam, w, h, sx, sy,
+        ) else {
+            return Ok(0);
+        };
+        c
     };
     let mode = *state.selection_combine_mode.lock();
     let mut sel = state.selection_cells.lock();
@@ -4012,20 +4139,23 @@ fn selection_add_coplanar_empty_at_screen(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
-    };
-    let vm = state.voxel_map.lock();
-    let Some(vmap) = vm.as_ref() else {
-        return Err("voxel index not ready".into());
-    };
-    let cam = state.camera.lock();
-    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let Some(coords) = voxel_edit::coplanar_empty_connected_from_screen(
-        file, vmap, &cam, w, h, sx, sy,
-    ) else {
-        return Ok(0);
+    let coords: Vec<greedy_mesh::VoxelCoord> = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        let Some(c) = voxel_edit::coplanar_empty_connected_from_screen(
+            file, vmap, &cam, w, h, sx, sy,
+        ) else {
+            return Ok(0);
+        };
+        c
     };
     let mode = *state.selection_combine_mode.lock();
     let mut sel = state.selection_cells.lock();
@@ -4069,11 +4199,13 @@ fn selection_invert(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Resul
 
 #[tauri::command]
 fn selection_grow(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
+    let grid_size = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        file.grid_size.max(1)
     };
-    let grid_size = file.grid_size.max(1);
     let vm = state.voxel_map.lock();
     let Some(vmap) = vm.as_ref() else {
         return Err("voxel index not ready".into());
@@ -4099,11 +4231,13 @@ fn selection_grow(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<
 
 #[tauri::command]
 fn selection_shrink(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
-    let fg = state.current_file.lock();
-    let Some(file) = fg.as_ref() else {
-        return Err("no model loaded".into());
+    let grid_size = {
+        let fg = state.current_file.lock();
+        let Some(file) = fg.as_ref() else {
+            return Err("no model loaded".into());
+        };
+        file.grid_size.max(1)
     };
-    let grid_size = file.grid_size.max(1);
     let mut sel = state.selection_cells.lock();
     if sel.is_empty() {
         return Ok(0);
@@ -4841,19 +4975,14 @@ fn voxel_sculpt_stroke_preview_at_screen(
         }
     }
 
-    let preview_tool = match args.sculpt_mode {
-        voxel_edit::SculptStrokeMode::Draw
-        | voxel_edit::SculptStrokeMode::Wall
-        | voxel_edit::SculptStrokeMode::Extrude
-        | voxel_edit::SculptStrokeMode::Terrain => voxel_edit::EditTool::Add,
-        voxel_edit::SculptStrokeMode::Gouge | voxel_edit::SculptStrokeMode::Smooth => {
-            voxel_edit::EditTool::Remove
-        }
-    };
-
+    // Palette-colored preview for every sculpt mode (gouge/smooth used to use Remove red).
     let (solid, wire) = {
         let union = state.stroke_preview_union.lock();
-        stroke_preview_meshes_for_union(preview_tool, &union, false)
+        let vm = state.voxel_map.lock();
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(());
+        };
+        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, false, args.color)
     };
 
     {
@@ -5897,7 +6026,7 @@ fn autosave_document_path_for_label(app: &AppHandle, label: &str) -> Result<Path
 }
 
 /// `file_label` after restoring from the unsaved-work autosave bucket (not a real on-disk project path).
-const ONGOING_UNSAVED_PROJECT_LABEL: &str = "An ongoing unsaved project";
+const ONGOING_UNSAVED_PROJECT_LABEL: &str = "An unsaved project";
 
 fn try_initial_autosave_after_new_project(
     app: &AppHandle,
@@ -6559,6 +6688,7 @@ fn prepare_preview_mesh(
             gizmo_drag,
             delete_hover_id,
             dbg,
+            hover.color,
         );
         if preview_overlay_cache_key_get(state) == Some(key) {
             return PreviewMeshPrepared::Noop;
@@ -6595,8 +6725,13 @@ fn prepare_preview_mesh(
         }
 
         let set: AHashSet<_> = coords.iter().copied().collect();
-        let (solid, mut wire) =
-            stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &set, dbg);
+        let (solid, mut wire) = stroke_preview_meshes_for_union(
+            voxel_edit::EditTool::Add,
+            &set,
+            vmap,
+            dbg,
+            hover.color,
+        );
 
         if show_gizmo {
             generators::append_squishy_gizmo_wire(&session_snap, cam, &mut wire);
@@ -6625,7 +6760,7 @@ fn prepare_preview_mesh(
     if matches!(mode, PreviewMode::Select) {
         let key_cell = voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy);
         let key = match key_cell {
-            Some((cx, cy, cz)) => hash_single_cell_preview(mode, cx, cy, cz, 3, dbg),
+            Some((cx, cy, cz)) => hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0),
             None => hash_preview_miss(mode, dbg),
         };
         if preview_overlay_cache_key_get(state) == Some(key) {
@@ -6635,7 +6770,8 @@ fn prepare_preview_mesh(
             let (sr, sg, sb, wr, wg, wb, size, wem) = if dbg {
                 (1.0f32, 0.12, 0.1, 0.55, 0.0, 0.0, 0.56f32, 3.5f32)
             } else {
-                (0.95, 0.75, 0.2, 0.2, 0.15, 0.02, 0.53, 2.0)
+                // Fixed blue for selection hover — not the active palette.
+                (0.35, 0.55, 0.98, 0.05, 0.08, 0.2, 0.53, 2.0)
             };
             let solid = greedy_mesh::preview_cube_mesh(
                 cx as f32,
@@ -6686,7 +6822,9 @@ fn prepare_preview_mesh(
             _ => None,
         };
         let key = match key_cell {
-            Some((cx, cy, cz)) => hash_single_cell_preview(mode, cx, cy, cz, mode_tag, dbg),
+            Some((cx, cy, cz)) => {
+                hash_single_cell_preview(mode, cx, cy, cz, mode_tag, dbg, ctx.color)
+            }
             None => hash_preview_miss(mode, dbg),
         };
         if preview_overlay_cache_key_get(state) == Some(key) {
@@ -6694,7 +6832,8 @@ fn prepare_preview_mesh(
         }
         match key_cell {
             Some((cx, cy, cz)) => {
-                let (sr, sg, sb, wr, wg, wb, size, wem) = preview_tool_colors(tool, dbg);
+                let (sr, sg, sb, wr, wg, wb, size, wem) =
+                    preview_tool_colors(tool, dbg, ctx.color);
                 let solid = greedy_mesh::preview_cube_mesh(
                     cx as f32,
                     cy as f32,
@@ -6722,7 +6861,7 @@ fn prepare_preview_mesh(
     }
 
     let material = voxelle::MaterialId::from_str_id(&ctx.material);
-    let targets = voxel_edit::collect_stroke_edit_targets(
+    let targets = voxel_edit::collect_stroke_preview_targets(
         file,
         vmap,
         cam,
@@ -6742,7 +6881,7 @@ fn prepare_preview_mesh(
         ctx.plane_axis,
         &ctx.stroke_aux,
     );
-    let key = hash_brush_hover_targets(mode, ctx, &targets, dbg);
+    let key = hash_brush_hover_targets(mode, ctx, &targets, vmap, dbg);
     if preview_overlay_cache_key_get(state) == Some(key) {
         return PreviewMeshPrepared::Noop;
     }
@@ -6750,7 +6889,7 @@ fn prepare_preview_mesh(
         return PreviewMeshPrepared::Clear;
     }
     let set: AHashSet<_> = targets.iter().copied().collect();
-    let (solid, wire) = stroke_preview_meshes_for_union(tool, &set, dbg);
+    let (solid, wire) = stroke_preview_meshes_for_union(tool, &set, vmap, dbg, ctx.color);
     if solid.positions.is_empty() {
         PreviewMeshPrepared::Clear
     } else {
@@ -7541,7 +7680,12 @@ fn resolve_start_screen_logo_path(app: &AppHandle) -> Option<PathBuf> {
     if dev.is_file() {
         return Some(dev);
     }
-    let res = app.path().resolve("Logo.voxelle", BaseDirectory::Resource).ok()?;
+    // Must match `bundle.resources` in tauri.conf.json — `../public/...` is packed as
+    // `$RESOURCE/_up_/public/...`, not `Logo.voxelle` at the resource root.
+    let res = app
+        .path()
+        .resolve("../public/Logo.voxelle", BaseDirectory::Resource)
+        .ok()?;
     if res.is_file() {
         return Some(res);
     }

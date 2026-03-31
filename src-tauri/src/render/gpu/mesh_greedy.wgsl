@@ -79,58 +79,142 @@ fn quad_corner(axis: u32, sign: i32, depth: i32, u: i32, v: i32) -> vec3<f32> {
     return vec3<f32>(f32(u) - 0.5, f32(v) - 0.5, f32(depth) + fo);
 }
 
-fn brick_occupied_at(ix: vec3<i32>) -> bool {
+fn brick_cell_at(ix: vec3<i32>) -> u32 {
     let rel = ix - vec3<i32>(mesh_params.brick_ox, mesh_params.brick_oy, mesh_params.brick_oz);
     let dx = i32(mesh_params.brick_dx);
     let dy = i32(mesh_params.brick_dy);
     let dz = i32(mesh_params.brick_dz);
     if (rel.x < 0 || rel.y < 0 || rel.z < 0) {
-        return false;
+        return 0u;
     }
     if (rel.x >= dx || rel.y >= dy || rel.z >= dz) {
-        return false;
+        return 0u;
     }
     let idx = u32(rel.x) + u32(rel.y) * u32(dx) + u32(rel.z) * u32(dx) * u32(dy);
-    let cell = brick_cells[idx];
-    return (cell & (1u << 31u)) != 0u;
+    return brick_cells[idx];
 }
 
-/// Minecraft-style corner AO (parity with `greedy_mesh::corner_ao_factor`).
-fn corner_ao_brick(axis: u32, depth: i32, cu: i32, cv: i32) -> f32 {
-    var occ = 0u;
-    if axis == 0u {
-        if brick_occupied_at(vec3<i32>(depth, cu - 1, cv)) {
-            occ = occ + 1u;
+fn unpack_mat(packed: u32) -> u32 {
+    return (packed >> 24u) & 7u;
+}
+
+/// Non-transmissive solid occludes AO. CPU also requires same `object_id`; the brick buffer has no per-voxel object id, so GPU only excludes glass/water (parity for materials, not object seams).
+fn ao_cell_occludes_brick(ix: vec3<i32>) -> bool {
+    let cell = brick_cell_at(ix);
+    if ((cell & (1u << 31u)) == 0u) {
+        return false;
+    }
+    let m = unpack_mat(cell);
+    return m != 3u && m != 4u;
+}
+
+fn ao_du_dv(ci: u32, k: u32) -> vec2<i32> {
+    switch ci {
+        case 0u: {
+            switch k {
+                case 0u: {
+                    return vec2<i32>(-1, 0);
+                }
+                case 1u: {
+                    return vec2<i32>(0, -1);
+                }
+                default: {
+                    return vec2<i32>(-1, -1);
+                }
+            }
         }
-        if brick_occupied_at(vec3<i32>(depth, cu, cv - 1)) {
-            occ = occ + 1u;
+        case 1u: {
+            switch k {
+                case 0u: {
+                    return vec2<i32>(1, 0);
+                }
+                case 1u: {
+                    return vec2<i32>(0, -1);
+                }
+                default: {
+                    return vec2<i32>(1, -1);
+                }
+            }
         }
-        if brick_occupied_at(vec3<i32>(depth, cu - 1, cv - 1)) {
-            occ = occ + 1u;
+        case 2u: {
+            switch k {
+                case 0u: {
+                    return vec2<i32>(1, 0);
+                }
+                case 1u: {
+                    return vec2<i32>(0, 1);
+                }
+                default: {
+                    return vec2<i32>(1, 1);
+                }
+            }
         }
-    } else if axis == 1u {
-        if brick_occupied_at(vec3<i32>(cu - 1, depth, cv)) {
-            occ = occ + 1u;
-        }
-        if brick_occupied_at(vec3<i32>(cu, depth, cv - 1)) {
-            occ = occ + 1u;
-        }
-        if brick_occupied_at(vec3<i32>(cu - 1, depth, cv - 1)) {
-            occ = occ + 1u;
-        }
-    } else {
-        if brick_occupied_at(vec3<i32>(cu - 1, cv, depth)) {
-            occ = occ + 1u;
-        }
-        if brick_occupied_at(vec3<i32>(cu, cv - 1, depth)) {
-            occ = occ + 1u;
-        }
-        if brick_occupied_at(vec3<i32>(cu - 1, cv - 1, depth)) {
-            occ = occ + 1u;
+        default: {
+            switch k {
+                case 0u: {
+                    return vec2<i32>(-1, 0);
+                }
+                case 1u: {
+                    return vec2<i32>(0, 1);
+                }
+                default: {
+                    return vec2<i32>(-1, 1);
+                }
+            }
         }
     }
-    let f = 1.0 - 0.2 * f32(occ);
-    return clamp(f, 0.4, 1.0);
+}
+
+fn ao_get_state(s1: u32, s2: u32, c: u32) -> u32 {
+    if (s1 != 0u && s2 != 0u) {
+        return 0u;
+    }
+    return 3u - (s1 + s2 + c);
+}
+
+fn ao_preset_strong(idx: u32) -> f32 {
+    switch idx {
+        case 0u: {
+            return 0.55;
+        }
+        case 1u: {
+            return 0.72;
+        }
+        case 2u: {
+            return 0.88;
+        }
+        default: {
+            return 1.0;
+        }
+    }
+}
+
+/// Matches `greedy_mesh::corner_ao_factor` / `greedyMeshCore.ts` strong AO preset (`AO_PRESETS[2]`).
+fn corner_ao_brick(axis: u32, sign: i32, depth: i32, cu: i32, cv: i32, corner_idx: u32) -> f32 {
+    var s1 = 0u;
+    var s2 = 0u;
+    var sc = 0u;
+    for (var k = 0u; k < 3u; k++) {
+        let duv = ao_du_dv(corner_idx, k);
+        var ix = vec3<i32>(0, 0, 0);
+        if axis == 0u {
+            ix = vec3<i32>(depth + sign, cu + duv.x, cv + duv.y);
+        } else if axis == 1u {
+            ix = vec3<i32>(cu + duv.x, depth + sign, cv + duv.y);
+        } else {
+            ix = vec3<i32>(cu + duv.x, cv + duv.y, depth + sign);
+        }
+        let b = select(0u, 1u, ao_cell_occludes_brick(ix));
+        if k == 0u {
+            s1 = b;
+        } else if k == 1u {
+            s2 = b;
+        } else {
+            sc = b;
+        }
+    }
+    let st = ao_get_state(s1, s2, sc);
+    return ao_preset_strong(st);
 }
 
 @compute @workgroup_size(1, 1, 1)
@@ -240,11 +324,17 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
             let p11 = quad_corner(h.axis, h.sign_i, h.depth, u0 + i32(rw), v0 + i32(rh));
             let p01 = quad_corner(h.axis, h.sign_i, h.depth, u0, v0 + i32(rh));
 
-            let ao00 = corner_ao_brick(h.axis, h.depth, u0, v0);
-            let ao10 = corner_ao_brick(h.axis, h.depth, u0 + i32(rw) - 1, v0);
-            let ao11 = corner_ao_brick(h.axis, h.depth, u0 + i32(rw) - 1, v0 + i32(rh) - 1);
-            let ao01 = corner_ao_brick(h.axis, h.depth, u0, v0 + i32(rh) - 1);
-            let ao_face = (ao00 + ao10 + ao11 + ao01) * 0.25;
+            let ao00 = corner_ao_brick(h.axis, h.sign_i, h.depth, u0, v0, 0u);
+            let ao10 = corner_ao_brick(h.axis, h.sign_i, h.depth, u0 + i32(rw) - 1, v0, 1u);
+            let ao11 = corner_ao_brick(
+                h.axis,
+                h.sign_i,
+                h.depth,
+                u0 + i32(rw) - 1,
+                v0 + i32(rh) - 1,
+                2u,
+            );
+            let ao01 = corner_ao_brick(h.axis, h.sign_i, h.depth, u0, v0 + i32(rh) - 1, 3u);
 
             let vbase = atomicAdd(&alloc[0], 4u);
             if vbase + 4u > mesh_params.max_vertices {
@@ -258,10 +348,10 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
                 return;
             }
 
-            write_opaque_vertex(vbase + 0u, p00, n, col, h.mat_kind, ao_face);
-            write_opaque_vertex(vbase + 1u, p10, n, col, h.mat_kind, ao_face);
-            write_opaque_vertex(vbase + 2u, p11, n, col, h.mat_kind, ao_face);
-            write_opaque_vertex(vbase + 3u, p01, n, col, h.mat_kind, ao_face);
+            write_opaque_vertex(vbase + 0u, p00, n, col, h.mat_kind, ao00);
+            write_opaque_vertex(vbase + 1u, p10, n, col, h.mat_kind, ao10);
+            write_opaque_vertex(vbase + 2u, p11, n, col, h.mat_kind, ao11);
+            write_opaque_vertex(vbase + 3u, p01, n, col, h.mat_kind, ao01);
 
             let g0 = vbase + 0u;
             let g1 = vbase + 1u;

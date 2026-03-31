@@ -4,6 +4,7 @@ use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{anchor_for_edit, voxel_line_dda, EditTool};
 use crate::voxelle::VoxelleFile;
 use ahash::AHashMap;
+use glam::Vec3;
 use std::collections::HashSet;
 
 /// Matches web [`StrokeMode`](https://github.com/...) in `core.ts`.
@@ -367,6 +368,220 @@ fn cylinder_axis_aligned_caps(a: VoxelCoord, b: VoxelCoord, radius: i32) -> Vec<
     seen.into_iter().collect()
 }
 
+#[inline]
+fn snap_world_to_voxel(p: Vec3) -> VoxelCoord {
+    (
+        (p.x + 0.5).floor() as i32,
+        (p.y + 0.5).floor() as i32,
+        (p.z + 0.5).floor() as i32,
+    )
+}
+
+fn intersect_ray_axis_aligned_plane(
+    origin: Vec3,
+    dir: Vec3,
+    plane_axis: usize,
+    plane_coord: f32,
+) -> Option<Vec3> {
+    let d = match plane_axis {
+        0 => dir.x,
+        1 => dir.y,
+        2 => dir.z,
+        _ => return None,
+    };
+    if d.abs() < 1e-8 {
+        return None;
+    }
+    let o = match plane_axis {
+        0 => origin.x,
+        1 => origin.y,
+        2 => origin.z,
+        _ => return None,
+    };
+    let t = (plane_coord - o) / d;
+    if t < 0.0 {
+        return None;
+    }
+    Some(origin + dir * t)
+}
+
+/// Web `getAxisAlignedPlaneFromNormal`: filled rectangle in the axis-aligned face plane through `a`, spanning to `b`.
+fn fill_axis_aligned_plane_rectangle(a: VoxelCoord, b: VoxelCoord, fixed_axis: usize) -> Vec<VoxelCoord> {
+    let mut out = Vec::new();
+    match fixed_axis {
+        0 => {
+            let x = a.0;
+            let y0 = a.1.min(b.1);
+            let y1 = a.1.max(b.1);
+            let z0 = a.2.min(b.2);
+            let z1 = a.2.max(b.2);
+            for py in y0..=y1 {
+                for pz in z0..=z1 {
+                    out.push((x, py, pz));
+                }
+            }
+        }
+        1 => {
+            let y = a.1;
+            let x0 = a.0.min(b.0);
+            let x1 = a.0.max(b.0);
+            let z0 = a.2.min(b.2);
+            let z1 = a.2.max(b.2);
+            for px in x0..=x1 {
+                for pz in z0..=z1 {
+                    out.push((px, y, pz));
+                }
+            }
+        }
+        _ => {
+            let z = a.2;
+            let x0 = a.0.min(b.0);
+            let x1 = a.0.max(b.0);
+            let y0 = a.1.min(b.1);
+            let y1 = a.1.max(b.1);
+            for px in x0..=x1 {
+                for py in y0..=y1 {
+                    out.push((px, py, z));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Outer rectangle minus inner rectangle eroded by `wall` in the two free axes (hollow plane shell).
+fn hollow_plane_rectangle_frame(a: VoxelCoord, b: VoxelCoord, fixed_axis: usize, wall: i32) -> Vec<VoxelCoord> {
+    let w = wall.max(1);
+    let full = fill_axis_aligned_plane_rectangle(a, b, fixed_axis);
+    let coord = |c: VoxelCoord, ax: usize| -> i32 {
+        match ax {
+            0 => c.0,
+            1 => c.1,
+            _ => c.2,
+        }
+    };
+    let (u_axis, v_axis) = match fixed_axis {
+        0 => (1usize, 2usize),
+        1 => (0usize, 2usize),
+        _ => (0usize, 1usize),
+    };
+    let u0 = coord(a, u_axis).min(coord(b, u_axis));
+    let u1 = coord(a, u_axis).max(coord(b, u_axis));
+    let v0 = coord(a, v_axis).min(coord(b, v_axis));
+    let v1 = coord(a, v_axis).max(coord(b, v_axis));
+    let iu0 = u0 + w;
+    let iu1 = u1 - w;
+    let iv0 = v0 + w;
+    let iv1 = v1 - w;
+    if iu0 > iu1 || iv0 > iv1 {
+        return full;
+    }
+    let inner_a = match fixed_axis {
+        0 => (a.0, iu0, iv0),
+        1 => (iu0, a.1, iv0),
+        _ => (iu0, iv0, a.2),
+    };
+    let inner_b = match fixed_axis {
+        0 => (a.0, iu1, iv1),
+        1 => (iu1, a.1, iv1),
+        _ => (iu1, iv1, a.2),
+    };
+    let inner: HashSet<VoxelCoord> = fill_axis_aligned_plane_rectangle(inner_a, inner_b, fixed_axis)
+        .into_iter()
+        .collect();
+    full.into_iter()
+        .filter(|c| !inner.contains(c))
+        .collect()
+}
+
+/// Web Surface plane / Solid cuboid plane phase: rectangle (or hollow shell) from drag start to current in the face plane.
+fn axis_aligned_drag_plane_rectangle(
+    tool: EditTool,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &crate::camera::OrbitCamera,
+    width: f32,
+    height: f32,
+    lsx: f32,
+    lsy: f32,
+    sx: f32,
+    sy: f32,
+    plane_axis: PlaneAxis,
+    plane_hollow: bool,
+) -> Option<Vec<VoxelCoord>> {
+    let grid_size = file.grid_size.max(1);
+    let (origin0, dir0) = crate::voxel_edit::screen_to_world_ray(camera, width, height, lsx, lsy);
+    let (_hit0, prev0) = crate::voxel_edit::ray_first_solid(origin0, dir0, voxel_map, grid_size)?;
+    let prev0 = prev0?;
+    let face_ax = face_normal_axis(prev0, _hit0);
+    let plane_ax = axis_from_plane_axis(plane_axis, face_ax).unwrap_or(2);
+    let a = anchor_for_edit(tool, file, voxel_map, camera, width, height, lsx, lsy)?;
+    let (origin1, dir1) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
+    let plane_coord = match plane_ax {
+        0 => a.0 as f32 + 0.5,
+        1 => a.1 as f32 + 0.5,
+        _ => a.2 as f32 + 0.5,
+    };
+    let p = intersect_ray_axis_aligned_plane(origin1, dir1, plane_ax, plane_coord)?;
+    let mut b = snap_world_to_voxel(p);
+    match plane_ax {
+        0 => b.0 = a.0,
+        1 => b.1 = a.1,
+        _ => b.2 = a.2,
+    }
+    Some(if plane_hollow {
+        hollow_plane_rectangle_frame(a, b, plane_ax, 1)
+    } else {
+        fill_axis_aligned_plane_rectangle(a, b, plane_ax)
+    })
+}
+
+/// Web circle/cylinder base drag: disk in the face plane from start anchor to current (cone intersection point).
+fn axis_aligned_drag_plane_circle(
+    tool: EditTool,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &crate::camera::OrbitCamera,
+    width: f32,
+    height: f32,
+    lsx: f32,
+    lsy: f32,
+    sx: f32,
+    sy: f32,
+    plane_axis: PlaneAxis,
+    plane_hollow: bool,
+) -> Option<Vec<VoxelCoord>> {
+    let grid_size = file.grid_size.max(1);
+    let (origin0, dir0) = crate::voxel_edit::screen_to_world_ray(camera, width, height, lsx, lsy);
+    let (_hit0, prev0) = crate::voxel_edit::ray_first_solid(origin0, dir0, voxel_map, grid_size)?;
+    let prev0 = prev0?;
+    let face_ax = face_normal_axis(prev0, _hit0);
+    let plane_ax = axis_from_plane_axis(plane_axis, face_ax).unwrap_or(2);
+    let a = anchor_for_edit(tool, file, voxel_map, camera, width, height, lsx, lsy)?;
+    let (origin1, dir1) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
+    let plane_coord = match plane_ax {
+        0 => a.0 as f32 + 0.5,
+        1 => a.1 as f32 + 0.5,
+        _ => a.2 as f32 + 0.5,
+    };
+    let p = intersect_ray_axis_aligned_plane(origin1, dir1, plane_ax, plane_coord)?;
+    let mut b = snap_world_to_voxel(p);
+    match plane_ax {
+        0 => b.0 = a.0,
+        1 => b.1 = a.1,
+        _ => b.2 = a.2,
+    }
+    let cc = [a.0, a.1, a.2];
+    let ce = [b.0, b.1, b.2];
+    let r = circle_radius_in_plane(cc, ce, plane_ax);
+    let center = (a.0, a.1, a.2);
+    Some(if plane_hollow && r > 0 {
+        annulus_in_axis_plane(center, plane_ax, r)
+    } else {
+        disk_in_axis_plane(center, plane_ax, r)
+    })
+}
+
 /// Stroke anchor cells for draw/remove/paint (brush applied per center afterward).
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_anchor_centers_with_mode(
@@ -435,6 +650,24 @@ pub fn stroke_anchor_centers_with_mode(
             }
         }
         DrawStrokeMode::Plane => {
+            if let Some((lsx, lsy)) = stroke_line_start {
+                if let Some(cells) = axis_aligned_drag_plane_rectangle(
+                    tool,
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    lsx,
+                    lsy,
+                    sx,
+                    sy,
+                    plane_axis,
+                    aux.plane_hollow,
+                ) {
+                    return cells;
+                }
+            }
             let grid_size = file.grid_size.max(1);
             let (origin, dir) =
                 crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
@@ -472,6 +705,27 @@ pub fn stroke_anchor_centers_with_mode(
                 };
                 let r = circle_radius_in_plane(cc, ce, plane_ax);
                 disk_in_axis_plane(center, plane_ax, r)
+            } else if let Some((lsx, lsy)) = stroke_line_start {
+                if let Some(v) = axis_aligned_drag_plane_circle(
+                    tool,
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    lsx,
+                    lsy,
+                    sx,
+                    sy,
+                    plane_axis,
+                    aux.plane_hollow,
+                ) {
+                    v
+                } else {
+                    anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
+                        .into_iter()
+                        .collect()
+                }
             } else {
                 anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
                     .into_iter()
@@ -481,6 +735,27 @@ pub fn stroke_anchor_centers_with_mode(
         DrawStrokeMode::Cuboid => {
             if let (Some(a), Some(b)) = (aux.cuboid_min, aux.cuboid_max) {
                 fill_aabb((a[0], a[1], a[2]), (b[0], b[1], b[2]))
+            } else if let Some((lsx, lsy)) = stroke_line_start {
+                if let Some(v) = axis_aligned_drag_plane_rectangle(
+                    tool,
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    lsx,
+                    lsy,
+                    sx,
+                    sy,
+                    plane_axis,
+                    aux.plane_hollow,
+                ) {
+                    v
+                } else {
+                    anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
+                        .into_iter()
+                        .collect()
+                }
             } else {
                 anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
                     .into_iter()
@@ -494,6 +769,27 @@ pub fn stroke_anchor_centers_with_mode(
                     (b[0], b[1], b[2]),
                     brush_radius as i32,
                 )
+            } else if let Some((lsx, lsy)) = stroke_line_start {
+                if let Some(v) = axis_aligned_drag_plane_circle(
+                    tool,
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    lsx,
+                    lsy,
+                    sx,
+                    sy,
+                    plane_axis,
+                    aux.plane_hollow,
+                ) {
+                    v
+                } else {
+                    anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
+                        .into_iter()
+                        .collect()
+                }
             } else {
                 anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
                     .into_iter()
@@ -535,5 +831,11 @@ mod tests {
     fn aabb_two_corners() {
         let v = fill_aabb((0, 0, 0), (1, 1, 1));
         assert_eq!(v.len(), 8);
+    }
+
+    #[test]
+    fn plane_rect_matches_web_axis_aligned_plane() {
+        let v = fill_axis_aligned_plane_rectangle((0, 0, 0), (2, 2, 0), 2);
+        assert_eq!(v.len(), 9);
     }
 }

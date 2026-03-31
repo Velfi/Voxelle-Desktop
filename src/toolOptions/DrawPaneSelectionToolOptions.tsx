@@ -267,14 +267,13 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <button
               type="button"
               className={
-                p.drawStrokeMode === "polygon" ||
                 p.drawStrokeMode === "polygonHull"
                   ? "tool-options-shape-btn is-active"
                   : "tool-options-shape-btn"
               }
               disabled={p.loading || p.workBusy}
               onClick={() => {
-                p.setDrawStrokeMode("polygon");
+                p.setDrawStrokeMode("polygonHull");
                 p.setStrokeDrawStyle("brush");
               }}
             >
@@ -403,8 +402,7 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             </p>
           </div>
         ) : null}
-        {(p.drawStrokeMode === "polygon" ||
-          p.drawStrokeMode === "polygonHull") ? (
+        {p.drawStrokeMode === "polygonHull" ? (
           <div className="tool-options-section">
             <p
               style={{

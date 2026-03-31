@@ -505,6 +505,19 @@ pub fn hex_srgb_to_linear_rgb3(hex: &str) -> Option<[f32; 3]> {
     ])
 }
 
+/// Packed `0xRRGGBB` voxel color (same as UI) → linear RGB in \([0,1]\) for GPU preview meshes.
+#[inline]
+pub fn rgb24_u32_to_linear_rgb3(rgb: u32) -> [f32; 3] {
+    let r = ((rgb >> 16) & 0xff) as u8;
+    let g = ((rgb >> 8) & 0xff) as u8;
+    let b = (rgb & 0xff) as u8;
+    [
+        srgb_byte_to_linear_u8(r),
+        srgb_byte_to_linear_u8(g),
+        srgb_byte_to_linear_u8(b),
+    ]
+}
+
 fn decompress_if_gzipped(bytes: &[u8]) -> Result<Vec<u8>, ParseError> {
     if bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b {
         let mut decoder = GzDecoder::new(bytes);

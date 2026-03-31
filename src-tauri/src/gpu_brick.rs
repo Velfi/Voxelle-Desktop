@@ -1,4 +1,8 @@
 //! Compact GPU voxel brick: one `u32` per cell (RGB8 + material + occupied bit).
+//!
+//! **AO parity:** CPU `greedy_mesh::corner_ao_factor` skips occlusion from other objects’ voxels.
+//! The brick word has no `object_id`; GPU greedy meshing (`render/gpu/mesh_greedy.wgsl`) AO only excludes
+//! **transmissive** materials (glass/water). Full CPU/GPU parity would require extra bits or a separate id brick.
 
 use crate::voxelle::{MaterialId, Voxel};
 use glam::IVec3;

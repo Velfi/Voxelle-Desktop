@@ -750,6 +750,13 @@ pub fn stroke_preview_accumulates_samples(
 }
 
 /// Voxel coordinates one `apply_edit` call would affect (same rules; no mutation).
+///
+/// For Paint, no-op cells removed. For Remove, empty footprint cells removed (preview may include
+/// them for meshing only).
+///
+/// Not all call sites use this (preview uses [`collect_stroke_preview_targets`] only); kept for
+/// parity with [`apply_edit`] and for tests / tooling.
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 pub fn collect_stroke_edit_targets(
     file: &VoxelleFile,
@@ -762,6 +769,67 @@ pub fn collect_stroke_edit_targets(
     tool: EditTool,
     color: u32,
     material: MaterialId,
+    brush_radius: u32,
+    brush_shape: BrushShape,
+    spray_density: f32,
+    stroke_line_start: Option<(f32, f32)>,
+    stroke_segment_prev: Option<(f32, f32)>,
+    stroke_mode: DrawStrokeMode,
+    plane_axis: PlaneAxis,
+    stroke_aux: &StrokeAux,
+) -> Vec<VoxelCoord> {
+    let mut out = collect_stroke_preview_targets(
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        tool,
+        color,
+        material,
+        brush_radius,
+        brush_shape,
+        spray_density,
+        stroke_line_start,
+        stroke_segment_prev,
+        stroke_mode,
+        plane_axis,
+        stroke_aux,
+    );
+    if matches!(tool, EditTool::Remove) {
+        out.retain(|c| voxel_map.contains_key(c));
+    }
+    if matches!(tool, EditTool::Paint) {
+        out.retain(|&(x, y, z)| {
+            let Some(&idx) = voxel_map.get(&(x, y, z)) else {
+                return false;
+            };
+            let before = file.voxels[idx];
+            before.color != color || before.material != material
+        });
+    }
+    out
+}
+
+/// Geometric brush footprint for hover / stroke **preview** meshes only.
+///
+/// Same centers/offsets/spray as [`collect_stroke_edit_targets`]. **Remove** and **Paint** include
+/// every in-grid cell in the footprint (occupied and empty) so the full brush shape is visible in
+/// air; [`collect_stroke_edit_targets`] still applies Paint no-op filtering for commits.
+#[allow(clippy::too_many_arguments)]
+pub fn collect_stroke_preview_targets(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    tool: EditTool,
+    _color: u32,
+    _material: MaterialId,
     brush_radius: u32,
     brush_shape: BrushShape,
     spray_density: f32,
@@ -819,41 +887,19 @@ pub fn collect_stroke_edit_targets(
                 }
             }
         }
-        EditTool::Remove => {
+        EditTool::Remove | EditTool::Paint => {
             for (hx, hy, hz) in centers {
                 for (dx, dy, dz) in &offsets {
                     let x = hx + dx;
                     let y = hy + dy;
                     let z = hz + dz;
+                    if !in_grid(x, y, z, grid_size) {
+                        continue;
+                    }
                     if !spray_passes((x, y, z), spray) {
                         continue;
                     }
                     if !seen.insert((x, y, z)) {
-                        continue;
-                    }
-                    if voxel_map.contains_key(&(x, y, z)) {
-                        out.push((x, y, z));
-                    }
-                }
-            }
-        }
-        EditTool::Paint => {
-            for (hx, hy, hz) in centers {
-                for (dx, dy, dz) in &offsets {
-                    let x = hx + dx;
-                    let y = hy + dy;
-                    let z = hz + dz;
-                    if !spray_passes((x, y, z), spray) {
-                        continue;
-                    }
-                    if !seen.insert((x, y, z)) {
-                        continue;
-                    }
-                    let Some(&idx) = voxel_map.get(&(x, y, z)) else {
-                        continue;
-                    };
-                    let before = file.voxels[idx];
-                    if before.color == color && before.material == material {
                         continue;
                     }
                     out.push((x, y, z));
@@ -2717,6 +2763,158 @@ mod tests {
         let ((x, y, z), prev) = r.unwrap();
         assert_eq!((x, y, z), (0, 0, 0));
         assert_eq!(prev, Some((0, 0, 1)));
+    }
+
+    #[test]
+    fn collect_stroke_preview_and_edit_agree_when_empty_scene() {
+        let file = VoxelleFile {
+            version: 4,
+            grid_size: 16,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            lighting: None,
+            voxels: vec![],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let aux = StrokeAux::default();
+        let w = 256.0_f32;
+        let h = 256.0_f32;
+        let sx = 128.0_f32;
+        let sy = 128.0_f32;
+        let preview = collect_stroke_preview_targets(
+            &file,
+            &vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            EditTool::Paint,
+            0xff0000,
+            MaterialId::Plastic,
+            0,
+            BrushShape::Sphere,
+            0.0,
+            None,
+            None,
+            DrawStrokeMode::Precise,
+            PlaneAxis::Auto,
+            &aux,
+        );
+        let edit = collect_stroke_edit_targets(
+            &file,
+            &vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            EditTool::Paint,
+            0xff0000,
+            MaterialId::Plastic,
+            0,
+            BrushShape::Sphere,
+            0.0,
+            None,
+            None,
+            DrawStrokeMode::Precise,
+            PlaneAxis::Auto,
+            &aux,
+        );
+        assert_eq!(preview, edit);
+        assert!(preview.is_empty());
+    }
+
+    #[test]
+    fn collect_stroke_remove_preview_includes_empty_footprint_cells() {
+        let file = VoxelleFile {
+            version: 4,
+            grid_size: 16,
+            scene: crate::voxelle::Scene::default(),
+            scene_extra: None,
+            mood: None,
+            lighting: None,
+            voxels: vec![Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xff0000,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            }],
+            objects: crate::voxelle::default_scene_objects(),
+            active_object_id: 0,
+        };
+        let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+        vm.insert((0, 0, 0), 0);
+        let mut cam = OrbitCamera::new();
+        cam.smooth_target = glam::Vec3::ZERO;
+        cam.smooth_spherical = cam.spherical;
+        let w = 256.0_f32;
+        let h = 256.0_f32;
+        let sx = 128.0_f32;
+        let sy = 128.0_f32;
+        let aux = StrokeAux::default();
+        let preview = collect_stroke_preview_targets(
+            &file,
+            &vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            EditTool::Remove,
+            0xff0000,
+            MaterialId::Plastic,
+            1,
+            BrushShape::Sphere,
+            0.0,
+            None,
+            None,
+            DrawStrokeMode::Precise,
+            PlaneAxis::Auto,
+            &aux,
+        );
+        let edit = collect_stroke_edit_targets(
+            &file,
+            &vm,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            EditTool::Remove,
+            0xff0000,
+            MaterialId::Plastic,
+            1,
+            BrushShape::Sphere,
+            0.0,
+            None,
+            None,
+            DrawStrokeMode::Precise,
+            PlaneAxis::Auto,
+            &aux,
+        );
+        assert!(
+            !preview.is_empty(),
+            "preview should include brush footprint"
+        );
+        let ghosts = preview
+            .iter()
+            .filter(|c| !vm.contains_key(c))
+            .count();
+        assert!(ghosts > 0, "preview should show empty cells along brush footprint");
+        assert!(preview.len() > edit.len());
+        for c in &edit {
+            assert!(vm.contains_key(c));
+            assert!(preview.contains(c));
+        }
     }
 
     #[test]

@@ -95,43 +95,72 @@ fn quad_corner(axis: usize, sign: i32, depth: i32, u: i32, v: i32) -> glam::Vec3
     }
 }
 
+/// Matches `greedyMeshCore.ts` `AO_PRESETS` strength **2** (`aoStrength` default).
+const AO_STRONG_PRESET: [f32; 4] = [0.55, 0.72, 0.88, 1.0];
+
+/// Matches `getAOState` in `greedyMeshCore.ts`.
 #[inline]
-fn cell_same_object(map: &AHashMap<VoxelCoord, Voxel>, object_id: u32, pos: IVec3) -> bool {
+fn ao_state(side1: u32, side2: u32, corner: u32) -> usize {
+    if side1 != 0 && side2 != 0 {
+        return 0;
+    }
+    (3 - (side1 + side2 + corner)) as usize
+}
+
+#[inline]
+fn ao_state_to_multiplier(state: usize) -> f32 {
+    AO_STRONG_PRESET[state.min(3)]
+}
+
+/// Matches `aoCellOccludesForOwner` in `greedyMeshCore.ts`: same object, non-transmissive.
+#[inline]
+fn ao_cell_occludes_for_owner(map: &AHashMap<VoxelCoord, Voxel>, pos: IVec3, source_object_id: u32) -> bool {
     map.get(&pos)
-        .map(|v| v.object_id == object_id)
+        .map(|v| v.object_id == source_object_id && !is_transmissive(v.material))
         .unwrap_or(false)
 }
 
-/// Minecraft-style corner AO: count solid neighbors among the three voxels meeting at this face corner.
-fn corner_ao_factor(
+/// Neighbor (du, dv) triplets per corner index — `AO_NEIGHBORS` in `greedyMeshCore.ts`.
+const AO_DU_DV: [[(i32, i32); 3]; 4] = [
+    [(-1, 0), (0, -1), (-1, -1)],
+    [(1, 0), (0, -1), (1, -1)],
+    [(1, 0), (0, 1), (1, 1)],
+    [(-1, 0), (0, 1), (-1, 1)],
+];
+
+/// Matches `getAONeighborCoords` / `getCornerAO` in `greedyMeshCore.ts` (strong preset).
+pub(super) fn corner_ao_factor(
     map: &AHashMap<VoxelCoord, Voxel>,
-    object_id: u32,
     axis: usize,
+    sign: i32,
     depth: i32,
     cu: i32,
     cv: i32,
+    corner_index: usize,
 ) -> f32 {
-    let occ = match axis {
-        0 => {
-            let a = cell_same_object(map, object_id, (depth, cu - 1, cv));
-            let b = cell_same_object(map, object_id, (depth, cu, cv - 1));
-            let c = cell_same_object(map, object_id, (depth, cu - 1, cv - 1));
-            u32::from(a) + u32::from(b) + u32::from(c)
-        }
-        1 => {
-            let a = cell_same_object(map, object_id, (cu - 1, depth, cv));
-            let b = cell_same_object(map, object_id, (cu, depth, cv - 1));
-            let c = cell_same_object(map, object_id, (cu - 1, depth, cv - 1));
-            u32::from(a) + u32::from(b) + u32::from(c)
-        }
-        _ => {
-            let a = cell_same_object(map, object_id, (cu - 1, cv, depth));
-            let b = cell_same_object(map, object_id, (cu, cv - 1, depth));
-            let c = cell_same_object(map, object_id, (cu - 1, cv - 1, depth));
-            u32::from(a) + u32::from(b) + u32::from(c)
-        }
+    let Some(face_voxel) = map.get(&grid_pos(axis, depth, cu, cv)) else {
+        return 1.0;
     };
-    (1.0 - 0.2 * occ as f32).clamp(0.4, 1.0)
+    let source_object_id = face_voxel.object_id;
+    let d_idx = axis;
+    let (u_idx, v_idx) = match axis {
+        0 => (1usize, 2usize),
+        1 => (0usize, 2usize),
+        _ => (0usize, 1usize),
+    };
+    let du_dv = AO_DU_DV[corner_index.min(3)];
+    let mut p = [0i32; 3];
+    let mut bits = [0u32; 3];
+    for i in 0..3 {
+        let (du, dv) = du_dv[i];
+        p[d_idx] = depth + sign;
+        p[u_idx] = cu + du;
+        p[v_idx] = cv + dv;
+        let pos = (p[0], p[1], p[2]);
+        bits[i] = u32::from(ao_cell_occludes_for_owner(map, pos, source_object_id));
+    }
+    let st = ao_state(bits[0], bits[1], bits[2]);
+    ao_state_to_multiplier(st)
 }
 
 fn greedy_merge(cells: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
@@ -279,7 +308,7 @@ pub struct MeshBuffers {
     pub normals: Vec<f32>,
     pub colors: Vec<f32>,
     pub mat_kind: Vec<f32>,
-    /// Per-vertex ambient factor [~0.4, 1.0] from 3-neighbor corner occlusion (hemisphere term only in shader).
+    /// Per-vertex ambient factor from corner AO (`AO_STRONG_PRESET` / `greedyMeshCore` strength 2); hemisphere only in shader.
     pub ao: Vec<f32>,
     pub indices: Vec<u32>,
 }
@@ -1142,22 +1171,17 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                 let p11 = quad_corner(axis, sign, depth, u + w, v + h);
                 let p01 = quad_corner(axis, sign, depth, u, v + h);
 
-                let id00 = map[&grid_pos(axis, depth, u, v)].object_id;
-                let id10 = map[&grid_pos(axis, depth, u + w - 1, v)].object_id;
-                let id11 = map[&grid_pos(axis, depth, u + w - 1, v + h - 1)].object_id;
-                let id01 = map[&grid_pos(axis, depth, u, v + h - 1)].object_id;
-                let ao00 = corner_ao_factor(map, id00, axis, depth, u, v);
-                let ao10 = corner_ao_factor(map, id10, axis, depth, u + w - 1, v);
-                let ao11 = corner_ao_factor(map, id11, axis, depth, u + w - 1, v + h - 1);
-                let ao01 = corner_ao_factor(map, id01, axis, depth, u, v + h - 1);
-                let ao_face = (ao00 + ao10 + ao11 + ao01) * 0.25;
+                let ao00 = corner_ao_factor(map, axis, sign, depth, u, v, 0);
+                let ao10 = corner_ao_factor(map, axis, sign, depth, u + w - 1, v, 1);
+                let ao11 = corner_ao_factor(map, axis, sign, depth, u + w - 1, v + h - 1, 2);
+                let ao01 = corner_ao_factor(map, axis, sign, depth, u, v + h - 1, 3);
 
                 let base = (out.positions.len() / 3) as u32;
                 for (p, ao_v) in [
-                    (p00, ao_face),
-                    (p10, ao_face),
-                    (p11, ao_face),
-                    (p01, ao_face),
+                    (p00, ao00),
+                    (p10, ao10),
+                    (p11, ao11),
+                    (p01, ao01),
                 ] {
                     out.positions.extend_from_slice(&p.to_array());
                     out.normals.extend_from_slice(&n.to_array());
@@ -1858,6 +1882,41 @@ pub const SELECTION_OVERLAY_COLOR: u32 = 0x3399ff;
 /// Above this count, use an axis-aligned box + bbox wireframe (web parity).
 pub const SELECTION_OVERLAY_MESH_THRESHOLD: usize = 20_000;
 
+/// Face-adjacent offsets (6-connected).
+const FACE_NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
+    (1, 0, 0),
+    (-1, 0, 0),
+    (0, 1, 0),
+    (0, -1, 0),
+    (0, 0, 1),
+    (0, 0, -1),
+];
+
+/// Keep only voxels that are not **strictly interior** to `set` (every face neighbor lies in `set`).
+/// Used for preview and selection overlay meshing so large solid regions only pay for a surface shell.
+/// Single-cell sets are returned unchanged.
+pub fn filter_voxel_set_to_shell(set: &AHashSet<VoxelCoord>) -> AHashSet<VoxelCoord> {
+    let n = set.len();
+    if n <= 1 {
+        return set.clone();
+    }
+    let mut out = AHashSet::with_capacity(n.min(65_536));
+    for &c in set.iter() {
+        let mut has_outside = false;
+        for &(dx, dy, dz) in &FACE_NEIGHBOR_OFFSETS {
+            let nb = (c.0 + dx, c.1 + dy, c.2 + dz);
+            if !set.contains(&nb) {
+                has_outside = true;
+                break;
+            }
+        }
+        if has_outside {
+            out.insert(c);
+        }
+    }
+    out
+}
+
 pub fn selection_bounds(sel: &AHashSet<VoxelCoord>) -> Option<(i32, i32, i32, i32, i32, i32)> {
     let mut it = sel.iter();
     let first = *it.next()?;
@@ -2003,11 +2062,15 @@ pub fn mesh_buffers_selection_overlay_solid(
         let cz = (min_z + max_z) as f32 * 0.5;
         return axis_aligned_box_mesh(cx, cy, cz, hx, hy, hz, col, 1.0);
     }
-    let mut combined: AHashMap<VoxelCoord, Voxel> = AHashMap::with_capacity(world.len() + sel.len());
+    let sel_mesh = filter_voxel_set_to_shell(sel);
+    if sel_mesh.is_empty() {
+        return MeshBuffers::default();
+    }
+    let mut combined: AHashMap<VoxelCoord, Voxel> = AHashMap::with_capacity(world.len() + sel_mesh.len());
     for (k, v) in world.iter() {
         combined.insert(*k, *v);
     }
-    for &c in sel.iter() {
+    for &c in sel_mesh.iter() {
         let oid = world.get(&c).map(|v| v.object_id).unwrap_or(0);
         combined.insert(
             c,
@@ -2021,8 +2084,8 @@ pub fn mesh_buffers_selection_overlay_solid(
             },
         );
     }
-    let mut emit: Vec<Voxel> = Vec::with_capacity(sel.len());
-    for &c in sel.iter() {
+    let mut emit: Vec<Voxel> = Vec::with_capacity(sel_mesh.len());
+    for &c in sel_mesh.iter() {
         if let Some(v) = combined.get(&c) {
             emit.push(*v);
         }
@@ -2223,5 +2286,136 @@ mod gpu_pack_tests {
         m.insert((0, 0, 0), v);
         let verts = voxel_surface_grid_line_vertices(&m);
         assert_eq!(verts.len(), 12 * 2 * 6);
+    }
+
+    /// 2×1 merged +Y top: voxel at `(-1,1,0)` occludes only the `(cu,cv)=(0,0)` corner’s outward samples (see `AO_NEIGHBORS`), not `(1,0)` / corner 1.
+    #[test]
+    fn merged_quad_per_corner_ao_not_uniform() {
+        let voxels = vec![
+            Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xcc_cc_cc,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                color: 0xcc_cc_cc,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            Voxel {
+                x: -1,
+                y: 1,
+                z: 0,
+                color: 0xcc_cc_cc,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+        ];
+        let map = voxel_map(&voxels);
+        let (mesh, _) = build_greedy_mesh(&voxels, &[]);
+        assert!(!mesh.ao.is_empty());
+        let mut set = AHashSet::new();
+        for &a in &mesh.ao {
+            set.insert((a * 1000.0).round() as i32);
+        }
+        assert!(
+            set.len() >= 2,
+            "expected varying AO after per-corner fix, got unique {:?}",
+            set
+        );
+
+        let axis = 1usize;
+        let sign = 1i32;
+        let depth = 0i32;
+        let ao00 = corner_ao_factor(&map, axis, sign, depth, 0, 0, 0);
+        let ao10 = corner_ao_factor(&map, axis, sign, depth, 1, 0, 1);
+        assert!(
+            (ao00 - ao10).abs() > 1e-4,
+            "expected different corner AO: ao00={} ao10={}",
+            ao00,
+            ao10
+        );
+    }
+
+    /// Glass in an AO neighbor slot does not occlude (unlike same-object plastic).
+    /// +X face on `(5,5,5)`: corner 0 samples `(6,4,5)` among others — occluder there is plastic vs glass.
+    #[test]
+    fn corner_ao_transmissive_neighbor_does_not_occlude() {
+        fn plastic_at(x: i32, y: i32, z: i32) -> Voxel {
+            Voxel {
+                x,
+                y,
+                z,
+                color: 1,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            }
+        }
+        let mut map_plastic = AHashMap::new();
+        map_plastic.insert((5, 5, 5), plastic_at(5, 5, 5));
+        map_plastic.insert((6, 4, 5), plastic_at(6, 4, 5));
+
+        let mut map_glass = AHashMap::new();
+        map_glass.insert((5, 5, 5), plastic_at(5, 5, 5));
+        map_glass.insert(
+            (6, 4, 5),
+            Voxel {
+                x: 6,
+                y: 4,
+                z: 5,
+                color: 1,
+                material: MaterialId::Glass,
+                object_id: 0,
+            },
+        );
+
+        let axis = 0usize;
+        let sign = 1i32;
+        let depth = 5i32;
+        let cu = 5i32;
+        let cv = 5i32;
+        let ao_p = corner_ao_factor(&map_plastic, axis, sign, depth, cu, cv, 0);
+        let ao_g = corner_ao_factor(&map_glass, axis, sign, depth, cu, cv, 0);
+        assert!(
+            ao_g > ao_p,
+            "glass should occlude less than plastic: ao_g={} ao_p={}",
+            ao_g,
+            ao_p
+        );
+    }
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+    use ahash::AHashSet;
+
+    #[test]
+    fn filter_shell_drops_3x3x3_center() {
+        let mut s = AHashSet::new();
+        for x in 0..3 {
+            for y in 0..3 {
+                for z in 0..3 {
+                    s.insert((x, y, z));
+                }
+            }
+        }
+        let sh = filter_voxel_set_to_shell(&s);
+        assert_eq!(sh.len(), 26);
+        assert!(!sh.contains(&(1, 1, 1)));
+    }
+
+    #[test]
+    fn filter_shell_keeps_single() {
+        let mut s = AHashSet::new();
+        s.insert((0, 0, 0));
+        let sh = filter_voxel_set_to_shell(&s);
+        assert_eq!(sh.len(), 1);
     }
 }

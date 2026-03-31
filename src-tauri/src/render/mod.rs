@@ -380,6 +380,9 @@ pub struct WgpuViewer {
     /// Web-style ghost: occluded (Greater) then front (Always), unlit + alpha blend; no gbuffer writes.
     pipeline_preview_occluded: wgpu::RenderPipeline,
     pipeline_preview_front: wgpu::RenderPipeline,
+    /// Same as [`pipeline_preview_front`] but **no** depth bias — wireframe edges use true depth
+    /// so they are occluded by scene geometry when embedded in solids.
+    pipeline_preview_front_wire: wgpu::RenderPipeline,
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
     /// Voxel grid borders: depth-tested only (no occluded ghost pass), semi-transparent.
@@ -1305,6 +1308,37 @@ impl WgpuViewer {
                 multiview: None,
                 cache: None,
             });
+        let pipeline_preview_front_wire =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview_front_wire"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_front_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
 
         let pipeline_collab_lines_occluded =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1911,6 +1945,7 @@ impl WgpuViewer {
             pipeline_opaque,
             pipeline_preview_occluded,
             pipeline_preview_front,
+            pipeline_preview_front_wire,
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
             pipeline_grid_border_lines,
@@ -3656,11 +3691,10 @@ impl WgpuViewer {
                 pass.set_vertex_buffer(0, wvb.slice(..));
                 pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-                // Triangle edges (not LineList): same pipelines as solid preview.
-                pass.set_pipeline(&self.pipeline_preview_occluded);
-                pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
-                pass.set_pipeline(&self.pipeline_preview_front);
-                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                // Wireframe: **front pass only** (`LessEqual`, no depth bias). Skip the occluded
+                // (`Greater`) pass so edges behind scene mesh are not drawn as x-ray; solid preview
+                // still uses both passes for the semi-transparent ghost fill.
+                pass.set_pipeline(&self.pipeline_preview_front_wire);
                 pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
             }
         }
@@ -3733,10 +3767,7 @@ impl WgpuViewer {
                 pass.set_vertex_buffer(0, wvb.slice(..));
                 pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-                pass.set_pipeline(&self.pipeline_preview_occluded);
-                pass.draw_indexed(0..self.ping_wire_index_count, 0, 0..1);
-                pass.set_pipeline(&self.pipeline_preview_front);
-                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_preview_front_wire);
                 pass.draw_indexed(0..self.ping_wire_index_count, 0, 0..1);
             }
         }
