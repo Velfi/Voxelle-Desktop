@@ -1,5 +1,6 @@
 //! Procedural generators (web parity). Face placement uses ray hit + inward normal.
 
+mod cloth_gen;
 mod grass_gen;
 mod rocks;
 mod rope_gen;
@@ -8,9 +9,10 @@ mod squishy_gizmo;
 mod squishy_pick_rings;
 mod squishy_session;
 
+pub use cloth_gen::{generator_cloth_from_pins, preview_cloth_voxels, ClothSimOptions};
 pub use grass_gen::generator_grass_at_screen;
 pub use rocks::generator_rocks_at_screen;
-pub use rope_gen::generator_rope_between_screens;
+pub use rope_gen::{generator_rope_between_screens, preview_rope_voxels_between_screens};
 pub use squishy_gen::squishy_metaball_at_screen;
 pub use squishy_gizmo::{
     append_squishy_gizmo_wire, pick_squishy_gizmo_handle, squishy_gizmo_apply_drag,

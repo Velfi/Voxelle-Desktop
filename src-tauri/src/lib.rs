@@ -12,6 +12,7 @@ mod macos_undo;
 mod render;
 mod render_constants;
 mod voxel_edit;
+mod sculpt_mesh_smooth;
 mod stroke_modes;
 mod generators;
 mod export_glb;
@@ -396,6 +397,18 @@ fn default_wall_height_vox_sculpt() -> u32 {
     2
 }
 
+fn default_smooth_aggressiveness_sculpt() -> u32 {
+    100
+}
+
+fn default_laplacian_iterations_sculpt() -> u32 {
+    4
+}
+
+fn default_laplacian_relax_sculpt() -> u32 {
+    50
+}
+
 #[derive(serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct SculptStrokeAtScreenArgs {
@@ -446,6 +459,18 @@ struct SculptStrokeAtScreenArgs {
     wall_lock_start_height: bool,
     #[serde(default)]
     wall_axis_align: bool,
+    #[serde(default)]
+    sculpt_smooth_variant: crate::sculpt_mesh_smooth::SculptSmoothVariant,
+    #[serde(default)]
+    smooth_neighbor_radius: u32,
+    #[serde(default = "default_smooth_aggressiveness_sculpt")]
+    smooth_aggressiveness: u32,
+    #[serde(default = "default_laplacian_iterations_sculpt")]
+    smooth_laplacian_iterations: u32,
+    #[serde(default = "default_laplacian_relax_sculpt")]
+    smooth_laplacian_relax_pct: u32,
+    #[serde(default)]
+    wall_polygon_vertices: Option<Vec<[i32; 3]>>,
 }
 
 /// Hover preview uses the same brush/stroke inputs as [`voxel_edit_at_screen`] / [`voxel_stroke_preview_at_screen`].
@@ -462,6 +487,19 @@ struct PreviewHoverContext {
     match_material: bool,
     /// When false (e.g. sculpt), hover uses the legacy single-cell preview.
     use_brush_preview: bool,
+    /// `Some("rope" | "cloth" | "rocks" | "grass")` when the generator tool is active (webview sync).
+    generator_kind: Option<String>,
+    generator_rope_first_nx: Option<f32>,
+    generator_rope_first_ny: Option<f32>,
+    generator_rope_sag: f32,
+    generator_rope_tension: f32,
+    generator_cloth_pins: Vec<[i32; 3]>,
+    generator_cloth_tension: f32,
+    generator_cloth_gravity_direction: String,
+    generator_cloth_gravity_scale: f64,
+    generator_cloth_stiffness_scale: f64,
+    generator_cloth_iterations: u32,
+    generator_cloth_constraint_passes: u32,
 }
 
 impl Default for PreviewHoverContext {
@@ -477,6 +515,18 @@ impl Default for PreviewHoverContext {
             material: String::new(),
             match_material: false,
             use_brush_preview: true,
+            generator_kind: None,
+            generator_rope_first_nx: None,
+            generator_rope_first_ny: None,
+            generator_rope_sag: 2.5,
+            generator_rope_tension: 0.5,
+            generator_cloth_pins: Vec::new(),
+            generator_cloth_tension: 0.5,
+            generator_cloth_gravity_direction: "down".into(),
+            generator_cloth_gravity_scale: 1.0,
+            generator_cloth_stiffness_scale: 1.0,
+            generator_cloth_iterations: 0,
+            generator_cloth_constraint_passes: 2,
         }
     }
 }
@@ -5591,6 +5641,11 @@ fn voxel_sculpt_stroke_at_screen(
         };
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        let wall_poly = args.wall_polygon_vertices.as_ref().map(|v| {
+            v.iter()
+                .map(|a| (a[0], a[1], a[2]))
+                .collect::<Vec<greedy_mesh::VoxelCoord>>()
+        });
         voxel_edit::apply_sculpt_stroke(
             file,
             vmap,
@@ -5622,6 +5677,12 @@ fn voxel_sculpt_stroke_at_screen(
             args.wall_height_vox,
             args.wall_lock_start_height,
             args.wall_axis_align,
+            args.sculpt_smooth_variant,
+            args.smooth_neighbor_radius,
+            args.smooth_aggressiveness,
+            args.smooth_laplacian_iterations,
+            args.smooth_laplacian_relax_pct,
+            wall_poly,
         )?
     };
     let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
@@ -5710,6 +5771,11 @@ fn commit_sculpt_stroke_replay(
             };
             let cam = state.camera.lock();
             let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+            let wall_poly = args.wall_polygon_vertices.as_ref().map(|v| {
+                v.iter()
+                    .map(|a| (a[0], a[1], a[2]))
+                    .collect::<Vec<greedy_mesh::VoxelCoord>>()
+            });
             voxel_edit::apply_sculpt_stroke(
                 file,
                 vmap,
@@ -5741,6 +5807,12 @@ fn commit_sculpt_stroke_replay(
                 args.wall_height_vox,
                 args.wall_lock_start_height,
                 args.wall_axis_align,
+                args.sculpt_smooth_variant,
+                args.smooth_neighbor_radius,
+                args.smooth_aggressiveness,
+                args.smooth_laplacian_iterations,
+                args.smooth_laplacian_relax_pct,
+                wall_poly,
             )?
         };
         all_deltas.extend(deltas);
@@ -5803,6 +5875,12 @@ fn voxel_sculpt_stroke_preview_at_screen(
             _ => None,
         };
         if args.sculpt_mode == voxel_edit::SculptStrokeMode::Wall {
+            let wall_poly_vec: Option<Vec<greedy_mesh::VoxelCoord>> =
+                args.wall_polygon_vertices.as_ref().map(|v| {
+                    v.iter()
+                        .map(|a| (a[0], a[1], a[2]))
+                        .collect()
+                });
             voxel_edit::compute_wall_sculpt_footprint(
                 file,
                 vmap,
@@ -5814,6 +5892,7 @@ fn voxel_sculpt_stroke_preview_at_screen(
                 line,
                 seg,
                 args.wall_area_shape,
+                wall_poly_vec.as_deref(),
                 args.spray_direction,
                 args.wall_width_index,
                 args.wall_height_vox,
@@ -6046,12 +6125,28 @@ struct GeneratorRopeArgs {
     ny2: f32,
     #[serde(default = "default_rope_sag")]
     sag: f32,
+    /// 0 = loose, 1 = taut (scales sag; web `ropeTension`).
+    #[serde(default = "default_rope_tension")]
+    tension: f32,
+    /// Web `ropeBrushRadius` index (same mapping as sculpt brush index).
+    #[serde(default = "default_rope_brush_radius_index")]
+    brush_radius: u32,
+    #[serde(default)]
+    brush_shape: voxel_edit::BrushShape,
     color: u32,
     material: String,
 }
 
 fn default_rope_sag() -> f32 {
     2.5
+}
+
+fn default_rope_tension() -> f32 {
+    0.5
+}
+
+fn default_rope_brush_radius_index() -> u32 {
+    2
 }
 
 #[tauri::command]
@@ -6092,8 +6187,97 @@ fn generator_rope_at_screen(
             sx2,
             sy2,
             args.sag,
+            args.tension,
+            args.brush_radius,
+            args.brush_shape,
             args.color,
             material,
+        )?
+    };
+    commit_voxel_edits(&state, &app, deltas)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratorClothArgs {
+    /// At least three distinct corner voxels (surface picks).
+    pins: Vec<[i32; 3]>,
+    #[serde(default = "default_rope_tension")]
+    tension: f32,
+    /// Web `ropeGravityDirection`: down | up | left | right | forward | back.
+    #[serde(default = "default_cloth_gravity_direction")]
+    gravity_direction: String,
+    #[serde(default = "default_rope_brush_radius_index")]
+    brush_radius: u32,
+    #[serde(default)]
+    brush_shape: voxel_edit::BrushShape,
+    color: u32,
+    material: String,
+    /// Web `clothSimGravityPct / 100`.
+    #[serde(default = "default_cloth_gravity_stiffness_scale")]
+    gravity_scale: f64,
+    /// Web `clothSimStiffnessPct / 100`.
+    #[serde(default = "default_cloth_gravity_stiffness_scale")]
+    stiffness_scale: f64,
+    /// 0 = automatic iteration count from tension.
+    #[serde(default)]
+    cloth_iterations: u32,
+    #[serde(default = "default_cloth_constraint_passes")]
+    cloth_constraint_passes: u32,
+}
+
+fn default_cloth_gravity_direction() -> String {
+    "down".into()
+}
+
+fn default_cloth_gravity_stiffness_scale() -> f64 {
+    1.0
+}
+
+fn default_cloth_constraint_passes() -> u32 {
+    2
+}
+
+#[tauri::command]
+fn generator_cloth_from_pins_cmd(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorClothArgs,
+) -> Result<bool, String> {
+    if args.pins.len() < 3 {
+        return Err("cloth needs at least three pin points".into());
+    }
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let sim = crate::generators::ClothSimOptions {
+        gravity_scale: args.gravity_scale.max(0.0),
+        stiffness_scale: args.stiffness_scale.clamp(0.05, 2.0),
+        iterations: if args.cloth_iterations > 0 {
+            Some(args.cloth_iterations.clamp(4, 96))
+        } else {
+            None
+        },
+        constraint_passes: args.cloth_constraint_passes.clamp(1, 6),
+    };
+    let deltas = {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        crate::generators::generator_cloth_from_pins(
+            file,
+            vmap,
+            &args.pins,
+            args.tension,
+            args.gravity_direction.as_str(),
+            args.brush_radius,
+            args.brush_shape,
+            args.color,
+            material,
+            sim,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
@@ -7257,6 +7441,46 @@ struct SyncPreviewInput {
     match_material: bool,
     #[serde(default = "default_true")]
     use_brush_preview: bool,
+    #[serde(default)]
+    generator_kind: Option<String>,
+    #[serde(default)]
+    generator_rope_first_nx: Option<f32>,
+    #[serde(default)]
+    generator_rope_first_ny: Option<f32>,
+    #[serde(default = "default_rope_sag")]
+    generator_rope_sag: f32,
+    #[serde(default = "default_rope_tension")]
+    generator_rope_tension: f32,
+    #[serde(default)]
+    generator_cloth_pins: Vec<[i32; 3]>,
+    #[serde(default = "default_cloth_tension_preview")]
+    generator_cloth_tension: f32,
+    #[serde(default = "default_cloth_gravity_direction_str")]
+    generator_cloth_gravity_direction: String,
+    #[serde(default = "default_one_f64")]
+    generator_cloth_gravity_scale: f64,
+    #[serde(default = "default_one_f64")]
+    generator_cloth_stiffness_scale: f64,
+    #[serde(default)]
+    generator_cloth_iterations: u32,
+    #[serde(default = "default_cloth_constraint_passes_u32")]
+    generator_cloth_constraint_passes: u32,
+}
+
+fn default_cloth_tension_preview() -> f32 {
+    0.5
+}
+
+fn default_cloth_gravity_direction_str() -> String {
+    "down".into()
+}
+
+fn default_one_f64() -> f64 {
+    1.0
+}
+
+fn default_cloth_constraint_passes_u32() -> u32 {
+    2
 }
 
 #[tauri::command]
@@ -7286,6 +7510,18 @@ fn sync_preview_input(
         ph.material = args.material;
         ph.match_material = args.match_material;
         ph.use_brush_preview = args.use_brush_preview;
+        ph.generator_kind = args.generator_kind.clone();
+        ph.generator_rope_first_nx = args.generator_rope_first_nx;
+        ph.generator_rope_first_ny = args.generator_rope_first_ny;
+        ph.generator_rope_sag = args.generator_rope_sag;
+        ph.generator_rope_tension = args.generator_rope_tension;
+        ph.generator_cloth_pins.clone_from(&args.generator_cloth_pins);
+        ph.generator_cloth_tension = args.generator_cloth_tension;
+        ph.generator_cloth_gravity_direction = args.generator_cloth_gravity_direction.clone();
+        ph.generator_cloth_gravity_scale = args.generator_cloth_gravity_scale;
+        ph.generator_cloth_stiffness_scale = args.generator_cloth_stiffness_scale;
+        ph.generator_cloth_iterations = args.generator_cloth_iterations;
+        ph.generator_cloth_constraint_passes = args.generator_cloth_constraint_passes;
     }
     if args.nx < 0.0 {
         *state.preview_cursor.lock() = None;
@@ -7539,6 +7775,79 @@ fn preview_overlay_cache_key_get(state: &ViewerState) -> Option<u64> {
     *state.preview_overlay_cache_key.lock()
 }
 
+fn brush_shape_tag(s: voxel_edit::BrushShape) -> u8 {
+    match s {
+        voxel_edit::BrushShape::Sphere => 0,
+        voxel_edit::BrushShape::Cube => 1,
+        voxel_edit::BrushShape::Pyramid => 2,
+    }
+}
+
+fn hash_generator_rope_hover(
+    sx1: f32,
+    sy1: f32,
+    sx2: f32,
+    sy2: f32,
+    sag: f32,
+    tension: f32,
+    brush_radius: u32,
+    brush_shape: voxel_edit::BrushShape,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x52u8.hash(&mut h);
+    sx1.to_bits().hash(&mut h);
+    sy1.to_bits().hash(&mut h);
+    sx2.to_bits().hash(&mut h);
+    sy2.to_bits().hash(&mut h);
+    sag.to_bits().hash(&mut h);
+    tension.to_bits().hash(&mut h);
+    brush_radius.hash(&mut h);
+    brush_shape_tag(brush_shape).hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+fn hash_generator_cloth_hover(
+    pins: &[[i32; 3]],
+    tension: f32,
+    gravity_dir: &str,
+    gravity_scale: f64,
+    stiffness_scale: f64,
+    iterations: u32,
+    passes: u32,
+    brush_radius: u32,
+    brush_shape: voxel_edit::BrushShape,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x43u8.hash(&mut h);
+    pins.len().hash(&mut h);
+    for p in pins {
+        p[0].hash(&mut h);
+        p[1].hash(&mut h);
+        p[2].hash(&mut h);
+    }
+    tension.to_bits().hash(&mut h);
+    gravity_dir.hash(&mut h);
+    gravity_scale.to_bits().hash(&mut h);
+    stiffness_scale.to_bits().hash(&mut h);
+    iterations.hash(&mut h);
+    passes.hash(&mut h);
+    brush_radius.hash(&mut h);
+    brush_shape_tag(brush_shape).hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
 fn prepare_preview_mesh(
     state: &ViewerState,
     cam: &OrbitCamera,
@@ -7683,6 +7992,126 @@ fn prepare_preview_mesh(
 
     let hover = state.preview_hover.lock();
     let ctx = &*hover;
+
+    if matches!(mode, PreviewMode::Add) {
+        if let Some(ref gk) = ctx.generator_kind {
+            let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
+            match gk.as_str() {
+                "rope" => {
+                    if let (Some(n1x), Some(n1y)) =
+                        (ctx.generator_rope_first_nx, ctx.generator_rope_first_ny)
+                    {
+                        let (sx1, sy1) = viewport_texels_from_norm(n1x, n1y, w, h);
+                        let cells = crate::generators::preview_rope_voxels_between_screens(
+                            file,
+                            vmap,
+                            cam,
+                            w,
+                            h,
+                            sx1,
+                            sy1,
+                            sx,
+                            sy,
+                            ctx.generator_rope_sag,
+                            ctx.generator_rope_tension,
+                            ctx.brush_radius,
+                            ctx.brush_shape,
+                        );
+                        if !cells.is_empty() {
+                            let key = hash_generator_rope_hover(
+                                sx1,
+                                sy1,
+                                sx,
+                                sy,
+                                ctx.generator_rope_sag,
+                                ctx.generator_rope_tension,
+                                ctx.brush_radius,
+                                ctx.brush_shape,
+                                ctx.color,
+                                dbg,
+                                mesh_gen,
+                            );
+                            if preview_overlay_cache_key_get(state) == Some(key) {
+                                return PreviewMeshPrepared::Noop;
+                            }
+                            let set: AHashSet<_> = cells.iter().copied().collect();
+                            let (solid, wire) = stroke_preview_meshes_for_union(
+                                voxel_edit::EditTool::Add,
+                                &set,
+                                vmap,
+                                file,
+                                dbg,
+                                ctx.color,
+                            );
+                            return PreviewMeshPrepared::Upload {
+                                cache_key: key,
+                                solid,
+                                wire,
+                            };
+                        }
+                    }
+                }
+                "cloth" => {
+                    if ctx.generator_cloth_pins.len() >= 3 {
+                        let sim = crate::generators::ClothSimOptions {
+                            gravity_scale: ctx.generator_cloth_gravity_scale.max(0.0),
+                            stiffness_scale: ctx
+                                .generator_cloth_stiffness_scale
+                                .clamp(0.05, 2.0),
+                            iterations: if ctx.generator_cloth_iterations > 0 {
+                                Some(ctx.generator_cloth_iterations.clamp(4, 96))
+                            } else {
+                                None
+                            },
+                            constraint_passes: ctx.generator_cloth_constraint_passes.clamp(1, 6),
+                        };
+                        let cells = crate::generators::preview_cloth_voxels(
+                            &ctx.generator_cloth_pins,
+                            ctx.generator_cloth_tension,
+                            ctx.generator_cloth_gravity_direction.as_str(),
+                            ctx.brush_radius,
+                            ctx.brush_shape,
+                            &sim,
+                        );
+                        if !cells.is_empty() {
+                            let key = hash_generator_cloth_hover(
+                                &ctx.generator_cloth_pins,
+                                ctx.generator_cloth_tension,
+                                ctx.generator_cloth_gravity_direction.as_str(),
+                                ctx.generator_cloth_gravity_scale,
+                                ctx.generator_cloth_stiffness_scale,
+                                ctx.generator_cloth_iterations,
+                                ctx.generator_cloth_constraint_passes,
+                                ctx.brush_radius,
+                                ctx.brush_shape,
+                                ctx.color,
+                                dbg,
+                                mesh_gen,
+                            );
+                            if preview_overlay_cache_key_get(state) == Some(key) {
+                                return PreviewMeshPrepared::Noop;
+                            }
+                            let set: AHashSet<_> = cells.iter().copied().collect();
+                            let (solid, wire) = stroke_preview_meshes_for_union(
+                                voxel_edit::EditTool::Add,
+                                &set,
+                                vmap,
+                                file,
+                                dbg,
+                                ctx.color,
+                            );
+                            return PreviewMeshPrepared::Upload {
+                                cache_key: key,
+                                solid,
+                                wire,
+                            };
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 
     if matches!(mode, PreviewMode::Select) {
         let poly_placing = matches!(
@@ -9633,6 +10062,7 @@ pub fn run() {
             generator_rocks_at_screen,
             generator_grass_at_screen,
             generator_rope_at_screen,
+            generator_cloth_from_pins_cmd,
             generator_squishy_metaball_at_screen,
             squishy_session_get,
             squishy_session_set_mode,

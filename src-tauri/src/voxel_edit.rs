@@ -2,6 +2,9 @@
 
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
+use crate::sculpt_mesh_smooth::{
+    apply_sculpt_smooth_majority_pass, apply_sculpt_smooth_mesh_laplacian, SculptSmoothVariant,
+};
 use crate::stroke_modes::{
     stroke_anchor_centers_with_mode, DrawStrokeMode, PlaneAxis, StrokeAux,
 };
@@ -2838,6 +2841,109 @@ pub fn outward_face_normal_from_screen_ray(
     Some((prev.0 - hit.0, prev.1 - hit.1, prev.2 - hit.2))
 }
 
+fn polygon_closed_outline(points: &[VoxelCoord]) -> Vec<VoxelCoord> {
+    let n = points.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![points[0]];
+    }
+    if n == 2 {
+        return voxel_line_dda(points[0], points[1]);
+    }
+    let mut seen: HashSet<VoxelCoord> = HashSet::new();
+    let mut out = Vec::new();
+    for i in 0..n {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        for p in voxel_line_dda(a, b) {
+            if seen.insert(p) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+fn axis_aligned_circle_filled_disk(
+    center: VoxelCoord,
+    edge: VoxelCoord,
+    face_n: (i32, i32, i32),
+) -> Vec<VoxelCoord> {
+    let ax = face_n.0.abs();
+    let ay = face_n.1.abs();
+    let az = face_n.2.abs();
+    let fixed_axis = if ax >= ay && ax >= az {
+        0usize
+    } else if ay >= az {
+        1usize
+    } else {
+        2usize
+    };
+
+    let (cu, cv, eu, ev) = match fixed_axis {
+        0 => (center.1, center.2, edge.1, edge.2),
+        1 => (center.0, center.2, edge.0, edge.2),
+        _ => (center.0, center.1, edge.0, edge.1),
+    };
+    let du = eu - cu;
+    let dv = ev - cv;
+    let r_sq = du * du + dv * dv;
+    if r_sq == 0 {
+        return match fixed_axis {
+            0 => vec![(center.0, cu, cv)],
+            1 => vec![(cu, center.1, cv)],
+            _ => vec![(cu, cv, center.2)],
+        };
+    }
+    let ru = (r_sq as f64).sqrt().ceil() as i32;
+    let mut filled = Vec::new();
+    for u in (cu - ru)..=(cu + ru) {
+        for v in (cv - ru)..=(cv + ru) {
+            let ddu = u - cu;
+            let ddv = v - cv;
+            if ddu * ddu + ddv * ddv <= r_sq {
+                let p = match fixed_axis {
+                    0 => (center.0, u, v),
+                    1 => (u, center.1, v),
+                    _ => (u, v, center.2),
+                };
+                filled.push(p);
+            }
+        }
+    }
+    filled
+}
+
+fn wall_circle_disk_spine(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx_center: f32,
+    sy_center: f32,
+    sx_edge: f32,
+    sy_edge: f32,
+) -> Option<Vec<VoxelCoord>> {
+    let grid_size = effective_ray_grid_size(file);
+    let (o1, d1) = screen_to_world_ray(camera, width, height, sx_center, sy_center);
+    let (o2, d2) = screen_to_world_ray(camera, width, height, sx_edge, sy_edge);
+    let (hit1, _, _) = ray_first_solid_scene(o1, d1, file, voxel_map, grid_size)?;
+    let (hit2, _, _) = ray_first_solid_scene(o2, d2, file, voxel_map, grid_size)?;
+    let n = outward_face_normal_from_screen_ray(
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        sx_edge,
+        sy_edge,
+    )?;
+    Some(axis_aligned_circle_filled_disk(hit1, hit2, n))
+}
+
 /// Web `thickenPathForStroke` wall path + strength/falloff.
 pub fn compute_wall_sculpt_footprint(
     file: &VoxelleFile,
@@ -2850,6 +2956,7 @@ pub fn compute_wall_sculpt_footprint(
     stroke_line_start: Option<(f32, f32)>,
     stroke_segment_prev: Option<(f32, f32)>,
     wall_area_shape: WallAreaShape,
+    wall_polygon_vertices: Option<&[VoxelCoord]>,
     spray_direction: SprayDirection,
     wall_width_index: u32,
     wall_height_vox: u32,
@@ -2860,20 +2967,127 @@ pub fn compute_wall_sculpt_footprint(
     brush_strength: u32,
     stroke_seed: u32,
 ) -> Vec<VoxelCoord> {
-    let _ = wall_area_shape;
-
-    let mut spine = stroke_anchor_centers_sculpt(
-        SculptStrokeMode::Wall,
-        file,
-        voxel_map,
-        camera,
-        width,
-        height,
-        sx,
-        sy,
-        stroke_line_start,
-        stroke_segment_prev,
-    );
+    let mut spine = match wall_area_shape {
+        WallAreaShape::Polygon => {
+            if let Some(corners) = wall_polygon_vertices {
+                if corners.len() >= 2 {
+                    let o = polygon_closed_outline(corners);
+                    if o.is_empty() {
+                        stroke_anchor_centers_sculpt(
+                            SculptStrokeMode::Wall,
+                            file,
+                            voxel_map,
+                            camera,
+                            width,
+                            height,
+                            sx,
+                            sy,
+                            stroke_line_start,
+                            stroke_segment_prev,
+                        )
+                    } else {
+                        o
+                    }
+                } else {
+                    stroke_anchor_centers_sculpt(
+                        SculptStrokeMode::Wall,
+                        file,
+                        voxel_map,
+                        camera,
+                        width,
+                        height,
+                        sx,
+                        sy,
+                        stroke_line_start,
+                        stroke_segment_prev,
+                    )
+                }
+            } else {
+                stroke_anchor_centers_sculpt(
+                    SculptStrokeMode::Wall,
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    sx,
+                    sy,
+                    stroke_line_start,
+                    stroke_segment_prev,
+                )
+            }
+        }
+        WallAreaShape::Circle => {
+            if let Some((lsx, lsy)) = stroke_line_start {
+                if let Some(disk) = wall_circle_disk_spine(
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    lsx,
+                    lsy,
+                    sx,
+                    sy,
+                ) {
+                    if disk.is_empty() {
+                        stroke_anchor_centers_sculpt(
+                            SculptStrokeMode::Wall,
+                            file,
+                            voxel_map,
+                            camera,
+                            width,
+                            height,
+                            sx,
+                            sy,
+                            stroke_line_start,
+                            stroke_segment_prev,
+                        )
+                    } else {
+                        disk
+                    }
+                } else {
+                    stroke_anchor_centers_sculpt(
+                        SculptStrokeMode::Wall,
+                        file,
+                        voxel_map,
+                        camera,
+                        width,
+                        height,
+                        sx,
+                        sy,
+                        stroke_line_start,
+                        stroke_segment_prev,
+                    )
+                }
+            } else {
+                stroke_anchor_centers_sculpt(
+                    SculptStrokeMode::Wall,
+                    file,
+                    voxel_map,
+                    camera,
+                    width,
+                    height,
+                    sx,
+                    sy,
+                    stroke_line_start,
+                    stroke_segment_prev,
+                )
+            }
+        }
+        WallAreaShape::Brush => stroke_anchor_centers_sculpt(
+            SculptStrokeMode::Wall,
+            file,
+            voxel_map,
+            camera,
+            width,
+            height,
+            sx,
+            sy,
+            stroke_line_start,
+            stroke_segment_prev,
+        ),
+    };
     if spine.is_empty() {
         return Vec::new();
     }
@@ -3063,6 +3277,12 @@ pub fn apply_sculpt_stroke(
     wall_height_vox: u32,
     wall_lock_start_height: bool,
     wall_axis_align: bool,
+    sculpt_smooth_variant: SculptSmoothVariant,
+    smooth_neighbor_radius: u32,
+    smooth_aggressiveness: u32,
+    smooth_laplacian_iterations: u32,
+    smooth_laplacian_relax_pct: u32,
+    wall_polygon_vertices: Option<Vec<VoxelCoord>>,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let footprint = if mode == SculptStrokeMode::Wall {
         compute_wall_sculpt_footprint(
@@ -3076,6 +3296,7 @@ pub fn apply_sculpt_stroke(
             stroke_line_start,
             stroke_segment_prev,
             wall_area_shape,
+            wall_polygon_vertices.as_deref(),
             spray_direction,
             wall_width_index,
             wall_height_vox,
@@ -3171,64 +3392,52 @@ pub fn apply_sculpt_stroke(
             Ok(out)
         }
         SculptStrokeMode::Smooth => {
-            let mut candidates: Vec<VoxelCoord> = Vec::new();
-            for (x, y, z) in &footprint {
-                if voxel_map.contains_key(&(*x, *y, *z)) {
-                    candidates.push((*x, *y, *z));
+            let mut seen_fp: AHashSet<VoxelCoord> = AHashSet::new();
+            let mut deduped: Vec<VoxelCoord> = Vec::new();
+            for &(x, y, z) in &footprint {
+                if in_grid(x, y, z, grid_size) && seen_fp.insert((x, y, z)) {
+                    deduped.push((x, y, z));
                 }
             }
-            if candidates.is_empty() {
+            if deduped.is_empty() {
                 return Ok(Vec::new());
             }
-            let passes = smooth_neighbor_passes.max(1);
-            let mut out: Vec<VoxelEditDelta> = Vec::new();
-            for _ in 0..passes {
-                let mut paints: Vec<(VoxelCoord, u32, MaterialId)> = Vec::new();
-                for &(x, y, z) in &candidates {
-                    let mut counts: AHashMap<(u32, MaterialId), u32> = AHashMap::new();
-                    for (nx, ny, nz) in neighbors_6((x, y, z)) {
-                        if let Some(&idx) = voxel_map.get(&(nx, ny, nz)) {
-                            let v = file.voxels[idx];
-                            *counts.entry((v.color, v.material)).or_insert(0) += 1;
-                        }
-                    }
-                    let Some(&idx) = voxel_map.get(&(x, y, z)) else {
-                        continue;
-                    };
-                    let before = file.voxels[idx];
-                    *counts.entry((before.color, before.material)).or_insert(0) += 1;
-                    let mut best: Option<((u32, MaterialId), u32)> = None;
-                    for (k, c) in counts {
-                        match best {
-                            None => best = Some((k, c)),
-                            Some((_bk, bc)) if c > bc => best = Some((k, c)),
-                            Some((bk, bc)) if c == bc && k.0 < bk.0 => best = Some((k, c)),
-                            _ => {}
-                        }
-                    }
-                    let Some(((nc, nm), _)) = best else { continue };
-                    if nc != before.color || nm != before.material {
-                        paints.push(((x, y, z), nc, nm));
-                    }
+            match sculpt_smooth_variant {
+                SculptSmoothVariant::MeshLaplacian => {
+                    let margin = (smooth_neighbor_radius as i32).min(6) + 2;
+                    Ok(apply_sculpt_smooth_mesh_laplacian(
+                        file,
+                        voxel_map,
+                        &deduped,
+                        grid_size,
+                        margin,
+                        smooth_laplacian_iterations,
+                        smooth_laplacian_relax_pct,
+                        smooth_neighbor_radius,
+                        smooth_aggressiveness,
+                        color,
+                        material,
+                    ))
                 }
-                for ((x, y, z), nc, nm) in paints {
-                    let Some(&idx) = voxel_map.get(&(x, y, z)) else {
-                        continue;
-                    };
-                    let before = file.voxels[idx];
-                    if before.color == nc && before.material == nm {
-                        continue;
+                SculptSmoothVariant::Majority => {
+                    let passes = smooth_neighbor_passes.max(1);
+                    let mut out: Vec<VoxelEditDelta> = Vec::new();
+                    for _ in 0..passes {
+                        let pass_deltas = apply_sculpt_smooth_majority_pass(
+                            file,
+                            voxel_map,
+                            &deduped,
+                            grid_size,
+                            smooth_neighbor_radius,
+                            smooth_aggressiveness,
+                            color,
+                            material,
+                        );
+                        out.extend(pass_deltas);
                     }
-                    let after = Voxel {
-                        color: nc,
-                        material: nm,
-                        ..before
-                    };
-                    file.voxels[idx] = after;
-                    out.push(VoxelEditDelta::Painted { before, after });
+                    Ok(out)
                 }
             }
-            Ok(out)
         }
         SculptStrokeMode::Terrain => {
             let op = terrain_op.unwrap_or(TerrainSculptOp::Raise);
@@ -4006,6 +4215,12 @@ mod tests {
             2,
             false,
             false,
+            SculptSmoothVariant::Majority,
+            0,
+            100,
+            4,
+            50,
+            None,
         )
         .unwrap();
         assert!(!deltas.is_empty());

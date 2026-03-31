@@ -102,6 +102,7 @@ commands.allow = [
   "generator_rocks_at_screen",
   "generator_grass_at_screen",
   "generator_rope_at_screen",
+  "generator_cloth_from_pins_cmd",
   "generator_squishy_metaball_at_screen",
   "squishy_session_get",
   "squishy_session_set_mode",

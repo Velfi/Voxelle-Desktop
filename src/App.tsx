@@ -305,7 +305,14 @@ type SculptStrokeModeApi =
 /** Matches Rust `TerrainSculptOp`. */
 type TerrainSculptOpApi = "raise" | "lower" | "smooth";
 
-type GeneratorKindId = "rocks" | "grass" | "rope";
+type GeneratorKindId = "rocks" | "grass" | "rope" | "cloth";
+type ClothGravityDirectionId =
+  | "down"
+  | "up"
+  | "left"
+  | "right"
+  | "forward"
+  | "back";
 
 type BrushShape = "sphere" | "cube" | "pyramid";
 
@@ -322,6 +329,8 @@ function sculptBrushShapeToRust(s: SculptBrushShapeUi): BrushShape {
 
 /** Web `WallAreaShape` / `SprayDirection` (Rust serde camelCase). */
 type WallAreaShapeApi = "brush" | "circle" | "polygon";
+/** Web `SculptSmoothVariant`; Rust serde camelCase. */
+type SculptSmoothVariantApi = "majority" | "meshLaplacian";
 type SprayDirectionApi =
   | "auto"
   | "none"
@@ -616,6 +625,21 @@ function App() {
     ny: number;
   } | null>(null);
   const [ropeSag, setRopeSag] = useState(2.5);
+  /** 0 = loose, 1 = taut (web ropeTension). */
+  const [ropeTension, setRopeTension] = useState(0.5);
+  const [ropeBrushRadiusIndex, setRopeBrushRadiusIndex] = useState(2);
+  const [ropeBrushShapeUi, setRopeBrushShapeUi] =
+    useState<"sphere" | "cube">("sphere");
+  /** Cloth: corner pins (surface picks), then Apply in tool options. */
+  const [clothPins, setClothPins] = useState<[number, number, number][]>([]);
+  const clothPinsRef = useRef<[number, number, number][]>([]);
+  const [clothTension, setClothTension] = useState(0.5);
+  const [clothGravityDirection, setClothGravityDirection] =
+    useState<ClothGravityDirectionId>("down");
+  const [clothSimGravityPct, setClothSimGravityPct] = useState(100);
+  const [clothSimStiffnessPct, setClothSimStiffnessPct] = useState(100);
+  const [clothSimIterations, setClothSimIterations] = useState(0);
+  const [clothSimConstraintPasses, setClothSimConstraintPasses] = useState(2);
   const [rockRoughness, setRockRoughness] = useState(0.45);
   const [grassDensity, setGrassDensity] = useState(4);
   const [grassMaxHeight, setGrassMaxHeight] = useState(3);
@@ -640,6 +664,17 @@ function App() {
   const [wallHeightVox, setWallHeightVox] = useState(2);
   const [wallLockStartHeight, setWallLockStartHeight] = useState(false);
   const [wallAxisAlign, setWallAxisAlign] = useState(false);
+  const [sculptSmoothVariant, setSculptSmoothVariant] =
+    useState<SculptSmoothVariantApi>("majority");
+  /** Web `smoothNeighborRadius` 0–6 (inclusive). */
+  const [smoothNeighborRadius, setSmoothNeighborRadius] = useState(0);
+  const [smoothAggressiveness, setSmoothAggressiveness] = useState(100);
+  const [smoothLaplacianIterations, setSmoothLaplacianIterations] = useState(4);
+  const [smoothLaplacianRelaxPct, setSmoothLaplacianRelaxPct] = useState(50);
+  /** Wall + polygon area: corner voxels (object-local), then Done commits a wall stroke. */
+  const [wallSculptPolygonVerts, setWallSculptPolygonVerts] = useState<
+    [number, number, number][]
+  >([]);
   const [pathLabel, setPathLabel] = useState("");
   /** Cold-start title mesh from `Logo.voxelle`; enables bottom menu layout and viewport orbit. */
   const [startScreenLogoLoaded, setStartScreenLogoLoaded] = useState(false);
@@ -1495,6 +1530,12 @@ function App() {
   const wallHeightVoxRef = useRef(2);
   const wallLockStartHeightRef = useRef(false);
   const wallAxisAlignRef = useRef(false);
+  const sculptSmoothVariantRef = useRef<SculptSmoothVariantApi>("majority");
+  const smoothNeighborRadiusRef = useRef(0);
+  const smoothAggressivenessRef = useRef(100);
+  const smoothLaplacianIterationsRef = useRef(4);
+  const smoothLaplacianRelaxPctRef = useRef(50);
+  const wallSculptPolygonVertsRef = useRef<[number, number, number][]>([]);
   useEffect(() => {
     generatorSphereRadiusRef.current = generatorSphereRadius;
   }, [generatorSphereRadius]);
@@ -1550,6 +1591,29 @@ function App() {
     wallAxisAlignRef.current = wallAxisAlign;
   }, [wallAxisAlign]);
   useEffect(() => {
+    sculptSmoothVariantRef.current = sculptSmoothVariant;
+  }, [sculptSmoothVariant]);
+  useEffect(() => {
+    smoothNeighborRadiusRef.current = smoothNeighborRadius;
+  }, [smoothNeighborRadius]);
+  useEffect(() => {
+    smoothAggressivenessRef.current = smoothAggressiveness;
+  }, [smoothAggressiveness]);
+  useEffect(() => {
+    smoothLaplacianIterationsRef.current = smoothLaplacianIterations;
+  }, [smoothLaplacianIterations]);
+  useEffect(() => {
+    smoothLaplacianRelaxPctRef.current = smoothLaplacianRelaxPct;
+  }, [smoothLaplacianRelaxPct]);
+  useEffect(() => {
+    wallSculptPolygonVertsRef.current = wallSculptPolygonVerts;
+  }, [wallSculptPolygonVerts]);
+  useEffect(() => {
+    if (wallAreaShape !== "polygon" || sculptStrokeMode !== "wall") {
+      setWallSculptPolygonVerts([]);
+    }
+  }, [wallAreaShape, sculptStrokeMode]);
+  useEffect(() => {
     selectionStrokeSnapToSurfaceRef.current = selectionStrokeSnapToSurface;
   }, [selectionStrokeSnapToSurface]);
   useEffect(() => {
@@ -1590,6 +1654,53 @@ function App() {
   useEffect(() => {
     strokePolygonVertsRef.current = strokePolygonVerts;
   }, [strokePolygonVerts]);
+  useEffect(() => {
+    clothPinsRef.current = clothPins;
+  }, [clothPins]);
+  const ropeFirstScreenRef = useRef<{ nx: number; ny: number } | null>(null);
+  const ropeSagRef = useRef(ropeSag);
+  const ropeTensionRef = useRef(ropeTension);
+  const ropeBrushRadiusIndexRef = useRef(ropeBrushRadiusIndex);
+  const ropeBrushShapeUiRef = useRef<"sphere" | "cube">(ropeBrushShapeUi);
+  const clothTensionRef = useRef(clothTension);
+  const clothGravityDirectionRef = useRef(clothGravityDirection);
+  const clothSimGravityPctRef = useRef(clothSimGravityPct);
+  const clothSimStiffnessPctRef = useRef(clothSimStiffnessPct);
+  const clothSimIterationsRef = useRef(clothSimIterations);
+  const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
+  useEffect(() => {
+    ropeFirstScreenRef.current = ropeFirstScreen;
+  }, [ropeFirstScreen]);
+  useEffect(() => {
+    ropeSagRef.current = ropeSag;
+  }, [ropeSag]);
+  useEffect(() => {
+    ropeTensionRef.current = ropeTension;
+  }, [ropeTension]);
+  useEffect(() => {
+    ropeBrushRadiusIndexRef.current = ropeBrushRadiusIndex;
+  }, [ropeBrushRadiusIndex]);
+  useEffect(() => {
+    ropeBrushShapeUiRef.current = ropeBrushShapeUi;
+  }, [ropeBrushShapeUi]);
+  useEffect(() => {
+    clothTensionRef.current = clothTension;
+  }, [clothTension]);
+  useEffect(() => {
+    clothGravityDirectionRef.current = clothGravityDirection;
+  }, [clothGravityDirection]);
+  useEffect(() => {
+    clothSimGravityPctRef.current = clothSimGravityPct;
+  }, [clothSimGravityPct]);
+  useEffect(() => {
+    clothSimStiffnessPctRef.current = clothSimStiffnessPct;
+  }, [clothSimStiffnessPct]);
+  useEffect(() => {
+    clothSimIterationsRef.current = clothSimIterations;
+  }, [clothSimIterations]);
+  useEffect(() => {
+    clothSimConstraintPassesRef.current = clothSimConstraintPasses;
+  }, [clothSimConstraintPasses]);
   useEffect(() => {
     squishyModeRef.current = squishyMode;
   }, [squishyMode]);
@@ -1895,15 +2006,22 @@ function App() {
   function buildSyncPreviewPayload(nx: number, ny: number, modeStr: string) {
     const im = interactionModeRef.current;
     const isSculpt = im === "sculpt";
-    const brushRadius =
-      im === "squishy"
+    const isGenerator = im === "generator";
+    const gk = generatorKindRef.current;
+    const brushRadius = isGenerator
+      ? gk === "rocks" || gk === "grass"
+        ? Math.max(1, generatorSphereRadiusRef.current)
+        : ropeBrushRadiusIndexRef.current
+      : im === "squishy"
         ? Math.max(2, generatorSphereRadiusRef.current)
         : isSculpt
-        ? sculptBrushRadiusRef.current
-        : brushRadiusRef.current;
+          ? sculptBrushRadiusRef.current
+          : brushRadiusRef.current;
     const brushShape = isSculpt
       ? sculptBrushShapeToRust(sculptBrushShapeUiRef.current)
-      : brushShapeRef.current;
+      : isGenerator
+        ? sculptBrushShapeToRust(ropeBrushShapeUiRef.current)
+        : brushShapeRef.current;
     return {
       nx,
       ny,
@@ -1917,7 +2035,27 @@ function App() {
       color: activeColorRef.current,
       material: activeMaterialRef.current,
       matchMaterial: matchMaterialSelectColorRef.current,
-      useBrushPreview: im !== "squishy",
+      useBrushPreview: im !== "squishy" && !isGenerator,
+      ...(isGenerator
+        ? {
+            generatorKind: gk,
+            generatorRopeFirstNx: ropeFirstScreenRef.current?.nx,
+            generatorRopeFirstNy: ropeFirstScreenRef.current?.ny,
+            generatorRopeSag: ropeSagRef.current,
+            generatorRopeTension: ropeTensionRef.current,
+            generatorClothPins: clothPinsRef.current.map((p) => [
+              p[0],
+              p[1],
+              p[2],
+            ]),
+            generatorClothTension: clothTensionRef.current,
+            generatorClothGravityDirection: clothGravityDirectionRef.current,
+            generatorClothGravityScale: clothSimGravityPctRef.current / 100,
+            generatorClothStiffnessScale: clothSimStiffnessPctRef.current / 100,
+            generatorClothIterations: clothSimIterationsRef.current,
+            generatorClothConstraintPasses: clothSimConstraintPassesRef.current,
+          }
+        : {}),
     };
   }
 
@@ -2021,6 +2159,75 @@ function App() {
       }
       return;
     }
+  }
+
+  async function handleWallSculptPolygonClick(nx: number, ny: number) {
+    const c = await invoke<[number, number, number] | null>(
+      "voxel_stroke_anchor_coord_at_screen",
+      {
+        args: {
+          nx,
+          ny,
+          tool: "add",
+          strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+        },
+      },
+    );
+    if (!c) return;
+    setWallSculptPolygonVerts((v) => {
+      const idx = v.findIndex(
+        (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
+      );
+      const next =
+        idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+      wallSculptPolygonVertsRef.current = next;
+      return next;
+    });
+  }
+
+  async function handleClothPinClick(nx: number, ny: number) {
+    const c = await invoke<[number, number, number] | null>(
+      "voxel_stroke_anchor_coord_at_screen",
+      {
+        args: {
+          nx,
+          ny,
+          tool: "add",
+          strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+        },
+      },
+    );
+    if (!c) return;
+    setClothPins((v) => {
+      const idx = v.findIndex(
+        (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
+      );
+      const next =
+        idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
+      clothPinsRef.current = next;
+      return next;
+    });
+  }
+
+  function commitClothGenerator() {
+    const pins = clothPinsRef.current;
+    if (pins.length < 3) return;
+    void invoke("generator_cloth_from_pins_cmd", {
+      args: {
+        pins: pins.map((p) => [p[0], p[1], p[2]]),
+        tension: clothTension,
+        gravityDirection: clothGravityDirection,
+        brushRadius: ropeBrushRadiusIndex,
+        brushShape: sculptBrushShapeToRust(ropeBrushShapeUi),
+        color: activeColorRef.current,
+        material: activeMaterialRef.current,
+        gravityScale: clothSimGravityPct / 100,
+        stiffnessScale: clothSimStiffnessPct / 100,
+        clothIterations: clothSimIterations,
+        clothConstraintPasses: clothSimConstraintPasses,
+      },
+    }).catch(() => {});
+    setClothPins([]);
   }
 
   function applyPolygonStrokeFill() {
@@ -2174,6 +2381,7 @@ function App() {
     if (m === "remove") return "remove";
     if (m === "paint") return "paint";
     if (m === "sculpt") return "add";
+    if (m === "generator") return "add";
     if (m === "fly") return "fly";
     if (m === "squishy") return "squishy";
     if (
@@ -2685,6 +2893,34 @@ function App() {
     squishySnapToSurface,
   ]);
 
+  /** Generators: hover + rope/cloth volume preview when parameters change without moving the pointer. */
+  useEffect(() => {
+    const im = interactionModeRef.current;
+    if (im !== "generator") return;
+    if (interactionBlockedRef.current) return;
+    const p = lastViewportPickNormRef.current;
+    if (p == null) return;
+    void invoke("sync_preview_input", {
+      args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(im)),
+    }).catch(() => {});
+  }, [
+    generatorKind,
+    ropeFirstScreen,
+    ropeSag,
+    ropeTension,
+    ropeBrushRadiusIndex,
+    ropeBrushShapeUi,
+    clothPins,
+    clothTension,
+    clothGravityDirection,
+    clothSimGravityPct,
+    clothSimStiffnessPct,
+    clothSimIterations,
+    clothSimConstraintPasses,
+    generatorSphereRadius,
+    activeColor,
+  ]);
+
   useEffect(() => {
     if (interactionMode !== "squishy" || squishyMode !== "edit") {
       void invoke("squishy_gizmo_pointer_up").catch(() => {});
@@ -3148,6 +3384,103 @@ function App() {
     }
   };
 
+  /** Shared sculpt stroke payload for preview and apply (matches Rust `SculptStrokeAtScreenArgs`). */
+  function buildSculptStrokeInvokeArgs(
+    nx: number,
+    ny: number,
+    opts: {
+      strokeSegmentPrev?: { nx: number; ny: number } | null;
+      includeStrokeSeed?: boolean;
+    } = {},
+  ) {
+    const sm = sculptStrokeModeRef.current;
+    const includeStrokeSeed = opts.includeStrokeSeed !== false;
+    const lineStart =
+      sm === "wall" &&
+      wallAreaShapeRef.current === "circle" &&
+      strokeViewportStartRef.current
+        ? {
+            strokeLineStartNx: strokeViewportStartRef.current.nx,
+            strokeLineStartNy: strokeViewportStartRef.current.ny,
+          }
+        : {};
+    const wallPoly =
+      sm === "wall" &&
+      wallAreaShapeRef.current === "polygon" &&
+      wallSculptPolygonVertsRef.current.length >= 2
+        ? {
+            wallPolygonVertices: wallSculptPolygonVertsRef.current.map((v) => [
+              v[0],
+              v[1],
+              v[2],
+            ]),
+          }
+        : {};
+    const seg = opts.strokeSegmentPrev
+      ? {
+          strokeSegmentPrevNx: opts.strokeSegmentPrev.nx,
+          strokeSegmentPrevNy: opts.strokeSegmentPrev.ny,
+        }
+      : {};
+    return {
+      nx,
+      ny,
+      sculptMode: sm,
+      color: activeColorRef.current,
+      material: activeMaterialRef.current,
+      brushRadius: sculptBrushRadiusRef.current,
+      brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+      sprayDensity: 0,
+      brushClipBottomHalf: brushClipBottomHalfRef.current,
+      ...seg,
+      ...(sm === "terrain"
+        ? {
+            terrainOp: terrainSculptOpRef.current,
+            terrainBaseY: terrainBaseYRef.current,
+            terrainStrength: terrainStrengthRef.current,
+            terrainSmoothRadius: terrainSmoothRadiusRef.current,
+          }
+        : {}),
+      ...(sm === "smooth"
+        ? {
+            smoothNeighborPasses: sculptSmoothPassesRef.current,
+          }
+        : {}),
+      brushStrength: sculptBrushStrengthRef.current,
+      brushFalloff: sculptBrushFalloffRef.current,
+      ...(includeStrokeSeed
+        ? {
+            strokeSeed: (Math.floor(Math.random() * 0x1_0000_0000) >>> 0),
+          }
+        : {}),
+      wallAreaShape: wallAreaShapeRef.current,
+      sprayDirection: sprayDirectionRef.current,
+      wallWidthIndex: wallWidthIndexRef.current,
+      wallHeightVox: wallHeightVoxRef.current,
+      wallLockStartHeight: wallLockStartHeightRef.current,
+      wallAxisAlign: wallAxisAlignRef.current,
+      sculptSmoothVariant: sculptSmoothVariantRef.current,
+      smoothNeighborRadius: smoothNeighborRadiusRef.current,
+      smoothAggressiveness: smoothAggressivenessRef.current,
+      smoothLaplacianIterations: smoothLaplacianIterationsRef.current,
+      smoothLaplacianRelaxPct: smoothLaplacianRelaxPctRef.current,
+      ...lineStart,
+      ...wallPoly,
+    };
+  }
+
+  function commitWallSculptPolygonStroke() {
+    const verts = wallSculptPolygonVertsRef.current;
+    if (verts.length < 2) return;
+    const scr = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
+    void invoke("voxel_sculpt_stroke_at_screen", {
+      args: buildSculptStrokeInvokeArgs(scr.nx, scr.ny, {
+        includeStrokeSeed: true,
+      }),
+    }).catch(() => {});
+    setWallSculptPolygonVerts([]);
+  }
+
   const onPointerMove = (e: React.PointerEvent) => {
     const { nx: px, ny: py } = clientToViewportNormalized(e);
     lastViewportPickNormRef.current = { nx: px, ny: py };
@@ -3314,7 +3647,8 @@ function App() {
         interactionModeRef.current === "selectByColor" ||
         interactionModeRef.current === "selectCoplanar" ||
         interactionModeRef.current === "selectCoplanarEmpty" ||
-        interactionModeRef.current === "squishy") &&
+        interactionModeRef.current === "squishy" ||
+        interactionModeRef.current === "generator") &&
       !interactionBlockedRef.current
     ) {
       const m = previewModeForSync(interactionModeRef.current);
@@ -3449,47 +3783,10 @@ function App() {
           lastStrokeEditMsRef.current = now;
           dragDidEditRef.current = true;
           const sculptBrushPrev = lastStrokeNormRef.current;
-          const sm = sculptStrokeModeRef.current;
           void invoke("voxel_sculpt_stroke_preview_at_screen", {
-            args: {
-              nx: px,
-              ny: py,
-              sculptMode: sm,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-              brushRadius: sculptBrushRadiusRef.current,
-              brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
-              sprayDensity: 0,
-              brushClipBottomHalf: brushClipBottomHalfRef.current,
-              ...(sculptBrushPrev
-                ? {
-                  strokeSegmentPrevNx: sculptBrushPrev.nx,
-                  strokeSegmentPrevNy: sculptBrushPrev.ny,
-                }
-                : {}),
-              ...(sm === "terrain"
-                ? {
-                  terrainOp: terrainSculptOpRef.current,
-                  terrainBaseY: terrainBaseYRef.current,
-                  terrainStrength: terrainStrengthRef.current,
-                  terrainSmoothRadius: terrainSmoothRadiusRef.current,
-                }
-                : {}),
-              ...(sm === "smooth"
-                ? {
-                  smoothNeighborPasses: sculptSmoothPassesRef.current,
-                }
-                : {}),
-              brushStrength: sculptBrushStrengthRef.current,
-              brushFalloff: sculptBrushFalloffRef.current,
-              strokeSeed: (Math.floor(Math.random() * 0x1_0000_0000) >>> 0),
-              wallAreaShape: wallAreaShapeRef.current,
-              sprayDirection: sprayDirectionRef.current,
-              wallWidthIndex: wallWidthIndexRef.current,
-              wallHeightVox: wallHeightVoxRef.current,
-              wallLockStartHeight: wallLockStartHeightRef.current,
-              wallAxisAlign: wallAxisAlignRef.current,
-            },
+            args: buildSculptStrokeInvokeArgs(px, py, {
+              strokeSegmentPrev: sculptBrushPrev,
+            }),
           })
             .finally(() => {
               lastStrokeNormRef.current = { nx: px, ny: py };
@@ -3703,6 +4000,8 @@ function App() {
                 material: activeMaterialRef.current,
               },
             }).catch(() => { });
+          } else if (gk === "cloth") {
+            void handleClothPinClick(nx, ny);
           } else if (gk === "rope") {
             if (!ropeFirstScreen) {
               setRopeFirstScreen({ nx, ny });
@@ -3714,6 +4013,9 @@ function App() {
                   nx2: nx,
                   ny2: ny,
                   sag: ropeSag,
+                  tension: ropeTension,
+                  brushRadius: ropeBrushRadiusIndex,
+                  brushShape: sculptBrushShapeToRust(ropeBrushShapeUi),
                   color: activeColorRef.current,
                   material: activeMaterialRef.current,
                 },
@@ -3898,41 +4200,14 @@ function App() {
       } else if (m === "sculpt") {
         if (!dragDidEditRef.current && moved < 5) {
           const sm = sculptStrokeModeRef.current;
-          void invoke("voxel_sculpt_stroke_at_screen", {
-            args: {
-              nx,
-              ny,
-              sculptMode: sm,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-              brushRadius: sculptBrushRadiusRef.current,
-              brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
-              sprayDensity: 0,
-              brushClipBottomHalf: brushClipBottomHalfRef.current,
-              ...(sm === "terrain"
-                ? {
-                  terrainOp: terrainSculptOpRef.current,
-                  terrainBaseY: terrainBaseYRef.current,
-                  terrainStrength: terrainStrengthRef.current,
-                  terrainSmoothRadius: terrainSmoothRadiusRef.current,
-                }
-                : {}),
-              ...(sm === "smooth"
-                ? {
-                  smoothNeighborPasses: sculptSmoothPassesRef.current,
-                }
-                : {}),
-              brushStrength: sculptBrushStrengthRef.current,
-              brushFalloff: sculptBrushFalloffRef.current,
-              strokeSeed: (Math.floor(Math.random() * 0x1_0000_0000) >>> 0),
-              wallAreaShape: wallAreaShapeRef.current,
-              sprayDirection: sprayDirectionRef.current,
-              wallWidthIndex: wallWidthIndexRef.current,
-              wallHeightVox: wallHeightVoxRef.current,
-              wallLockStartHeight: wallLockStartHeightRef.current,
-              wallAxisAlign: wallAxisAlignRef.current,
-            },
-          }).catch(() => { });
+          const wa = wallAreaShapeRef.current;
+          if (sm === "wall" && wa === "polygon") {
+            void handleWallSculptPolygonClick(nx, ny);
+          } else {
+            void invoke("voxel_sculpt_stroke_at_screen", {
+              args: buildSculptStrokeInvokeArgs(nx, ny),
+            }).catch(() => {});
+          }
         }
         void invoke("voxel_stroke_end").catch(() => { });
         lastStrokeNormRef.current = null;
@@ -4236,12 +4511,27 @@ function App() {
     showDrawPaneToolMatrix &&
     (drawStrokeMode === "polygon" || drawStrokeMode === "polygonHull");
 
+  const showWallSculptPolygonHud =
+    showEditorChrome &&
+    interactionMode === "sculpt" &&
+    toolsPane === "draw" &&
+    sculptStrokeMode === "wall" &&
+    wallAreaShape === "polygon";
+
+  const showClothGeneratorHud =
+    showEditorChrome &&
+    interactionMode === "generator" &&
+    toolsPane === "generators" &&
+    generatorKind === "cloth";
+
   const showViewportTopCenterStack =
     showEditorChrome &&
     (viewportTopCenterHud != null ||
       cuboidDepthPhase ||
       cylinderDepthPhase ||
-      showPolygonPhaseHud);
+      showPolygonPhaseHud ||
+      showWallSculptPolygonHud ||
+      showClothGeneratorHud);
 
   const selectionMethod = deriveSelectionMethod({
     drawStrokeMode,
@@ -4713,6 +5003,7 @@ function App() {
                             ["rocks", "Rocks"],
                             ["grass", "Grass"],
                             ["rope", "Rope"],
+                            ["cloth", "Cloth"],
                           ] as const
                         ).map(([id, label]) => (
                           <button
@@ -4727,6 +5018,7 @@ function App() {
                             onClick={() => {
                               setGeneratorKind(id);
                               setRopeFirstScreen(null);
+                              setClothPins([]);
                             }}
                           >
                             <span className="sidebar-mode-label">{label}</span>
@@ -4746,8 +5038,13 @@ function App() {
                           Click second point to finish rope.
                         </p>
                       ) : null}
+                      {generatorKind === "cloth" ? (
+                        <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
+                          Cloth: click the surface to add pins (3+ corners), then Apply in tool options.
+                        </p>
+                      ) : null}
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Size and shape in the tool options panel. Rope: two clicks.
+                        Size and shape in the tool options panel. Rope: two clicks. Cloth: multi-pin + Apply.
                       </p>
                     </>
                   ) : null}
@@ -5171,6 +5468,73 @@ function App() {
                   >
                     Done
                   </button>
+                </div>
+              ) : null}
+              {showWallSculptPolygonHud ? (
+                <div
+                  className="viewport-polygon-phase-bar"
+                  role="dialog"
+                  aria-label="Wall polygon outline"
+                >
+                  <p className="viewport-polygon-phase-hint">
+                    Wall outline: {wallSculptPolygonVerts.length} corners. Click
+                    the surface to add; Done applies (min 2 corners).
+                  </p>
+                  <div className="viewport-polygon-phase-actions">
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={loading || workBusy}
+                      onClick={() => setWallSculptPolygonVerts([])}
+                    >
+                      Clear
+                    </button>
+                        <button
+                          type="button"
+                          className="tool-options-shape-btn"
+                          disabled={
+                            loading ||
+                            workBusy ||
+                            wallSculptPolygonVerts.length < 2
+                          }
+                          onClick={() => commitWallSculptPolygonStroke()}
+                        >
+                          Done
+                        </button>
+                  </div>
+                </div>
+              ) : null}
+              {showClothGeneratorHud ? (
+                <div
+                  className="viewport-polygon-phase-bar"
+                  role="dialog"
+                  aria-label="Cloth pins"
+                >
+                  <p className="viewport-polygon-phase-hint">
+                    Cloth: {clothPins.length} pin
+                    {clothPins.length === 1 ? "" : "s"}. Click surface to add
+                    or toggle; need 3+ for Apply (tool options).
+                  </p>
+                  <div className="viewport-polygon-phase-actions">
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={loading || workBusy}
+                      onClick={() => setClothPins([])}
+                    >
+                      Clear
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      disabled={
+                        loading || workBusy || clothPins.length < 3
+                      }
+                      onClick={() => commitClothGenerator()}
+                    >
+                      Apply
+                    </button>
+                  </div>
                 </div>
               ) : null}
               {showPolygonPhaseHud ? (
@@ -5717,22 +6081,165 @@ function App() {
                   {sculptStrokeMode === "smooth" ? (
                     <div className="tool-options-section">
                       <div className="tool-options-heading">Smooth</div>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Passes</span>
-                        <input
-                          type="range"
-                          min={1}
-                          max={8}
-                          value={sculptSmoothPasses}
-                          onChange={(ev) =>
-                            setSculptSmoothPasses(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                        <span className="tool-options-range-value">
-                          {sculptSmoothPasses}
-                        </span>
-                      </label>
+                      <div
+                        className="tool-options-shape-row"
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr",
+                          gap: "0.25rem",
+                          marginBottom: "0.35rem",
+                        }}
+                        role="group"
+                        aria-label="Smooth algorithm"
+                      >
+                        {(
+                          [
+                            ["majority", "Majority"],
+                            ["meshLaplacian", "Mesh Laplacian"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              sculptSmoothVariant === id
+                                ? "tool-options-shape-btn is-active"
+                                : "tool-options-shape-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() =>
+                              setSculptSmoothVariant(id)
+                            }
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                      {sculptSmoothVariant === "majority" ? (
+                        <>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Passes</span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={8}
+                              value={sculptSmoothPasses}
+                              onChange={(ev) =>
+                                setSculptSmoothPasses(Number(ev.target.value))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span className="tool-options-range-value">
+                              {sculptSmoothPasses}
+                            </span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Neighbor radius</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={6}
+                              value={smoothNeighborRadius}
+                              onChange={(ev) =>
+                                setSmoothNeighborRadius(Number(ev.target.value))
+                              }
+                              disabled={loading || workBusy}
+                              title="0 = six face neighbors only"
+                            />
+                            <span className="tool-options-range-value">
+                              {smoothNeighborRadius}
+                            </span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Aggressiveness</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={smoothAggressiveness}
+                              onChange={(ev) =>
+                                setSmoothAggressiveness(Number(ev.target.value))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span className="tool-options-range-value">
+                              {smoothAggressiveness}
+                            </span>
+                          </label>
+                        </>
+                      ) : (
+                        <>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Iterations</span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={20}
+                              value={smoothLaplacianIterations}
+                              onChange={(ev) =>
+                                setSmoothLaplacianIterations(
+                                  Number(ev.target.value),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span className="tool-options-range-value">
+                              {smoothLaplacianIterations}
+                            </span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Relax</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={smoothLaplacianRelaxPct}
+                              onChange={(ev) =>
+                                setSmoothLaplacianRelaxPct(
+                                  Number(ev.target.value),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span className="tool-options-range-value">
+                              {smoothLaplacianRelaxPct}
+                            </span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Majority fallback radius</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={6}
+                              value={smoothNeighborRadius}
+                              onChange={(ev) =>
+                                setSmoothNeighborRadius(Number(ev.target.value))
+                              }
+                              disabled={loading || workBusy}
+                              title="Neighborhood margin + mesh fallback"
+                            />
+                            <span className="tool-options-range-value">
+                              {smoothNeighborRadius}
+                            </span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Fallback aggressiveness</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={smoothAggressiveness}
+                              onChange={(ev) =>
+                                setSmoothAggressiveness(Number(ev.target.value))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span className="tool-options-range-value">
+                              {smoothAggressiveness}
+                            </span>
+                          </label>
+                        </>
+                      )}
                     </div>
                   ) : null}
                   {sculptStrokeMode === "wall" ? (
@@ -5777,10 +6284,6 @@ function App() {
                           </button>
                         ))}
                       </div>
-                      <p className="tool-options-hint" style={{ marginTop: "0.35rem" }}>
-                        Circle and polygon use the same freehand stroke as brush on
-                        desktop until dedicated flows land.
-                      </p>
                       <label
                         className="tool-options-range-label"
                         style={{
@@ -5939,18 +6442,275 @@ function App() {
                     </>
                   ) : null}
                   {generatorKind === "rope" ? (
-                    <label className="tool-options-range-label">
-                      <span>Sag</span>
-                      <input
-                        type="range"
-                        min={0}
-                        max={8}
-                        step={0.1}
-                        value={ropeSag}
-                        onChange={(ev) => setRopeSag(Number(ev.target.value))}
-                        disabled={loading || workBusy}
-                      />
-                    </label>
+                    <>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Sag</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={8}
+                          step={0.1}
+                          value={ropeSag}
+                          onChange={(ev) => setRopeSag(Number(ev.target.value))}
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {ropeSag.toFixed(1)}
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Tension</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={ropeTension}
+                          onChange={(ev) =>
+                            setRopeTension(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="0 = loose, 1 = taut"
+                        />
+                        <span className="tool-options-range-value">
+                          {ropeTension.toFixed(2)}
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Brush</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={SCULPT_BRUSH_MAX_INDEX}
+                          value={ropeBrushRadiusIndex}
+                          onChange={(ev) =>
+                            setRopeBrushRadiusIndex(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {ropeBrushRadiusIndex + 1}
+                        </span>
+                      </label>
+                      <div
+                        className="tool-options-shape-row"
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr",
+                          gap: "0.25rem",
+                          marginTop: "0.35rem",
+                        }}
+                        role="group"
+                        aria-label="Rope brush shape"
+                      >
+                        <button
+                          type="button"
+                          className={
+                            ropeBrushShapeUi === "sphere"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setRopeBrushShapeUi("sphere")}
+                        >
+                          Sphere
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            ropeBrushShapeUi === "cube"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setRopeBrushShapeUi("cube")}
+                        >
+                          Cube
+                        </button>
+                      </div>
+                    </>
+                  ) : null}
+                  {generatorKind === "cloth" ? (
+                    <>
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
+                        <span>Gravity</span>
+                        <select
+                          aria-label="Cloth gravity direction"
+                          value={clothGravityDirection}
+                          onChange={(ev) =>
+                            setClothGravityDirection(
+                              ev.target.value as ClothGravityDirectionId,
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        >
+                          <option value="down">Down (−Y)</option>
+                          <option value="up">Up (+Y)</option>
+                          <option value="left">Left (−X)</option>
+                          <option value="right">Right (+X)</option>
+                          <option value="forward">Forward (−Z)</option>
+                          <option value="back">Back (+Z)</option>
+                        </select>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Tension</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={clothTension}
+                          onChange={(ev) =>
+                            setClothTension(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="0 = loose drape, 1 = stiff"
+                        />
+                        <span className="tool-options-range-value">
+                          {clothTension.toFixed(2)}
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Brush</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={SCULPT_BRUSH_MAX_INDEX}
+                          value={ropeBrushRadiusIndex}
+                          onChange={(ev) =>
+                            setRopeBrushRadiusIndex(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {ropeBrushRadiusIndex + 1}
+                        </span>
+                      </label>
+                      <div
+                        className="tool-options-shape-row"
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr",
+                          gap: "0.25rem",
+                          marginTop: "0.35rem",
+                        }}
+                        role="group"
+                        aria-label="Cloth brush shape"
+                      >
+                        <button
+                          type="button"
+                          className={
+                            ropeBrushShapeUi === "sphere"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setRopeBrushShapeUi("sphere")}
+                        >
+                          Sphere
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            ropeBrushShapeUi === "cube"
+                              ? "tool-options-shape-btn is-active"
+                              : "tool-options-shape-btn"
+                          }
+                          disabled={loading || workBusy}
+                          onClick={() => setRopeBrushShapeUi("cube")}
+                        >
+                          Cube
+                        </button>
+                      </div>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Sim gravity</span>
+                        <input
+                          type="range"
+                          min={50}
+                          max={200}
+                          step={5}
+                          value={clothSimGravityPct}
+                          onChange={(ev) =>
+                            setClothSimGravityPct(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="PBD gravity step scale"
+                        />
+                        <span className="tool-options-range-value">
+                          {clothSimGravityPct}%
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Stiffness</span>
+                        <input
+                          type="range"
+                          min={50}
+                          max={150}
+                          step={5}
+                          value={clothSimStiffnessPct}
+                          onChange={(ev) =>
+                            setClothSimStiffnessPct(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {clothSimStiffnessPct}%
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Iterations</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={64}
+                          step={1}
+                          value={clothSimIterations}
+                          onChange={(ev) =>
+                            setClothSimIterations(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                          title="0 = automatic from tension"
+                        />
+                        <span className="tool-options-range-value">
+                          {clothSimIterations === 0
+                            ? "Auto"
+                            : String(clothSimIterations)}
+                        </span>
+                      </label>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Passes</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={6}
+                          step={1}
+                          value={clothSimConstraintPasses}
+                          onChange={(ev) =>
+                            setClothSimConstraintPasses(
+                              Number(ev.target.value),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {clothSimConstraintPasses}
+                        </span>
+                      </label>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        style={{ marginTop: "0.5rem", width: "100%" }}
+                        disabled={
+                          loading || workBusy || clothPins.length < 3
+                        }
+                        onClick={() => commitClothGenerator()}
+                      >
+                        Apply cloth
+                      </button>
+                    </>
                   ) : null}
                 </div>
               ) : null}
