@@ -23,7 +23,7 @@ pub mod voxelle;
 
 use camera::OrbitCamera;
 use gpu_brick::{BrickCellWrite, GpuVoxelBrick};
-use render::{compute_greedy_rebuild_cpu, MoodParams, PreparedGreedyRebuild, PreparedOpaqueUpload, WgpuViewer};
+use render::{compute_greedy_rebuild_cpu, GpuPeerLabel, MoodParams, PreparedGreedyRebuild, PreparedOpaqueUpload, WgpuViewer};
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -2117,6 +2117,11 @@ fn spawn_decode_and_mesh_with_label(
                     } else {
                         if label.ends_with(".voxelle") {
                             persist_last_document_path(&app, &label);
+                            persist_recent_file(&app, &label);
+                            #[cfg(desktop)]
+                            if let Some(rm) = app.try_state::<RecentMenuState>() {
+                                rebuild_recent_submenu(&app, &rm.submenu);
+                            }
                         }
                         emit_voxelle_loaded(&app, label, &state, false);
                     }
@@ -8373,6 +8378,63 @@ fn read_last_document_path(app: &AppHandle) -> Option<String> {
     Some(f.last_document_path)
 }
 
+// ---------------------------------------------------------------------------
+// Recent files list
+// ---------------------------------------------------------------------------
+
+const MAX_RECENT_FILES: usize = 10;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecentFiles {
+    paths: Vec<String>,
+}
+
+fn recent_files_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let mut p = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    p.push("recent_files.json");
+    Ok(p)
+}
+
+fn read_recent_files(app: &AppHandle) -> Vec<String> {
+    let Ok(path) = recent_files_path(app) else {
+        return Vec::new();
+    };
+    let Ok(bytes) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_slice::<RecentFiles>(&bytes)
+        .map(|r| r.paths)
+        .unwrap_or_default()
+}
+
+fn persist_recent_file(app: &AppHandle, document_path: &str) {
+    if !document_path.ends_with(".voxelle") {
+        return;
+    }
+    let Ok(path) = recent_files_path(app) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut paths = read_recent_files(app);
+    // Remove if already present so we can move it to the front.
+    paths.retain(|p| p != document_path);
+    paths.insert(0, document_path.to_string());
+    paths.truncate(MAX_RECENT_FILES);
+    let data = RecentFiles { paths };
+    if let Ok(s) = serde_json::to_string_pretty(&data) {
+        let _ = std::fs::write(path, s);
+    }
+}
+
+fn clear_recent_files(app: &AppHandle) {
+    let Ok(path) = recent_files_path(app) else {
+        return;
+    };
+    let _ = std::fs::remove_file(path);
+}
+
 fn autosave_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let mut d = app.path().app_data_dir().map_err(|e| e.to_string())?;
     d.push("autosaves");
@@ -8649,6 +8711,11 @@ fn save_voxelle(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<()
     drop(label);
     write_voxelle_file_to_path(Some(&app), &state, Path::new(s.as_str()))?;
     persist_last_document_path(&app, s.as_str());
+    persist_recent_file(&app, s.as_str());
+    #[cfg(desktop)]
+    if let Some(rm) = app.try_state::<RecentMenuState>() {
+        rebuild_recent_submenu(&app, &rm.submenu);
+    }
     Ok(())
 }
 
@@ -8679,6 +8746,11 @@ fn save_voxelle_as(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result
         let s = path.to_string_lossy().to_string();
         *state_c.file_label.lock() = s.clone();
         persist_last_document_path(&app_c, &s);
+        persist_recent_file(&app_c, &s);
+        #[cfg(desktop)]
+        if let Some(rm) = app_c.try_state::<RecentMenuState>() {
+            rebuild_recent_submenu(&app_c, &rm.submenu);
+        }
         emit_voxelle_loaded(&app_c, s, &state_c, false);
     });
     Ok(())
@@ -8895,15 +8967,17 @@ fn sync_preview_input(
     Ok(())
 }
 
-fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
+fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
     let snap = state.ping_flash.lock().clone();
     let Some(f) = snap else {
         viewer.clear_ping_mesh();
+        viewer.clear_ping_label();
         return;
     };
     if std::time::Instant::now() > f.until {
         *state.ping_flash.lock() = None;
         viewer.clear_ping_mesh();
+        viewer.clear_ping_label();
         return;
     }
     let r = ((f.color_rgb >> 16) & 0xff) as f32 / 255.0;
@@ -8925,6 +8999,26 @@ fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState) {
     let elapsed = f.started.elapsed().as_secs_f32();
     let wave_verts = greedy_mesh::ping_ripple_line_vertices(f.x, f.y, f.z, elapsed, [r, g, b]);
     viewer.upload_ping_wave_lines(&wave_verts);
+
+    // Project ping world position to screen for GPU text label
+    let (w, h) = {
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    if w > 0.0 && h > 0.0 && !f.display_name.is_empty() {
+        if let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(cam, w, h, cx, cy, cz) {
+            viewer.upload_ping_label(GpuPeerLabel {
+                name: f.display_name.clone(),
+                color_rgb: f.color_rgb,
+                x: sx,
+                y: sy,
+            });
+        } else {
+            viewer.clear_ping_label();
+        }
+    } else {
+        viewer.clear_ping_label();
+    }
 }
 
 fn lerp_presence(
@@ -8948,6 +9042,52 @@ fn lerp_presence(
         fov_y: lerp(smooth.fov_y, target.fov_y, t),
         ortho_half_height: lerp(smooth.ortho_half_height, target.ortho_half_height, t),
     }
+}
+
+/// Build screen-space peer labels and upload to the GPU renderer (replaces IPC polling).
+fn sync_collab_peer_labels(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
+    let (w, h) = {
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    if w <= 0.0 || h <= 0.0 {
+        viewer.clear_peer_labels();
+        return;
+    }
+    let c = state.collab.lock();
+    if !c.is_active() {
+        viewer.clear_peer_labels();
+        return;
+    }
+    let local_id = c.local_peer_id;
+    let roster = c.roster.clone();
+    drop(c);
+
+    let smooth = state.smooth_presence.lock();
+    let mut labels = Vec::new();
+    for (pid, pr) in smooth.iter() {
+        if *pid == local_id {
+            continue;
+        }
+        let eye = collab::presence_eye(pr);
+        let Some((sx, sy)) =
+            voxel_edit::world_to_viewport_pixels(&cam, w, h, eye.x, eye.y, eye.z)
+        else {
+            continue;
+        };
+        let entry = roster.iter().find(|r| r.peer_id == *pid);
+        let name = entry
+            .map(|r| r.display_name.clone())
+            .unwrap_or_default();
+        let color_rgb = entry.map(|r| r.color_rgb).unwrap_or(0x888888);
+        labels.push(GpuPeerLabel {
+            name,
+            color_rgb,
+            x: sx,
+            y: sy,
+        });
+    }
+    viewer.upload_peer_labels(labels);
 }
 
 fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
@@ -10060,6 +10200,50 @@ fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadat
 /// Native menu handles for [`CheckMenuItem`] sync (match material, debug overlay) and
 /// selection/voxel-dependent enable state (mirrors web `MenuBar` disabled rules).
 #[cfg(desktop)]
+/// Holds the "Open Recent" submenu so it can be rebuilt when the list changes.
+pub struct RecentMenuState {
+    pub submenu: tauri::menu::Submenu<tauri::Wry>,
+}
+
+/// Rebuild the contents of the "Open Recent" submenu from disk.
+#[cfg(desktop)]
+fn rebuild_recent_submenu(app: &AppHandle, submenu: &tauri::menu::Submenu<tauri::Wry>) {
+    use tauri::menu::{MenuItem, PredefinedMenuItem};
+    // Clear existing items.
+    while submenu.items().map(|v| v.len()).unwrap_or(0) > 0 {
+        let _ = submenu.remove_at(0);
+    }
+    let recent = read_recent_files(app);
+    if recent.is_empty() {
+        let empty =
+            MenuItem::with_id(app, "recent_none", "No Recent Projects", false, None::<&str>);
+        if let Ok(item) = empty {
+            let _ = submenu.append(&item);
+        }
+    } else {
+        for (i, path) in recent.iter().enumerate() {
+            // Show just the filename, with the full path as the menu ID.
+            let display = std::path::Path::new(path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            let id = format!("recent_file_{i}");
+            let item = MenuItem::with_id(app, &id, &display, true, None::<&str>);
+            if let Ok(item) = item {
+                let _ = submenu.append(&item);
+            }
+        }
+        let sep = PredefinedMenuItem::separator(app);
+        if let Ok(sep) = sep {
+            let _ = submenu.append(&sep);
+        }
+        let clear = MenuItem::with_id(app, "recent_clear", "Clear Recent", true, None::<&str>);
+        if let Ok(item) = clear {
+            let _ = submenu.append(&item);
+        }
+    }
+}
+
 pub struct SelectionMenuState {
     pub match_material: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub viewport_cursor_debug: tauri::menu::CheckMenuItem<tauri::Wry>,
@@ -10157,7 +10341,7 @@ fn place_voxelle_custom_top_level_menus<R: tauri::Runtime>(
 }
 
 #[cfg(desktop)]
-fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
+fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, RecentMenuState)> {
     use tauri::menu::{
         CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu,
     };
@@ -10176,6 +10360,8 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
         Some("CommandOrCtrl+Shift+S"),
     )?;
     let export_glb_item = MenuItem::with_id(app, "menu_export_glb", "Export GLB…", true, None::<&str>)?;
+    let open_recent_submenu = Submenu::with_id(app, "open_recent_submenu", "Open Recent", true)?;
+    rebuild_recent_submenu(app, &open_recent_submenu);
     let undo_item = MenuItem::with_id(app, "menu_undo", "Undo", true, Some("CommandOrCtrl+Z"))?;
     let redo_item = MenuItem::with_id(
         app,
@@ -10320,6 +10506,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
                 sub.prepend_items(&[
                     &new_item,
                     &open_item,
+                    &open_recent_submenu,
                     &save_item,
                     &save_as_item,
                     &export_glb_item,
@@ -10636,24 +10823,29 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<SelectionMenuState> {
         &debug_menu,
     )?;
     menu.set_as_app_menu()?;
-    Ok(SelectionMenuState {
-        match_material: menu_sel_match_material.clone(),
-        viewport_cursor_debug: debug_viewport_cursor.clone(),
-        view_show_borders: view_show_borders.clone(),
-        full_surface_viewport: view_full_surface_viewport.clone(),
-        sel_all: menu_sel_all.clone(),
-        sel_by_color: menu_sel_by_color.clone(),
-        sel_connected: menu_sel_connected.clone(),
-        sel_coplanar: menu_sel_coplanar.clone(),
-        sel_coplanar_empty: menu_sel_coplanar_empty.clone(),
-        sel_grow: menu_sel_grow.clone(),
-        sel_shrink: menu_sel_shrink.clone(),
-        sel_invert: menu_sel_invert.clone(),
-        sel_deselect_all: menu_sel_deselect_all.clone(),
-        sel_deselect_inner: menu_sel_deselect_inner.clone(),
-        sel_deselect_voxels: menu_sel_deselect_voxels.clone(),
-        sel_deselect_empty: menu_sel_deselect_empty.clone(),
-    })
+    Ok((
+        SelectionMenuState {
+            match_material: menu_sel_match_material.clone(),
+            viewport_cursor_debug: debug_viewport_cursor.clone(),
+            view_show_borders: view_show_borders.clone(),
+            full_surface_viewport: view_full_surface_viewport.clone(),
+            sel_all: menu_sel_all.clone(),
+            sel_by_color: menu_sel_by_color.clone(),
+            sel_connected: menu_sel_connected.clone(),
+            sel_coplanar: menu_sel_coplanar.clone(),
+            sel_coplanar_empty: menu_sel_coplanar_empty.clone(),
+            sel_grow: menu_sel_grow.clone(),
+            sel_shrink: menu_sel_shrink.clone(),
+            sel_invert: menu_sel_invert.clone(),
+            sel_deselect_all: menu_sel_deselect_all.clone(),
+            sel_deselect_inner: menu_sel_deselect_inner.clone(),
+            sel_deselect_voxels: menu_sel_deselect_voxels.clone(),
+            sel_deselect_empty: menu_sel_deselect_empty.clone(),
+        },
+        RecentMenuState {
+            submenu: open_recent_submenu,
+        },
+    ))
 }
 
 #[cfg(desktop)]
@@ -11081,8 +11273,8 @@ fn collab_snap_camera(state: State<'_, Arc<ViewerState>>, peer_id: u32) -> Resul
     cam.spherical.radius = pr.radius;
     cam.spherical.theta = pr.theta;
     cam.spherical.phi = pr.phi;
-    cam.smooth_target = cam.target;
-    cam.smooth_spherical = cam.spherical;
+    // Leave smooth_target / smooth_spherical at their current values
+    // so update_damping() interpolates smoothly to the new position.
     cam.perspective = pr.perspective;
     cam.fov_y = pr.fov_y;
     cam.ortho_half_height = pr.ortho_half_height;
@@ -11602,13 +11794,46 @@ pub fn run() {
                         );
                     }
                 }
+            } else if event.id() == "recent_clear" {
+                clear_recent_files(app);
+                #[cfg(desktop)]
+                if let Some(rm) = app.try_state::<RecentMenuState>() {
+                    rebuild_recent_submenu(app, &rm.submenu);
+                }
+            } else if event.id().0.starts_with("recent_file_") {
+                let id_str = event.id().0.to_string();
+                if let Some(idx_str) = id_str.strip_prefix("recent_file_") {
+                    if let Ok(idx) = idx_str.parse::<usize>() {
+                        let recent = read_recent_files(app);
+                        if let Some(path_str) = recent.get(idx) {
+                            let path = PathBuf::from(path_str);
+                            if path.exists() {
+                                let state = app.state::<Arc<ViewerState>>();
+                                let label = path.to_string_lossy().to_string();
+                                *state.file_label.lock() = label.clone();
+                                let _ = app.emit("voxelle-load-start", label);
+                                spawn_decode_and_mesh(
+                                    state.inner().clone(),
+                                    app.clone(),
+                                    path,
+                                );
+                            } else {
+                                let _ = app.emit(
+                                    "voxelle-load-error",
+                                    format!("File not found: {path_str}"),
+                                );
+                            }
+                        }
+                    }
+                }
             }
         })
         .setup(move |app| {
             #[cfg(desktop)]
             {
-                let selection_menu_state = install_app_menu(app.handle())?;
+                let (selection_menu_state, recent_menu_state) = install_app_menu(app.handle())?;
                 app.manage(selection_menu_state);
+                app.manage(recent_menu_state);
                 let (has_voxels, has_selection) = scene_menu_flags(vs.as_ref());
                 selection_menu_sync_enabled_for_scene(app.handle(), has_voxels, has_selection);
             }
@@ -11854,7 +12079,8 @@ pub fn run() {
                         apply_preview_mesh(viewer, Arc::as_ref(&state), prev_p);
                     }
                     sync_collab_peer_lines(viewer, Arc::as_ref(&state));
-                    sync_ping_flash(viewer, Arc::as_ref(&state));
+                    sync_collab_peer_labels(viewer, Arc::as_ref(&state), &cam);
+                    sync_ping_flash(viewer, Arc::as_ref(&state), &cam);
                     let transparent = state
                         .start_screen_logo_transparent
                         .load(Ordering::Relaxed);

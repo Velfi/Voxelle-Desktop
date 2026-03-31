@@ -1,31 +1,23 @@
 - Why does it sometimes open the logo project when I try to open the previous project?
-- Rope isn't working in phases like it should
-  - Cloth almost gets it right but also needs fixing
+- Rope and Cloth need some polish. previews are very slow
 - Rocks is the only generator the really works, all the others need fixing
   - flora
   - fauna
   - piscina
   - Insecta
-  - Roof
   - Ashlar
-- Fly mode jumps forward when moving forward and moving the mouse
+  - Roof needs to have the square and circle area shape options, also it should be showing a preview in polygon mode.
+- Fly mode jumps forward  when moving forward and moving the mouse
 - Fly mode mouse control sucks on MacOS, it feels floaty
-- Mood needs implementing. it's just a facade right now, apart from grain
-- ray picking is slightly broken on MacOS and fixed with a hack, unsure about Windows
 - weird degenerate normals on flat surfaces with voxels scattered on top. It's not shadows or AO, I checked already
 - MacOS and Windows support HDR, can we make an HDR setting? Can we make the sun really bright?
 - I want to simulate the moon too
 - think about designing the shrunken version of the left sidebar
-- [ ] clicking once with the Draw-Solid tool should enter depth set phase but right now it's just adding a single voxel instead
-- [ ] Draw-Selection-Solid is using duplicated code rather than being the same as add/remove/paint.
- - as such, the cube and cylinder area shapes aren't working and the polygon area shape is still using the wrong algorithm.
-  - select doesn't work with spray
 - I want the ability to extrude a selected face
 - stamp and punch are broken
 - symmetry is not yet implemented
 - fancy palette interactions and color randomness settings are not yet implemented
 - ray tracing
-- extrude doesn't work
 - Terrain brush doesn't work
 - sculpt brushes shouldn't snap to surface, they should embed
 - 

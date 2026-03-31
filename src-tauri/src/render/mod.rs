@@ -43,6 +43,11 @@ use crate::render_constants::{BLOOM_STRENGTH, SHADOW_MAP_SIZE};
 use crate::voxel_edit::VoxelEditDelta;
 use crate::voxelle::{SceneObject, Voxel};
 use glam::{IVec3, Mat4, Vec3};
+use glyphon::{
+    Attrs, Buffer as GlyphonBuffer, Cache as GlyphonCache, Color as GlyphonColor, Family,
+    FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
+    TextRenderer, Viewport as GlyphonViewport,
+};
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Instant;
@@ -713,6 +718,29 @@ pub struct WgpuViewer {
 
     /// Last opaque mesh rebuild path (for perf): `gpu_greedy`, `cpu`, `cpu_chunked`, `clear`, `gpu_no_headers`, etc.
     pub last_mesh_route: String,
+
+    // ── Glyphon text rendering (peer labels) ──
+    glyphon_font_system: FontSystem,
+    glyphon_swash_cache: SwashCache,
+    #[allow(dead_code)]
+    glyphon_cache: GlyphonCache,
+    glyphon_atlas: TextAtlas,
+    glyphon_text_renderer: TextRenderer,
+    glyphon_viewport: GlyphonViewport,
+    /// Per-frame peer label data uploaded via [`Self::upload_peer_labels`].
+    peer_label_data: Vec<GpuPeerLabel>,
+    /// Active ping label (at most one).
+    ping_label_data: Option<GpuPeerLabel>,
+}
+
+/// Screen-space peer label for GPU text rendering.
+pub struct GpuPeerLabel {
+    pub name: String,
+    pub color_rgb: u32,
+    /// Pixel X in viewport space.
+    pub x: f32,
+    /// Pixel Y in viewport space.
+    pub y: f32,
 }
 
 /// GPU buffers for one spatial chunk of opaque greedy mesh.
@@ -2346,6 +2374,27 @@ impl WgpuViewer {
             ],
         }));
 
+        // ── Glyphon text rendering setup ──
+        let mut glyphon_font_system = FontSystem::new();
+        #[cfg(target_os = "macos")]
+        glyphon_font_system
+            .db_mut()
+            .set_sans_serif_family("Helvetica Neue");
+        #[cfg(not(target_os = "macos"))]
+        glyphon_font_system
+            .db_mut()
+            .set_sans_serif_family("Segoe UI");
+        let glyphon_swash_cache = SwashCache::new();
+        let glyphon_cache = GlyphonCache::new(&device);
+        let mut glyphon_atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
+        let glyphon_text_renderer = TextRenderer::new(
+            &mut glyphon_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let glyphon_viewport = GlyphonViewport::new(&device, &glyphon_cache);
+
         Ok(Self {
             surface,
             device,
@@ -2478,6 +2527,16 @@ impl WgpuViewer {
             mesh_greedy_pl_version: 0,
             mesh_greedy_pool: MeshGreedyPool::default(),
             last_mesh_route: String::new(),
+
+            // ── Glyphon (initialized below) ──
+            glyphon_font_system: glyphon_font_system,
+            glyphon_swash_cache: glyphon_swash_cache,
+            glyphon_cache: glyphon_cache,
+            glyphon_atlas: glyphon_atlas,
+            glyphon_text_renderer: glyphon_text_renderer,
+            glyphon_viewport: glyphon_viewport,
+            peer_label_data: Vec::new(),
+            ping_label_data: None,
         })
     }
 
@@ -3953,6 +4012,23 @@ impl WgpuViewer {
         self.collab_line_vertex_count = 0;
     }
 
+    /// Replace the set of peer labels to render as GPU text this frame.
+    pub fn upload_peer_labels(&mut self, labels: Vec<GpuPeerLabel>) {
+        self.peer_label_data = labels;
+    }
+
+    pub fn clear_peer_labels(&mut self) {
+        self.peer_label_data.clear();
+    }
+
+    pub fn upload_ping_label(&mut self, label: GpuPeerLabel) {
+        self.ping_label_data = Some(label);
+    }
+
+    pub fn clear_ping_label(&mut self) {
+        self.ping_label_data = None;
+    }
+
     /// Frustum wireframe: each vertex is `[x,y,z, r,g,b, a]` (7 floats); line-list pairs.
     pub fn upload_collab_frustum_lines(&mut self, verts: &[f32]) {
         if verts.is_empty() || verts.len() % 7 != 0 {
@@ -4766,6 +4842,111 @@ impl WgpuViewer {
             pass.set_pipeline(&self.pipeline_composite);
             pass.set_bind_group(0, &self.bind_composite, &[]);
             pass.draw(0..3, 0..1);
+        }
+
+        // ── Peer + ping name labels (GPU text via glyphon) ──
+        let has_text = !self.peer_label_data.is_empty() || self.ping_label_data.is_some();
+        if has_text {
+            let vw = self.viewport_width.max(1);
+            let vh = self.viewport_height.max(1);
+
+            self.glyphon_viewport.update(
+                &self.queue,
+                Resolution {
+                    width: vw,
+                    height: vh,
+                },
+            );
+
+            let font_size = 52.0;
+            let line_height = 68.0;
+
+            // Collect all labels: peers + optional ping
+            let all_labels: Vec<&GpuPeerLabel> = self
+                .peer_label_data
+                .iter()
+                .chain(self.ping_label_data.iter())
+                .collect();
+
+            let mut text_areas: Vec<TextArea<'_>> = Vec::new();
+            let mut buffers: Vec<GlyphonBuffer> = Vec::new();
+
+            for label in &all_labels {
+                let mut buffer =
+                    GlyphonBuffer::new(&mut self.glyphon_font_system, Metrics::new(font_size, line_height));
+                buffer.set_size(&mut self.glyphon_font_system, Some(400.0), Some(line_height));
+
+                let r = ((label.color_rgb >> 16) & 0xff) as u8;
+                let g = ((label.color_rgb >> 8) & 0xff) as u8;
+                let b = (label.color_rgb & 0xff) as u8;
+
+                buffer.set_text(
+                    &mut self.glyphon_font_system,
+                    &label.name,
+                    Attrs::new().family(Family::SansSerif).color(GlyphonColor::rgb(r, g, b)),
+                    Shaping::Advanced,
+                );
+                buffer.shape_until_scroll(&mut self.glyphon_font_system, false);
+                buffers.push(buffer);
+            }
+
+            for (i, label) in all_labels.iter().enumerate() {
+                let buf = &buffers[i];
+                let text_width = buf
+                    .layout_runs()
+                    .next()
+                    .map(|run| run.line_w)
+                    .unwrap_or(0.0);
+
+                text_areas.push(TextArea {
+                    buffer: buf,
+                    left: label.x - text_width * 0.5,
+                    top: label.y - line_height - 4.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: vw as i32,
+                        bottom: vh as i32,
+                    },
+                    default_color: GlyphonColor::rgb(255, 255, 255),
+                    custom_glyphs: &[],
+                });
+            }
+
+            let _ = self.glyphon_text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.glyphon_font_system,
+                &mut self.glyphon_atlas,
+                &self.glyphon_viewport,
+                text_areas,
+                &mut self.glyphon_swash_cache,
+            );
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("peer_labels_text"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.present_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                let _ = self.glyphon_text_renderer.render(
+                    &self.glyphon_atlas,
+                    &self.glyphon_viewport,
+                    &mut pass,
+                );
+            }
+
+            self.glyphon_atlas.trim();
         }
 
         {

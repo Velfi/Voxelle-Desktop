@@ -993,14 +993,6 @@ function App() {
     until: number;
   } | null>(null);
   const [pingHudTick, setPingHudTick] = useState(0);
-  const [pingLabelCss, setPingLabelCss] = useState<{
-    name: string;
-    leftPct: number;
-    topPct: number;
-  } | null>(null);
-  const [peerLabels, setPeerLabels] = useState<
-    { name: string; colorRgb: number; leftPct: number; topPct: number }[]
-  >([]);
   const collabActiveRef = useRef(false);
   const localPeerIdRef = useRef(0);
   const [hostPort, setHostPort] = useState(
@@ -1654,6 +1646,7 @@ function App() {
     [onToolPaneDragMove, onToolPaneDragEnd],
   );
 
+  // Expire ping HUD ref after its duration (label now rendered on GPU)
   useEffect(() => {
     if (pingHudTick === 0 && !pingHudRef.current) return;
     let cancelled = false;
@@ -1661,28 +1654,10 @@ function App() {
     const tick = () => {
       if (cancelled) return;
       const p = pingHudRef.current;
-      if (!p || Date.now() > p.until) {
-        setPingLabelCss(null);
-        if (p && Date.now() > p.until) pingHudRef.current = null;
+      if (p && Date.now() > p.until) {
+        pingHudRef.current = null;
         return;
       }
-      void invoke<[number, number] | null>("world_to_viewport_pixels", {
-        args: { x: p.wx, y: p.wy, z: p.wz },
-      })
-        .then((opt) => {
-          if (cancelled || opt == null || !pingHudRef.current) return;
-          const [sx, sy] = opt;
-          const { w, h } = viewportPhysRef.current;
-          if (w <= 0 || h <= 0) return;
-          const cur = pingHudRef.current;
-          if (!cur) return;
-          setPingLabelCss({
-            name: cur.name,
-            leftPct: (sx / w) * 100,
-            topPct: (sy / h) * 100,
-          });
-        })
-        .catch(() => {});
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -1691,32 +1666,6 @@ function App() {
       cancelAnimationFrame(raf);
     };
   }, [pingHudTick]);
-
-  // Poll peer label screen positions while collab is active
-  useEffect(() => {
-    if (!collabActive) {
-      setPeerLabels([]);
-      return;
-    }
-    let cancelled = false;
-    let raf = 0;
-    const tick = () => {
-      if (cancelled) return;
-      void invoke<
-        { name: string; colorRgb: number; leftPct: number; topPct: number }[]
-      >("collab_peer_labels")
-        .then((labels) => {
-          if (!cancelled) setPeerLabels(labels);
-        })
-        .catch(() => {});
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => {
-      cancelled = true;
-      cancelAnimationFrame(raf);
-    };
-  }, [collabActive]);
 
   useEffect(() => {
     interactionModeRef.current = interactionMode;
@@ -6217,40 +6166,6 @@ function App() {
               </div>
             ) : null}
           </div>
-          {showEditorChrome ? (
-            <div className="viewport-ping-overlay" aria-hidden>
-              {pingLabelCss ? (
-                <div
-                  className="viewport-ping-label"
-                  style={{
-                    left: `${pingLabelCss.leftPct}%`,
-                    top: `${pingLabelCss.topPct}%`,
-                  }}
-                >
-                  {pingLabelCss.name}
-                </div>
-              ) : null}
-            </div>
-          ) : null}
-          {peerLabels.length > 0 ? (
-            <div className="viewport-peer-labels-overlay" aria-hidden>
-              {peerLabels.map((pl, i) => (
-                <div
-                  key={i}
-                  className="viewport-peer-label"
-                  style={
-                    {
-                      left: `${pl.leftPct}%`,
-                      top: `${pl.topPct}%`,
-                      "--peer-color": `#${pl.colorRgb.toString(16).padStart(6, "0")}`,
-                    } as React.CSSProperties
-                  }
-                >
-                  {pl.name}
-                </div>
-              ))}
-            </div>
-          ) : null}
           {showEditorChrome ? (
             <ViewportCameraHud
               flyMode={interactionMode === "fly"}
