@@ -749,7 +749,7 @@ pub fn extrude_ray_footprint(
         return Vec::new();
     }
     if extrude_profile == ExtrudeProfile::Cylinder {
-        let r = brush_radius as f32 * 0.5 + 0.5;
+        let r = (brush_radius + 1) as f32 / 2.0;
         let footprint = if extrude_taper {
             let start_r = extrude_taper_start.max(0.0);
             let end_r = extrude_taper_end.max(0.0);
@@ -1349,36 +1349,50 @@ pub fn face_normal_to_axis(n: (i32, i32, i32)) -> u8 {
     }
 }
 
-/// Inclusive brush radius in voxels from the stroke center: `0` = single cell only.
-/// Optional `clip_half_normal`: axis-aligned outward normal — keep offsets with `dx*nx+dy*ny+dz*nz >= 0`.
-/// Optional `face_normal_axis`: for 2D shapes (Square/Circle), the world axis to lock (0=X, 1=Y, 2=Z).
-pub fn brush_offset_cells(
+/// Build a brush offset list where `size` is the diameter in voxels (1 = single cell).
+///
+/// Odd sizes use a voxel-centered sphere/cube; even sizes shift the center to (0.5, 0.5, 0.5)
+/// between voxels so the cross-section is exactly `size` voxels wide on every axis.
+pub fn brush_offset_cells_for_size(
     shape: BrushShape,
-    radius: u32,
+    size: u32,
     clip_half_normal: Option<(i32, i32, i32)>,
     face_normal_axis: Option<u8>,
 ) -> Vec<(i32, i32, i32)> {
-    let r = radius as i32;
-    if r <= 0 {
-        return vec![(0, 0, 0)];
+    if size <= 1 {
+        return if let Some(n) = clip_half_normal {
+            let v = (0, 0, 0);
+            if v.0 * n.0 + v.1 * n.1 + v.2 * n.2 >= 0 { vec![v] } else { vec![] }
+        } else {
+            vec![(0, 0, 0)]
+        };
     }
+    let even = size % 2 == 0;
+    let half = size as i32 / 2;
+    let (lo, hi) = if even { (-(half - 1), half) } else { (-half, half) };
+    // For even sizes the sphere is centered between voxels; for odd it is on a voxel.
+    let c = if even { 0.5_f32 } else { 0.0_f32 };
+    let r2 = (size as f32 / 2.0).powi(2);
+    let axis = face_normal_axis.unwrap_or(1);
     let mut out = Vec::new();
     match shape {
         BrushShape::Cube => {
-            for dx in -r..=r {
-                for dy in -r..=r {
-                    for dz in -r..=r {
+            for dx in lo..=hi {
+                for dy in lo..=hi {
+                    for dz in lo..=hi {
                         out.push((dx, dy, dz));
                     }
                 }
             }
         }
         BrushShape::Sphere => {
-            let r2 = r * r;
-            for dx in -r..=r {
-                for dy in -r..=r {
-                    for dz in -r..=r {
-                        if dx * dx + dy * dy + dz * dz <= r2 {
+            for dx in lo..=hi {
+                for dy in lo..=hi {
+                    for dz in lo..=hi {
+                        let fx = dx as f32 - c;
+                        let fy = dy as f32 - c;
+                        let fz = dz as f32 - c;
+                        if fx * fx + fy * fy + fz * fz <= r2 + 1e-4 {
                             out.push((dx, dy, dz));
                         }
                     }
@@ -1386,10 +1400,15 @@ pub fn brush_offset_cells(
             }
         }
         BrushShape::Pyramid => {
-            for dx in -r..=r {
-                for dy in -r..=r {
-                    for dz in -r..=r {
-                        if dx.abs() + dy.abs() + dz.abs() <= r {
+            // Octahedron: L1 norm <= half-size. Even sizes use fractional center.
+            let thresh = size as f32 / 2.0;
+            for dx in lo..=hi {
+                for dy in lo..=hi {
+                    for dz in lo..=hi {
+                        let fx = (dx as f32 - c).abs();
+                        let fy = (dy as f32 - c).abs();
+                        let fz = (dz as f32 - c).abs();
+                        if fx + fy + fz <= thresh + 1e-4 {
                             out.push((dx, dy, dz));
                         }
                     }
@@ -1397,19 +1416,19 @@ pub fn brush_offset_cells(
             }
         }
         BrushShape::Square => {
-            let axis = face_normal_axis.unwrap_or(1);
-            for du in -r..=r {
-                for dv in -r..=r {
+            for du in lo..=hi {
+                for dv in lo..=hi {
                     out.push(expand_2d_to_3d(axis, du, dv));
                 }
             }
         }
         BrushShape::Circle => {
-            let axis = face_normal_axis.unwrap_or(1);
-            let r2 = r * r;
-            for du in -r..=r {
-                for dv in -r..=r {
-                    if du * du + dv * dv <= r2 {
+            let r2_2d = (size as f32 / 2.0).powi(2);
+            for du in lo..=hi {
+                for dv in lo..=hi {
+                    let fu = du as f32 - c;
+                    let fv = dv as f32 - c;
+                    if fu * fu + fv * fv <= r2_2d + 1e-4 {
                         out.push(expand_2d_to_3d(axis, du, dv));
                     }
                 }
@@ -1421,6 +1440,18 @@ pub fn brush_offset_cells(
     }
     out.sort_by_key(|(a, b, c)| (a.abs() + b.abs() + c.abs(), *a, *b, *c));
     out
+}
+
+/// Brush offset list keyed by a display-size index (`radius` = display_value − 1, so 0 = 1-voxel).
+/// Optional `clip_half_normal`: axis-aligned outward normal — keep offsets with `dx*nx+dy*ny+dz*nz >= 0`.
+/// Optional `face_normal_axis`: for 2D shapes (Square/Circle), the world axis to lock (0=X, 1=Y, 2=Z).
+pub fn brush_offset_cells(
+    shape: BrushShape,
+    radius: u32,
+    clip_half_normal: Option<(i32, i32, i32)>,
+    face_normal_axis: Option<u8>,
+) -> Vec<(i32, i32, i32)> {
+    brush_offset_cells_for_size(shape, radius + 1, clip_half_normal, face_normal_axis)
 }
 
 /// Voxel steps from brush center to the deepest part of the footprint toward the solid, along
@@ -3224,7 +3255,7 @@ fn filter_sculpt_footprint_stochastic(
         return footprint;
     }
 
-    let r_vox = (brush_radius as f32 * 0.5).max(1e-6);
+    let r_vox = ((brush_radius + 1) as f32 / 2.0).max(1e-6);
 
     let mut spine_eff: Vec<(i32, i32, i32)> = spine.to_vec();
     if spine_eff.is_empty() && !footprint.is_empty() {
@@ -3268,7 +3299,7 @@ fn filter_sculpt_footprint_stochastic(
     out
 }
 
-fn snap_normal_to_axis(n: (i32, i32, i32)) -> (i32, i32, i32) {
+pub fn snap_normal_to_axis(n: (i32, i32, i32)) -> (i32, i32, i32) {
     let ax = n.0.abs();
     let ay = n.1.abs();
     let az = n.2.abs();
@@ -3540,6 +3571,9 @@ pub fn compute_wall_sculpt_footprint(
     brush_falloff: u32,
     brush_strength: u32,
     stroke_seed: u32,
+    // Pre-locked face normal from the start of the stroke. `Some(v)` overrides the per-frame
+    // ray cast so the wall orientation stays constant across the entire drag.
+    locked_face_snapped: Option<Option<(i32, i32, i32)>>,
 ) -> Vec<VoxelCoord> {
     let mut spine = match wall_area_shape {
         WallAreaShape::Polygon => {
@@ -3672,8 +3706,13 @@ pub fn compute_wall_sculpt_footprint(
         spine = voxel_line_dda(a, b);
     }
 
-    let face_out = outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy);
-    let face_snapped = face_out.map(snap_normal_to_axis);
+    let face_snapped = match locked_face_snapped {
+        Some(v) => v,
+        None => {
+            let face_out = outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy);
+            face_out.map(snap_normal_to_axis)
+        }
+    };
 
     if wall_lock_start_height {
         if let Some(axis) = wall_lock_axis(spray_direction, face_snapped) {
@@ -4223,7 +4262,7 @@ pub fn sculpt_stroke_effective_footprint(
         if spine.is_empty() {
             return Vec::new();
         }
-        let r = brush_radius as f32 * 0.5 + 0.5;
+        let r = (brush_radius + 1) as f32 / 2.0;
         let footprint = if extrude_taper {
             let start_r = extrude_taper_start.max(0.0);
             let end_r = extrude_taper_end.max(0.0);
@@ -4352,6 +4391,7 @@ pub fn apply_sculpt_stroke(
             brush_falloff,
             brush_strength,
             stroke_seed,
+            None,
         )
     } else {
         sculpt_stroke_effective_footprint(
@@ -4506,7 +4546,7 @@ pub fn apply_sculpt_stroke(
                 return Ok(Vec::new());
             }
             let cols: Vec<(i32, i32)> = xz_map.values().copied().collect();
-            let brush_r_vox = brush_radius as f32 * 0.5 + 0.5;
+            let brush_r_vox = (brush_radius + 1) as f32 / 2.0;
 
             let mut col_meta: Vec<(i32, i32, i32, i32, Voxel)> = Vec::new();
             for &(x, z) in &cols {

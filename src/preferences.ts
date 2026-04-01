@@ -72,6 +72,10 @@ export type VoxelleDesktopPreferences = {
   reopenLastProject: boolean;
   /** Bake irradiance from glow voxels onto nearby surfaces (re-runs on mesh rebuild). */
   enableEmissionLighting: boolean;
+  /** Replace the rasterized renderer with a progressive GPU ray tracer. */
+  raytraceEnabled: boolean;
+  /** Use PCF soft shadows instead of hard single-tap shadows. */
+  softShadows: boolean;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -89,6 +93,8 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   appearanceTheme: "auto",
   reopenLastProject: false,
   enableEmissionLighting: true,
+  raytraceEnabled: false,
+  softShadows: true,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -271,6 +277,14 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         typeof o.enableEmissionLighting === "boolean"
           ? o.enableEmissionLighting
           : DEFAULTS.enableEmissionLighting,
+      raytraceEnabled:
+        typeof o.raytraceEnabled === "boolean"
+          ? o.raytraceEnabled
+          : DEFAULTS.raytraceEnabled,
+      softShadows:
+        typeof o.softShadows === "boolean"
+          ? o.softShadows
+          : DEFAULTS.softShadows,
     };
   } catch {
     return { ...DEFAULTS };
@@ -305,6 +319,8 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.appearanceTheme = prefs.appearanceTheme;
     merged.reopenLastProject = prefs.reopenLastProject;
     merged.enableEmissionLighting = prefs.enableEmissionLighting;
+    merged.raytraceEnabled = prefs.raytraceEnabled;
+    merged.softShadows = prefs.softShadows;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

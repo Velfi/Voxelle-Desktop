@@ -217,7 +217,8 @@ const EDGE_PAIRS: [[usize; 2]; 12] = [
 fn mat_kind_for_material(m: MaterialId) -> f32 {
     match m {
         MaterialId::Glow => 1.0,
-        MaterialId::Glass | MaterialId::Water => 2.0,
+        MaterialId::Glass => 2.0,
+        MaterialId::Water => 2.5,
         _ => 0.0,
     }
 }
@@ -989,6 +990,20 @@ pub fn build_marching_cubes_merged_with_progress<F>(voxels: &[Voxel], on_progres
 where
     F: Fn(f32, usize, usize),
 {
+    build_marching_cubes_merged_cancellable(voxels, on_progress, || false)
+}
+
+/// Like [`build_marching_cubes_merged_with_progress`] but checks `should_cancel()` after each bucket
+/// and returns an empty [`MeshBuffers`] immediately when it returns `true`.
+pub fn build_marching_cubes_merged_cancellable<F, C>(
+    voxels: &[Voxel],
+    on_progress: F,
+    should_cancel: C,
+) -> MeshBuffers
+where
+    F: Fn(f32, usize, usize),
+    C: Fn() -> bool,
+{
     let t0 = Instant::now();
     let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
@@ -1005,6 +1020,10 @@ where
     );
     let mut parts = Vec::new();
     for (i, b) in buckets.values().enumerate() {
+        if should_cancel() {
+            log::info!(target: "voxelle_load", "marching_cubes_merged: cancelled after {i}/{n_buckets} buckets");
+            return MeshBuffers::default();
+        }
         let t_bucket = Instant::now();
         let idx = i + 1;
         match marching_cubes_bucket(b, Some((idx, n_buckets))) {
@@ -1044,6 +1063,20 @@ pub fn build_dual_contour_merged_with_progress<F>(voxels: &[Voxel], on_progress:
 where
     F: Fn(f32, usize, usize),
 {
+    build_dual_contour_merged_cancellable(voxels, on_progress, || false)
+}
+
+/// Like [`build_dual_contour_merged_with_progress`] but checks `should_cancel()` after each bucket
+/// and returns an empty [`MeshBuffers`] immediately when it returns `true`.
+pub fn build_dual_contour_merged_cancellable<F, C>(
+    voxels: &[Voxel],
+    on_progress: F,
+    should_cancel: C,
+) -> MeshBuffers
+where
+    F: Fn(f32, usize, usize),
+    C: Fn() -> bool,
+{
     let t0 = Instant::now();
     let full = crate::greedy_mesh::voxel_map(voxels);
     let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
@@ -1061,6 +1094,10 @@ where
     );
     let mut parts = Vec::new();
     for (i, b) in buckets.values().enumerate() {
+        if should_cancel() {
+            log::info!(target: "voxelle_load", "dual_contour_merged: cancelled after {i}/{n_buckets} buckets");
+            return MeshBuffers::default();
+        }
         let t_bucket = Instant::now();
         let idx = i + 1;
         match dual_contour_bucket(b, &full) {

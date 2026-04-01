@@ -172,7 +172,14 @@ export function PreferencesModal({
     void invoke("set_emission_lighting", { enabled: checked }).catch(() => {});
   };
 
-  const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
+  const onSoftShadows = (checked: boolean) => {
+    const next = { ...prefs, softShadows: checked };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_soft_shadows", { enabled: checked }).catch(() => {});
+  };
+
+const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
     void invoke(
       "set_autosave_settings",
       autosaveSettingsInvokeArgs(next),
@@ -420,6 +427,17 @@ export function PreferencesModal({
           </label>
           <p className="prefs-field-hint prefs-section-hint">
             Glow voxels cast colored light onto nearby surfaces.
+          </p>
+          <label className="prefs-checkbox-label">
+            <input
+              type="checkbox"
+              checked={prefs.softShadows}
+              onChange={(e) => onSoftShadows(e.target.checked)}
+            />
+            Soft shadows
+          </label>
+          <p className="prefs-field-hint prefs-section-hint">
+            Smooths shadow edges using multi-tap filtering.
           </p>
           </div>
         </div>

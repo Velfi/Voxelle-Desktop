@@ -1051,6 +1051,7 @@ function App() {
   /** Previous brush sample (normalized viewport). */
   const lastStrokeNormRef = useRef<{ nx: number; ny: number } | null>(null);
   const lastStrokeEditMsRef = useRef(0);
+  const lastWallHoverMsRef = useRef(0);
   const dragDidEditRef = useRef(false);
   const loadingRef = useRef(false);
   const interactionBlockedRef = useRef(false);
@@ -1075,6 +1076,7 @@ function App() {
     useState<InteractionMode>("navigate");
   const [mood, setMood] = useState<MoodState>(() => defaultMoodState());
   const [selectionCount, setSelectionCount] = useState(0);
+  const selectionCountRef = useRef(0);
   const [viewportCursorDebugEnabled, setViewportCursorDebugEnabled] = useState(
     () => {
       try {
@@ -1255,8 +1257,8 @@ function App() {
           ny1,
           nx2,
           ny2,
-          sag: ropeSagRef.current,
           tension: ropeTensionRef.current,
+          gravityDirection: clothGravityDirectionRef.current,
           brushRadius: ropeBrushRadiusIndexRef.current,
           brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
           color: activeColorRef.current,
@@ -1544,6 +1546,10 @@ function App() {
   const [lastSessionInfo, setLastSessionInfo] =
     useState<LastSessionInfo | null>(null);
   const [lastSessionReady, setLastSessionReady] = useState(false);
+  /** True from startup until we've resolved whether to auto-reopen; hides start screen during that window. */
+  const [pendingAutoReopen, setPendingAutoReopen] = useState(
+    () => loadPreferences().reopenLastProject,
+  );
   const [collabActive, setCollabActive] = useState(false);
   /** Set when hosting or after welcome; 0 when solo. */
   const [localPeerId, setLocalPeerId] = useState(0);
@@ -2051,6 +2057,33 @@ function App() {
           setViewportCursorDebugScreen(null);
         }
       }),
+      listen<{
+        frame_count: number;
+        viewport_width: number;
+        viewport_height: number;
+        total_ms: number;
+        avg_ms: number;
+        stddev_ms: number;
+        min_ms: number;
+        p50_ms: number;
+        p95_ms: number;
+        p99_ms: number;
+        max_ms: number;
+        mpix_per_sec: number;
+        frame_times_ms: number[];
+      }>("voxelle-debug-raytrace-benchmark", (e) => {
+        const r = e.payload;
+        const f = (n: number) => n.toFixed(2);
+        console.group(
+          `Ray trace benchmark — ${r.viewport_width}×${r.viewport_height} — ${r.frame_count} frames — ${f(r.mpix_per_sec)} Mpix/s`,
+        );
+        console.log(
+          `avg ${f(r.avg_ms)} ms  σ ${f(r.stddev_ms)} ms  min ${f(r.min_ms)} ms  p50 ${f(r.p50_ms)} ms  p95 ${f(r.p95_ms)} ms  p99 ${f(r.p99_ms)} ms  max ${f(r.max_ms)} ms`,
+        );
+        console.log(`total ${f(r.total_ms)} ms over ${r.frame_count} frames`);
+        console.log("frame times (ms):", r.frame_times_ms.map((t) => +t.toFixed(2)));
+        console.groupEnd();
+      }),
       listen<boolean>("voxelle-hide-ui", (e) => {
         setHideUI(e.payload);
       }),
@@ -2214,10 +2247,29 @@ function App() {
   }, []);
 
   useEffect(() => {
+    selectionCountRef.current = selectionCount;
+  }, [selectionCount]);
+  useEffect(() => {
     activeColorRef.current = activeColor;
+    if (selectionCountRef.current > 0) {
+      void invoke("paint_selection", {
+        color: activeColor,
+        strokeSeed: Math.floor(Math.random() * 0xffffffff),
+        material: activeMaterialRef.current,
+      }).catch((e) => console.error("[voxelle] paint_selection error", e));
+    }
   }, [activeColor]);
   useEffect(() => {
     selectedColorsRef.current = selectedColors;
+    if (selectionCountRef.current > 0 && selectedColors.length >= 1) {
+      void invoke("paint_selection", {
+        color: activeColorRef.current,
+        palette: selectedColors,
+        paintColorDistrib: paintColorDistribRef.current,
+        strokeSeed: Math.floor(Math.random() * 0xffffffff),
+        material: activeMaterialRef.current,
+      }).catch((e) => console.error("[voxelle] paint_selection error", e));
+    }
   }, [selectedColors]);
   useEffect(() => {
     paintColorDistribRef.current = paintColorDistrib;
@@ -2230,6 +2282,18 @@ function App() {
   }, [paintColorDistrib]);
   useEffect(() => {
     activeMaterialRef.current = activeMaterial;
+    if (selectionCountRef.current > 0) {
+      const palette = selectedColorsRef.current;
+      const multiColor = palette.length > 1;
+      void invoke("paint_selection", {
+        color: activeColorRef.current,
+        ...(multiColor
+          ? { palette, paintColorDistrib: paintColorDistribRef.current }
+          : {}),
+        strokeSeed: Math.floor(Math.random() * 0xffffffff),
+        material: activeMaterial,
+      }).catch((e) => console.error("[voxelle] paint_selection error", e));
+    }
   }, [activeMaterial]);
   useEffect(() => {
     brushRadiusRef.current = brushRadius;
@@ -2740,8 +2804,8 @@ function App() {
             generatorKind: gk,
             generatorRopeFirstNx: ropeFirstScreenRef.current?.nx,
             generatorRopeFirstNy: ropeFirstScreenRef.current?.ny,
-            generatorRopeSag: ropeSagRef.current,
             generatorRopeTension: ropeTensionRef.current,
+            generatorRopeGravityDirection: clothGravityDirectionRef.current,
             generatorClothPins: clothPinsRef.current.map((p) => [
               p[0],
               p[1],
@@ -3292,9 +3356,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!lastSessionReady || !lastSessionInfo?.lastDocumentPath) return;
+    if (!lastSessionReady) return;
     const p = loadPreferences();
-    if (!p.reopenLastProject) return;
+    if (!p.reopenLastProject) {
+      setPendingAutoReopen(false);
+      return;
+    }
+    if (!lastSessionInfo?.lastDocumentPath) {
+      setPendingAutoReopen(false);
+      return;
+    }
     const info = lastSessionInfo;
     const doc = info.lastDocumentPath;
     const auto = info.autosavePath;
@@ -3308,11 +3379,15 @@ function App() {
         args: { documentPath: doc, autosavePath: auto },
       }).catch((err) => {
         setLoadError(err instanceof Error ? err.message : String(err));
+        setPendingAutoReopen(false);
       });
     } else if (info.documentExists) {
       void invoke("load_voxelle_path", { path: doc }).catch((err) => {
         setLoadError(err instanceof Error ? err.message : String(err));
+        setPendingAutoReopen(false);
       });
+    } else {
+      setPendingAutoReopen(false);
     }
   }, [lastSessionReady, lastSessionInfo]);
 
@@ -3329,7 +3404,7 @@ function App() {
     ) as RenderingMode | null;
     const valid =
       saved &&
-      ["greedy", "marchingCubes", "dualContour", "ray"].includes(saved);
+      ["greedy", "marchingCubes", "dualContour"].includes(saved);
     void invoke<RenderingMode>("get_rendering_mode")
       .then((m) => {
         if (valid && saved !== m) {
@@ -4181,6 +4256,20 @@ function App() {
           void invoke("selection_stroke_begin").catch(() => {});
         } else {
           void invoke("voxel_stroke_begin").catch(() => {});
+          // Immediately refresh the preview so the correct stroke seed and
+          // line-start are reflected on click without requiring mouse movement.
+          if (
+            mode === "sculpt" &&
+            sculptStrokeModeRef.current !== "extrude" &&
+            !loading &&
+            !workBusy
+          ) {
+            void invoke("voxel_sculpt_stroke_preview_at_screen", {
+              args: buildSculptStrokeInvokeArgs(nx, ny, {
+                strokeSegmentPrev: { nx, ny },
+              }),
+            }).catch(() => {});
+          }
         }
       }
     }
@@ -4222,7 +4311,8 @@ function App() {
     const includeStrokeSeed = opts.includeStrokeSeed !== false;
     const lineStart =
       sm === "wall" &&
-      wallAreaShapeRef.current === "circle" &&
+      (wallAreaShapeRef.current === "circle" ||
+        wallAreaShapeRef.current === "brush") &&
       strokeViewportStartRef.current
         ? {
             strokeLineStartNx: strokeViewportStartRef.current.nx,
@@ -4500,6 +4590,34 @@ function App() {
       void invoke("sync_preview_input", {
         args: buildSyncPreviewPayload(px, py, m),
       }).catch(() => {});
+    }
+
+    // Wall brush hover preview: show the full wall footprint under the cursor before any drag.
+    // Pass strokeLineStart = current position so Rust uses a zero-length line anchor (single
+    // surface voxel) and treats the union as non-accumulating, replacing each frame.
+    // strokeSeed is fixed so the stochastic filter is stable and doesn't flicker on hover.
+    if (
+      e.buttons === 0 &&
+      !probingRef.current &&
+      !interactionBlockedRef.current &&
+      !loading &&
+      !workBusy &&
+      interactionModeRef.current === "sculpt" &&
+      sculptStrokeModeRef.current === "wall" &&
+      wallAreaShapeRef.current === "brush"
+    ) {
+      const now = Date.now();
+      if (now - lastWallHoverMsRef.current >= 40) {
+        lastWallHoverMsRef.current = now;
+        void invoke("voxel_sculpt_stroke_preview_at_screen", {
+          args: {
+            ...buildSculptStrokeInvokeArgs(px, py, { includeStrokeSeed: false }),
+            strokeLineStartNx: px,
+            strokeLineStartNy: py,
+            strokeSeed: 0,
+          },
+        }).catch(() => {});
+      }
     }
 
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
@@ -5480,10 +5598,12 @@ function App() {
     collabJoinPending ||
     (workBusy && !startScreenLogoLoaded);
   const showStartScreen = !showEditorChrome;
-  const showEmptyOpenFile = showStartScreen;
-  /** Cold start: logo mesh still decoding (ignore `showStartScreen` while `workBusy` toggles editor chrome). */
+  const showEmptyOpenFile = showStartScreen && !pendingAutoReopen;
+  /** Cold start: logo mesh still decoding (ignore `showStartScreen` while `workBusy` toggles editor chrome).
+   *  Also shown while waiting to resolve auto-reopen so the start screen doesn't flash before loading begins. */
   const showStartScreenLogoSpinner =
-    !startScreenLogoLoaded && !pathLabel && !collabActive;
+    (!startScreenLogoLoaded && !pathLabel && !collabActive) ||
+    (pendingAutoReopen && !loading && !pathLabel && !collabActive);
 
   const reopenLastProject = useCallback(() => {
     const info = lastSessionInfo;
@@ -7280,32 +7400,6 @@ function App() {
                     >
                       {ropeTension.toFixed(2)}
                     </span>
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        color: "var(--app-text-muted)",
-                      }}
-                    >
-                      Sag
-                    </span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={8}
-                      step={0.1}
-                      value={ropeSag}
-                      onChange={(ev) => setRopeSag(Number(ev.target.value))}
-                      style={{ width: 60 }}
-                    />
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        minWidth: "1.6em",
-                        textAlign: "right",
-                      }}
-                    >
-                      {ropeSag.toFixed(1)}
-                    </span>
                     <button
                       type="button"
                       className="tool-options-shape-btn"
@@ -8522,54 +8616,28 @@ function App() {
                   ) : null}
                   {generatorKind === "rope" ? (
                     <>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Sag</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={8}
-                          step={0.1}
-                          value={ropeSag}
-                          onChange={(ev) => setRopeSag(Number(ev.target.value))}
-                          disabled={loading || workBusy}
-                        />
-                        <span className="tool-options-range-value">
-                          {ropeSag.toFixed(1)}
-                        </span>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Tension</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={1}
-                          step={0.02}
-                          value={ropeTension}
+                      <label
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
+                        <span>Gravity</span>
+                        <select
+                          aria-label="Rope gravity direction"
+                          value={clothGravityDirection}
                           onChange={(ev) =>
-                            setRopeTension(Number(ev.target.value))
+                            setClothGravityDirection(
+                              ev.target.value as ClothGravityDirectionId,
+                            )
                           }
                           disabled={loading || workBusy}
-                          title="0 = loose, 1 = taut"
-                        />
-                        <span className="tool-options-range-value">
-                          {ropeTension.toFixed(2)}
-                        </span>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Brush</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={SCULPT_BRUSH_MAX_INDEX}
-                          value={ropeBrushRadiusIndex}
-                          onChange={(ev) =>
-                            setRopeBrushRadiusIndex(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                        <span className="tool-options-range-value">
-                          {ropeBrushRadiusIndex + 1}
-                        </span>
+                        >
+                          <option value="down">Down (−Y)</option>
+                          <option value="up">Up (+Y)</option>
+                          <option value="left">Left (−X)</option>
+                          <option value="right">Right (+X)</option>
+                          <option value="forward">Forward (−Z)</option>
+                          <option value="back">Back (+Z)</option>
+                        </select>
                       </label>
                       <div
                         className="tool-options-shape-row"
@@ -8580,7 +8648,7 @@ function App() {
                           marginTop: "0.35rem",
                         }}
                         role="group"
-                        aria-label="Rope brush shape"
+                        aria-label="Shape"
                       >
                         <button
                           type="button"
@@ -8607,6 +8675,22 @@ function App() {
                           Cube
                         </button>
                       </div>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Size</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={SCULPT_BRUSH_MAX_INDEX}
+                          value={ropeBrushRadiusIndex}
+                          onChange={(ev) =>
+                            setRopeBrushRadiusIndex(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {ropeBrushRadiusIndex + 1}
+                        </span>
+                      </label>
                     </>
                   ) : null}
                   {generatorKind === "cloth" ? (
@@ -8634,40 +8718,6 @@ function App() {
                           <option value="back">Back (+Z)</option>
                         </select>
                       </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Tension</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={1}
-                          step={0.02}
-                          value={clothTension}
-                          onChange={(ev) =>
-                            setClothTension(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                          title="0 = loose drape, 1 = stiff"
-                        />
-                        <span className="tool-options-range-value">
-                          {clothTension.toFixed(2)}
-                        </span>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Brush</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={SCULPT_BRUSH_MAX_INDEX}
-                          value={ropeBrushRadiusIndex}
-                          onChange={(ev) =>
-                            setRopeBrushRadiusIndex(Number(ev.target.value))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                        <span className="tool-options-range-value">
-                          {ropeBrushRadiusIndex + 1}
-                        </span>
-                      </label>
                       <div
                         className="tool-options-shape-row"
                         style={{
@@ -8677,7 +8727,7 @@ function App() {
                           marginTop: "0.35rem",
                         }}
                         role="group"
-                        aria-label="Cloth brush shape"
+                        aria-label="Shape"
                       >
                         <button
                           type="button"
@@ -8704,6 +8754,22 @@ function App() {
                           Cube
                         </button>
                       </div>
+                      <label className="tool-options-range-label tool-options-range-with-value">
+                        <span>Size</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={SCULPT_BRUSH_MAX_INDEX}
+                          value={ropeBrushRadiusIndex}
+                          onChange={(ev) =>
+                            setRopeBrushRadiusIndex(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span className="tool-options-range-value">
+                          {ropeBrushRadiusIndex + 1}
+                        </span>
+                      </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Sim gravity</span>
                         <input

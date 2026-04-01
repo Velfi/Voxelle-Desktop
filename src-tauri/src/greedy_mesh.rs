@@ -46,9 +46,18 @@ fn mat_kind_f32(m: MaterialId) -> f32 {
 }
 
 /// Mirrors `isFaceOccludedByNeighbor` in greedyMeshCore.ts — `true` = face not emitted.
+/// Glass faces abutting opaque are culled: the shared face is coplanar with the opaque
+/// depth entry and would z-fight, and glass tinting comes from the glass-air faces anyway.
+/// Water faces abutting opaque are kept: water is volumetric and those faces define the
+/// water body edge.  A small depth bias on the OIT pipeline prevents water-opaque z-fight.
 fn face_occluded(source: MaterialId, neighbor: MaterialId) -> bool {
     if is_transmissive(source) {
-        source == neighbor
+        if source == neighbor {
+            return true; // interior same-kind face
+        }
+        // Glass-on-opaque: cull (coplanar z-fight, visually redundant).
+        // Water-on-opaque: keep (defines the water body boundary).
+        source == MaterialId::Glass && !is_transmissive(neighbor)
     } else {
         !is_transmissive(neighbor)
     }
@@ -363,6 +372,31 @@ pub struct MeshBuffers {
     /// Applied in the shader as diffuse light on non-emissive surfaces.
     pub emission_tint: Vec<f32>,
     pub indices: Vec<u32>,
+}
+
+/// Reorder `mesh.indices` so opaque faces come first and transparent faces last.
+/// Returns the number of **opaque indices** (the split point).
+/// Each face is 6 indices (two triangles per quad).  A face is transparent when
+/// the first vertex's `mat_kind > 1.6` (glass = 2.0, water = 2.5).
+pub fn partition_indices_by_transparency(mesh: &mut MeshBuffers) -> u32 {
+    const INDICES_PER_FACE: usize = 6;
+    let face_count = mesh.indices.len() / INDICES_PER_FACE;
+    let mut opaque = Vec::with_capacity(mesh.indices.len());
+    let mut trans = Vec::new();
+    for f in 0..face_count {
+        let start = f * INDICES_PER_FACE;
+        let end = start + INDICES_PER_FACE;
+        let first_vert = mesh.indices[start] as usize;
+        if first_vert < mesh.mat_kind.len() && mesh.mat_kind[first_vert] > 1.6 {
+            trans.extend_from_slice(&mesh.indices[start..end]);
+        } else {
+            opaque.extend_from_slice(&mesh.indices[start..end]);
+        }
+    }
+    let split = opaque.len() as u32;
+    opaque.append(&mut trans);
+    mesh.indices = opaque;
+    split
 }
 
 /// Padded brick (+1 voxel halo) for GPU mesh AO: same row-major layout as [`crate::gpu_brick::GpuVoxelBrick`],
@@ -2368,19 +2402,9 @@ pub fn mesh_buffers_selection_overlay_solid(
     if sel.is_empty() {
         return MeshBuffers::default();
     }
-    let Some((min_x, min_y, min_z, max_x, max_y, max_z)) = selection_bounds(sel) else {
-        return MeshBuffers::default();
-    };
     if sel.len() >= SELECTION_OVERLAY_MESH_THRESHOLD {
-        let c = color_rgb(SELECTION_OVERLAY_COLOR);
-        let col = [c.x, c.y, c.z];
-        let hx = (max_x - min_x + 1) as f32 * 0.5;
-        let hy = (max_y - min_y + 1) as f32 * 0.5;
-        let hz = (max_z - min_z + 1) as f32 * 0.5;
-        let cx = (min_x + max_x) as f32 * 0.5;
-        let cy = (min_y + max_y) as f32 * 0.5;
-        let cz = (min_z + max_z) as f32 * 0.5;
-        return axis_aligned_box_mesh(cx, cy, cz, hx, hy, hz, col, 1.0);
+        // Too large to mesh per-voxel; AABB wireframe alone marks the bounds.
+        return MeshBuffers::default();
     }
     let sel_mesh = filter_voxel_set_to_shell(sel);
     if sel_mesh.is_empty() {
@@ -2392,14 +2416,17 @@ pub fn mesh_buffers_selection_overlay_solid(
         combined.insert(*k, *v);
     }
     for &c in sel_mesh.iter() {
-        let oid = world.get(&c).map(|v| v.object_id).unwrap_or(0);
+        let (actual_color, oid) = world
+            .get(&c)
+            .map(|v| (v.color, v.object_id))
+            .unwrap_or((0xe8e8e8, 0));
         combined.insert(
             c,
             Voxel {
                 x: c.0,
                 y: c.1,
                 z: c.2,
-                color: SELECTION_OVERLAY_COLOR,
+                color: actual_color,
                 material: MaterialId::Plastic,
                 object_id: oid,
             },

@@ -72,7 +72,7 @@ fn fs_collab_line_occluded(in: VertexOut) -> OpaqueOut {
 fn fs_gizmo_front(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
     let c = clamp(in.color, vec3<f32>(0.0), vec3<f32>(1.0));
-    out.color = vec4<f32>(c, 0.92);
+    out.color = vec4<f32>(c, 1.0);
     out.gbuf_n = vec4<f32>(0.0);
     return out;
 }
@@ -82,7 +82,7 @@ fn fs_gizmo_front(in: VertexOut) -> OpaqueOut {
 fn fs_gizmo_occluded(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
     let c = clamp(in.color, vec3<f32>(0.0), vec3<f32>(1.0));
-    out.color = vec4<f32>(c * 0.55, 0.28);
+    out.color = vec4<f32>(c * 0.6, 0.35);
     out.gbuf_n = vec4<f32>(0.0);
     return out;
 }

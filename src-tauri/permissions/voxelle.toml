@@ -62,6 +62,7 @@ commands.allow = [
   "view_menu_sync_full_surface_viewport",
   "selection_menu_sync_match_material",
   "debug_menu_sync_viewport_cursor_overlay",
+  "set_soft_shadows",
   "set_tone_mapping",
   "set_mood_params",
   "set_scene_lighting",
@@ -80,6 +81,7 @@ commands.allow = [
   "selection_clear",
   "selection_delete_selected_voxels",
   "selection_get_count",
+  "paint_selection",
   "selection_add_by_color_at_screen",
   "selection_add_coplanar_at_screen",
   "selection_add_coplanar_empty_at_screen",
@@ -134,4 +136,5 @@ commands.allow = [
   "set_active_object",
   "set_object_visible",
   "create_scene_object",
+  "set_raytrace_mode",
 ]

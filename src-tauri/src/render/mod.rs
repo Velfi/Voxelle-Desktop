@@ -37,6 +37,12 @@ mod gpu {
     pub mod collab_frustum {
         pub const WGSL: &str = include_str!("collab_frustum.wgsl");
     }
+    pub mod ray_trace {
+        pub const WGSL: &str = include_str!("ray_trace.wgsl");
+    }
+    pub mod oit_composite {
+        pub const WGSL: &str = include_str!("oit_composite.wgsl");
+    }
 }
 
 use crate::camera::OrbitCamera;
@@ -51,9 +57,9 @@ use glyphon::{
     FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
     TextRenderer, Viewport as GlyphonViewport,
 };
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Runtime};
 use wgpu::util::DeviceExt;
 
@@ -101,6 +107,10 @@ pub(crate) enum PreparedOpaqueUpload {
         chunk_origin: IVec3,
         meshes: BTreeMap<ChunkKey, MeshBuffers>,
         spatial_cache: greedy_mesh::SpatialMeshCache,
+    },
+    /// Scene set up for chunked rendering but meshes arrive later via background streaming.
+    ChunkedDeferred {
+        chunk_origin: IVec3,
     },
 }
 
@@ -617,6 +627,7 @@ pub struct WgpuViewer {
     sun_color_linear: Vec3,
     bg_color_linear: Vec3,
     shadows_enabled: bool,
+    pub(crate) soft_shadows: bool,
     sky_enabled: bool,
 
     #[allow(dead_code)]
@@ -638,6 +649,13 @@ pub struct WgpuViewer {
     depth_snapshot_texture: wgpu::Texture,
     depth_snapshot_view: wgpu::TextureView,
 
+    /// OIT accumulation texture (Rgba16Float): weighted color + alpha accumulation.
+    oit_accum_texture: wgpu::Texture,
+    oit_accum_view: wgpu::TextureView,
+    /// OIT revealage texture (R16Float): product of (1 − alpha) across all transparent layers.
+    oit_revealage_texture: wgpu::Texture,
+    oit_revealage_view: wgpu::TextureView,
+
     bloom_a: wgpu::Texture,
     bloom_a_view: wgpu::TextureView,
     bloom_b: wgpu::Texture,
@@ -657,6 +675,7 @@ pub struct WgpuViewer {
     post_bloom_layout: wgpu::BindGroupLayout,
     post_blur_layout: wgpu::BindGroupLayout,
     post_composite_layout: wgpu::BindGroupLayout,
+    oit_composite_layout: wgpu::BindGroupLayout,
 
     bind_scene_opaque: wgpu::BindGroup,
     bind_shadow_pass: wgpu::BindGroup,
@@ -673,6 +692,7 @@ pub struct WgpuViewer {
     bind_blur_pyr_h: Vec<wgpu::BindGroup>,
     bind_blur_pyr_v: Vec<wgpu::BindGroup>,
     bind_trans: Option<wgpu::BindGroup>,
+    bind_oit_composite: wgpu::BindGroup,
 
     post_blur_buf: wgpu::Buffer,
     /// Feeds exposure_ev into the bloom extract shader for physical threshold scaling.
@@ -708,7 +728,8 @@ pub struct WgpuViewer {
     pipeline_gizmo_tris_occluded: wgpu::RenderPipeline,
     pipeline_sky: wgpu::RenderPipeline,
     pipeline_start_screen_bg: wgpu::RenderPipeline,
-    pipeline_trans: wgpu::RenderPipeline,
+    pipeline_oit_accum: wgpu::RenderPipeline,
+    pipeline_oit_composite: wgpu::RenderPipeline,
     pipeline_shadow: wgpu::RenderPipeline,
     pipeline_bloom_extract: wgpu::RenderPipeline,
     pipeline_blur: wgpu::RenderPipeline,
@@ -718,6 +739,39 @@ pub struct WgpuViewer {
     pipeline_composite: wgpu::RenderPipeline,
     /// 1×1 average linear luminance (HDR, pre-exposure) for auto exposure.
     pipeline_meter: wgpu::RenderPipeline,
+    // ── Progressive ray tracer ────────────────────────────────────────────
+    pub raytrace_enabled: bool,
+    /// Ping-pong accumulation textures (Rgba16Float, viewport size).
+    /// Index 0/1 alternate as read/write each frame.
+    rt_accum_textures: [wgpu::Texture; 2],
+    rt_accum_views: [wgpu::TextureView; 2],
+    /// Which accumulator index is currently written to this frame.
+    rt_accum_flip: bool,
+    /// Running count of accumulated samples; 0 = reset / first frame.
+    rt_sample_n: u32,
+    rt_uniform_buf: wgpu::Buffer,
+    /// Layout for group 0 (global + brick only — no shadow sampler).
+    rt_scene_layout: wgpu::BindGroupLayout,
+    /// Layout for group 1 (accum_prev + sampler + rt_uniform).
+    rt_accum_layout: wgpu::BindGroupLayout,
+    /// Bind group for group 0: global + brick.
+    rt_scene_bg: wgpu::BindGroup,
+    /// Two bind groups for group 1 — one per ping-pong side.
+    /// rt_accum_bgs[i] reads from rt_accum_textures[1-i] (the non-written side).
+    rt_accum_bgs: Vec<wgpu::BindGroup>,
+    /// Half-resolution texture used as the raytrace render target in fast_preview mode.
+    /// Upscaled to full-res after the pass so the rest of the pipeline is unchanged.
+    rt_preview_tex:  wgpu::Texture,
+    rt_preview_view: wgpu::TextureView,
+    /// Bind group (post_bloom_layout: tex + sampler) for the upscale blit.
+    rt_preview_bg:   wgpu::BindGroup,
+    pipeline_raytrace: wgpu::RenderPipeline,
+    /// Last camera eye used for accumulation-reset detection.
+    rt_prev_eye: [f32; 3],
+    rt_prev_inv_view: [[f32; 4]; 4],
+    /// True when the camera moved this frame; shader uses cheap shading path.
+    rt_fast_preview: bool,
+
     // ── Screen-space reflections (inline in fs_trans) ─────────────────────
     ssr_opts_buf: wgpu::Buffer,
     ssr_opts: SsrOpts,
@@ -741,12 +795,17 @@ pub struct WgpuViewer {
     vertex_buffer: Option<wgpu::Buffer>,
     index_buffer: Option<wgpu::Buffer>,
     index_count: u32,
+    /// Split point in the non-chunked index buffer: indices `0..opaque_index_split` are opaque,
+    /// `opaque_index_split..index_count` are transparent.
+    opaque_index_split: u32,
 
     /// When set, opaque mesh is drawn from [`Self::opaque_chunks`] (multi-draw).
     pub opaque_chunked: bool,
     /// Chunk bucketing origin (must match [`greedy_mesh::voxel_buckets_by_chunk`]).
     pub chunk_grid_origin: IVec3,
     opaque_chunks: BTreeMap<ChunkKey, OpaqueChunkDraw>,
+    /// Chunks waiting to be uploaded to GPU (progressive loading after initial batch).
+    pending_chunk_uploads: VecDeque<(ChunkKey, MeshBuffers)>,
     /// Incremental occupancy + buckets; rebuilt on full chunked upload, updated O(1) per edit.
     spatial_mesh_cache: Option<greedy_mesh::SpatialMeshCache>,
 
@@ -845,7 +904,8 @@ pub struct GpuPeerLabel {
 struct OpaqueChunkDraw {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
-    index_count: u32,
+    opaque_index_count: u32,
+    transparent_index_count: u32,
 }
 
 /// Reused GPU buffers for greedy mesh compute (grow-only scratch).
@@ -941,6 +1001,63 @@ struct GpuMeshParams {
 
 fn hdr_format() -> wgpu::TextureFormat {
     wgpu::TextureFormat::Rgba16Float
+}
+
+// ── Progressive raytracer types ───────────────────────────────────────────────
+
+#[derive(serde::Serialize, Clone)]
+pub struct RaytraceBenchmarkResult {
+    pub frame_count: u32,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    /// Total wall-clock time for all frames (ms), GPU synced.
+    pub total_ms: f64,
+    pub avg_ms: f64,
+    pub stddev_ms: f64,
+    pub min_ms: f64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+    /// Megapixels per second (frames * pixels / total_ms * 1000).
+    pub mpix_per_sec: f64,
+    /// Individual frame times in ms.
+    pub frame_times_ms: Vec<f64>,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct RtUniform {
+    frame_seed: u32,
+    sample_n: u32,
+    /// 1 when the camera moved this frame: use cheap shading (1 shadow ray, no bounces).
+    fast_preview: u32,
+    _pad1: u32,
+}
+
+fn create_rt_accum_tex(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("rt_accum"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: hdr_format(),
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
 }
 
 /// Uses [`Mat4::orthographic_rh`], which glam documents as \([0,1]\) depth for WebGPU (do not apply an extra OpenGL→wgpu Z remap).
@@ -1185,6 +1302,44 @@ fn create_depth_snapshot(
     });
     let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
     (tex, view)
+}
+
+/// OIT accumulation (Rgba16Float) + revealage (R16Float) textures for WBOIT.
+fn create_oit_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+    let w = width.max(1);
+    let h = height.max(1);
+    let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+
+    let accum_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("oit_accum"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage,
+        view_formats: &[],
+    });
+    let accum_view = accum_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let reveal_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("oit_revealage"),
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R16Float,
+        usage,
+        view_formats: &[],
+    });
+    let reveal_view = reveal_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    (accum_tex, accum_view, reveal_tex, reveal_view)
 }
 
 /// Tonemapped sRGB output at **viewport** resolution before [`copy_texture_to_texture`] into the swapchain.
@@ -2281,7 +2436,8 @@ impl WgpuViewer {
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -2312,7 +2468,8 @@ impl WgpuViewer {
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -2613,8 +2770,8 @@ impl WgpuViewer {
             cache: None,
         });
 
-        let pipeline_trans = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("trans"),
+        let pipeline_oit_accum = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("oit_accum"),
             layout: Some(&pl_trans),
             vertex: wgpu::VertexState {
                 module: &shader_scene,
@@ -2624,16 +2781,47 @@ impl WgpuViewer {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader_scene,
-                entry_point: Some("fs_trans"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: vf,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                entry_point: Some("fs_oit_accum"),
+                targets: &[
+                    // Target 0: accumulation (additive blend)
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    // Target 1: revealage (multiplicative: dst * (1 - src))
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::R16Float,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None, // Glass visible from both sides
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -2641,8 +2829,90 @@ impl WgpuViewer {
                 depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // Small bias pulls transparent faces toward camera to prevent
+                // z-fighting where water faces are coplanar with opaque depth.
+                bias: wgpu::DepthBiasState {
+                    constant: -2,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
             }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let shader_oit_composite = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("oit_composite"),
+            source: wgpu::ShaderSource::Wgsl(gpu::oit_composite::WGSL.into()),
+        });
+        let oit_composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("oit_composite"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let pl_oit_composite = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pl_oit_composite"),
+            bind_group_layouts: &[&oit_composite_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline_oit_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("oit_composite"),
+            layout: Some(&pl_oit_composite),
+            vertex: wgpu::VertexState {
+                module: &shader_oit_composite,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_oit_composite,
+                entry_point: Some("fs_oit_composite"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: vf,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
             cache: None,
@@ -2667,7 +2937,11 @@ impl WgpuViewer {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                bias: wgpu::DepthBiasState {
+                        constant: 2,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -2888,6 +3162,8 @@ impl WgpuViewer {
             create_present_texture(&device, size.0, size.1, format);
         let (depth_snapshot_texture, depth_snapshot_view) =
             create_depth_snapshot(&device, size.0, size.1);
+        let (oit_accum_texture, oit_accum_view, oit_revealage_texture, oit_revealage_view) =
+            create_oit_textures(&device, size.0, size.1);
 
         let (bloom_pyramid_a, bloom_pyramid_a_views, bloom_pyramid_b, bloom_pyramid_b_views) =
             create_bloom_pyramid(&device, size.0, size.1, vf);
@@ -3085,6 +3361,151 @@ impl WgpuViewer {
             ],
         }));
 
+        let bind_oit_composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("oit_composite"),
+            layout: &oit_composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&oit_accum_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&oit_revealage_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&hdr_opaque_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler_linear) },
+            ],
+        });
+
+        // ── Progressive raytracer setup ──────────────────────────────────────
+        let rt_scene_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rt_scene"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let rt_accum_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rt_accum"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let rt_uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("rt_uniform"),
+            contents: bytemuck::bytes_of(&RtUniform { frame_seed: 0, sample_n: 0, fast_preview: 0, _pad1: 0 }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let (rt_accum_tex0, rt_accum_view0) = create_rt_accum_tex(&device, size.0, size.1);
+        let (rt_accum_tex1, rt_accum_view1) = create_rt_accum_tex(&device, size.0, size.1);
+        let (rt_preview_tex, rt_preview_view) =
+            create_rt_accum_tex(&device, (size.0 / 2).max(1), (size.1 / 2).max(1));
+        let rt_preview_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rt_preview_bg"),
+            layout: &post_bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rt_preview_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler_linear) },
+            ],
+        });
+
+        let rt_scene_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rt_scene_bg"),
+            layout: &rt_scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: global_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: brick_buffer.as_entire_binding() },
+            ],
+        });
+        // rt_accum_bgs[i] reads from the side that is NOT written this frame:
+        //   flip=false → write to [0], so bg[0] reads from [1]
+        //   flip=true  → write to [1], so bg[1] reads from [0]
+        let rt_accum_bgs: Vec<wgpu::BindGroup> = vec![
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rt_accum_bg0"),
+                layout: &rt_accum_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rt_accum_view1) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler_linear) },
+                    wgpu::BindGroupEntry { binding: 2, resource: rt_uniform_buf.as_entire_binding() },
+                ],
+            }),
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rt_accum_bg1"),
+                layout: &rt_accum_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&rt_accum_view0) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler_linear) },
+                    wgpu::BindGroupEntry { binding: 2, resource: rt_uniform_buf.as_entire_binding() },
+                ],
+            }),
+        ];
+
+        let rt_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("rt_pl"),
+            bind_group_layouts: &[&rt_scene_layout, &rt_accum_layout],
+            push_constant_ranges: &[],
+        });
+        let shader_rt = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ray_trace"),
+            source: wgpu::ShaderSource::Wgsl(gpu::ray_trace::WGSL.into()),
+        });
+        let pipeline_raytrace = fullscreen_pipeline(
+            &device,
+            &rt_pl_layout,
+            &shader_rt,
+            "fs_trace",
+            &[Some(wgpu::ColorTargetState {
+                format: vf,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            None,
+        );
+
+        let rt_accum_textures = [rt_accum_tex0, rt_accum_tex1];
+        let rt_accum_views    = [rt_accum_view0, rt_accum_view1];
+
         // ── Glyphon text rendering setup ──
         let mut glyphon_font_system = FontSystem::new();
         #[cfg(target_os = "macos")]
@@ -3129,6 +3550,7 @@ impl WgpuViewer {
             sun_color_linear: sun_c,
             bg_color_linear: bg_c,
             shadows_enabled: default_lit.enable_shadows,
+            soft_shadows: true,
             sky_enabled: default_lit.enable_sky,
             shadow_texture,
             shadow_view,
@@ -3142,6 +3564,10 @@ impl WgpuViewer {
             depth_view,
             depth_snapshot_texture,
             depth_snapshot_view,
+            oit_accum_texture,
+            oit_accum_view,
+            oit_revealage_texture,
+            oit_revealage_view,
             bloom_a,
             bloom_a_view,
             bloom_b,
@@ -3158,6 +3584,7 @@ impl WgpuViewer {
             post_bloom_layout,
             post_blur_layout,
             post_composite_layout,
+            oit_composite_layout,
             bind_scene_opaque,
             bind_shadow_pass,
             bind_bloom_extract,
@@ -3166,6 +3593,7 @@ impl WgpuViewer {
             bind_blur_v,
             bind_composite,
             bind_trans,
+            bind_oit_composite,
             bind_blit_down,
             bind_blit_up,
             bind_blit_up_weighted,
@@ -3197,7 +3625,8 @@ impl WgpuViewer {
             pipeline_gizmo_tris_occluded,
             pipeline_sky,
             pipeline_start_screen_bg,
-            pipeline_trans,
+            pipeline_oit_accum,
+            pipeline_oit_composite,
             pipeline_shadow,
             pipeline_bloom_extract,
             pipeline_blur,
@@ -3210,6 +3639,23 @@ impl WgpuViewer {
             meter_staging,
             ssr_opts_buf,
             ssr_opts,
+            raytrace_enabled: false,
+            rt_accum_textures,
+            rt_accum_views,
+            rt_accum_flip: false,
+            rt_sample_n: 0,
+            rt_uniform_buf,
+            rt_scene_layout,
+            rt_accum_layout,
+            rt_scene_bg,
+            rt_accum_bgs,
+            rt_preview_tex,
+            rt_preview_view,
+            rt_preview_bg,
+            pipeline_raytrace,
+            rt_prev_eye: [0.0; 3],
+            rt_prev_inv_view: [[0.0; 4]; 4],
+            rt_fast_preview: false,
             exposure_user_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
             auto_exposure_enabled: default_lit.auto_exposure,
             auto_exposure_smoothed: 0.0,
@@ -3219,9 +3665,11 @@ impl WgpuViewer {
             vertex_buffer: None,
             index_buffer: None,
             index_count: 0,
+            opaque_index_split: 0,
             opaque_chunked: false,
             chunk_grid_origin: IVec3::ZERO,
             opaque_chunks: BTreeMap::new(),
+            pending_chunk_uploads: VecDeque::new(),
             spatial_mesh_cache: None,
             preview_vertex_buffer: None,
             preview_index_buffer: None,
@@ -3293,7 +3741,7 @@ impl WgpuViewer {
 
     pub fn opaque_index_count(&self) -> u32 {
         if self.opaque_chunked {
-            self.opaque_chunks.values().map(|c| c.index_count).sum()
+            self.opaque_chunks.values().map(|c| c.opaque_index_count + c.transparent_index_count).sum()
         } else {
             self.index_count
         }
@@ -3385,6 +3833,24 @@ impl WgpuViewer {
             create_depth_snapshot(&self.device, viewport_width, viewport_height);
         self.depth_snapshot_texture = depth_snapshot_texture;
         self.depth_snapshot_view = depth_snapshot_view;
+
+        let (oit_accum_texture, oit_accum_view, oit_revealage_texture, oit_revealage_view) =
+            create_oit_textures(&self.device, viewport_width, viewport_height);
+        self.oit_accum_texture = oit_accum_texture;
+        self.oit_accum_view = oit_accum_view;
+        self.oit_revealage_texture = oit_revealage_texture;
+        self.oit_revealage_view = oit_revealage_view;
+
+        // Reallocate raytracer accumulation textures for new viewport size.
+        let (rt_a_tex, rt_a_view) = create_rt_accum_tex(&self.device, viewport_width, viewport_height);
+        let (rt_b_tex, rt_b_view) = create_rt_accum_tex(&self.device, viewport_width, viewport_height);
+        self.rt_accum_textures = [rt_a_tex, rt_b_tex];
+        self.rt_accum_views    = [rt_a_view, rt_b_view];
+        let (rt_preview_tex, rt_preview_view) =
+            create_rt_accum_tex(&self.device, (viewport_width / 2).max(1), (viewport_height / 2).max(1));
+        self.rt_preview_tex  = rt_preview_tex;
+        self.rt_preview_view = rt_preview_view;
+        self.rt_sample_n = 0;
 
         self.rebuild_bind_groups();
     }
@@ -3560,6 +4026,109 @@ impl WgpuViewer {
             0,
             bytemuck::bytes_of(&self.post_composite_opts),
         );
+        // Lighting change invalidates accumulated RT samples.
+        self.rt_sample_n = 0;
+    }
+
+    pub fn set_raytrace_mode(&mut self, enabled: bool) {
+        self.raytrace_enabled = enabled;
+        self.rt_sample_n = 0;
+    }
+
+    /// Run `frame_count` ray-trace frames off-screen (no surface present), GPU-synced.
+    /// Returns timing statistics. Raytrace mode does not need to be active; this temporarily
+    /// forces it on regardless of the current mode flag.
+    pub fn run_raytrace_benchmark(&mut self, frame_count: u32) -> RaytraceBenchmarkResult {
+        let n = frame_count.max(1);
+        let mut frame_ms = Vec::with_capacity(n as usize);
+
+        // Reset accumulation so every frame is a fresh sample-0 pass.
+        self.rt_sample_n = 0;
+        self.rt_fast_preview = false;
+
+        for _ in 0..n {
+            let flip = self.rt_accum_flip as usize;
+            let rt_u = RtUniform {
+                frame_seed: self.rt_sample_n.wrapping_mul(2654435761).wrapping_add(1),
+                sample_n: self.rt_sample_n,
+                fast_preview: 0,
+                _pad1: 0,
+            };
+            self.queue.write_buffer(&self.rt_uniform_buf, 0, bytemuck::bytes_of(&rt_u));
+
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("rt_bench"),
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("rt_bench_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.rt_accum_views[flip],
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline_raytrace);
+                pass.set_bind_group(0, &self.rt_scene_bg, &[]);
+                pass.set_bind_group(1, &self.rt_accum_bgs[flip], &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            let t0 = Instant::now();
+            self.queue.submit(std::iter::once(encoder.finish()));
+            self.device.poll(wgpu::Maintain::Wait);
+            frame_ms.push(t0.elapsed().as_secs_f64() * 1000.0);
+
+            self.rt_accum_flip = !self.rt_accum_flip;
+            self.rt_sample_n = self.rt_sample_n.saturating_add(1);
+        }
+
+        // Reset so normal rendering starts fresh.
+        self.rt_sample_n = 0;
+        self.rt_accum_flip = false;
+
+        let total_ms: f64 = frame_ms.iter().sum();
+        let avg_ms = total_ms / n as f64;
+        let variance = frame_ms.iter().map(|&t| (t - avg_ms).powi(2)).sum::<f64>() / n as f64;
+        let stddev_ms = variance.sqrt();
+        let min_ms = frame_ms.iter().cloned().fold(f64::INFINITY, f64::min);
+        let max_ms = frame_ms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let pixels = self.viewport_width as f64 * self.viewport_height as f64;
+        let mpix_per_sec = (n as f64 * pixels) / (total_ms / 1000.0) / 1_000_000.0;
+
+        let mut sorted = frame_ms.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let percentile = |p: f64| -> f64 {
+            let idx = ((p / 100.0) * (sorted.len() - 1) as f64).round() as usize;
+            sorted[idx.min(sorted.len() - 1)]
+        };
+
+        RaytraceBenchmarkResult {
+            frame_count: n,
+            viewport_width: self.viewport_width,
+            viewport_height: self.viewport_height,
+            total_ms,
+            avg_ms,
+            stddev_ms,
+            min_ms,
+            p50_ms: percentile(50.0),
+            p95_ms: percentile(95.0),
+            p99_ms: percentile(99.0),
+            max_ms,
+            mpix_per_sec,
+            frame_times_ms: frame_ms,
+        }
+    }
+
+    /// Reset progressive accumulation (call on camera move, scene change, lighting change).
+    pub fn reset_rt_accumulation(&mut self) {
+        self.rt_sample_n = 0;
     }
 
     pub fn set_start_screen_transparent(&mut self, v: bool) {
@@ -3735,6 +4304,16 @@ impl WgpuViewer {
                 },
             ],
         }));
+        self.bind_oit_composite = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("oit_composite"),
+            layout: &self.oit_composite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.oit_accum_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.oit_revealage_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.hdr_opaque_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler_linear) },
+            ],
+        });
 
         let (bind_blit_down, bind_blit_up, bind_blit_up_weighted, bind_blit_final, bind_blur_pyr_h, bind_blur_pyr_v) =
             build_bloom_pyramid_bind_groups(
@@ -3754,6 +4333,47 @@ impl WgpuViewer {
         self.bind_blit_final = bind_blit_final;
         self.bind_blur_pyr_h = bind_blur_pyr_h;
         self.bind_blur_pyr_v = bind_blur_pyr_v;
+
+        // Raytracer bind groups — must be rebuilt on brick change (rt_scene_bg) and on
+        // viewport resize (rt_accum_bgs, because rt_accum_views are reallocated).
+        self.rt_scene_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rt_scene_bg"),
+            layout: &self.rt_scene_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.global_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.brick_buffer.as_entire_binding() },
+            ],
+        });
+        // bg[0]: write→accum[0], read from accum[1]
+        // bg[1]: write→accum[1], read from accum[0]
+        self.rt_accum_bgs = vec![
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rt_accum_bg0"),
+                layout: &self.rt_accum_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.rt_accum_views[1]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler_linear) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.rt_uniform_buf.as_entire_binding() },
+                ],
+            }),
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("rt_accum_bg1"),
+                layout: &self.rt_accum_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.rt_accum_views[0]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler_linear) },
+                    wgpu::BindGroupEntry { binding: 2, resource: self.rt_uniform_buf.as_entire_binding() },
+                ],
+            }),
+        ];
+        self.rt_preview_bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("rt_preview_bg"),
+            layout: &self.post_bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.rt_preview_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler_linear) },
+            ],
+        });
     }
 
     fn interleaved_from_mesh(mesh: &MeshBuffers) -> Vec<f32> {
@@ -3779,7 +4399,7 @@ impl WgpuViewer {
         interleaved
     }
 
-    fn opaque_draw_from_mesh(&self, mesh: &MeshBuffers) -> OpaqueChunkDraw {
+    fn opaque_draw_from_mesh(&self, mesh: &MeshBuffers, opaque_split: u32) -> OpaqueChunkDraw {
         let interleaved = Self::interleaved_from_mesh(mesh);
         let vertex_buffer = self
             .device
@@ -3798,12 +4418,13 @@ impl WgpuViewer {
         OpaqueChunkDraw {
             vertex_buffer,
             index_buffer,
-            index_count: mesh.indices.len() as u32,
+            opaque_index_count: opaque_split,
+            transparent_index_count: (mesh.indices.len() as u32).saturating_sub(opaque_split),
         }
     }
 
     /// If existing chunk buffers are large enough, overwrite with [`queue::write_buffer`]; else allocate new.
-    fn upload_or_replace_chunk_mesh(&mut self, key: ChunkKey, mesh: &MeshBuffers) {
+    fn upload_or_replace_chunk_mesh(&mut self, key: ChunkKey, mesh: &MeshBuffers, opaque_split: u32) {
         let n = mesh.positions.len() / 3;
         let vtx_need = (n as u64).saturating_mul(OPAQUE_VERTEX_STRIDE);
         let idx_need = (mesh.indices.len() * 4) as u64;
@@ -3824,17 +4445,19 @@ impl WgpuViewer {
                 .write_buffer(&draw.vertex_buffer, 0, bytemuck::cast_slice(&interleaved));
             self.queue
                 .write_buffer(&draw.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
-            draw.index_count = mesh.indices.len() as u32;
+            draw.opaque_index_count = opaque_split;
+            draw.transparent_index_count = (mesh.indices.len() as u32).saturating_sub(opaque_split);
         } else {
             self.opaque_chunks
-                .insert(key, self.opaque_draw_from_mesh(mesh));
+                .insert(key, self.opaque_draw_from_mesh(mesh, opaque_split));
         }
     }
 
-    pub fn upload_mesh(&mut self, mesh: &MeshBuffers) {
+    pub fn upload_mesh(&mut self, mesh: &mut MeshBuffers) {
         self.opaque_chunked = false;
         self.opaque_chunks.clear();
         self.spatial_mesh_cache = None;
+        let split = greedy_mesh::partition_indices_by_transparency(mesh);
         let interleaved = Self::interleaved_from_mesh(mesh);
         self.vertex_buffer = Some(self.device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
@@ -3851,6 +4474,54 @@ impl WgpuViewer {
             },
         ));
         self.index_count = mesh.indices.len() as u32;
+        self.opaque_index_split = split;
+    }
+
+    pub(crate) fn has_pending_chunk_uploads(&self) -> bool {
+        !self.pending_chunk_uploads.is_empty()
+    }
+
+    /// Move chunks from an external inbox (background thread) into the pending upload queue.
+    pub(crate) fn enqueue_chunk_uploads(
+        &mut self,
+        inbox: &mut VecDeque<(ChunkKey, MeshBuffers)>,
+    ) {
+        self.pending_chunk_uploads.extend(inbox.drain(..));
+    }
+
+    pub(crate) fn has_spatial_mesh_cache(&self) -> bool {
+        self.spatial_mesh_cache.is_some()
+    }
+
+    pub(crate) fn set_spatial_mesh_cache(&mut self, cache: greedy_mesh::SpatialMeshCache) {
+        self.spatial_mesh_cache = Some(cache);
+    }
+
+    /// Upload queued chunks until `budget` elapses. Returns `true` if more remain.
+    pub(crate) fn drain_pending_chunk_uploads(&mut self, budget: Duration) -> bool {
+        if self.pending_chunk_uploads.is_empty() {
+            return false;
+        }
+        let start = Instant::now();
+        let mut uploaded = 0u32;
+        while let Some((key, mut mesh)) = self.pending_chunk_uploads.pop_front() {
+            if !self.opaque_chunks.contains_key(&key) {
+                let split = greedy_mesh::partition_indices_by_transparency(&mut mesh);
+                self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(&mesh, split));
+            }
+            uploaded += 1;
+            if start.elapsed() >= budget {
+                break;
+            }
+        }
+        let remaining = self.pending_chunk_uploads.len();
+        if remaining == 0 {
+            log::info!(
+                target: "voxelle_load",
+                "progressive upload: done ({uploaded} chunks this frame)"
+            );
+        }
+        remaining > 0
     }
 
     /// Full CPU chunked mesh upload (all spatial chunks). Used on load and when chunk origin shifts.
@@ -3862,6 +4533,7 @@ impl WgpuViewer {
         self.vertex_buffer = None;
         self.index_buffer = None;
         self.index_count = 0;
+        self.opaque_index_split = 0;
         self.opaque_chunks.clear();
         if let Some(app) = work_progress {
             crate::emit_work_progress(
@@ -3902,12 +4574,13 @@ impl WgpuViewer {
             return;
         }
         self.opaque_chunked = true;
-        for (i, (key, mesh)) in meshes.into_iter().enumerate() {
+        for (i, (key, mut mesh)) in meshes.into_iter().enumerate() {
             if i > 0 && i % 4 == 0 {
                 std::thread::yield_now();
             }
+            let split = greedy_mesh::partition_indices_by_transparency(&mut mesh);
             self.opaque_chunks
-                .insert(key, self.opaque_draw_from_mesh(&mesh));
+                .insert(key, self.opaque_draw_from_mesh(&mesh, split));
         }
         self.spatial_mesh_cache = Some(spatial_cache);
         self.last_mesh_route = "cpu_chunked".to_string();
@@ -3951,7 +4624,7 @@ impl WgpuViewer {
             perf.buckets_ms = t_cold.elapsed().as_secs_f64() * 1000.0;
         }
         let Some(cache_ref) = self.spatial_mesh_cache.as_ref() else {
-            self.upload_mesh(&MeshBuffers::default());
+            self.upload_mesh(&mut MeshBuffers::default());
             return (false, perf);
         };
         let origin_iv = IVec3::new(cache_ref.origin.0, cache_ref.origin.1, cache_ref.origin.2);
@@ -4075,7 +4748,7 @@ impl WgpuViewer {
 
             if !used_gpu {
                 let t_cpu = Instant::now();
-                let mesh = greedy_mesh::mesh_buffers_for_chunk_key(
+                let mut mesh = greedy_mesh::mesh_buffers_for_chunk_key(
                     &cache.buckets,
                     &cache.occupancy,
                     *key,
@@ -4084,8 +4757,9 @@ impl WgpuViewer {
                 if mesh.indices.is_empty() {
                     self.opaque_chunks.remove(key);
                 } else {
+                    let split = greedy_mesh::partition_indices_by_transparency(&mut mesh);
                     let t_u = Instant::now();
-                    self.upload_or_replace_chunk_mesh(*key, &mesh);
+                    self.upload_or_replace_chunk_mesh(*key, &mesh, split);
                     perf.chunk_buffers_ms += t_u.elapsed().as_secs_f64() * 1000.0;
                 }
             }
@@ -4109,7 +4783,7 @@ impl WgpuViewer {
         };
         let work = crate::voxelle::scene::visible_voxels_for_meshing(voxels, objs);
         if work.is_empty() {
-            self.upload_mesh(&greedy_mesh::MeshBuffers::default());
+            self.upload_mesh(&mut greedy_mesh::MeshBuffers::default());
             self.last_mesh_route = "cpu_empty".to_string();
             return;
         }
@@ -4122,8 +4796,8 @@ impl WgpuViewer {
         if work.len() >= greedy_mesh::CHUNKED_CPU_MESH_MIN_VOXELS && !multi {
             self.upload_cpu_mesh_chunked_full(&work, None::<&AppHandle<tauri::Wry>>);
         } else {
-            let (mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
-            self.upload_mesh(&mesh);
+            let (mut mesh, _) = greedy_mesh::build_greedy_mesh(voxels, objs);
+            self.upload_mesh(&mut mesh);
             self.last_mesh_route = "cpu".to_string();
         }
     }
@@ -4417,6 +5091,8 @@ impl WgpuViewer {
     }
 
     /// Copy compact greedy output from [`MeshGreedyPool`] scratch into chunk draw buffers (`VERTEX`/`INDEX` layout matches [`Self::opaque_draw_from_mesh`]).
+    /// NOTE: GPU-meshed chunks currently treat all indices as opaque (`transparent_index_count = 0`)
+    /// because we don't yet have GPU-side index partitioning.
     fn upload_or_replace_chunk_mesh_from_gpu_scratch(&mut self, key: ChunkKey, v_total: u32, i_total: u32) {
         const VTX_STRIDE: u64 = OPAQUE_VERTEX_STRIDE;
         let vtx_bytes = (v_total as u64).saturating_mul(VTX_STRIDE);
@@ -4446,7 +5122,8 @@ impl WgpuViewer {
             enc.copy_buffer_to_buffer(idx_out, 0, &draw.index_buffer, 0, idx_bytes);
             self.queue.submit(std::iter::once(enc.finish()));
             poll_device_yielding_until_queue_empty(&self.device);
-            draw.index_count = i_total;
+            draw.opaque_index_count = i_total;
+            draw.transparent_index_count = 0;
             return;
         }
 
@@ -4476,7 +5153,8 @@ impl WgpuViewer {
             OpaqueChunkDraw {
                 vertex_buffer: vb,
                 index_buffer: ib,
-                index_count: i_total,
+                opaque_index_count: i_total,
+                transparent_index_count: 0,
             },
         );
     }
@@ -4490,6 +5168,7 @@ impl WgpuViewer {
                 self.vertex_buffer = None;
                 self.index_buffer = None;
                 self.index_count = 0;
+                self.opaque_index_split = 0;
                 self.opaque_chunked = false;
                 self.opaque_chunks.clear();
                 self.spatial_mesh_cache = None;
@@ -4499,6 +5178,7 @@ impl WgpuViewer {
                 self.vertex_buffer = None;
                 self.index_buffer = None;
                 self.index_count = 0;
+                self.opaque_index_split = 0;
                 self.opaque_chunked = false;
                 self.opaque_chunks.clear();
                 self.spatial_mesh_cache = None;
@@ -4643,6 +5323,8 @@ impl WgpuViewer {
         self.vertex_buffer = Some(vb_final);
         self.index_buffer = Some(ib_final);
         self.index_count = i_total;
+        // GPU greedy path doesn't partition indices yet — treat all as opaque.
+        self.opaque_index_split = i_total;
         self.last_mesh_route = "gpu_greedy".to_string();
         Ok(bounds)
     }
@@ -5175,6 +5857,7 @@ impl WgpuViewer {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             });
         self.brick_buffer = new_brick;
+        self.rt_sample_n = 0;
         self.rebuild_bind_groups();
     }
 
@@ -5206,6 +5889,7 @@ impl WgpuViewer {
                             );
                         }
                     }
+                    self.rt_sample_n = 0;
                     return;
                 }
             }
@@ -5253,13 +5937,16 @@ impl WgpuViewer {
                 self.vertex_buffer = None;
                 self.index_buffer = None;
                 self.index_count = 0;
+                self.opaque_index_split = 0;
                 self.opaque_chunked = false;
                 self.opaque_chunks.clear();
+                self.pending_chunk_uploads.clear();
                 self.spatial_mesh_cache = None;
                 self.last_mesh_route = "cpu".to_string();
             }
-            PreparedOpaqueUpload::Single(mesh) => {
-                self.upload_mesh(&mesh);
+            PreparedOpaqueUpload::Single(mut mesh) => {
+                self.pending_chunk_uploads.clear();
+                self.upload_mesh(&mut mesh);
                 self.last_mesh_route = "cpu".to_string();
             }
             PreparedOpaqueUpload::Chunked {
@@ -5270,19 +5957,46 @@ impl WgpuViewer {
                 self.vertex_buffer = None;
                 self.index_buffer = None;
                 self.index_count = 0;
+                self.opaque_index_split = 0;
                 self.opaque_chunks.clear();
+                self.pending_chunk_uploads.clear();
                 self.chunk_grid_origin = chunk_origin;
                 if meshes.is_empty() {
                     self.opaque_chunked = false;
                     self.spatial_mesh_cache = None;
                 } else {
                     self.opaque_chunked = true;
-                    for (key, mesh) in meshes {
-                        self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(&mesh));
+                    // Upload first batch immediately; queue rest for progressive per-frame upload.
+                    const INITIAL_BATCH: usize = 8;
+                    let mut iter = meshes.into_iter();
+                    for (key, mut mesh) in iter.by_ref().take(INITIAL_BATCH) {
+                        let split = greedy_mesh::partition_indices_by_transparency(&mut mesh);
+                        self.opaque_chunks.insert(key, self.opaque_draw_from_mesh(&mesh, split));
+                    }
+                    self.pending_chunk_uploads.extend(iter);
+                    if !self.pending_chunk_uploads.is_empty() {
+                        log::info!(
+                            target: "voxelle_load",
+                            "progressive upload: {} chunks queued, {} uploaded immediately",
+                            self.pending_chunk_uploads.len(),
+                            self.opaque_chunks.len()
+                        );
                     }
                     self.spatial_mesh_cache = Some(spatial_cache);
                     self.last_mesh_route = "cpu_chunked".to_string();
                 }
+            }
+            PreparedOpaqueUpload::ChunkedDeferred { chunk_origin } => {
+                self.vertex_buffer = None;
+                self.index_buffer = None;
+                self.index_count = 0;
+                self.opaque_chunks.clear();
+                self.pending_chunk_uploads.clear();
+                self.chunk_grid_origin = chunk_origin;
+                self.opaque_chunked = true;
+                // spatial_mesh_cache arrives later via deferred_spatial_cache on ViewerState
+                self.spatial_mesh_cache = None;
+                self.last_mesh_route = "cpu_chunked_deferred".to_string();
             }
         }
     }
@@ -5292,6 +6006,22 @@ impl WgpuViewer {
         let h = self.viewport_height.max(1) as f32;
         let proj = camera.proj_matrix(w, h);
         let view = camera.view_matrix();
+
+        // Detect camera change for RT accumulation reset.
+        if self.raytrace_enabled {
+            let eye = camera.smooth_eye();
+            let inv_v = view.inverse();
+            let eye_arr = [eye.x, eye.y, eye.z];
+            let inv_v_arr = inv_v.to_cols_array_2d();
+            if eye_arr != self.rt_prev_eye || inv_v_arr != self.rt_prev_inv_view {
+                self.rt_sample_n = 0;
+                self.rt_prev_eye = eye_arr;
+                self.rt_prev_inv_view = inv_v_arr;
+                self.rt_fast_preview = true;
+            } else {
+                self.rt_fast_preview = false;
+            }
+        }
         let vp = proj * view;
         let inv_v = view.inverse();
         let inv_p = proj.inverse();
@@ -5319,7 +6049,7 @@ impl WgpuViewer {
             screen: [w, h, 1.0 / w.max(1.0), 1.0 / h.max(1.0)],
             params: [
                 self.start_screen_appearance,
-                0.0,
+                if self.soft_shadows { 1.0 } else { 0.0 },
                 BLOOM_STRENGTH,
                 camera.near,
             ],
@@ -5360,15 +6090,67 @@ impl WgpuViewer {
         }
     }
 
+    /// Draw only the opaque index range.
     fn draw_indexed_mesh(&self, pass: &mut wgpu::RenderPass<'_>) {
         if self.opaque_chunked {
             for ch in self.opaque_chunks.values() {
-                if ch.index_count == 0 {
+                if ch.opaque_index_count == 0 {
                     continue;
                 }
                 pass.set_vertex_buffer(0, ch.vertex_buffer.slice(..));
                 pass.set_index_buffer(ch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..ch.index_count, 0, 0..1);
+                pass.draw_indexed(0..ch.opaque_index_count, 0, 0..1);
+            }
+            return;
+        }
+        if let (Some(vb), Some(ib)) = (&self.vertex_buffer, &self.index_buffer) {
+            if self.opaque_index_split > 0 {
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.opaque_index_split, 0, 0..1);
+            }
+        }
+    }
+
+    /// Draw only the transparent index range for the OIT accumulation pass.
+    fn draw_indexed_oit_mesh(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.opaque_chunked {
+            for ch in self.opaque_chunks.values() {
+                if ch.transparent_index_count == 0 {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, ch.vertex_buffer.slice(..));
+                pass.set_index_buffer(ch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(
+                    ch.opaque_index_count..ch.opaque_index_count + ch.transparent_index_count,
+                    0,
+                    0..1,
+                );
+            }
+            return;
+        }
+        if let (Some(vb), Some(ib)) = (&self.vertex_buffer, &self.index_buffer) {
+            let trans_count = self.index_count.saturating_sub(self.opaque_index_split);
+            if trans_count > 0 {
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(self.opaque_index_split..self.index_count, 0, 0..1);
+            }
+        }
+    }
+
+    /// Draw the full index range (opaque + transparent). Used by the shadow pass
+    /// where glass needs `glass_shadow_push` applied.
+    fn draw_indexed_mesh_all(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.opaque_chunked {
+            for ch in self.opaque_chunks.values() {
+                let total = ch.opaque_index_count + ch.transparent_index_count;
+                if total == 0 {
+                    continue;
+                }
+                pass.set_vertex_buffer(0, ch.vertex_buffer.slice(..));
+                pass.set_index_buffer(ch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..total, 0, 0..1);
             }
             return;
         }
@@ -5496,7 +6278,7 @@ impl WgpuViewer {
     fn draw_gizmo(&self, pass: &mut wgpu::RenderPass<'_>) {
         pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
         if let Some(ref vb) = self.gizmo_line_vertex_buffer {
-            if self.gizmo_line_vertex_count >= 2 {
+            if self.gizmo_line_vertex_count >= 3 {
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_pipeline(&self.pipeline_gizmo_lines_occluded);
                 pass.draw(0..self.gizmo_line_vertex_count, 0..1);
@@ -5604,6 +6386,157 @@ impl WgpuViewer {
                 label: Some("frame"),
             });
 
+        if self.raytrace_enabled {
+            // ── Progressive raytracer ─────────────────────────────────────────
+            // Upload uniform: frame seed + current sample count.
+            let flip = self.rt_accum_flip as usize;
+            let rt_u = RtUniform {
+                frame_seed: self.rt_sample_n.wrapping_mul(2654435761).wrapping_add(1),
+                sample_n: self.rt_sample_n,
+                fast_preview: self.rt_fast_preview as u32,
+                _pad1: 0,
+            };
+            self.queue.write_buffer(&self.rt_uniform_buf, 0, bytemuck::bytes_of(&rt_u));
+
+            if self.rt_fast_preview {
+                // ── Fast-preview path: render at half resolution, then upscale ──
+                // Rendering to w/2 × h/2 cuts pixel count to 1/4, giving ~4× speedup
+                // before the reduced-step DDA savings on top.
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("raytrace_preview"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.rt_preview_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.pipeline_raytrace);
+                    pass.set_bind_group(0, &self.rt_scene_bg, &[]);
+                    pass.set_bind_group(1, &self.rt_accum_bgs[flip], &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                // Bilinear upscale to full-size accum texture.
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("raytrace_upscale"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &self.rt_accum_views[flip],
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        occlusion_query_set: None,
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&self.pipeline_blit);
+                    pass.set_bind_group(0, &self.rt_preview_bg, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+            } else {
+                // ── Full-quality path ─────────────────────────────────────────────
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("raytrace"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.rt_accum_views[flip],
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline_raytrace);
+                pass.set_bind_group(0, &self.rt_scene_bg, &[]);
+                pass.set_bind_group(1, &self.rt_accum_bgs[flip], &[]);
+                pass.draw(0..3, 0..1);
+            }
+
+            // Copy raytrace result → hdr_texture for bloom + composite.
+            let ext = wgpu::Extent3d {
+                width: self.viewport_width.max(1),
+                height: self.viewport_height.max(1),
+                depth_or_array_layers: 1,
+            };
+            encoder.copy_texture_to_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &self.rt_accum_textures[flip],
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyTexture {
+                    texture: &self.hdr_texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                ext,
+            );
+
+            // Overlay pass: draw editing overlays (preview, selection, gizmo, grid) on top.
+            // Depth is cleared fresh so overlays z-test against each other but not the scene.
+            // All overlay pipelines write to two color targets (HDR + normal) but the normal
+            // target has ColorWrites::empty(), so it is safe to Load/Discard it.
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("rt_overlay"),
+                    color_attachments: &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.hdr_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: &self.normal_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Discard,
+                            },
+                        }),
+                    ],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                self.draw_indexed_selection_overlay_solid(&mut pass);
+                self.draw_indexed_preview(&mut pass);
+                self.draw_selection_overlay_lines(&mut pass);
+                self.draw_grid_border_lines(&mut pass);
+                self.draw_collab_frustum_lines(&mut pass);
+                self.draw_ping_wave_lines(&mut pass);
+                self.draw_indexed_ping(&mut pass);
+                self.draw_gizmo(&mut pass);
+            }
+
+            self.rt_accum_flip = !self.rt_accum_flip;
+            self.rt_sample_n = self.rt_sample_n.saturating_add(1);
+        } else {
+        // ── Rasterized path (default) ─────────────────────────────────────────
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
@@ -5621,7 +6554,7 @@ impl WgpuViewer {
             });
             pass.set_pipeline(&self.pipeline_shadow);
             pass.set_bind_group(0, &self.bind_shadow_pass, &[]);
-            self.draw_indexed_mesh(&mut pass);
+            self.draw_indexed_mesh_all(&mut pass);
         }
 
         {
@@ -5720,17 +6653,28 @@ impl WgpuViewer {
             ext,
         );
 
+        // ── OIT accumulation pass ────────────────────────────────────────────
         if let Some(ref trans_bg) = self.bind_trans {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("trans"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.hdr_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                label: Some("oit_accum"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.oit_accum_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.oit_revealage_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 0.0 }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth_view,
                     depth_ops: Some(wgpu::Operations {
@@ -5742,11 +6686,34 @@ impl WgpuViewer {
                 occlusion_query_set: None,
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipeline_trans);
+            pass.set_pipeline(&self.pipeline_oit_accum);
             pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
             pass.set_bind_group(1, trans_bg, &[]);
-            self.draw_indexed_mesh(&mut pass);
+            self.draw_indexed_oit_mesh(&mut pass);
         }
+
+        // ── OIT composite pass ───────────────────────────────────────────────
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("oit_composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_oit_composite);
+            pass.set_bind_group(0, &self.bind_oit_composite, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        } // end rasterized path
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

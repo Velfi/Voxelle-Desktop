@@ -88,12 +88,25 @@ fn compute_ssr(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
     }
     // Sky fallback ─────────────────────────────────────────────────────────
     // When the reflection ray climbs above the scene (typical for water viewed
-    // from above) it misses all opaque geometry.  For those directions the
-    // physical reflection is the sky, so blend in the background sky color.
-    // refl.y > 0 means the ray points above the horizon.
-    if (refl.y > 0.05) {
-        let sky_w = smoothstep(0.05, 0.6, refl.y) * ssr_opts.strength * 0.8;
-        return vec4<f32>(g.bg_color.rgb, sky_w);
+    // from above) it misses all opaque geometry.  Sample the background colour
+    // texture at the projected reflection direction so the result changes with
+    // camera movement and shows the actual sky / distant scene colour.
+    // Threshold is raised (0.30) to avoid side-facing glass walls triggering
+    // sky fallback and appearing as flat blue mirrors.
+    if (refl.y > 0.30) {
+        // Project the reflection direction as a very distant point.
+        let sky_p = world_pos + refl * 900.0;
+        let sky_clip = g.view_proj * vec4<f32>(sky_p, 1.0);
+        var sky_col = g.bg_color.rgb;
+        if (sky_clip.w > 0.0) {
+            let sky_ndc = sky_clip.xyz / sky_clip.w;
+            // Clamp to [−1,1] so off-frustum directions sample the screen edge.
+            let sky_uv = clamp(sky_ndc.xy, vec2<f32>(-1.0), vec2<f32>(1.0))
+                         * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+            sky_col = textureSampleLevel(hdr_bg, samp_linear, sky_uv, 0.0).rgb;
+        }
+        let sky_w = smoothstep(0.30, 0.8, refl.y) * ssr_opts.strength * 0.45;
+        return vec4<f32>(sky_col, sky_w);
     }
     return vec4<f32>(0.0);
 }
@@ -155,22 +168,56 @@ fn march_slab_thickness(world: vec3<f32>, outward_normal: vec3<f32>) -> f32 {
     return max(acc, 1.0);
 }
 
-/// Parity: `render_constants` (`SHADOW_DEPTH_BIAS_*`, `SHADOW_NORMAL_BIAS`).
-const SHADOW_DEPTH_BIAS_BASE: f32 = 0.0015;
-const SHADOW_DEPTH_BIAS_SLOPE: f32 = 0.003;
-const SHADOW_NORMAL_BIAS_WORLD: f32 = 0.012;
+/// World-space shadow bias (in voxel units). Converted to NDC using the light frustum depth range
+/// extracted from `light_view_proj`, so bias is consistent regardless of scene size.
+const SHADOW_BIAS_WORLD_BASE:  f32 = 0.04;   // flat surfaces facing the light
+const SHADOW_BIAS_WORLD_SLOPE: f32 = 0.15;   // extra for surfaces at grazing angles
+const SHADOW_NORMAL_OFFSET:    f32 = 0.08;   // world-space offset along surface normal
+const SHADOW_PCF_SPREAD:       f32 = 1.5;    // texel radius for PCF soft shadows
 
-fn shadow_visibility(world: vec3<f32>, n: vec3<f32>) -> f32 {
+/// Interleaved gradient noise — gives a unique-looking pseudo-random value per pixel
+/// that is stable across frames.  Used to rotate the PCF kernel so the regular 3×3
+/// grid doesn't produce visible striping artefacts.
+fn ign(screen_xy: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(screen_xy, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+fn shadow_visibility(world: vec3<f32>, n: vec3<f32>, screen_pos: vec2<f32>) -> f32 {
     let l = normalize(g.light_dir.xyz);
     let nn = normalize(n);
     let ndl = max(dot(nn, l), 0.0);
-    let biased_world = world + nn * (SHADOW_NORMAL_BIAS_WORLD * ndl);
-    let lp = g.light_view_proj * vec4<f32>(biased_world, 1.0);
+    // Push the sample point away from the surface along its normal to avoid self-shadowing.
+    let offset_pos = world + nn * SHADOW_NORMAL_OFFSET;
+    let lp = g.light_view_proj * vec4<f32>(offset_pos, 1.0);
     let ndc = lp.xyz / max(lp.w, 1e-6);
     let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
     if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
-    let depth_bias = SHADOW_DEPTH_BIAS_BASE + SHADOW_DEPTH_BIAS_SLOPE * (1.0 - ndl);
-    let sh = textureSampleCompare(shadow_map, shadow_cmp, uv, ndc.z - depth_bias);
+    // Extract NDC-per-world-unit from the Z row of light_view_proj (= 1/(far-near) for ortho).
+    let z_grad = vec3<f32>(g.light_view_proj[0][2], g.light_view_proj[1][2], g.light_view_proj[2][2]);
+    let ndc_per_world = length(z_grad);
+    let world_bias = SHADOW_BIAS_WORLD_BASE + SHADOW_BIAS_WORLD_SLOPE * (1.0 - ndl);
+    let cmp_depth = ndc.z - world_bias * ndc_per_world;
+    // g.params.y: 1 = soft (3x3 PCF), 0 = hard (single tap).
+    var sh: f32;
+    if (g.params.y > 0.5) {
+        let texel = SHADOW_PCF_SPREAD / vec2<f32>(textureDimensions(shadow_map));
+        // Per-pixel rotation angle breaks up the regular grid pattern that causes striping.
+        let angle = ign(screen_pos) * 6.2831853;
+        let rot_c = cos(angle);
+        let rot_s = sin(angle);
+        var sum = 0.0;
+        for (var y = -1i; y <= 1i; y++) {
+            for (var x = -1i; x <= 1i; x++) {
+                let off = vec2<f32>(f32(x), f32(y));
+                let rotated = vec2<f32>(off.x * rot_c - off.y * rot_s,
+                                        off.x * rot_s + off.y * rot_c);
+                sum += textureSampleCompare(shadow_map, shadow_cmp, uv + rotated * texel, cmp_depth);
+            }
+        }
+        sh = sum / 9.0;
+    } else {
+        sh = textureSampleCompare(shadow_map, shadow_cmp, uv, cmp_depth);
+    }
     return select(1.0, sh, g.light_params.z > 0.5);
 }
 
@@ -179,15 +226,20 @@ fn schlick_f0(n: vec3<f32>, v: vec3<f32>, f0: vec3<f32>) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - h, 5.0);
 }
 
+/// Returns `vec4(color, alpha)` where alpha is the physically-derived glass opacity.
+/// Alpha is low for thin clear glass (most light passes through) and high for
+/// thick / heavily absorbed glass.  This allows multi-layer transparency to
+/// accumulate correctly via premultiplied alpha blending.
 fn transmission_shade(
     base: vec3<f32>,
     world: vec3<f32>,
     n: vec3<f32>,
     v: vec3<f32>,
     is_water: bool,
+    screen_pos: vec2<f32>,
     bg: vec3<f32>,
     vertex_ao: f32,
-) -> vec3<f32> {
+) -> vec4<f32> {
     let slab = march_slab_thickness(world, n);
     let transmission = select(0.96, 0.998, is_water);
     let thickness = select(0.65, 0.9, is_water);
@@ -198,16 +250,69 @@ fn transmission_shade(
     let f0 = vec3<f32>(pow((ior - 1.0) / (ior + 1.0), 2.0));
     let fresnel = schlick_f0(n, v, f0);
     let l = normalize(g.light_dir.xyz);
-    let ndl = max(dot(n, l), 0.0);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
     let amb = g.light_params.x;
     let sun = g.light_params.y;
     let sc = g.sun_color.xyz;
     let ao_h = pow(max(vertex_ao, 0.001), VERTEX_AO_GAMMA);
-    let lit = base * (hemi * 0.28 * ao_h * amb + 0.55 * ndl * shadow_visibility(world, n) * sun * sc);
+    // Transmission: background tinted and absorbed through glass/water thickness.
+    // Fresnel controls transmitted vs reflected energy split.
     let refr = bg * base * net_t * (vec3<f32>(1.0) - fresnel);
-    let spec = pow(max(dot(normalize(l + v), n), 0.0), 48.0) * 0.2 * sun;
-    return mix(refr, lit + sc * spec, 0.15);
+    // Specular reflection: Fresnel-weighted Blinn-Phong from sun.
+    // Dielectrics have no diffuse scattering — only specular — so the highlight
+    // scales with Fresnel: bright at grazing incidence, near-zero head-on.
+    let h_spec = normalize(l + v);
+    let spec = fresnel * pow(max(dot(h_spec, n), 0.0), 96.0) * shadow_visibility(world, n, screen_pos) * sun * sc;
+    // Small hemisphere ambient keeps silhouettes readable in dark environments.
+    let ambient = base * hemi * 0.06 * ao_h * amb;
+    let rgb = refr + spec + ambient;
+    // Physical alpha: 1 − transmittance.  Thin clear glass at normal incidence
+    // is mostly transparent (alpha ~0.3); thick glass or grazing Fresnel pushes
+    // alpha toward 1.  Minimum 0.12 keeps glass edges readable.
+    let avg_fresnel = max(fresnel.x, max(fresnel.y, fresnel.z));
+    let a = max(0.12, 1.0 - net_t * (1.0 - avg_fresnel));
+    return vec4<f32>(rgb, a);
+}
+
+/// OIT variant: returns glass self-contribution (specular, ambient, absorption tint)
+/// WITHOUT baking in the background.  The transmitted background is handled by the
+/// revealage term in the OIT composite pass.
+fn transmission_shade_oit(
+    base: vec3<f32>,
+    world: vec3<f32>,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    is_water: bool,
+    screen_pos: vec2<f32>,
+    vertex_ao: f32,
+) -> vec4<f32> {
+    let slab = march_slab_thickness(world, n);
+    let transmission = select(0.96, 0.998, is_water);
+    let thickness = select(0.65, 0.9, is_water);
+    let att_dist = select(2.5, 32.0, is_water);
+    let ior = select(1.5, 1.333, is_water);
+    let absorb = exp(-(thickness * slab * 1.2) / max(att_dist, 1e-4));
+    let net_t = transmission * absorb;
+    let f0 = vec3<f32>(pow((ior - 1.0) / (ior + 1.0), 2.0));
+    let fresnel = schlick_f0(n, v, f0);
+    let l = normalize(g.light_dir.xyz);
+    let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
+    let amb = g.light_params.x;
+    let sun = g.light_params.y;
+    let sc = g.sun_color.xyz;
+    let ao_h = pow(max(vertex_ao, 0.001), VERTEX_AO_GAMMA);
+    // Absorption self-tint: light absorbed by the glass becomes visible color.
+    let self_tint = base * (1.0 - net_t) * 0.5;
+    // Specular reflection from sun (Fresnel-weighted Blinn-Phong).
+    let h_spec = normalize(l + v);
+    let spec = fresnel * pow(max(dot(h_spec, n), 0.0), 96.0) * shadow_visibility(world, n, screen_pos) * sun * sc;
+    // Small hemisphere ambient for silhouette readability.
+    let ambient = base * hemi * 0.06 * ao_h * amb;
+    let rgb = self_tint + spec + ambient;
+    // Physical alpha: 1 - transmittance.
+    let avg_fresnel = max(fresnel.x, max(fresnel.y, fresnel.z));
+    let a = max(0.12, 1.0 - net_t * (1.0 - avg_fresnel));
+    return vec4<f32>(rgb, a);
 }
 
 @vertex
@@ -279,7 +384,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let base = in.color;
     let h = normalize(l + v);
     let ndl = max(dot(n, l), 0.0);
-    let sh = shadow_visibility(in.world_pos, n);
+    let sh = shadow_visibility(in.world_pos, n, in.clip_pos.xy);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
     let amb = g.light_params.x;
     let sun = g.light_params.y;
@@ -428,18 +533,73 @@ fn fs_trans(in: VertexOut) -> @location(0) vec4<f32> {
     let n = normalize(in.normal);
     let v = normalize(g.cam_pos.xyz - in.world_pos);
     let is_water = in.mat_kind > 2.2;
-    let bg = textureSample(hdr_bg, samp_linear, in.uv).rgb;
-    var rgb = transmission_shade(in.color, in.world_pos, n, v, is_water, bg, in.vertex_ao);
+    // IOR-based refraction: offset the background sample UV by the angular
+    // deviation of the refracted ray (Snell's law). Without this, glass and water
+    // tint the background but don't visually displace it, which looks flat.
+    // refract(I, N, eta): I = incident direction (-v), eta = 1/IOR (air→material).
+    let ior_fs = select(1.5, 1.333, is_water);
+    let refract_dir = refract(-v, n, 1.0 / ior_fs);
+    // (refract_dir + v) is the tangential deviation from the straight-through ray.
+    // Guard against total internal reflection (refract() returns zero vector).
+    let tangent_shift = select(
+        vec2<f32>(0.0),
+        (refract_dir.xy + v.xy) * 0.08,
+        dot(refract_dir, refract_dir) > 0.5
+    );
+    let refr_uv = clamp(in.uv + tangent_shift, vec2<f32>(0.001), vec2<f32>(0.999));
+    let bg = textureSample(hdr_bg, samp_linear, refr_uv).rgb;
+    let shade = transmission_shade(in.color, in.world_pos, n, v, is_water, in.clip_pos.xy, bg, in.vertex_ao);
+    var rgb = shade.rgb;
+    let a = shade.a;
 
     // ── Screen-space reflection blend ───────────────────────────────────────
-    // SSR strength (baked into ssr_sample.a) controls the blend directly.
-    // Fresnel is already used inside transmission_shade for the refraction;
-    // multiplying it here too would make reflections nearly invisible at
-    // typical viewing angles (water Fresnel is ~2% at 45°).
+    // Weight SSR by the Fresnel term at the glass/water surface: reflections
+    // are physically strongest at grazing angles and nearly invisible head-on.
+    // This prevents side-facing glass walls from appearing as opaque mirrors
+    // and keeps reflections on horizontal water surfaces where they belong.
     let ssr_sample = compute_ssr(in.world_pos, n, v);
-    rgb = mix(rgb, ssr_sample.rgb, saturate(ssr_sample.a));
+    let ndv_ssr = max(dot(n, v), 0.0);
+    let fresnel_ssr = pow(1.0 - ndv_ssr, 4.0);
+    rgb = mix(rgb, ssr_sample.rgb, saturate(ssr_sample.a * fresnel_ssr));
     // ────────────────────────────────────────────────────────────────────────
 
-    let a = 0.94;
     return vec4<f32>(rgb * a, a);
+}
+
+struct OitOut {
+    @location(0) accum: vec4<f32>,
+    @location(1) revealage: vec4<f32>,
+}
+
+@fragment
+fn fs_oit_accum(in: VertexOut) -> OitOut {
+    if (in.mat_kind < 1.6) {
+        discard;
+    }
+    let n = normalize(in.normal);
+    let v = normalize(g.cam_pos.xyz - in.world_pos);
+    let is_water = in.mat_kind > 2.2;
+
+    let shade = transmission_shade_oit(in.color, in.world_pos, n, v, is_water, in.clip_pos.xy, in.vertex_ao);
+    var rgb = shade.rgb;
+    let alpha = shade.a;
+
+    // Screen-space reflections (same as fs_trans).
+    let ssr_sample = compute_ssr(in.world_pos, n, v);
+    let ndv_ssr = max(dot(n, v), 0.0);
+    let fresnel_ssr = pow(1.0 - ndv_ssr, 4.0);
+    rgb = mix(rgb, ssr_sample.rgb, saturate(ssr_sample.a * fresnel_ssr));
+
+    // WBOIT depth weight (McGuire & Bavoil 2013).
+    // Clip-space z is in [0,1] with 0=near.  The weight biases toward nearer
+    // fragments to approximate correct ordering.
+    let z = in.clip_pos.z;
+    let w = alpha * max(1e-2, min(3e3,
+        10.0 / (1e-5 + pow(z / 5.0, 2.0) + pow(z / 200.0, 6.0))
+    ));
+
+    var out: OitOut;
+    out.accum = vec4<f32>(rgb * alpha * w, alpha * w);
+    out.revealage = vec4<f32>(alpha, 0.0, 0.0, 0.0);
+    return out;
 }
