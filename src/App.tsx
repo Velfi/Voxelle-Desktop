@@ -1298,7 +1298,7 @@ function App() {
       clothPinsRef.current = [];
     },
   });
-  const [ropeSag, setRopeSag] = useState(2.5);
+  const [ropeSag, _setRopeSag] = useState(2.5);
   /** 0 = loose, 1 = taut (web ropeTension). */
   const [ropeTension, setRopeTension] = useState(0.5);
   const [ropeBrushRadiusIndex, setRopeBrushRadiusIndex] = useState(2);
@@ -6901,8 +6901,6 @@ function App() {
             {showEditorChrome && viewportCursorDebugEnabled ? (
               <div className="viewport-cursor-debug-overlay" aria-hidden>
                 {(() => {
-                  const overlayRect =
-                    viewportRef.current?.getBoundingClientRect() ?? null;
                   const jsPct = viewportCursorDebugJs
                     ? viewportCursorOverlayPercent(
                         viewportCursorDebugJs.nx,
