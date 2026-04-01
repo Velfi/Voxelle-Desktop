@@ -4,12 +4,18 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to re-release (e.g. v0.2.0)"
+        required: true
 
 jobs:
   publish-tauri:
     # Use Node 24 for JS-based actions (checkout, setup-node) per GitHub deprecation of Node 20 runners.
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     permissions:
       contents: write
     strategy:
@@ -28,6 +34,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -58,8 +66,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "Voxelle Desktop ${{ github.ref_name }}"
+          tagName: ${{ env.RELEASE_TAG }}
+          releaseName: "Voxelle Desktop ${{ env.RELEASE_TAG }}"
           releaseBody: "Installers and `latest.json` (updater manifest) are in the release assets."
           generateReleaseNotes: true
           releaseDraft: false

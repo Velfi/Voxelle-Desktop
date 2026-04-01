@@ -1060,23 +1060,70 @@ fn create_rt_accum_tex(
     (tex, view)
 }
 
+/// Clamp a point so the shadow frustum center stays within (or near) the scene bounds.
+fn clamp_point_to_bounds(p: Vec3, bounds: &MeshBounds, margin: f32) -> Vec3 {
+    Vec3::new(
+        p.x.clamp(bounds.min.x - margin, bounds.max.x + margin),
+        p.y.clamp(bounds.min.y - margin, bounds.max.y + margin),
+        p.z.clamp(bounds.min.z - margin, bounds.max.z + margin),
+    )
+}
+
 /// Uses [`Mat4::orthographic_rh`], which glam documents as \([0,1]\) depth for WebGPU (do not apply an extra OpenGL→wgpu Z remap).
-fn light_view_proj(bounds: &MeshBounds, light_dir: Vec3) -> Mat4 {
-    let center = bounds.center();
-    let r = bounds.radius().max(8.0);
+///
+/// The shadow frustum is fitted to the camera's visible area so that close-up views
+/// get dramatically higher shadow texel density without changing the map resolution.
+fn light_view_proj(
+    bounds: &MeshBounds,
+    light_dir: Vec3,
+    camera: &OrbitCamera,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> Mat4 {
+    let scene_r = bounds.radius().max(8.0);
+
+    // Visible radius at the camera target plane.
+    let cam_dist = camera.smooth_spherical.radius;
+    let aspect = (viewport_w / viewport_h.max(1.0)).max(1e-4);
+    let visible_r = if camera.perspective {
+        let v_half = cam_dist * (camera.fov_y * 0.5).tan();
+        let h_half = v_half * aspect;
+        (v_half * v_half + h_half * h_half).sqrt()
+    } else {
+        let hh = camera.ortho_half_height;
+        let hw = hh * aspect;
+        (hh * hh + hw * hw).sqrt()
+    };
+
+    // 1.5× padding keeps shadow casters just outside the view.
+    // Clamp to scene radius (no point covering more) and a minimum of 2 voxels.
+    let effective_r = (visible_r * 1.5).clamp(2.0, scene_r);
+
+    // Centre the shadow frustum on the camera target, clamped to the scene.
+    let shadow_center = clamp_point_to_bounds(camera.smooth_target, bounds, effective_r);
+
     let ld = light_dir.normalize();
     let up = if ld.cross(Vec3::Y).length() > 0.05 {
         Vec3::Y
     } else {
         Vec3::Z
     };
-    // `ld` points from the scene toward the light (e.g. toward the sun). The shadow camera sits on
-    // that side of the bounds looking at the scene; the previous `center - ld` put it underground
-    // when the sun is above, so +Y faces were back-face culled and the depth map stayed cleared.
-    let eye = center + ld * (r * 5.0);
-    let view = Mat4::look_at_rh(eye, center, up);
-    let he = r * 1.8;
-    let proj = Mat4::orthographic_rh(-he, he, -he, he, 1.0, r * 12.0);
+    let eye = shadow_center + ld * (scene_r * 5.0);
+    let view = Mat4::look_at_rh(eye, shadow_center, up);
+
+    // Texel-snap the shadow centre in light-space so the sampling grid stays fixed
+    // when the camera pans — prevents shadow swimming / shimmer.
+    let he = effective_r * 1.8;
+    let texel_world = (he * 2.0) / SHADOW_MAP_SIZE as f32;
+    let ls = view.transform_point3(shadow_center);
+    let snap = Vec3::new(
+        (ls.x / texel_world).floor() * texel_world - ls.x,
+        (ls.y / texel_world).floor() * texel_world - ls.y,
+        0.0,
+    );
+    let view = Mat4::from_translation(snap) * view;
+
+    let proj = Mat4::orthographic_rh(-he, he, -he, he, 1.0, scene_r * 12.0);
     proj * view
 }
 
@@ -6025,7 +6072,7 @@ impl WgpuViewer {
         let vp = proj * view;
         let inv_v = view.inverse();
         let inv_p = proj.inverse();
-        let lvp = light_view_proj(&self.scene_bounds, self.light_dir);
+        let lvp = light_view_proj(&self.scene_bounds, self.light_dir, camera, w, h);
         let eye = camera.smooth_eye();
         let gs = GlobalState {
             view_proj: vp.to_cols_array_2d(),
