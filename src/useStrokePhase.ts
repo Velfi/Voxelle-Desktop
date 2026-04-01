@@ -91,13 +91,10 @@ export interface StrokePhaseHandle<TData> {
 // Hook
 // ---------------------------------------------------------------------------
 
-export function useStrokePhase<TData>(
-  opts: UseStrokePhaseOpts<TData>,
-): StrokePhaseHandle<TData> {
+export function useStrokePhase<TData>(opts: UseStrokePhaseOpts<TData>): StrokePhaseHandle<TData> {
   const { phases, onCancel, onCommit, keyboard = true } = opts;
 
-  const [snapshot, setSnapshot] =
-    useState<StrokePhaseSnapshot<TData> | null>(null);
+  const [snapshot, setSnapshot] = useState<StrokePhaseSnapshot<TData> | null>(null);
   const ref = useRef<StrokePhaseSnapshot<TData> | null>(null);
 
   // Keep refs for callbacks so the keydown listener doesn't go stale.
@@ -190,7 +187,6 @@ export function useStrokePhase<TData>(
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // Re-bind when snapshot presence changes (active ↔ inactive).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keyboard, snapshot != null]);
 
   // -- handle ----------------------------------------------------------------

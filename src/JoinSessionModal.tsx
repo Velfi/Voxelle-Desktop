@@ -72,9 +72,7 @@ export function JoinSessionModal({
             type="text"
             value={joinUrl}
             onChange={(e) => onJoinUrlChange(e.target.value)}
-            onKeyDown={(e) =>
-              e.key === "Enter" && !collabActive && onJoin(undefined)
-            }
+            onKeyDown={(e) => e.key === "Enter" && !collabActive && onJoin(undefined)}
             placeholder="ws://host:port"
             disabled={collabActive || connecting}
             spellCheck={false}

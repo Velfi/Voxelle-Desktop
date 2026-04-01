@@ -139,8 +139,7 @@ fn braid_offsets(
         return (0.0, 0.0, 0.0);
     }
     let r = 1.0 + (twist * 2.2).floor();
-    let base_angle =
-        (strand_index as f64 / strand_count as f64) * std::f64::consts::TAU;
+    let base_angle = (strand_index as f64 / strand_count as f64) * std::f64::consts::TAU;
     let angle = base_angle + step as f64 * (0.35 + twist * 0.95);
     let ou = r * angle.cos();
     let ov = r * angle.sin();
@@ -166,13 +165,7 @@ fn euclidean_radius_steps(r: f64) -> i32 {
     (r * 1.85).round() as i32
 }
 
-fn place_disk(
-    center: V3,
-    radius: f64,
-    t1: V3,
-    t2: V3,
-    coords: &mut HashSet<VoxelCoord>,
-) {
+fn place_disk(center: V3, radius: f64, t1: V3, t2: V3, coords: &mut HashSet<VoxelCoord>) {
     if radius < 0.01 {
         let c = v3_round(center);
         coords.insert(c);
@@ -187,10 +180,7 @@ fn place_disk(
             if uf * uf + vf * vf > r2 {
                 continue;
             }
-            let pos = v3_add(
-                center,
-                v3_add(v3_scale(t1, uf), v3_scale(t2, vf)),
-            );
+            let pos = v3_add(center, v3_add(v3_scale(t1, uf), v3_scale(t2, vf)));
             coords.insert(v3_round(pos));
         }
     }
@@ -280,10 +270,7 @@ fn generate_branches(
 
         // Direction: outward in tangent plane using golden angle spiral
         let angle = bi as f64 * GOLDEN_ANGLE_RAD;
-        let out_dir = v3_normalize(v3_add(
-            v3_scale(t1, angle.cos()),
-            v3_scale(t2, angle.sin()),
-        ));
+        let out_dir = v3_normalize(v3_add(v3_scale(t1, angle.cos()), v3_scale(t2, angle.sin())));
         // Mix in some upward (normal) bias
         let branch_dir = v3_normalize(v3_add(
             v3_scale(out_dir, branch_spread.max(0.3)),
@@ -319,7 +306,10 @@ fn generate_branches(
         // Recursive sub-branches (depth 2)
         if branch_depth >= 2 && path.len() > 2 {
             let sub_count = (branch_count / 2).max(1).min(3);
-            let sub_spine: Vec<V3> = path.iter().map(|&(x, y, z)| (x as f64, y as f64, z as f64)).collect();
+            let sub_spine: Vec<V3> = path
+                .iter()
+                .map(|&(x, y, z)| (x as f64, y as f64, z as f64))
+                .collect();
             generate_branches(
                 &sub_spine,
                 normal,
@@ -378,10 +368,7 @@ fn place_canopy_at(
                 if rng.next_f64() < 0.2 {
                     continue;
                 }
-                let pos = v3_add(
-                    layer_center,
-                    v3_add(v3_scale(t1, uf), v3_scale(t2, vf)),
-                );
+                let pos = v3_add(layer_center, v3_add(v3_scale(t1, uf), v3_scale(t2, vf)));
                 coords.insert(v3_round(pos));
             }
         }
@@ -439,7 +426,11 @@ pub fn generate_flora_deltas(
     }
     let normal = v3_normalize((nx as f64, ny as f64, nz as f64));
     let (t1, t2) = tangent_vectors(nx, ny, nz);
-    let base = (face_empty.0 as f64, face_empty.1 as f64, face_empty.2 as f64);
+    let base = (
+        face_empty.0 as f64,
+        face_empty.1 as f64,
+        face_empty.2 as f64,
+    );
 
     let mut rng = Rng::new(seed as u32);
     let mut coords: HashSet<VoxelCoord> = HashSet::new();
@@ -452,8 +443,8 @@ pub fn generate_flora_deltas(
 
         // Cluster offset: spread stems around the base
         let cluster_off = if stem_count > 1 && cluster_radius > 0 {
-            let angle = (si as f64 / stem_count as f64) * std::f64::consts::TAU
-                + rng.next_f64() * 0.5;
+            let angle =
+                (si as f64 / stem_count as f64) * std::f64::consts::TAU + rng.next_f64() * 0.5;
             let r = rng.next_f64() * cluster_radius as f64;
             v3_add(v3_scale(t1, r * angle.cos()), v3_scale(t2, r * angle.sin()))
         } else {
@@ -462,9 +453,7 @@ pub fn generate_flora_deltas(
         let stem_base = v3_add(base, cluster_off);
 
         // Build the mean backbone for this stem
-        let spine = build_mean_backbone(
-            stem_base, normal, t1, t2, height, wobble, &mut rng,
-        );
+        let spine = build_mean_backbone(stem_base, normal, t1, t2, height, wobble, &mut rng);
 
         // Place disks along each braid strand
         for strand in 0..braid_strands {

@@ -56,17 +56,18 @@ fn v3_lerp(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
 }
 
 fn v3_round(v: [f32; 3]) -> (i32, i32, i32) {
-    (v[0].round() as i32, v[1].round() as i32, v[2].round() as i32)
+    (
+        v[0].round() as i32,
+        v[1].round() as i32,
+        v[2].round() as i32,
+    )
 }
 
 // ── Body frame ──────────────────────────────────────────────────────────────
 
 /// Build a right-handed creature frame from a face normal.
 /// Returns (forward, side, up) in world space.
-fn body_frame_from_normal(
-    face_normal: [f32; 3],
-    body_yaw: f32,
-) -> ([f32; 3], [f32; 3], [f32; 3]) {
+fn body_frame_from_normal(face_normal: [f32; 3], body_yaw: f32) -> ([f32; 3], [f32; 3], [f32; 3]) {
     // Up is the face normal (creature stands on the face)
     let up = v3_norm(face_normal);
 
@@ -287,7 +288,9 @@ fn fill_slice_bridge(
         let center = v3_lerp(p_start, p_end, t);
         let hw = hw_start + (hw_end - hw_start) * t;
         let hh = hh_start + (hh_end - hh_start) * t;
-        fill_slice(file, voxel_map, seen, out, center, side, up, hw, hh, color, material);
+        fill_slice(
+            file, voxel_map, seen, out, center, side, up, hw, hh, color, material,
+        );
     }
 }
 
@@ -310,9 +313,15 @@ fn fill_sphere(
             for dz in -r..=r {
                 if (dx * dx + dy * dy + dz * dz) as f32 <= r2 {
                     if !place_voxel(
-                        file, voxel_map, seen, out,
-                        cx + dx, cy + dy, cz + dz,
-                        color, material,
+                        file,
+                        voxel_map,
+                        seen,
+                        out,
+                        cx + dx,
+                        cy + dy,
+                        cz + dz,
+                        color,
+                        material,
                     ) {
                         return;
                     }
@@ -342,9 +351,21 @@ fn fill_oriented_ellipsoid(
     for df in -max_r..=max_r {
         for ds in -max_r..=max_r {
             for du in -max_r..=max_r {
-                let ef = if half_fwd > 0.01 { df as f32 / half_fwd } else { 999.0 };
-                let es = if half_side > 0.01 { ds as f32 / half_side } else { 999.0 };
-                let eu = if half_up > 0.01 { du as f32 / half_up } else { 999.0 };
+                let ef = if half_fwd > 0.01 {
+                    df as f32 / half_fwd
+                } else {
+                    999.0
+                };
+                let es = if half_side > 0.01 {
+                    ds as f32 / half_side
+                } else {
+                    999.0
+                };
+                let eu = if half_up > 0.01 {
+                    du as f32 / half_up
+                } else {
+                    999.0
+                };
                 if ef * ef + es * es + eu * eu > 1.0 {
                     continue;
                 }
@@ -420,7 +441,10 @@ fn fabrik_3bone(
     let fwd = v3_norm(to_target);
     let pole_dir = v3_norm(v3_sub(pole, root));
     // Bias mid-joint toward pole
-    let mid_hint = v3_add(root, v3_add(v3_scale(fwd, l1 * 0.7), v3_scale(pole_dir, l1 * 0.5)));
+    let mid_hint = v3_add(
+        root,
+        v3_add(v3_scale(fwd, l1 * 0.7), v3_scale(pole_dir, l1 * 0.5)),
+    );
 
     let mut p0 = root;
     let mut p1 = mid_hint;
@@ -606,9 +630,15 @@ pub fn generator_fauna_at_screen(
 
     // Tangent offsets for anchor
     let anchor_base = [
-        face_empty.0 as f32 + side[0] * anchor_offset_u as f32 + forward[0] * anchor_offset_v as f32,
-        face_empty.1 as f32 + side[1] * anchor_offset_u as f32 + forward[1] * anchor_offset_v as f32,
-        face_empty.2 as f32 + side[2] * anchor_offset_u as f32 + forward[2] * anchor_offset_v as f32,
+        face_empty.0 as f32
+            + side[0] * anchor_offset_u as f32
+            + forward[0] * anchor_offset_v as f32,
+        face_empty.1 as f32
+            + side[1] * anchor_offset_u as f32
+            + forward[1] * anchor_offset_v as f32,
+        face_empty.2 as f32
+            + side[2] * anchor_offset_u as f32
+            + forward[2] * anchor_offset_v as f32,
     ];
 
     // Compute standing lift: creature center is raised so feet touch the surface
@@ -645,13 +675,26 @@ pub fn generator_fauna_at_screen(
     // ── Voxelize body along spine ───────────────────────────────────────
     let segs = body_bones.len();
     for i in 0..segs {
-        let t = if segs > 1 { i as f32 / (segs - 1) as f32 } else { 0.5 };
+        let t = if segs > 1 {
+            i as f32 / (segs - 1) as f32
+        } else {
+            0.5
+        };
         let (w_mult, h_mult) = body_profile_multiplier(t, stance);
         let hw = body_half_width as f32 * w_mult;
         let hh = body_half_height as f32 * h_mult;
         fill_slice(
-            file, voxel_map, &mut seen, &mut out,
-            body_bones[i].pos, side, up, hw, hh, color, material,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            body_bones[i].pos,
+            side,
+            up,
+            hw,
+            hh,
+            color,
+            material,
         );
         // Bridge to next segment
         if i + 1 < segs {
@@ -660,9 +703,20 @@ pub fn generator_fauna_at_screen(
             let hw_next = body_half_width as f32 * w_next;
             let hh_next = body_half_height as f32 * h_next;
             fill_slice_bridge(
-                file, voxel_map, &mut seen, &mut out,
-                body_bones[i].pos, body_bones[i + 1].pos,
-                side, up, hw, hh, hw_next, hh_next, color, material,
+                file,
+                voxel_map,
+                &mut seen,
+                &mut out,
+                body_bones[i].pos,
+                body_bones[i + 1].pos,
+                side,
+                up,
+                hw,
+                hh,
+                hw_next,
+                hh_next,
+                color,
+                material,
             );
         }
     }
@@ -672,35 +726,56 @@ pub fn generator_fauna_at_screen(
     // Pelvis mass at rear of body
     let pelvis_pos = body_bones.first().map(|b| b.pos).unwrap_or(center);
     fill_oriented_ellipsoid(
-        file, voxel_map, &mut seen, &mut out,
-        pelvis_pos, forward, side, up,
+        file,
+        voxel_map,
+        &mut seen,
+        &mut out,
+        pelvis_pos,
+        forward,
+        side,
+        up,
         body_half_height as f32 * 0.8,
         body_half_width as f32 * 1.1,
         body_half_height as f32 * 0.9,
-        color, material,
+        color,
+        material,
     );
 
     // Chest mass at front of body
     let chest_pos = body_bones.last().map(|b| b.pos).unwrap_or(center);
     fill_oriented_ellipsoid(
-        file, voxel_map, &mut seen, &mut out,
-        chest_pos, forward, side, up,
+        file,
+        voxel_map,
+        &mut seen,
+        &mut out,
+        chest_pos,
+        forward,
+        side,
+        up,
         body_half_height as f32 * 0.9,
         body_half_width as f32 * 1.15,
         body_half_height as f32 * 1.0,
-        color, material,
+        color,
+        material,
     );
 
     // Rump (quadruped only)
     if stance == "quadruped" {
         let rump_pos = v3_add(pelvis_pos, v3_scale(up, -(body_half_height as f32 * 0.2)));
         fill_oriented_ellipsoid(
-            file, voxel_map, &mut seen, &mut out,
-            rump_pos, forward, side, up,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            rump_pos,
+            forward,
+            side,
+            up,
             body_half_height as f32 * 0.6,
             body_half_width as f32 * 1.0,
             body_half_height as f32 * 0.7,
-            color, material,
+            color,
+            material,
         );
     }
 
@@ -712,12 +787,19 @@ pub fn generator_fauna_at_screen(
             v3_scale(up, -(body_half_height as f32 * 0.3)),
         );
         fill_oriented_ellipsoid(
-            file, voxel_map, &mut seen, &mut out,
-            belly_pos, forward, side, up,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            belly_pos,
+            forward,
+            side,
+            up,
             body_length as f32 * 0.2,
             body_half_width as f32 * 0.8,
             body_half_height as f32 * 0.5,
-            color, material,
+            color,
+            material,
         );
     }
 
@@ -731,9 +813,20 @@ pub fn generator_fauna_at_screen(
             let hw1 = neck_half_width as f32 * (1.0 - t1 * 0.3);
             let hh1 = neck_half_height as f32 * (1.0 - t1 * 0.3);
             fill_slice_bridge(
-                file, voxel_map, &mut seen, &mut out,
-                neck_bones[i].pos, neck_bones[i + 1].pos,
-                side, up, hw0, hh0, hw1, hh1, color, material,
+                file,
+                voxel_map,
+                &mut seen,
+                &mut out,
+                neck_bones[i].pos,
+                neck_bones[i + 1].pos,
+                side,
+                up,
+                hw0,
+                hh0,
+                hw1,
+                hh1,
+                color,
+                material,
             );
         }
     }
@@ -747,29 +840,53 @@ pub fn generator_fauna_at_screen(
         let head_center = v3_lerp(head_start, head_end, 0.5);
         let head_r = head_half_width.max(head_half_height) as f32;
         fill_sphere(
-            file, voxel_map, &mut seen, &mut out,
-            head_center, head_r, color, material,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            head_center,
+            head_r,
+            color,
+            material,
         );
     } else {
         // Quadruped: bridged head with snout
         // Main head mass
         fill_slice_bridge(
-            file, voxel_map, &mut seen, &mut out,
-            head_start, head_end, side, up,
-            head_half_width as f32, head_half_height as f32,
-            head_half_width as f32 * 0.8, head_half_height as f32 * 0.7,
-            color, material,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            head_start,
+            head_end,
+            side,
+            up,
+            head_half_width as f32,
+            head_half_height as f32,
+            head_half_width as f32 * 0.8,
+            head_half_height as f32 * 0.7,
+            color,
+            material,
         );
         // Snout extends forward
         let snout_len = (head_length as f32 * 0.6).max(1.0);
         let snout_start = head_end;
         let snout_end = v3_add(head_end, v3_scale(forward, snout_len));
         fill_slice_bridge(
-            file, voxel_map, &mut seen, &mut out,
-            snout_start, snout_end, side, up,
-            head_half_width as f32 * 0.6, head_half_height as f32 * 0.5,
-            head_half_width as f32 * 0.3, head_half_height as f32 * 0.3,
-            color, material,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            snout_start,
+            snout_end,
+            side,
+            up,
+            head_half_width as f32 * 0.6,
+            head_half_height as f32 * 0.5,
+            head_half_width as f32 * 0.3,
+            head_half_height as f32 * 0.3,
+            color,
+            material,
         );
     }
 
@@ -780,7 +897,9 @@ pub fn generator_fauna_at_screen(
         for i in 0..tail_length {
             let p = v3_add(tail_start, v3_scale(tail_dir, i as f32 + 1.0));
             let (x, y, z) = v3_round(p);
-            if !place_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+            if !place_voxel(
+                file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+            ) {
                 break;
             }
         }
@@ -887,22 +1006,22 @@ pub fn generator_fauna_at_screen(
         let r_end = 0.7_f32;
 
         fill_segment_capsule(
-            file, voxel_map, &mut seen, &mut out,
-            chain[0], chain[1], r_root, r_mid, color, material,
+            file, voxel_map, &mut seen, &mut out, chain[0], chain[1], r_root, r_mid, color,
+            material,
         );
         fill_segment_capsule(
-            file, voxel_map, &mut seen, &mut out,
-            chain[1], chain[2], r_mid, r_distal, color, material,
+            file, voxel_map, &mut seen, &mut out, chain[1], chain[2], r_mid, r_distal, color,
+            material,
         );
         fill_segment_capsule(
-            file, voxel_map, &mut seen, &mut out,
-            chain[2], chain[3], r_distal, r_end, color, material,
+            file, voxel_map, &mut seen, &mut out, chain[2], chain[3], r_distal, r_end, color,
+            material,
         );
 
         // Place foot at end effector
         fill_foot(
-            file, voxel_map, &mut seen, &mut out,
-            chain[3], forward, side, up, archetype, color, material,
+            file, voxel_map, &mut seen, &mut out, chain[3], forward, side, up, archetype, color,
+            material,
         );
     }
 

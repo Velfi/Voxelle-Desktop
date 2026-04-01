@@ -53,8 +53,7 @@ pub fn mesh_buffers_to_glb(mesh: &MeshBuffers) -> Result<Vec<u8>, String> {
     let idx_u32: Vec<u32> = mesh.indices.iter().map(|&i| i as u32).collect();
     let idx_bytes: &[u8] = bytemuck::cast_slice(&idx_u32);
 
-    let has_normals =
-        mesh.normals.len() == mesh.positions.len() && mesh.normals.len() >= 9;
+    let has_normals = mesh.normals.len() == mesh.positions.len() && mesh.normals.len() >= 9;
     let norm_bytes: &[u8] = if has_normals {
         bytemuck::cast_slice(&mesh.normals)
     } else {

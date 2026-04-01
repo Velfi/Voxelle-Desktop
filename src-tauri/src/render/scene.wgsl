@@ -435,9 +435,9 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     }
 
     out.color = vec4<f32>(rgb, glow_mask);
-    let vn = (g.inv_view * vec4<f32>(n, 0.0)).xyz;
-    let nn = normalize(vn) * 0.5 + 0.5;
-    out.gbuf_n = vec4<f32>(nn, 1.0);
+    let nn = n * 0.5 + 0.5;
+    let metalness = select(0.0, 1.0, is_metal);
+    out.gbuf_n = vec4<f32>(nn, metalness);
     return out;
 }
 

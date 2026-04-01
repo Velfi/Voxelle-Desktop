@@ -45,16 +45,10 @@ export function CollabJoinProgressModal({
     >
       <div className="modal collab-join-progress-modal">
         <div className="collab-join-progress-spinner" aria-hidden />
-        <h3
-          id="collab-join-progress-title"
-          className="collab-join-progress-title"
-        >
+        <h3 id="collab-join-progress-title" className="collab-join-progress-title">
           Joining session
         </h3>
-        <p
-          id="collab-join-progress-detail"
-          className="collab-join-progress-detail"
-        >
+        <p id="collab-join-progress-detail" className="collab-join-progress-detail">
           {detail}
         </p>
         {loading ? (
@@ -65,16 +59,10 @@ export function CollabJoinProgressModal({
             aria-valuemin={0}
             aria-valuemax={100}
           >
-            <div
-              className="collab-join-progress-bar"
-              style={{ width: `${pct}%` }}
-            />
+            <div className="collab-join-progress-bar" style={{ width: `${pct}%` }} />
           </div>
         ) : null}
-        <button
-          className="btn btn-secondary collab-join-progress-cancel"
-          onClick={onCancel}
-        >
+        <button className="btn btn-secondary collab-join-progress-cancel" onClick={onCancel}>
           Cancel
         </button>
       </div>

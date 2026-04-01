@@ -17,12 +17,17 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> FullscreenOut {
 @group(0) @binding(1) var t_revealage: texture_2d<f32>;
 @group(0) @binding(2) var t_opaque: texture_2d<f32>;
 @group(0) @binding(3) var samp: sampler;
+@group(0) @binding(4) var t_ssr: texture_2d<f32>;
 
 @fragment
 fn fs_oit_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
     let accum = textureSample(t_accum, samp, in.uv);
     let revealage = textureSample(t_revealage, samp, in.uv).r;
-    let opaque = textureSample(t_opaque, samp, in.uv).rgb;
+    var opaque = textureSample(t_opaque, samp, in.uv).rgb;
+
+    // Blend opaque metal SSR reflections.
+    let ssr = textureSample(t_ssr, samp, in.uv);
+    opaque = mix(opaque, ssr.rgb, ssr.a);
 
     // No transparent fragments accumulated at this pixel.
     if (accum.a < 1e-4) {

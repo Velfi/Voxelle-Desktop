@@ -20,6 +20,35 @@ const FLY_LOOK_PIXELS_PER_RADIAN: f32 = 200.0;
 const PAN_SPEED: f32 = 1.0;
 const ZOOM_SPEED: f32 = 1.0;
 
+// ── Walk mode constants ──────────────────────────────────────────────
+/// Eye height above feet position (slightly taller than 1 voxel so you can see over 1-high walls).
+pub const WALK_EYE_HEIGHT: f32 = 1.6;
+/// Gravity acceleration (units/sec², negative = downward).
+pub const WALK_GRAVITY: f32 = -20.0;
+/// Initial upward velocity when jumping (~1.2 voxel jump height).
+pub const WALK_JUMP_VEL: f32 = 7.0;
+/// Horizontal walk speed in units/sec.
+pub const WALK_MOVE_SPEED: f32 = 8.0;
+/// Auto-step-up threshold: walk into a ledge up to this height and you're lifted automatically.
+pub const WALK_STEP_HEIGHT: f32 = 1.01;
+
+#[derive(Clone, Copy, Debug)]
+pub struct WalkPhysicsState {
+    pub feet_pos: Vec3,
+    pub vel_y: f32,
+    pub on_ground: bool,
+}
+
+impl Default for WalkPhysicsState {
+    fn default() -> Self {
+        Self {
+            feet_pos: Vec3::ZERO,
+            vel_y: 0.0,
+            on_ground: false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Spherical {
     pub radius: f32,
@@ -69,6 +98,8 @@ pub struct OrbitCamera {
     pub far: f32,
     /// In FPS fly mode: disable damping for responsive feel.
     pub is_fly_mode: bool,
+    /// Walk mode: first-person with gravity, collision, and jumping.
+    pub is_walk_mode: bool,
 }
 
 impl OrbitCamera {
@@ -94,6 +125,7 @@ impl OrbitCamera {
             near: 0.05,
             far: 5000.0,
             is_fly_mode: false,
+            is_walk_mode: false,
         }
     }
 
@@ -107,7 +139,11 @@ impl OrbitCamera {
 
     /// Call each frame.
     pub fn update_damping(&mut self) {
-        let damping = if self.is_fly_mode { FLY_MODE_DAMPING } else { DAMPING };
+        let damping = if self.is_fly_mode || self.is_walk_mode {
+            FLY_MODE_DAMPING
+        } else {
+            DAMPING
+        };
         self.smooth_target = self.smooth_target.lerp(self.target, damping);
         let sr = self.smooth_spherical.radius
             + (self.spherical.radius - self.smooth_spherical.radius) * damping;
@@ -162,7 +198,8 @@ impl OrbitCamera {
         self.spherical.theta -= dx * k;
         self.spherical.phi -= dy * k;
         let half_span = logo_splash_orbit_half_span_rad();
-        self.spherical.theta = Self::clamp_theta_near_rest(self.spherical.theta, rest.theta, half_span);
+        self.spherical.theta =
+            Self::clamp_theta_near_rest(self.spherical.theta, rest.theta, half_span);
         self.spherical.phi = (self.spherical.phi)
             .clamp(rest.phi - half_span, rest.phi + half_span)
             .clamp(self.min_polar, self.max_polar);
@@ -340,9 +377,42 @@ impl OrbitCamera {
         } else {
             strafe_right = strafe_right.normalize();
         }
-        let delta =
-            (look * forward + strafe_right * right + Vec3::Y * up) * (speed * dt);
+        let delta = (look * forward + strafe_right * right + Vec3::Y * up) * (speed * dt);
         self.target += delta;
+    }
+
+    /// Walk mode: reposition the camera so the eye sits at `feet_pos + Y * eye_height`,
+    /// preserving the current look direction (spherical offset unchanged, target adjusts).
+    pub fn walk_set_eye_from_feet(&mut self, feet_pos: Vec3, eye_height: f32) {
+        let eye = feet_pos + Vec3::Y * eye_height;
+        // eye = target + offset  =>  target = eye - offset
+        self.target = eye - self.spherical.to_offset();
+        self.smooth_target = self.target;
+        self.smooth_spherical = self.spherical;
+    }
+
+    /// Walk mode horizontal movement: project the look vector onto the XZ plane (no vertical
+    /// component from look direction) and compute a movement delta from forward/right input.
+    pub fn walk_horizontal_delta(&self, forward: f32, right: f32, dt: f32, speed: f32) -> Vec3 {
+        let dt = dt.max(0.0);
+        if dt == 0.0 || (forward == 0.0 && right == 0.0) {
+            return Vec3::ZERO;
+        }
+        let eye = self.target + self.spherical.to_offset();
+        let mut look = self.target - eye;
+        look.y = 0.0; // Project onto XZ plane
+        if look.length_squared() < 1e-12 {
+            look = Vec3::new(0.0, 0.0, -1.0);
+        } else {
+            look = look.normalize();
+        }
+        let mut strafe = look.cross(Vec3::Y);
+        if strafe.length_squared() < 1e-12 {
+            strafe = Vec3::X;
+        } else {
+            strafe = strafe.normalize();
+        }
+        (look * forward + strafe * right) * (speed * dt)
     }
 
     pub fn fit_sphere(&mut self, center: Vec3, radius: f32, width: f32, height: f32) {
@@ -442,10 +512,7 @@ impl OrbitCamera {
     /// Web-style reset: orbit target at content center, camera offset along (0.6, 0.8, 1) scaled.
     pub fn reset_view_to_bounds(&mut self, min: Vec3, max: Vec3, empty_extent: f32) {
         let extent = if (max - min).length() > 1e-3 {
-            (max.x - min.x)
-                .max(max.y - min.y)
-                .max(max.z - min.z)
-                + 2.0
+            (max.x - min.x).max(max.y - min.y).max(max.z - min.z) + 2.0
         } else {
             empty_extent
         };
@@ -476,14 +543,7 @@ impl OrbitCamera {
 
     /// Snap to an axis-aligned view (+X,+Y,+Z,-X,-Y,-Z); preserves orbit radius.
     pub fn snap_to_axis(&mut self, axis_idx: u8) {
-        let dirs = [
-            Vec3::X,
-            Vec3::Y,
-            Vec3::Z,
-            -Vec3::X,
-            -Vec3::Y,
-            -Vec3::Z,
-        ];
+        let dirs = [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X, -Vec3::Y, -Vec3::Z];
         let mut dir = dirs[(axis_idx as usize).min(5)];
         if dir.y.abs() > 0.9 {
             dir.x += 0.0001;
@@ -499,18 +559,11 @@ impl OrbitCamera {
     pub fn zoom_step(&mut self, inward: bool) {
         const ZOOM_STEP: f32 = 1.2;
         if self.perspective {
-            let f = if inward {
-                1.0 / ZOOM_STEP
-            } else {
-                ZOOM_STEP
-            };
-            self.spherical.radius = (self.spherical.radius * f).clamp(self.min_radius, self.max_radius);
+            let f = if inward { 1.0 / ZOOM_STEP } else { ZOOM_STEP };
+            self.spherical.radius =
+                (self.spherical.radius * f).clamp(self.min_radius, self.max_radius);
         } else {
-            let f = if inward {
-                1.0 / ZOOM_STEP
-            } else {
-                ZOOM_STEP
-            };
+            let f = if inward { 1.0 / ZOOM_STEP } else { ZOOM_STEP };
             self.ortho_half_height = (self.ortho_half_height * f).max(0.01);
         }
     }
@@ -519,14 +572,7 @@ impl OrbitCamera {
     pub fn gizmo_axis_projections(&self) -> [[f32; 3]; 6] {
         let eye = self.smooth_target + self.smooth_spherical.to_offset();
         let view = Mat4::look_at_rh(eye, self.smooth_target, Vec3::Y);
-        let axes = [
-            Vec3::X,
-            Vec3::Y,
-            Vec3::Z,
-            -Vec3::X,
-            -Vec3::Y,
-            -Vec3::Z,
-        ];
+        let axes = [Vec3::X, Vec3::Y, Vec3::Z, -Vec3::X, -Vec3::Y, -Vec3::Z];
         let mut out = [[0f32; 3]; 6];
         for (i, ax) in axes.iter().enumerate() {
             let p = view.transform_vector3(*ax);
@@ -536,10 +582,16 @@ impl OrbitCamera {
     }
 
     /// Percent label: perspective uses `base_dist / radius`, ortho uses `ref_half_h / ortho_half_height`.
-    pub fn zoom_percent_for_display(&self, base_perspective_dist: f32, ortho_ref_half_h: f32) -> i32 {
+    pub fn zoom_percent_for_display(
+        &self,
+        base_perspective_dist: f32,
+        ortho_ref_half_h: f32,
+    ) -> i32 {
         if self.perspective {
             let r = self.smooth_spherical.radius.max(1e-4);
-            ((base_perspective_dist / r) * 100.0).round().clamp(1.0, 9999.0) as i32
+            ((base_perspective_dist / r) * 100.0)
+                .round()
+                .clamp(1.0, 9999.0) as i32
         } else {
             let h = self.ortho_half_height.max(1e-4);
             ((ortho_ref_half_h / h) * 100.0).round().clamp(1.0, 9999.0) as i32

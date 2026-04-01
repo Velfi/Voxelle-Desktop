@@ -239,25 +239,63 @@ pub struct MoodSettings {
     pub bloom_strength: f32,
 }
 
-fn default_true() -> bool { true }
-fn default_one() -> f32 { 1.0 }
-fn default_atm_color() -> String { "#c8d4e0".into() }
-fn default_28() -> f32 { 28.0 }
-fn default_085() -> f32 { 0.85 }
-fn default_120() -> f32 { 120.0 }
-fn default_02() -> f32 { 0.2 }
-fn default_002() -> f32 { 0.02 }
-fn default_dt_near() -> String { "#ffffff".into() }
-fn default_dt_mid() -> String { "#c8d4e0".into() }
-fn default_dt_far() -> String { "#8fa3bf".into() }
-fn default_16() -> f32 { 16.0 }
-fn default_140() -> f32 { 140.0 }
-fn default_06() -> f32 { 0.6 }
-fn default_07() -> f32 { 0.7 }
-fn default_092() -> f32 { 0.92 }
-fn default_08() -> f32 { 0.8 }
-fn default_32() -> f32 { 32.0 }
-fn default_09() -> f32 { 0.1 }
+fn default_true() -> bool {
+    true
+}
+fn default_one() -> f32 {
+    1.0
+}
+fn default_atm_color() -> String {
+    "#c8d4e0".into()
+}
+fn default_28() -> f32 {
+    28.0
+}
+fn default_085() -> f32 {
+    0.85
+}
+fn default_120() -> f32 {
+    120.0
+}
+fn default_02() -> f32 {
+    0.2
+}
+fn default_002() -> f32 {
+    0.02
+}
+fn default_dt_near() -> String {
+    "#ffffff".into()
+}
+fn default_dt_mid() -> String {
+    "#c8d4e0".into()
+}
+fn default_dt_far() -> String {
+    "#8fa3bf".into()
+}
+fn default_16() -> f32 {
+    16.0
+}
+fn default_140() -> f32 {
+    140.0
+}
+fn default_06() -> f32 {
+    0.6
+}
+fn default_07() -> f32 {
+    0.7
+}
+fn default_092() -> f32 {
+    0.92
+}
+fn default_08() -> f32 {
+    0.8
+}
+fn default_32() -> f32 {
+    32.0
+}
+fn default_09() -> f32 {
+    0.1
+}
 
 impl Default for MoodSettings {
     fn default() -> Self {
@@ -505,7 +543,10 @@ pub fn parse_mood_from_scene_optional(scene: &Document) -> Option<MoodSettings> 
     if is_old {
         let grain_v = m.get("grain").and_then(|b| bson_f32(b)).unwrap_or(0.0);
         let vig_v = m.get("vignette").and_then(|b| bson_f32(b)).unwrap_or(0.0);
-        let dt_v = m.get("distanceTint").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let dt_v = m
+            .get("distanceTint")
+            .and_then(|b| bson_f32(b))
+            .unwrap_or(0.0);
         let atm_v = m.get("atmosphere").and_then(|b| bson_f32(b)).unwrap_or(0.0);
         let ss_v = m.get("sunShafts").and_then(|b| bson_f32(b)).unwrap_or(0.0);
         let mut ms = MoodSettings::default();
@@ -553,17 +594,54 @@ fn parse_mood_from_raw_file_bytes(bytes: &[u8]) -> Option<MoodSettings> {
     let has_grain_enabled = mood.get("grainEnabled").ok().flatten().is_some();
     if !has_grain_enabled {
         // Old bare-float format
-        let grain_v = mood.get("grain").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
-        let vig_v = mood.get("vignette").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
-        let dt_v = mood.get("distanceTint").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
-        let atm_v = mood.get("atmosphere").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
-        let ss_v = mood.get("sunShafts").ok().flatten().and_then(raw_bson_to_f32).unwrap_or(0.0);
+        let grain_v = mood
+            .get("grain")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0);
+        let vig_v = mood
+            .get("vignette")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0);
+        let dt_v = mood
+            .get("distanceTint")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0);
+        let atm_v = mood
+            .get("atmosphere")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0);
+        let ss_v = mood
+            .get("sunShafts")
+            .ok()
+            .flatten()
+            .and_then(raw_bson_to_f32)
+            .unwrap_or(0.0);
         let mut ms = MoodSettings::default();
         ms.vignette = vig_v;
-        if grain_v > 0.001 { ms.grain_enabled = true; ms.grain_strength = grain_v.clamp(0.0, 0.5); }
-        if atm_v > 0.001 { ms.atm_enabled = true; ms.atm_density = atm_v; }
-        if dt_v > 0.001 { ms.dt_enabled = true; ms.dt_strength = dt_v; }
-        if ss_v > 0.001 { ms.ss_enabled = true; ms.ss_strength = ss_v * 10.0; }
+        if grain_v > 0.001 {
+            ms.grain_enabled = true;
+            ms.grain_strength = grain_v.clamp(0.0, 0.5);
+        }
+        if atm_v > 0.001 {
+            ms.atm_enabled = true;
+            ms.atm_density = atm_v;
+        }
+        if dt_v > 0.001 {
+            ms.dt_enabled = true;
+            ms.dt_strength = dt_v;
+        }
+        if ss_v > 0.001 {
+            ms.ss_enabled = true;
+            ms.ss_strength = ss_v * 10.0;
+        }
         return Some(ms);
     }
     // New format: convert raw to owned Document, then serde

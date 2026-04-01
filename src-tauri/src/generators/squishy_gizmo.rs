@@ -231,11 +231,7 @@ pub fn append_squishy_gizmo_wire(
     );
     let eye = camera.smooth_eye();
     let (arm_base, arrow_world_len) = gizmo_layout(center, ball.radius, eye);
-    let colors = [
-        [1.0, 0.36, 0.4],
-        [0.34, 0.84, 0.43],
-        [0.36, 0.63, 1.0],
-    ];
+    let colors = [[1.0, 0.36, 0.4], [0.34, 0.84, 0.43], [0.36, 0.63, 1.0]];
     let axes = [Vec3::X, Vec3::Y, Vec3::Z];
     for i in 0..3 {
         let a = center + axes[i] * arm_base;

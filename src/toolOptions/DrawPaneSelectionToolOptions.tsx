@@ -56,9 +56,7 @@ export type DrawPaneSelectionToolOptionsProps = {
   setSprayBrushShape: (s: BrushShape) => void;
   /** Plane reference for constrain-to-plane. */
   sprayConstrainToPlaneRef: "auto" | "camera" | "x" | "y" | "z";
-  setSprayConstrainToPlaneRef: (
-    v: "auto" | "camera" | "x" | "y" | "z",
-  ) => void;
+  setSprayConstrainToPlaneRef: (v: "auto" | "camera" | "x" | "y" | "z") => void;
   fillConstrainToPlane: boolean;
   setFillConstrainToPlane: (v: boolean) => void;
 };
@@ -72,9 +70,7 @@ export type DrawPaneSelectionToolOptionsProps = {
  * Fill: constrain + diagonals + respect color.
  * Other methods: Brush + stroke line/brush + full area shape dropdown.
  */
-export function DrawPaneSelectionToolOptions(
-  p: DrawPaneSelectionToolOptionsProps,
-) {
+export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProps) {
   const narrowStroke = p.selectionMethod === "stroke";
   const narrowSurface = p.selectionMethod === "surface";
   const narrowSolid = p.selectionMethod === "solid";
@@ -145,11 +141,7 @@ export function DrawPaneSelectionToolOptions(
         </div>
         <div className="tool-options-section">
           <div className="tool-options-heading">Brush shape</div>
-          <div
-            className="tool-options-shape-row"
-            role="group"
-            aria-label="Brush shape"
-          >
+          <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
             {(
               [
                 ["cube", "Cube"],
@@ -172,10 +164,7 @@ export function DrawPaneSelectionToolOptions(
               </button>
             ))}
           </div>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.35rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
@@ -199,9 +188,7 @@ export function DrawPaneSelectionToolOptions(
               max={65}
               step={2}
               value={p.brushRadius * 2 + 1}
-              onChange={(ev) =>
-                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
-              }
+              onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
@@ -214,23 +201,16 @@ export function DrawPaneSelectionToolOptions(
             <input
               type="checkbox"
               checked={p.selectionStrokeSnapToSurface}
-              onChange={(ev) =>
-                p.setSelectionStrokeSnapToSurface(ev.target.checked)
-              }
+              onChange={(ev) => p.setSelectionStrokeSnapToSurface(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Snap to surface</span>
           </label>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.35rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
             <input
               type="checkbox"
               checked={p.selectionStrokeAxisAlign}
-              onChange={(ev) =>
-                p.setSelectionStrokeAxisAlign(ev.target.checked)
-              }
+              onChange={(ev) => p.setSelectionStrokeAxisAlign(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Axis-align</span>
@@ -300,11 +280,7 @@ export function DrawPaneSelectionToolOptions(
         </div>
         <div className="tool-options-section">
           <div className="tool-options-heading">Brush shape</div>
-          <div
-            className="tool-options-shape-row"
-            role="group"
-            aria-label="Brush shape"
-          >
+          <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
             {(
               [
                 ["cube", "Cube"],
@@ -327,10 +303,7 @@ export function DrawPaneSelectionToolOptions(
               </button>
             ))}
           </div>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.35rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
@@ -354,25 +327,18 @@ export function DrawPaneSelectionToolOptions(
               max={65}
               step={2}
               value={p.brushRadius * 2 + 1}
-              onChange={(ev) =>
-                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
-              }
+              onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
               {p.brushRadius * 2 + 1}
             </span>
           </label>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.5rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
             <input
               type="checkbox"
               checked={p.selectionStrokeSnapToSurface}
-              onChange={(ev) =>
-                p.setSelectionStrokeSnapToSurface(ev.target.checked)
-              }
+              onChange={(ev) => p.setSelectionStrokeSnapToSurface(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Snap to surface</span>
@@ -410,10 +376,7 @@ export function DrawPaneSelectionToolOptions(
                 </button>
               ))}
             </div>
-            <label
-              className="tool-options-checkbox-row"
-              style={{ marginTop: "0.5rem" }}
-            >
+            <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
               <input
                 type="checkbox"
                 checked={p.surfacePlaneHollow}
@@ -484,8 +447,7 @@ export function DrawPaneSelectionToolOptions(
             <button
               type="button"
               className={
-                p.drawStrokeMode === "polygon" ||
-                p.drawStrokeMode === "polygonHull"
+                p.drawStrokeMode === "polygon" || p.drawStrokeMode === "polygonHull"
                   ? "tool-options-shape-btn is-active"
                   : "tool-options-shape-btn"
               }
@@ -502,11 +464,7 @@ export function DrawPaneSelectionToolOptions(
         </div>
         <div className="tool-options-section">
           <div className="tool-options-heading">Brush shape</div>
-          <div
-            className="tool-options-shape-row"
-            role="group"
-            aria-label="Brush shape"
-          >
+          <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
             {(
               [
                 ["cube", "Cube"],
@@ -529,10 +487,7 @@ export function DrawPaneSelectionToolOptions(
               </button>
             ))}
           </div>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.35rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
@@ -556,25 +511,18 @@ export function DrawPaneSelectionToolOptions(
               max={65}
               step={2}
               value={p.brushRadius * 2 + 1}
-              onChange={(ev) =>
-                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
-              }
+              onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
               {p.brushRadius * 2 + 1}
             </span>
           </label>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.5rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
             <input
               type="checkbox"
               checked={p.selectionStrokeSnapToSurface}
-              onChange={(ev) =>
-                p.setSelectionStrokeSnapToSurface(ev.target.checked)
-              }
+              onChange={(ev) => p.setSelectionStrokeSnapToSurface(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Snap to surface</span>
@@ -600,9 +548,7 @@ export function DrawPaneSelectionToolOptions(
                 key={id}
                 type="button"
                 className={
-                  p.planeAxis === id
-                    ? "tool-options-shape-btn is-active"
-                    : "tool-options-shape-btn"
+                  p.planeAxis === id ? "tool-options-shape-btn is-active" : "tool-options-shape-btn"
                 }
                 disabled={p.loading || p.workBusy}
                 onClick={() => p.setPlaneAxis(id)}
@@ -629,8 +575,8 @@ export function DrawPaneSelectionToolOptions(
               className="tool-options-hint"
               style={{ margin: 0, fontSize: "0.85rem", opacity: 0.9 }}
             >
-              Cuboid: Click and drag, set a depth, and then click "Done" when
-              you're ready to commit.
+              Cuboid: Click and drag, set a depth, and then click "Done" when you're ready to
+              commit.
             </p>
           </div>
         ) : null}
@@ -640,8 +586,8 @@ export function DrawPaneSelectionToolOptions(
               className="tool-options-hint"
               style={{ margin: 0, fontSize: "0.85rem", opacity: 0.9 }}
             >
-              Cylinder: Click and drag, set a depth, and then click "Done" when
-              you're ready to commit.
+              Cylinder: Click and drag, set a depth, and then click "Done" when you're ready to
+              commit.
             </p>
           </div>
         ) : null}
@@ -670,9 +616,7 @@ export function DrawPaneSelectionToolOptions(
               <span>Plane</span>
               <select
                 value={p.planeAxis}
-                onChange={(ev) =>
-                  p.setPlaneAxis(ev.target.value as PlaneAxisApi)
-                }
+                onChange={(ev) => p.setPlaneAxis(ev.target.value as PlaneAxisApi)}
                 disabled={p.loading || p.workBusy}
               >
                 <option value="auto">Auto (face)</option>
@@ -701,10 +645,7 @@ export function DrawPaneSelectionToolOptions(
             />
             <span>Include diagonals</span>
           </label>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.5rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
             <input
               type="checkbox"
               checked={p.fillRespectsColor}
@@ -774,11 +715,7 @@ export function DrawPaneSelectionToolOptions(
         />
         <div className="tool-options-section">
           <div className="tool-options-heading">Brush shape</div>
-          <div
-            className="tool-options-shape-row"
-            role="group"
-            aria-label="Spray brush shape"
-          >
+          <div className="tool-options-shape-row" role="group" aria-label="Spray brush shape">
             {(
               [
                 ["cube", "Cube"],
@@ -801,10 +738,7 @@ export function DrawPaneSelectionToolOptions(
               </button>
             ))}
           </div>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.35rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
             <input
               type="checkbox"
               checked={p.brushClipBottomHalf}
@@ -815,10 +749,7 @@ export function DrawPaneSelectionToolOptions(
               Outer half (face)
             </span>
           </label>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.5rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
             <input
               type="checkbox"
               checked={p.spraySizeRange}
@@ -893,9 +824,7 @@ export function DrawPaneSelectionToolOptions(
                   max={MAX_BRUSH_SIZE - 1}
                   step={1}
                   value={p.brushRadius}
-                  onChange={(ev) =>
-                    p.setBrushRadius(Number(ev.target.value))
-                  }
+                  onChange={(ev) => p.setBrushRadius(Number(ev.target.value))}
                   disabled={p.loading || p.workBusy}
                 />
                 <span className="tool-options-range-value" aria-live="polite">
@@ -924,16 +853,11 @@ export function DrawPaneSelectionToolOptions(
               {p.sprayScatter}
             </span>
           </label>
-          <label
-            className="tool-options-checkbox-row"
-            style={{ marginTop: "0.5rem" }}
-          >
+          <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
             <input
               type="checkbox"
               checked={p.selectionStrokeSnapToSurface}
-              onChange={(ev) =>
-                p.setSelectionStrokeSnapToSurface(ev.target.checked)
-              }
+              onChange={(ev) => p.setSelectionStrokeSnapToSurface(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Snap to surface</span>
@@ -947,11 +871,7 @@ export function DrawPaneSelectionToolOptions(
     <>
       <div className="tool-options-section">
         <div className="tool-options-heading">Brush</div>
-        <div
-          className="tool-options-shape-row"
-          role="group"
-          aria-label="Brush shape"
-        >
+        <div className="tool-options-shape-row" role="group" aria-label="Brush shape">
           {(
             [
               ["sphere", "Sphere"],
@@ -963,9 +883,7 @@ export function DrawPaneSelectionToolOptions(
               key={id}
               type="button"
               className={
-                p.brushShape === id
-                  ? "tool-options-shape-btn is-active"
-                  : "tool-options-shape-btn"
+                p.brushShape === id ? "tool-options-shape-btn is-active" : "tool-options-shape-btn"
               }
               disabled={p.loading || p.workBusy}
               onClick={() => p.setBrushShape(id)}
@@ -974,10 +892,7 @@ export function DrawPaneSelectionToolOptions(
             </button>
           ))}
         </div>
-        <label
-          className="tool-options-checkbox-row"
-          style={{ marginTop: "0.35rem" }}
-        >
+        <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
           <input
             type="checkbox"
             checked={p.brushClipBottomHalf}
@@ -996,20 +911,14 @@ export function DrawPaneSelectionToolOptions(
             max={65}
             step={2}
             value={p.brushRadius * 2 + 1}
-            onChange={(ev) =>
-              p.setBrushRadius((Number(ev.target.value) - 1) / 2)
-            }
+            onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
             disabled={p.loading || p.workBusy}
           />
         </label>
       </div>
       <div className="tool-options-section">
         <div className="tool-options-heading">Stroke</div>
-        <div
-          className="tool-options-shape-row"
-          role="group"
-          aria-label="Stroke style"
-        >
+        <div className="tool-options-shape-row" role="group" aria-label="Stroke style">
           <button
             type="button"
             className={

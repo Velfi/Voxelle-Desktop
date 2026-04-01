@@ -98,16 +98,14 @@ fn generate_rock_local(seed: i32, size: i32, roughness: f32) -> Vec<(i32, i32, i
                     yf * scale * 1.7,
                     zf * scale * 1.7,
                 );
-                let perturb =
-                    (n - 0.5) * 2.0 * lumpiness + (n2 - 0.5) * lumpiness * 0.5;
+                let perturb = (n - 0.5) * 2.0 * lumpiness + (n2 - 0.5) * lumpiness * 0.5;
                 let r_effective = rf * (1.0 + perturb);
                 if d > r_effective {
                     continue;
                 }
                 // Fracture facet: exclude voxels on one side of a plane
                 if do_facet {
-                    let dist =
-                        xf * (fnx / flen) + yf * (fny / flen) + zf * (fnz / flen);
+                    let dist = xf * (fnx / flen) + yf * (fny / flen) + zf * (fnz / flen);
                     if dist < -facet_depth {
                         continue;
                     }
@@ -169,11 +167,7 @@ pub fn generate_rock_cluster_deltas(
             face_empty.2 + (sink_n - 1) * nz,
         )
     } else {
-        (
-            face_empty.0 - nx,
-            face_empty.1 - ny,
-            face_empty.2 - nz,
-        )
+        (face_empty.0 - nx, face_empty.1 - ny, face_empty.2 - nz)
     };
 
     let mut out = Vec::new();
@@ -222,17 +216,29 @@ pub fn generate_rock_cluster_deltas(
         // The "stamp offset" centers the rock on the surface target
         let ox = if nx != 0 {
             // Normal is along X: align to surface
-            if nx > 0 { stx - min_x } else { stx - max_x }
+            if nx > 0 {
+                stx - min_x
+            } else {
+                stx - max_x
+            }
         } else {
             face_empty.0 + dx - half_x - min_x
         };
         let oy = if ny != 0 {
-            if ny > 0 { sty - min_y } else { sty - max_y }
+            if ny > 0 {
+                sty - min_y
+            } else {
+                sty - max_y
+            }
         } else {
             face_empty.1 + dy - half_y - min_y
         };
         let oz = if nz != 0 {
-            if nz > 0 { stz - min_z } else { stz - max_z }
+            if nz > 0 {
+                stz - min_z
+            } else {
+                stz - max_z
+            }
         } else {
             face_empty.2 + dz - half_z - min_z
         };
@@ -303,11 +309,7 @@ pub fn preview_rock_cluster_coords(
             face_empty.2 + (sink_n - 1) * nz,
         )
     } else {
-        (
-            face_empty.0 - nx,
-            face_empty.1 - ny,
-            face_empty.2 - nz,
-        )
+        (face_empty.0 - nx, face_empty.1 - ny, face_empty.2 - nz)
     };
 
     let mut out = Vec::new();
@@ -351,17 +353,29 @@ pub fn preview_rock_cluster_coords(
         let half_z = (max_z - min_z) / 2;
 
         let ox = if nx != 0 {
-            if nx > 0 { stx - min_x } else { stx - max_x }
+            if nx > 0 {
+                stx - min_x
+            } else {
+                stx - max_x
+            }
         } else {
             face_empty.0 + dx - half_x - min_x
         };
         let oy = if ny != 0 {
-            if ny > 0 { sty - min_y } else { sty - max_y }
+            if ny > 0 {
+                sty - min_y
+            } else {
+                sty - max_y
+            }
         } else {
             face_empty.1 + dy - half_y - min_y
         };
         let oz = if nz != 0 {
-            if nz > 0 { stz - min_z } else { stz - max_z }
+            if nz > 0 {
+                stz - min_z
+            } else {
+                stz - max_z
+            }
         } else {
             face_empty.2 + dz - half_z - min_z
         };

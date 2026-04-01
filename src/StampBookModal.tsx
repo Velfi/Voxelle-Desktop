@@ -23,12 +23,7 @@ type Props = {
   onUseStamp: (entries: StampBookEntryTuple[]) => void;
 };
 
-export function StampBookModal({
-  open,
-  onClose,
-  selectionCount,
-  onUseStamp,
-}: Props) {
+export function StampBookModal({ open, onClose, selectionCount, onUseStamp }: Props) {
   const [stamps, setStamps] = useState<StampBookRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
@@ -69,7 +64,7 @@ export function StampBookModal({
       setEditName(selected.name);
       setEditTags(normalizeStampTags(selected.tags).join(", "));
     }
-  }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selected?.id]);
 
   const filtered = stamps.filter((s) => stampMatchesSearch(s, search));
 
@@ -117,9 +112,13 @@ export function StampBookModal({
         "get_selection_as_stamp_entries",
       );
       if (!entries || entries.length === 0) return;
-      const tupleEntries: StampBookEntryTuple[] = entries.map(
-        ([dx, dy, dz, color, mat]) => [dx, dy, dz, color, mat],
-      );
+      const tupleEntries: StampBookEntryTuple[] = entries.map(([dx, dy, dz, color, mat]) => [
+        dx,
+        dy,
+        dz,
+        color,
+        mat,
+      ]);
       await saveNewStamp(name, tupleEntries, saveTags);
       setSaveName("");
       setSaveTags("");
@@ -207,9 +206,7 @@ export function StampBookModal({
                     role="option"
                     aria-selected={s.id === selectedId}
                     className={
-                      s.id === selectedId
-                        ? "stamp-book-item is-selected"
-                        : "stamp-book-item"
+                      s.id === selectedId ? "stamp-book-item is-selected" : "stamp-book-item"
                     }
                     onClick={() => handleSelect(s.id)}
                   >
@@ -241,7 +238,8 @@ export function StampBookModal({
                         </span>
                       ) : null}
                       <span className="stamp-book-item-count">
-                        {s.entries.length} voxel{s.entries.length !== 1 ? "s" : ""}
+                        {s.entries.length} voxel
+                        {s.entries.length !== 1 ? "s" : ""}
                       </span>
                     </div>
                   </button>
@@ -295,9 +293,7 @@ export function StampBookModal({
                             value={editName}
                             onChange={(e) => setEditName(e.target.value)}
                             onBlur={() => void handleSaveName()}
-                            onKeyDown={(e) =>
-                              e.key === "Enter" && void handleSaveName()
-                            }
+                            onKeyDown={(e) => e.key === "Enter" && void handleSaveName()}
                           />
                         </div>
                       </label>
@@ -309,9 +305,7 @@ export function StampBookModal({
                             value={editTags}
                             onChange={(e) => setEditTags(e.target.value)}
                             onBlur={() => void handleSaveTags()}
-                            onKeyDown={(e) =>
-                              e.key === "Enter" && void handleSaveTags()
-                            }
+                            onKeyDown={(e) => e.key === "Enter" && void handleSaveTags()}
                             placeholder="e.g. arch, stone"
                           />
                         </div>
@@ -354,9 +348,7 @@ export function StampBookModal({
                       value={saveName}
                       onChange={(e) => setSaveName(e.target.value)}
                       placeholder="My stamp"
-                      onKeyDown={(e) =>
-                        e.key === "Enter" && void handleSaveStamp()
-                      }
+                      onKeyDown={(e) => e.key === "Enter" && void handleSaveStamp()}
                     />
                   </label>
                   <label className="modal-field">
@@ -377,9 +369,7 @@ export function StampBookModal({
                     <button
                       type="button"
                       className="stamp-book-btn stamp-book-btn--primary"
-                      disabled={
-                        !saveName.trim() || selectionCount === 0 || saving
-                      }
+                      disabled={!saveName.trim() || selectionCount === 0 || saving}
                       onClick={() => void handleSaveStamp()}
                     >
                       {saving ? "Saving…" : "Save selection"}
@@ -400,9 +390,7 @@ export function StampBookModal({
                     <button
                       type="button"
                       className="stamp-book-btn stamp-book-btn--secondary"
-                      disabled={
-                        (search ? filtered : stamps).length === 0
-                      }
+                      disabled={(search ? filtered : stamps).length === 0}
                       onClick={handleExport}
                     >
                       Export to file…
@@ -427,12 +415,8 @@ export function StampBookModal({
                       style={{ display: "none" }}
                       onChange={(e) => void handleImportFile(e)}
                     />
-                    {importError && (
-                      <div className="stamp-book-error">{importError}</div>
-                    )}
-                    {importSuccess && (
-                      <div className="stamp-book-success">{importSuccess}</div>
-                    )}
+                    {importError && <div className="stamp-book-error">{importError}</div>}
+                    {importSuccess && <div className="stamp-book-success">{importSuccess}</div>}
                   </div>
                 </div>
               )}

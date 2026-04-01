@@ -99,7 +99,11 @@ fn signed_dist_to_polygon_boundary(px: f64, py: f64, poly: &[(f64, f64)]) -> f64
 /// Convex hull via Andrew's monotone chain. Returns CCW-ordered hull.
 fn convex_hull_2d(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
     let mut pts: Vec<(f64, f64)> = points.to_vec();
-    pts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap().then(a.1.partial_cmp(&b.1).unwrap()));
+    pts.sort_by(|a, b| {
+        a.0.partial_cmp(&b.0)
+            .unwrap()
+            .then(a.1.partial_cmp(&b.1).unwrap())
+    });
     pts.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-12 && (a.1 - b.1).abs() < 1e-12);
     let n = pts.len();
     if n <= 1 {
@@ -115,16 +119,14 @@ fn convex_hull_2d(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
 
     let mut lower: Vec<(f64, f64)> = Vec::new();
     for &p in &pts {
-        while lower.len() >= 2 && cross2(lower[lower.len() - 2], lower[lower.len() - 1], p) <= 0.0
-        {
+        while lower.len() >= 2 && cross2(lower[lower.len() - 2], lower[lower.len() - 1], p) <= 0.0 {
             lower.pop();
         }
         lower.push(p);
     }
     let mut upper: Vec<(f64, f64)> = Vec::new();
     for &p in pts.iter().rev() {
-        while upper.len() >= 2 && cross2(upper[upper.len() - 2], upper[upper.len() - 1], p) <= 0.0
-        {
+        while upper.len() >= 2 && cross2(upper[upper.len() - 2], upper[upper.len() - 1], p) <= 0.0 {
             upper.pop();
         }
         upper.push(p);
@@ -138,9 +140,7 @@ fn convex_hull_2d(points: &[(f64, f64)]) -> Vec<(f64, f64)> {
 /// Oriented bounding rectangle (minimum area) of 2D points. Returns (center, half_extents, axes).
 /// axes[0] = longer axis direction, axes[1] = shorter axis direction.
 /// half_extents = (half_length_along_axes0, half_length_along_axes1).
-fn oriented_bounding_rect(
-    hull: &[(f64, f64)],
-) -> ((f64, f64), (f64, f64), [(f64, f64); 2]) {
+fn oriented_bounding_rect(hull: &[(f64, f64)]) -> ((f64, f64), (f64, f64), [(f64, f64); 2]) {
     if hull.len() < 2 {
         let c = hull.first().copied().unwrap_or((0.0, 0.0));
         return (c, (0.0, 0.0), [(1.0, 0.0), (0.0, 1.0)]);
@@ -316,7 +316,11 @@ fn roof_height_for_style(
             let axis_idx = if gable_orientation == 1 { 0 } else { 1 };
             let ax = obb_axes[axis_idx];
             let proj = (u - obb_center.0) * ax.0 + (v - obb_center.1) * ax.1;
-            let half_val = if axis_idx == 0 { obb_half.0 } else { obb_half.1 };
+            let half_val = if axis_idx == 0 {
+                obb_half.0
+            } else {
+                obb_half.1
+            };
             let ratio = (1.0 - (proj.abs() / half_val.max(1.0))).clamp(0.0, 1.0);
             t + (ratio * h).round() as i32
         }
@@ -326,7 +330,11 @@ fn roof_height_for_style(
             let axis_idx = if gable_orientation == 1 { 0 } else { 1 };
             let ax = obb_axes[axis_idx];
             let proj = (u - obb_center.0) * ax.0 + (v - obb_center.1) * ax.1;
-            let half_val = if axis_idx == 0 { obb_half.0 } else { obb_half.1 };
+            let half_val = if axis_idx == 0 {
+                obb_half.0
+            } else {
+                obb_half.1
+            };
             let half = half_val.max(1.0);
             let skew = salt_skew.clamp(-0.8, 0.8) as f64;
             let ridge_offset = skew * half;
@@ -366,7 +374,11 @@ fn roof_height_for_style(
             let axis_idx = if gable_orientation == 1 { 0 } else { 1 };
             let ax = obb_axes[axis_idx];
             let proj = (u - obb_center.0) * ax.0 + (v - obb_center.1) * ax.1;
-            let half_val = if axis_idx == 0 { obb_half.0 } else { obb_half.1 };
+            let half_val = if axis_idx == 0 {
+                obb_half.0
+            } else {
+                obb_half.1
+            };
             let half = half_val.max(1.0);
             let normalized = (proj.abs() / half).clamp(0.0, 1.0);
             // Semicircular profile: sqrt(1 - x^2)
@@ -398,7 +410,11 @@ fn roof_height_for_style(
             let axis_idx = if gable_orientation == 1 { 0 } else { 1 };
             let ax = obb_axes[axis_idx];
             let proj = (u - obb_center.0) * ax.0 + (v - obb_center.1) * ax.1;
-            let half_val = if axis_idx == 0 { obb_half.0 } else { obb_half.1 };
+            let half_val = if axis_idx == 0 {
+                obb_half.0
+            } else {
+                obb_half.1
+            };
             let half = half_val.max(1.0);
             let normalized = (proj.abs() / half).clamp(0.0, 1.0);
             let br = break_ratio.clamp(0.1, 0.9) as f64;
@@ -444,7 +460,11 @@ fn roof_height_for_style(
             let axis_idx = if gable_orientation == 1 { 0 } else { 1 };
             let ax = obb_axes[axis_idx];
             let proj = (u - obb_center.0) * ax.0 + (v - obb_center.1) * ax.1;
-            let half_val = if axis_idx == 0 { obb_half.0 } else { obb_half.1 };
+            let half_val = if axis_idx == 0 {
+                obb_half.0
+            } else {
+                obb_half.1
+            };
             let half = half_val.max(1.0);
             let gable_ratio = (1.0 - (proj.abs() / half)).clamp(0.0, 1.0);
             let gable_h = (h - wh).max(0.0);
@@ -479,10 +499,7 @@ pub fn preview_roof_voxels(
         .iter()
         .enumerate()
         .filter(|(i, p)| {
-            *i == 0
-                || pins[i - 1][0] != p[0]
-                || pins[i - 1][1] != p[1]
-                || pins[i - 1][2] != p[2]
+            *i == 0 || pins[i - 1][0] != p[0] || pins[i - 1][1] != p[1] || pins[i - 1][2] != p[2]
         })
         .map(|(_, p)| *p)
         .collect();
@@ -492,25 +509,16 @@ pub fn preview_roof_voxels(
     }
 
     let o = [raw[0][0] as f64, raw[0][1] as f64, raw[0][2] as f64];
-    let e1 = v3_sub(
-        [raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64],
-        o,
-    );
+    let e1 = v3_sub([raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64], o);
     let mut nvec = v3_cross(
         e1,
-        v3_sub(
-            [raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64],
-            o,
-        ),
+        v3_sub([raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64], o),
     );
     let mut k = 3usize;
     while v3_len(nvec) < 1e-9 && k < raw.len() {
         nvec = v3_cross(
             e1,
-            v3_sub(
-                [raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64],
-                o,
-            ),
+            v3_sub([raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64], o),
         );
         k += 1;
     }
@@ -593,11 +601,24 @@ pub fn preview_roof_voxels(
                 }
             }
             let rh = roof_height_for_style(
-                uf, vf, style, height, thickness,
-                shed_edge_index, gable_orientation, break_ratio,
-                wall_height, parapet_height, salt_skew,
-                &uv_poly, &hull, centroid,
-                obb_center, obb_half, obb_axes, max_boundary_dist,
+                uf,
+                vf,
+                style,
+                height,
+                thickness,
+                shed_edge_index,
+                gable_orientation,
+                break_ratio,
+                wall_height,
+                parapet_height,
+                salt_skew,
+                &uv_poly,
+                &hull,
+                centroid,
+                obb_center,
+                obb_half,
+                obb_axes,
+                max_boundary_dist,
             );
             if rh > 0 {
                 footprint.push(FootprintCell { iu, iv, roof_h: rh });
@@ -614,9 +635,18 @@ pub fn preview_roof_voxels(
 
     for cell in &footprint {
         for layer in 0..cell.roof_h {
-            let wx = o[0] + cell.iu as f64 * uaxis[0] + cell.iv as f64 * vaxis[0] + layer as f64 * nunit[0];
-            let wy = o[1] + cell.iu as f64 * uaxis[1] + cell.iv as f64 * vaxis[1] + layer as f64 * nunit[1];
-            let wz = o[2] + cell.iu as f64 * uaxis[2] + cell.iv as f64 * vaxis[2] + layer as f64 * nunit[2];
+            let wx = o[0]
+                + cell.iu as f64 * uaxis[0]
+                + cell.iv as f64 * vaxis[0]
+                + layer as f64 * nunit[0];
+            let wy = o[1]
+                + cell.iu as f64 * uaxis[1]
+                + cell.iv as f64 * vaxis[1]
+                + layer as f64 * nunit[1];
+            let wz = o[2]
+                + cell.iu as f64 * uaxis[2]
+                + cell.iv as f64 * vaxis[2]
+                + layer as f64 * nunit[2];
             let x = wx.round() as i32;
             let y = wy.round() as i32;
             let z = wz.round() as i32;
@@ -630,16 +660,19 @@ pub fn preview_roof_voxels(
         let occupied: HashSet<(i32, i32, i32)> =
             all_coords.iter().map(|&(x, y, z, _)| (x, y, z)).collect();
         let neighbors: [(i32, i32, i32); 6] = [
-            (1, 0, 0), (-1, 0, 0),
-            (0, 1, 0), (0, -1, 0),
-            (0, 0, 1), (0, 0, -1),
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
         ];
         all_coords
             .iter()
             .filter(|&&(x, y, z, _)| {
-                neighbors.iter().any(|&(dx, dy, dz)| {
-                    !occupied.contains(&(x + dx, y + dy, z + dz))
-                })
+                neighbors
+                    .iter()
+                    .any(|&(dx, dy, dz)| !occupied.contains(&(x + dx, y + dy, z + dz)))
             })
             .map(|&(x, y, z, _)| (x, y, z))
             .collect()
@@ -647,8 +680,6 @@ pub fn preview_roof_voxels(
         all_coords.iter().map(|&(x, y, z, _)| (x, y, z)).collect()
     }
 }
-
-
 
 /// Generate a roof from polygon pin points. Mirrors the web `getRoofFromPinsVoxels`.
 ///
@@ -677,10 +708,7 @@ pub fn generate_roof_from_pins(
         .iter()
         .enumerate()
         .filter(|(i, p)| {
-            *i == 0
-                || pins[i - 1][0] != p[0]
-                || pins[i - 1][1] != p[1]
-                || pins[i - 1][2] != p[2]
+            *i == 0 || pins[i - 1][0] != p[0] || pins[i - 1][1] != p[1] || pins[i - 1][2] != p[2]
         })
         .map(|(_, p)| *p)
         .collect();
@@ -691,25 +719,16 @@ pub fn generate_roof_from_pins(
 
     // --- Determine plane normal from first 3+ non-collinear points ---
     let o = [raw[0][0] as f64, raw[0][1] as f64, raw[0][2] as f64];
-    let e1 = v3_sub(
-        [raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64],
-        o,
-    );
+    let e1 = v3_sub([raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64], o);
     let mut nvec = v3_cross(
         e1,
-        v3_sub(
-            [raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64],
-            o,
-        ),
+        v3_sub([raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64], o),
     );
     let mut k = 3usize;
     while v3_len(nvec) < 1e-9 && k < raw.len() {
         nvec = v3_cross(
             e1,
-            v3_sub(
-                [raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64],
-                o,
-            ),
+            v3_sub([raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64], o),
         );
         k += 1;
     }
@@ -830,11 +849,7 @@ pub fn generate_roof_from_pins(
             );
 
             if rh > 0 {
-                footprint.push(FootprintCell {
-                    iu,
-                    iv,
-                    roof_h: rh,
-                });
+                footprint.push(FootprintCell { iu, iv, roof_h: rh });
             }
         }
     }
@@ -852,9 +867,18 @@ pub fn generate_roof_from_pins(
 
     for cell in &footprint {
         for layer in 0..cell.roof_h {
-            let wx = o[0] + cell.iu as f64 * uaxis[0] + cell.iv as f64 * vaxis[0] + layer as f64 * nunit[0];
-            let wy = o[1] + cell.iu as f64 * uaxis[1] + cell.iv as f64 * vaxis[1] + layer as f64 * nunit[1];
-            let wz = o[2] + cell.iu as f64 * uaxis[2] + cell.iv as f64 * vaxis[2] + layer as f64 * nunit[2];
+            let wx = o[0]
+                + cell.iu as f64 * uaxis[0]
+                + cell.iv as f64 * vaxis[0]
+                + layer as f64 * nunit[0];
+            let wy = o[1]
+                + cell.iu as f64 * uaxis[1]
+                + cell.iv as f64 * vaxis[1]
+                + layer as f64 * nunit[1];
+            let wz = o[2]
+                + cell.iu as f64 * uaxis[2]
+                + cell.iv as f64 * vaxis[2]
+                + layer as f64 * nunit[2];
             let x = wx.round() as i32;
             let y = wy.round() as i32;
             let z = wz.round() as i32;
@@ -879,9 +903,9 @@ pub fn generate_roof_from_pins(
         all_coords
             .iter()
             .filter(|&&(x, y, z, _)| {
-                neighbors.iter().any(|&(dx, dy, dz)| {
-                    !occupied.contains(&(x + dx, y + dy, z + dz))
-                })
+                neighbors
+                    .iter()
+                    .any(|&(dx, dy, dz)| !occupied.contains(&(x + dx, y + dy, z + dz)))
             })
             .map(|&(x, y, z, _)| (x, y, z))
             .collect()

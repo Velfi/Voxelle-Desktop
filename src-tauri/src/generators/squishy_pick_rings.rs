@@ -16,8 +16,7 @@ pub fn append_squishy_metaball_pick_rings(
         let cy = b.y as f32 + 0.5;
         let cz = b.z as f32 + 0.5;
         let r = b.radius.max(0.2);
-        let delete_hover =
-            session.mode == SquishyMode::Delete && delete_hover_id == Some(b.id);
+        let delete_hover = session.mode == SquishyMode::Delete && delete_hover_id == Some(b.id);
         let is_selected = session.selected_id == Some(b.id);
         let color = if delete_hover {
             [1.0, 51.0 / 255.0, 85.0 / 255.0]

@@ -316,16 +316,8 @@ fn find_non_collinear_triple(vertices: &[[i32; 3]]) -> Option<(usize, usize, usi
                 let a = vertices[i];
                 let b = vertices[j];
                 let c = vertices[k];
-                let ab = (
-                    b[0] - a[0],
-                    b[1] - a[1],
-                    b[2] - a[2],
-                );
-                let ac = (
-                    c[0] - a[0],
-                    c[1] - a[1],
-                    c[2] - a[2],
-                );
+                let ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+                let ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2]);
                 let cx = ab.1 * ac.2 - ab.2 * ac.1;
                 let cy = ab.2 * ac.0 - ab.0 * ac.2;
                 let cz = ab.0 * ac.1 - ab.1 * ac.0;
@@ -341,16 +333,8 @@ fn find_non_collinear_triple(vertices: &[[i32; 3]]) -> Option<(usize, usize, usi
 }
 
 fn are_coplanar(vertices: &[[i32; 3]], a: [i32; 3], b: [i32; 3], c: [i32; 3]) -> bool {
-    let ab = (
-        b[0] - a[0],
-        b[1] - a[1],
-        b[2] - a[2],
-    );
-    let ac = (
-        c[0] - a[0],
-        c[1] - a[1],
-        c[2] - a[2],
-    );
+    let ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    let ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2]);
     let mut nx = (ab.1 * ac.2 - ab.2 * ac.1) as f64;
     let mut ny = (ab.2 * ac.0 - ab.0 * ac.2) as f64;
     let mut nz = (ab.0 * ac.1 - ab.1 * ac.0) as f64;
@@ -383,16 +367,8 @@ fn fill_coplanar_polygon(vertices: &[[i32; 3]]) -> Option<Vec<VoxelCoord>> {
     if !are_coplanar(vertices, a, b, c) {
         return None;
     }
-    let ab = (
-        b[0] - a[0],
-        b[1] - a[1],
-        b[2] - a[2],
-    );
-    let ac = (
-        c[0] - a[0],
-        c[1] - a[1],
-        c[2] - a[2],
-    );
+    let ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    let ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2]);
     let mut nx = (ab.1 * ac.2 - ab.2 * ac.1) as f64;
     let mut ny = (ab.2 * ac.0 - ab.0 * ac.2) as f64;
     let mut nz = (ab.0 * ac.1 - ab.1 * ac.0) as f64;
@@ -543,16 +519,8 @@ fn fill_coplanar_hull(vertices: &[[i32; 3]]) -> Option<Vec<VoxelCoord>> {
     if !are_coplanar(vertices, a, b, c) {
         return None;
     }
-    let ab = (
-        b[0] - a[0],
-        b[1] - a[1],
-        b[2] - a[2],
-    );
-    let ac = (
-        c[0] - a[0],
-        c[1] - a[1],
-        c[2] - a[2],
-    );
+    let ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    let ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2]);
     let mut nx = (ab.1 * ac.2 - ab.2 * ac.1) as f64;
     let mut ny = (ab.2 * ac.0 - ab.0 * ac.2) as f64;
     let mut nz = (ab.0 * ac.1 - ab.1 * ac.0) as f64;
@@ -874,10 +842,7 @@ fn stroke_aux_is_solid_family(aux: &StrokeAux) -> bool {
 }
 
 /// Web `getSolidPolygonBasePositions`: corners projected onto plane through first vertex, orthogonal to `plane_axis` / auto-detected axis.
-fn solid_polygon_fixed_plane(
-    vertices: &[[i32; 3]],
-    plane_axis: PlaneAxis,
-) -> Option<(usize, i32)> {
+fn solid_polygon_fixed_plane(vertices: &[[i32; 3]], plane_axis: PlaneAxis) -> Option<(usize, i32)> {
     if vertices.is_empty() {
         return None;
     }
@@ -971,11 +936,7 @@ fn fill_solid_polygon_hull_projected(
     Some(lift_plane_2d_to_voxels(fixed_axis, fixed_coord, &filled))
 }
 
-fn circle_radius_in_plane(
-    center: [i32; 3],
-    edge: [i32; 3],
-    plane_axis: usize,
-) -> i32 {
+fn circle_radius_in_plane(center: [i32; 3], edge: [i32; 3], plane_axis: usize) -> i32 {
     let r = match plane_axis {
         0 => {
             let dy = edge[1] - center[1];
@@ -1082,7 +1043,11 @@ fn intersect_ray_axis_aligned_plane(
 }
 
 /// Web `getAxisAlignedPlaneFromNormal`: filled rectangle in the axis-aligned face plane through `a`, spanning to `b`.
-fn fill_axis_aligned_plane_rectangle(a: VoxelCoord, b: VoxelCoord, fixed_axis: usize) -> Vec<VoxelCoord> {
+fn fill_axis_aligned_plane_rectangle(
+    a: VoxelCoord,
+    b: VoxelCoord,
+    fixed_axis: usize,
+) -> Vec<VoxelCoord> {
     let mut out = Vec::new();
     match fixed_axis {
         0 => {
@@ -1126,7 +1091,12 @@ fn fill_axis_aligned_plane_rectangle(a: VoxelCoord, b: VoxelCoord, fixed_axis: u
 }
 
 /// Outer rectangle minus inner rectangle eroded by `wall` in the two free axes (hollow plane shell).
-fn hollow_plane_rectangle_frame(a: VoxelCoord, b: VoxelCoord, fixed_axis: usize, wall: i32) -> Vec<VoxelCoord> {
+fn hollow_plane_rectangle_frame(
+    a: VoxelCoord,
+    b: VoxelCoord,
+    fixed_axis: usize,
+    wall: i32,
+) -> Vec<VoxelCoord> {
     let w = wall.max(1);
     let full = fill_axis_aligned_plane_rectangle(a, b, fixed_axis);
     let coord = |c: VoxelCoord, ax: usize| -> i32 {
@@ -1162,12 +1132,11 @@ fn hollow_plane_rectangle_frame(a: VoxelCoord, b: VoxelCoord, fixed_axis: usize,
         1 => (iu1, a.1, iv1),
         _ => (iu1, iv1, a.2),
     };
-    let inner: HashSet<VoxelCoord> = fill_axis_aligned_plane_rectangle(inner_a, inner_b, fixed_axis)
-        .into_iter()
-        .collect();
-    full.into_iter()
-        .filter(|c| !inner.contains(c))
-        .collect()
+    let inner: HashSet<VoxelCoord> =
+        fill_axis_aligned_plane_rectangle(inner_a, inner_b, fixed_axis)
+            .into_iter()
+            .collect();
+    full.into_iter().filter(|c| !inner.contains(c)).collect()
 }
 
 const NEIGHBORS6: [(i32, i32, i32); 6] = [
@@ -1254,11 +1223,7 @@ pub fn axis_aligned_cuboid_from_plane(
         if !plane_hollow {
             return plane_positions;
         }
-        return hollow_solid_to_shell(
-            &plane_positions,
-            wall,
-            neighbors_in_fixed_plane(fixed_axis),
-        );
+        return hollow_solid_to_shell(&plane_positions, wall, neighbors_in_fixed_plane(fixed_axis));
     }
     let mut positions: Vec<VoxelCoord> = plane_positions.clone();
     let comp = match fixed_axis {
@@ -1346,11 +1311,7 @@ fn axis_aligned_circle_from_normal(
     if !hollow {
         return filled;
     }
-    hollow_solid_to_shell(
-        &filled,
-        wall,
-        neighbors_in_fixed_plane(fixed_axis),
-    )
+    hollow_solid_to_shell(&filled, wall, neighbors_in_fixed_plane(fixed_axis))
 }
 
 /// Web `getAxisAlignedCylinder` — `face_n*` outward air→solid (`prev - hit`).
@@ -1687,16 +1648,20 @@ pub fn stroke_anchor_centers_with_mode(
     let snap = aux.stroke_snap_to_surface;
     match mode {
         DrawStrokeMode::Fill => Vec::new(),
-        DrawStrokeMode::Precise => anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-            .into_iter()
-            .collect(),
+        DrawStrokeMode::Precise => {
+            anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
+                .into_iter()
+                .collect()
+        }
         DrawStrokeMode::Spray => {
             // When constrain-to-plane is active, raycast against the invisible plane.
             let anchor_fn = |sx_: f32, sy_: f32| -> Option<VoxelCoord> {
                 if let Some((pp, pn)) = spray_constraint_plane {
                     crate::voxel_edit::anchor_on_plane(camera, width, height, sx_, sy_, pp, pn)
                 } else {
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx_, sy_)
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx_, sy_,
+                    )
                 }
             };
             if let Some((px, py)) = stroke_segment_prev {
@@ -1720,23 +1685,35 @@ pub fn stroke_anchor_centers_with_mode(
             };
             if let Some((lsx, lsy)) = stroke_line_start {
                 match (
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, lsx, lsy),
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy),
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, lsx, lsy,
+                    ),
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    ),
                 ) {
                     (Some(a), Some(b)) => line_pts(a, b),
-                    _ => anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                        .into_iter()
-                        .collect(),
+                    _ => anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    )
+                    .into_iter()
+                    .collect(),
                 }
             } else if let Some((px, py)) = stroke_segment_prev {
                 match (
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, px, py),
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy),
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, px, py,
+                    ),
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    ),
                 ) {
                     (Some(a), Some(b)) => line_pts(a, b),
-                    _ => anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                        .into_iter()
-                        .collect(),
+                    _ => anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    )
+                    .into_iter()
+                    .collect(),
                 }
             } else {
                 anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
@@ -1777,7 +1754,8 @@ pub fn stroke_anchor_centers_with_mode(
             };
             let face_ax = face_normal_axis(prev, hit);
             let plane_ax = axis_from_plane_axis(plane_axis, face_ax).unwrap_or(2);
-            let anchor = anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy);
+            let anchor =
+                anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy);
             let Some(c) = anchor else {
                 return Vec::new();
             };
@@ -1791,16 +1769,7 @@ pub fn stroke_anchor_centers_with_mode(
             if let (Some(&cc), Some(&ce)) = (aux.circle_center.as_ref(), aux.circle_edge.as_ref()) {
                 let center = (cc[0], cc[1], cc[2]);
                 let plane_ax = circle_plane_axis_two_click(
-                    plane_axis,
-                    file,
-                    voxel_map,
-                    camera,
-                    width,
-                    height,
-                    sx,
-                    sy,
-                    cc,
-                    ce,
+                    plane_axis, file, voxel_map, camera, width, height, sx, sy, cc, ce,
                 );
                 let r = circle_radius_in_plane(cc, ce, plane_ax);
                 disk_in_axis_plane(center, plane_ax, r)
@@ -1822,9 +1791,11 @@ pub fn stroke_anchor_centers_with_mode(
                 ) {
                     v
                 } else {
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                        .into_iter()
-                        .collect()
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    )
+                    .into_iter()
+                    .collect()
                 }
             } else {
                 anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
@@ -1837,17 +1808,7 @@ pub fn stroke_anchor_centers_with_mode(
                 let wall = aux.cuboid_hollow_wall_thickness.unwrap_or(1);
                 if let Some(depth) = aux.cuboid_depth {
                     if let Some((a, b, plane_ax, hit, prev)) = cuboid_drag_plane_geometry(
-                        tool,
-                        file,
-                        voxel_map,
-                        camera,
-                        width,
-                        height,
-                        lsx,
-                        lsy,
-                        sx,
-                        sy,
-                        plane_axis,
+                        tool, file, voxel_map, camera, width, height, lsx, lsy, sx, sy, plane_axis,
                         snap,
                     ) {
                         // Negative depth + Add: flip anchor & normal so the
@@ -1887,9 +1848,11 @@ pub fn stroke_anchor_centers_with_mode(
                 ) {
                     v
                 } else {
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                        .into_iter()
-                        .collect()
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    )
+                    .into_iter()
+                    .collect()
                 }
             } else {
                 anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
@@ -1902,17 +1865,7 @@ pub fn stroke_anchor_centers_with_mode(
                 let wall = aux.cuboid_hollow_wall_thickness.unwrap_or(1);
                 if let Some(depth) = aux.cylinder_depth {
                     if let Some((a, b, _plane_ax, hit, prev)) = cuboid_drag_plane_geometry(
-                        tool,
-                        file,
-                        voxel_map,
-                        camera,
-                        width,
-                        height,
-                        lsx,
-                        lsy,
-                        sx,
-                        sy,
-                        plane_axis,
+                        tool, file, voxel_map, camera, width, height, lsx, lsy, sx, sy, plane_axis,
                         snap,
                     ) {
                         let taper = aux.cylinder_taper_pct.unwrap_or(0).clamp(0, 100);
@@ -1949,9 +1902,11 @@ pub fn stroke_anchor_centers_with_mode(
                 ) {
                     v
                 } else {
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                        .into_iter()
-                        .collect()
+                    anchor_for_stroke_edit(
+                        tool, snap, file, voxel_map, camera, width, height, sx, sy,
+                    )
+                    .into_iter()
+                    .collect()
                 }
             } else if let (Some(a), Some(b)) = (aux.cylinder_a, aux.cylinder_b) {
                 cylinder_axis_aligned_caps(
@@ -2019,34 +1974,14 @@ mod tests {
     #[test]
     fn axis_aligned_cuboid_depth_zero_matches_plane() {
         let plane = fill_axis_aligned_plane_rectangle((0, 0, 0), (1, 1, 0), 2);
-        let cuboid = axis_aligned_cuboid_from_plane(
-            (0, 0, 0),
-            (1, 1, 0),
-            0,
-            0,
-            1,
-            0,
-            false,
-            1,
-            2,
-        );
+        let cuboid = axis_aligned_cuboid_from_plane((0, 0, 0), (1, 1, 0), 0, 0, 1, 0, false, 1, 2);
         assert_eq!(cuboid.len(), plane.len());
         assert_eq!(cuboid.len(), 4);
     }
 
     #[test]
     fn axis_aligned_cuboid_depth_one_extends_one_layer() {
-        let result = axis_aligned_cuboid_from_plane(
-            (0, 0, 0),
-            (0, 0, 0),
-            0,
-            0,
-            1,
-            1,
-            false,
-            1,
-            2,
-        );
+        let result = axis_aligned_cuboid_from_plane((0, 0, 0), (0, 0, 0), 0, 0, 1, 1, false, 1, 2);
         assert_eq!(result.len(), 2);
         assert!(result.contains(&(0, 0, 0)));
         assert!(result.contains(&(0, 0, 1)));
@@ -2055,17 +1990,7 @@ mod tests {
     #[test]
     fn axis_aligned_cylinder_depth_one_two_disks_along_normal() {
         // Face +Z: center (0,0,0), edge (2,0,0) → radius 2 in XY at z=0; depth +1 → z=0 and z=1.
-        let cyl = axis_aligned_cylinder_from_plane(
-            (0, 0, 0),
-            (2, 0, 0),
-            0,
-            0,
-            1,
-            1,
-            0,
-            false,
-            1,
-        );
+        let cyl = axis_aligned_cylinder_from_plane((0, 0, 0), (2, 0, 0), 0, 0, 1, 1, 0, false, 1);
         let base = disk_in_axis_plane((0, 0, 0), 2, 2);
         let top = disk_in_axis_plane((0, 0, 1), 2, 2);
         assert_eq!(cyl.len(), base.len() + top.len());
@@ -2178,25 +2103,18 @@ mod tests {
     /// Web `getPolygonVoxels` non-coplanar branch: 3D convex hull, integer voxel centers inside.
     #[test]
     fn non_coplanar_tetrahedron_hull_includes_interior_lattice() {
-        let v = [
-            [0, 0, 0],
-            [4, 0, 0],
-            [0, 4, 0],
-            [0, 0, 4],
-        ];
+        let v = [[0, 0, 0], [4, 0, 0], [0, 4, 0], [0, 0, 4]];
         let filled = fill_non_coplanar_convex_hull_voxels(&v).expect("expected 3D hull fill");
-        assert!(filled.contains(&(1, 1, 1)), "interior lattice point should be inside hull");
+        assert!(
+            filled.contains(&(1, 1, 1)),
+            "interior lattice point should be inside hull"
+        );
         assert!(filled.len() > 8);
     }
 
     #[test]
     fn polygon_fill_non_coplanar_uses_hull() {
-        let v = [
-            [0, 0, 0],
-            [4, 0, 0],
-            [0, 4, 0],
-            [0, 0, 4],
-        ];
+        let v = [[0, 0, 0], [4, 0, 0], [0, 4, 0], [0, 0, 4]];
         let filled = fill_polygon_axis_aligned(&v);
         assert!(filled.contains(&(1, 1, 1)));
     }

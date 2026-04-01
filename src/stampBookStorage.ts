@@ -85,9 +85,7 @@ export async function deleteStamp(id: string): Promise<void> {
   });
 }
 
-export async function getStampById(
-  id: string,
-): Promise<StampBookRecord | null> {
+export async function getStampById(id: string): Promise<StampBookRecord | null> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readonly");
@@ -103,9 +101,7 @@ export async function getStampById(
   });
 }
 
-export async function replaceAllOrders(
-  records: StampBookRecord[],
-): Promise<void> {
+export async function replaceAllOrders(records: StampBookRecord[]): Promise<void> {
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, "readwrite");
@@ -142,18 +138,13 @@ export function normalizeStampTags(raw: unknown): string[] {
   return [];
 }
 
-export function stampMatchesSearch(
-  record: StampBookRecord,
-  query: string,
-): boolean {
+export function stampMatchesSearch(record: StampBookRecord, query: string): boolean {
   const q = query.trim().toLowerCase();
   if (!q) return true;
   const name = record.name.toLowerCase();
   const tags = normalizeStampTags(record.tags);
   const words = q.split(/\s+/).filter(Boolean);
-  return words.every(
-    (word) => name.includes(word) || tags.some((t) => t.includes(word)),
-  );
+  return words.every((word) => name.includes(word) || tags.some((t) => t.includes(word)));
 }
 
 export type ParsedStampImport = {
@@ -193,12 +184,9 @@ export function parseStampLibraryJson(
           !Number.isFinite(dx + dy + dz + c)
         )
           continue;
-        const mat =
-          row.length >= 5 && typeof row[4] === "string" ? row[4] : undefined;
+        const mat = row.length >= 5 && typeof row[4] === "string" ? row[4] : undefined;
         entries.push(
-          mat !== undefined
-            ? [dx, dy, dz, c & 0xffffff, mat]
-            : [dx, dy, dz, c & 0xffffff],
+          mat !== undefined ? [dx, dy, dz, c & 0xffffff, mat] : [dx, dy, dz, c & 0xffffff],
         );
       }
       if (entries.length === 0) continue;
@@ -208,8 +196,7 @@ export function parseStampLibraryJson(
         tags: normalizeStampTags(obj.tags),
       });
     }
-    if (out.length === 0)
-      return { ok: false, error: "No valid stamps found in file." };
+    if (out.length === 0) return { ok: false, error: "No valid stamps found in file." };
     return { ok: true, stamps: out };
   } catch {
     return { ok: false, error: "Invalid JSON." };
@@ -224,9 +211,7 @@ export function stampRecordsToLibraryJson(records: StampBookRecord[]): string {
         id: r.id,
         name: r.name,
         entries: r.entries,
-        ...(normalizeStampTags(r.tags).length > 0
-          ? { tags: normalizeStampTags(r.tags) }
-          : {}),
+        ...(normalizeStampTags(r.tags).length > 0 ? { tags: normalizeStampTags(r.tags) } : {}),
       })),
     },
     null,

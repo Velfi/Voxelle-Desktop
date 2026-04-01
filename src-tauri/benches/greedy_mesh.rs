@@ -74,7 +74,9 @@ fn bench_mapped_and_chunked(c: &mut Criterion) {
     });
 
     c.bench_function("build_greedy_mesh_chunked solid 20³", |b| {
-        b.iter(|| greedy_mesh::build_greedy_mesh_chunked(black_box(&voxels), cs, black_box(NO_OBJECTS)))
+        b.iter(|| {
+            greedy_mesh::build_greedy_mesh_chunked(black_box(&voxels), cs, black_box(NO_OBJECTS))
+        })
     });
 }
 
@@ -161,9 +163,17 @@ fn bench_mesh_bounds(c: &mut Criterion) {
     c.bench_function("mesh_bounds_from_voxels 64³ solid", |b| {
         b.iter(|| greedy_mesh::mesh_bounds_from_voxels(black_box(&voxels)))
     });
-    c.bench_function("mesh_bounds_from_voxels_world 64³ solid (identity objects)", |b| {
-        b.iter(|| greedy_mesh::mesh_bounds_from_voxels_world(black_box(&voxels), black_box(objs.as_slice())))
-    });
+    c.bench_function(
+        "mesh_bounds_from_voxels_world 64³ solid (identity objects)",
+        |b| {
+            b.iter(|| {
+                greedy_mesh::mesh_bounds_from_voxels_world(
+                    black_box(&voxels),
+                    black_box(objs.as_slice()),
+                )
+            })
+        },
+    );
 }
 
 /// Build the `AHashMap<VoxelCoord, Voxel>` occupancy map that

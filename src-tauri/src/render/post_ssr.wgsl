@@ -1,17 +1,17 @@
-/// Screen-Space Reflections pass.
+/// Screen-Space Reflections pass (opaque metals).
 ///
-/// Runs after the opaque pass and texture copy, before the transmission pass.
+/// Runs after the opaque pass and texture copy, before the OIT pass.
 /// Outputs (rgb = reflected colour, a = confidence 0..1) into `ssr_texture`.
-/// The transmission pass (`fs_trans`) reads this and blends it via Fresnel.
+/// The OIT composite reads this and blends it onto opaque pixels.
 ///
 /// Algorithm:
-///   1. Reconstruct world position from depth buffer.
-///   2. Reconstruct world normal via cross-product of adjacent depth samples
-///      (finite-differences). Works well for axis-aligned voxel faces.
-///   3. Reflect the view ray around the surface normal.
-///   4. March the reflected ray in world space, projecting each step back to
+///   1. Read world normal + metalness from the GBuffer.
+///   2. Skip non-metallic pixels (early-out).
+///   3. Reconstruct world position from the depth buffer.
+///   4. Reflect the view ray around the surface normal.
+///   5. March the reflected ray in world space, projecting each step back to
 ///      screen-space UV to compare against the depth buffer.
-///   5. On hit: sample `hdr_opaque`, fade confidence near screen edges and at
+///   6. On hit: sample `hdr_opaque`, fade confidence near screen edges and at
 ///      large march distances to hide the miss boundary.
 
 struct FullscreenOut {
@@ -61,6 +61,7 @@ struct SsrOpts {
     enabled:   f32,
 }
 @group(0) @binding(5) var<uniform> ssr: SsrOpts;
+@group(0) @binding(6) var t_normal: texture_2d<f32>;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -76,33 +77,16 @@ fn reconstruct_world_pos(uv: vec2<f32>) -> vec4<f32> {
     return vec4<f32>(world, 1.0);
 }
 
-/// Reconstruct world-space surface normal at `uv` by finite-differencing the
-/// depth buffer.  Ensures the result faces the camera.
-fn reconstruct_normal(uv: vec2<f32>) -> vec3<f32> {
-    let dx = vec2<f32>(g.screen.z, 0.0);
-    let dy = vec2<f32>(0.0, g.screen.w);
-
-    let p0 = reconstruct_world_pos(uv);
-    let pr = reconstruct_world_pos(uv + dx);
-    let pd = reconstruct_world_pos(uv + dy);
-
-    if p0.w < 0.5 || pr.w < 0.5 || pd.w < 0.5 { return vec3<f32>(0.0); }
-
-    let t = pr.xyz - p0.xyz;
-    let b = pd.xyz - p0.xyz;
-    var n = normalize(cross(t, b));
-
-    // Flip if pointing away from the camera.
-    let v = normalize(g.cam_pos.xyz - p0.xyz);
-    if dot(n, v) < 0.0 { n = -n; }
-    return n;
-}
-
 // ── Main fragment ─────────────────────────────────────────────────────────────
 
 @fragment
 fn fs_ssr(i: FullscreenOut) -> @location(0) vec4<f32> {
     if ssr.enabled < 0.5 { return vec4<f32>(0.0); }
+
+    // Read GBuffer: rgb = world normal * 0.5 + 0.5, a = metalness.
+    let gbuf = textureSample(t_normal, samp_linear, i.uv);
+    let metalness = gbuf.a;
+    if metalness < 0.5 { return vec4<f32>(0.0); }
 
     // Skip sky.
     let depth = textureSample(t_depth, samp_depth, i.uv);
@@ -111,8 +95,7 @@ fn fs_ssr(i: FullscreenOut) -> @location(0) vec4<f32> {
     let p0 = reconstruct_world_pos(i.uv);
     if p0.w < 0.5 { return vec4<f32>(0.0); }
 
-    let n = reconstruct_normal(i.uv);
-    if dot(n, n) < 0.25 { return vec4<f32>(0.0); }
+    let n = normalize(gbuf.rgb * 2.0 - 1.0);
 
     let v       = normalize(g.cam_pos.xyz - p0.xyz);
     let ray_dir = reflect(-v, n);
@@ -120,9 +103,18 @@ fn fs_ssr(i: FullscreenOut) -> @location(0) vec4<f32> {
     // Don't trace rays pointing away from camera (back-facing).
     if dot(ray_dir, v) < 0.0 { return vec4<f32>(0.0); }
 
+    // Metallic Fresnel: metals tint reflections with their base color.
+    // Read base color from the opaque HDR buffer for the F0 term.
+    let base = textureSample(t_color, samp_linear, i.uv).rgb;
+    let ndv = max(dot(n, v), 0.0);
+    let f0 = base * 0.96 + vec3<f32>(0.04);
+    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndv, 5.0);
+    // Scalar fresnel weight for confidence scaling.
+    let fresnel_w = max(max(fresnel.r, fresnel.g), fresnel.b);
+
     let max_steps = i32(clamp(ssr.max_steps, 8.0, 64.0));
-    // Step size in world units; 0.5 gives sub-voxel precision.
-    let step_size = 0.5;
+    let max_dist  = 48.0;
+    let step_size = max_dist / f32(max_steps);
 
     var hit_color  = vec3<f32>(0.0);
     var confidence = 0.0;
@@ -171,5 +163,6 @@ fn fs_ssr(i: FullscreenOut) -> @location(0) vec4<f32> {
         }
     }
 
-    return vec4<f32>(hit_color, confidence * ssr.strength);
+    // Tint reflection by metal Fresnel and scale by SSR strength.
+    return vec4<f32>(hit_color * fresnel, confidence * fresnel_w * ssr.strength);
 }

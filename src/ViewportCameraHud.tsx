@@ -16,10 +16,7 @@ function sortForHit(a: ProjItem, b: ProjItem) {
   return b.depth - a.depth;
 }
 
-export function ViewportCameraHud(props: {
-  flyMode: boolean;
-  loadingOrBusy: boolean;
-}) {
+export function ViewportCameraHud(props: { flyMode: boolean; loadingOrBusy: boolean }) {
   const { flyMode, loadingOrBusy } = props;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const ctxRef = useRef<CanvasRenderingContext2D | null>(null);
@@ -50,9 +47,7 @@ export function ViewportCameraHud(props: {
     ctx.arc(cx, cy, GIZMO_RADIUS * dpr + 1, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(40, 40, 40, 0.55)";
     ctx.fill();
-    ctx.strokeStyle = hoverEdge
-      ? "rgba(255,255,255,0.45)"
-      : "rgba(255,255,255,0.12)";
+    ctx.strokeStyle = hoverEdge ? "rgba(255,255,255,0.45)" : "rgba(255,255,255,0.12)";
     ctx.lineWidth = hoverEdge ? 2.5 * dpr : 1;
     ctx.stroke();
     ctx.restore();
@@ -163,23 +158,16 @@ export function ViewportCameraHud(props: {
   }[] => {
     const items = lastProjRef.current;
     if (!items) return [];
-    return items
-      .map((p, idx) => ({ sx: p.sx, sy: p.sy, depth: p.depth, idx }))
-      .sort(sortForHit);
+    return items.map((p, idx) => ({ sx: p.sx, sy: p.sy, depth: p.depth, idx })).sort(sortForHit);
   }, []);
 
-  const edgeTest = useCallback(
-    (ex: number, ey: number, canvas: HTMLCanvasElement) => {
-      const rect = canvas.getBoundingClientRect();
-      const mx = ex - rect.left - GIZMO_SIZE / 2;
-      const my = ey - rect.top - GIZMO_SIZE / 2;
-      const dist = Math.sqrt(mx * mx + my * my);
-      return (
-        dist >= GIZMO_RADIUS - EDGE_BAND && dist <= GIZMO_RADIUS + EDGE_BAND
-      );
-    },
-    [],
-  );
+  const edgeTest = useCallback((ex: number, ey: number, canvas: HTMLCanvasElement) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = ex - rect.left - GIZMO_SIZE / 2;
+    const my = ey - rect.top - GIZMO_SIZE / 2;
+    const dist = Math.sqrt(mx * mx + my * my);
+    return dist >= GIZMO_RADIUS - EDGE_BAND && dist <= GIZMO_RADIUS + EDGE_BAND;
+  }, []);
 
   const hitTest = useCallback(
     (ex: number, ey: number, canvas: HTMLCanvasElement) => {
@@ -237,8 +225,7 @@ export function ViewportCameraHud(props: {
     if (idx !== hoveredIndexRef.current || nowEdge !== hoverEdgeRef.current) {
       hoveredIndexRef.current = idx;
       hoverEdgeRef.current = nowEdge;
-      canvas.style.cursor =
-        idx >= 0 ? "pointer" : nowEdge ? "ew-resize" : "grab";
+      canvas.style.cursor = idx >= 0 ? "pointer" : nowEdge ? "ew-resize" : "grab";
       draw();
     }
   };
@@ -292,9 +279,7 @@ export function ViewportCameraHud(props: {
         <button
           type="button"
           disabled={loadingOrBusy}
-          onClick={() =>
-            void invoke("camera_zoom_step", { inward: false }).catch(() => {})
-          }
+          onClick={() => void invoke("camera_zoom_step", { inward: false }).catch(() => {})}
           title="Zoom out"
           aria-label="Zoom out"
         >
@@ -304,9 +289,7 @@ export function ViewportCameraHud(props: {
         <button
           type="button"
           disabled={loadingOrBusy}
-          onClick={() =>
-            void invoke("camera_zoom_step", { inward: true }).catch(() => {})
-          }
+          onClick={() => void invoke("camera_zoom_step", { inward: true }).catch(() => {})}
           title="Zoom in"
           aria-label="Zoom in"
         >

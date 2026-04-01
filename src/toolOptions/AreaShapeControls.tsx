@@ -27,16 +27,11 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
 
   return (
     <>
-      <label
-        className="tool-options-range-label"
-        style={{ marginTop: "0.35rem" }}
-      >
+      <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
         <span>{p.selectLabel}</span>
         <select
           value={p.drawStrokeMode}
-          onChange={(ev) =>
-            p.onDrawStrokeModeChange(ev.target.value as DrawStrokeModeApi)
-          }
+          onChange={(ev) => p.onDrawStrokeModeChange(ev.target.value as DrawStrokeModeApi)}
           disabled={p.loading || p.workBusy}
         >
           <option value="line">Line</option>
@@ -52,16 +47,11 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
         </select>
       </label>
       {p.drawStrokeMode === "plane" ? (
-        <label
-          className="tool-options-range-label"
-          style={{ marginTop: "0.25rem" }}
-        >
+        <label className="tool-options-range-label" style={{ marginTop: "0.25rem" }}>
           <span>Plane axis</span>
           <select
             value={p.planeAxis}
-            onChange={(ev) =>
-              p.onPlaneAxisChange(ev.target.value as PlaneAxisApi)
-            }
+            onChange={(ev) => p.onPlaneAxisChange(ev.target.value as PlaneAxisApi)}
             disabled={p.loading || p.workBusy}
           >
             <option value="auto">Auto (face)</option>
@@ -85,9 +75,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             <input
               type="checkbox"
               checked={p.fillSelectDiagonals}
-              onChange={(ev) =>
-                p.onFillSelectDiagonalsChange(ev.target.checked)
-              }
+              onChange={(ev) => p.onFillSelectDiagonalsChange(ev.target.checked)}
               disabled={p.loading || p.workBusy}
             />
             <span>Include diagonals (26-connectivity)</span>
@@ -129,8 +117,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             opacity: 0.9,
           }}
         >
-          Cuboid: drag on a face to set the rectangle, then adjust depth and tap
-          Done.
+          Cuboid: drag on a face to set the rectangle, then adjust depth and tap Done.
         </p>
       ) : null}
       {p.drawStrokeMode === "cylinder" ? (
@@ -141,8 +128,7 @@ export function AreaShapeControls(p: AreaShapeControlsProps) {
             opacity: 0.9,
           }}
         >
-          Cylinder: drag on a face to set the disk, then adjust depth and tap
-          Done.
+          Cylinder: drag on a face to set the disk, then adjust depth and tap Done.
         </p>
       ) : null}
       {showSpraySlider ? (

@@ -149,47 +149,55 @@ fn ao_cell_occludes_for_owner(
         .unwrap_or(false)
 }
 
-/// Neighbor (du, dv) triplets per corner index — `AO_NEIGHBORS` in `greedyMeshCore.ts`.
-const AO_DU_DV: [[(i32, i32); 3]; 4] = [
-    [(-1, 0), (0, -1), (-1, -1)],
-    [(1, 0), (0, -1), (1, -1)],
-    [(1, 0), (0, 1), (1, 1)],
-    [(-1, 0), (0, 1), (-1, 1)],
-];
-
-/// Matches `getAONeighborCoords` / `getCornerAO` in `greedyMeshCore.ts` (strong preset).
-pub(super) fn corner_ao_factor(
+/// Canonical vertex AO: returns the same value for a given vertex grid position
+/// regardless of which merged quad references it.  Averages all four L-shaped
+/// neighborhood evaluations around the vertex so that shared edges between
+/// greedy-merged quads never produce seams.
+fn canonical_vertex_ao(
     map: &AHashMap<VoxelCoord, Voxel>,
     axis: usize,
     sign: i32,
     depth: i32,
-    cu: i32,
-    cv: i32,
-    corner_index: usize,
+    vert_u: i32,
+    vert_v: i32,
+    source_object_id: u32,
 ) -> f32 {
-    let Some(face_voxel) = map.get(&grid_pos(axis, depth, cu, cv)) else {
-        return 1.0;
-    };
-    let source_object_id = face_voxel.object_id;
     let d_idx = axis;
     let (u_idx, v_idx) = match axis {
         0 => (1usize, 2usize),
         1 => (0usize, 2usize),
         _ => (0usize, 1usize),
     };
-    let du_dv = AO_DU_DV[corner_index.min(3)];
-    let mut p = [0i32; 3];
-    let mut bits = [0u32; 3];
-    for i in 0..3 {
-        let (du, dv) = du_dv[i];
+
+    // Check all 4 voxels one layer above the face surrounding this vertex.
+    let occ = |du: i32, dv: i32| -> u32 {
+        let mut p = [0i32; 3];
         p[d_idx] = depth + sign;
-        p[u_idx] = cu + du;
-        p[v_idx] = cv + dv;
-        let pos = (p[0], p[1], p[2]);
-        bits[i] = u32::from(ao_cell_occludes_for_owner(map, pos, source_object_id));
-    }
-    let st = ao_state(bits[0], bits[1], bits[2]);
-    ao_state_to_multiplier(st)
+        p[u_idx] = vert_u + du;
+        p[v_idx] = vert_v + dv;
+        u32::from(ao_cell_occludes_for_owner(
+            map,
+            (p[0], p[1], p[2]),
+            source_object_id,
+        ))
+    };
+
+    let a = occ(-1, -1); // (U-1, V-1)
+    let b = occ(0, -1); // (U,   V-1)
+    let c = occ(-1, 0); // (U-1, V  )
+    let d = occ(0, 0); // (U,   V  )
+
+    // Four L-shape evaluations — one per quadrant.
+    // L0 (corner 0 of cell (U, V)):     side1=C, side2=B, corner=A
+    // L1 (corner 1 of cell (U-1, V)):   side1=D, side2=A, corner=B
+    // L2 (corner 2 of cell (U-1, V-1)): side1=B, side2=C, corner=D
+    // L3 (corner 3 of cell (U, V-1)):   side1=A, side2=D, corner=C
+    let m0 = ao_state_to_multiplier(ao_state(c, b, a));
+    let m1 = ao_state_to_multiplier(ao_state(d, a, b));
+    let m2 = ao_state_to_multiplier(ao_state(b, c, d));
+    let m3 = ao_state_to_multiplier(ao_state(a, d, c));
+
+    (m0 + m1 + m2 + m3) * 0.25
 }
 
 /// Maximum distance (in voxels) at which a glow voxel contributes irradiance to a surface.
@@ -1307,29 +1315,56 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
             slices.entry((axis, sign, depth)).or_default().push((u, v));
         }
 
-        for ((axis, sign, depth), cells) in slices {
-            let merged = greedy_merge(&cells);
+        for ((axis, sign, depth), mut cells) in slices {
+            // Sort cells for deterministic greedy merge output (hash-map order varies).
+            cells.sort_unstable();
             let n = face_normal(axis, sign);
+            let src_oid = map
+                .get(&grid_pos(axis, depth, cells[0].0, cells[0].1))
+                .map_or(0, |v| v.object_id);
 
-            for (u, v, w, h) in merged {
-                let p00 = quad_corner(axis, sign, depth, u, v);
-                let p10 = quad_corner(axis, sign, depth, u + w, v);
-                let p11 = quad_corner(axis, sign, depth, u + w, v + h);
-                let p01 = quad_corner(axis, sign, depth, u, v + h);
+            // AO-aware merge: only merge cells whose 4 vertex AO values are
+            // all fully lit (1.0).  Cells near edges/blocks keep per-voxel
+            // detail and are emitted as 1×1 quads.
+            let mut mergeable: Vec<(i32, i32)> = Vec::new();
+            let mut individual: Vec<(i32, i32)> = Vec::new();
+            for &(cu, cv) in &cells {
+                let a00 = canonical_vertex_ao(map, axis, sign, depth, cu, cv, src_oid);
+                let a10 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv, src_oid);
+                let a11 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv + 1, src_oid);
+                let a01 = canonical_vertex_ao(map, axis, sign, depth, cu, cv + 1, src_oid);
+                if a00 >= 1.0 && a10 >= 1.0 && a11 >= 1.0 && a01 >= 1.0 {
+                    mergeable.push((cu, cv));
+                } else {
+                    individual.push((cu, cv));
+                }
+            }
 
-                let ao00 = corner_ao_factor(map, axis, sign, depth, u, v, 0);
-                let ao10 = corner_ao_factor(map, axis, sign, depth, u + w - 1, v, 1);
-                let ao11 = corner_ao_factor(map, axis, sign, depth, u + w - 1, v + h - 1, 2);
-                let ao01 = corner_ao_factor(map, axis, sign, depth, u, v + h - 1, 3);
+            let merged = greedy_merge(&mergeable);
+            let ccw = if n.x != 0.0 {
+                n.x > 0.0
+            } else if n.y != 0.0 {
+                n.y < 0.0
+            } else {
+                n.z > 0.0
+            };
 
+            // Helper: emit a quad with given positions, AO, and winding.
+            let emit_quad = |out: &mut MeshBuffers,
+                             positions: [(Vec3, f32); 4],
+                             n: Vec3,
+                             col: Vec3,
+                             mat_k: f32,
+                             ccw: bool,
+                             is_glow_face: bool,
+                             glow_sources: &[(IVec3, Vec3)]| {
                 let base = (out.positions.len() / 3) as u32;
-                // Glow voxels are already self-illuminated; skip emission baking for them.
-                let is_glow_face = mat_k > 0.75 && mat_k < 1.25;
-                for (p, ao_v) in [(p00, ao00), (p10, ao10), (p11, ao11), (p01, ao01)] {
+                let [(_p00, ao00), (_p10, ao10), (_p11, ao11), (_p01, ao01)] = positions;
+                for &(p, ao_v) in &positions {
                     let em = if is_glow_face || glow_sources.is_empty() {
                         Vec3::ZERO
                     } else {
-                        accumulate_emission(&glow_sources, p, n)
+                        accumulate_emission(glow_sources, p, n)
                     };
                     out.positions.extend_from_slice(&p.to_array());
                     out.normals.extend_from_slice(&n.to_array());
@@ -1339,21 +1374,37 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                     out.emission_tint.extend_from_slice(&em.to_array());
                 }
 
-                let ccw = if n.x != 0.0 {
-                    n.x > 0.0
-                } else if n.y != 0.0 {
-                    n.y < 0.0
-                } else {
-                    n.z > 0.0
-                };
+                // Quad diagonal flip: choose the split that pairs the two
+                // brighter corners, minimising the visible crease.
+                let flip = ao00 + ao11 < ao10 + ao01;
                 if ccw {
+                    if flip {
+                        out.indices.extend_from_slice(&[
+                            base,
+                            base + 1,
+                            base + 3,
+                            base + 1,
+                            base + 2,
+                            base + 3,
+                        ]);
+                    } else {
+                        out.indices.extend_from_slice(&[
+                            base,
+                            base + 1,
+                            base + 2,
+                            base,
+                            base + 2,
+                            base + 3,
+                        ]);
+                    }
+                } else if flip {
                     out.indices.extend_from_slice(&[
                         base,
-                        base + 1,
-                        base + 2,
-                        base,
-                        base + 2,
                         base + 3,
+                        base + 1,
+                        base + 1,
+                        base + 3,
+                        base + 2,
                     ]);
                 } else {
                     out.indices.extend_from_slice(&[
@@ -1365,6 +1416,50 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                         base + 2,
                     ]);
                 }
+            };
+
+            let is_glow_face = mat_k > 0.75 && mat_k < 1.25;
+
+            // Emit merged quads (all AO = 1.0, no gradients).
+            for (u, v, w, h) in merged {
+                emit_quad(
+                    &mut out,
+                    [
+                        (quad_corner(axis, sign, depth, u, v), 1.0),
+                        (quad_corner(axis, sign, depth, u + w, v), 1.0),
+                        (quad_corner(axis, sign, depth, u + w, v + h), 1.0),
+                        (quad_corner(axis, sign, depth, u, v + h), 1.0),
+                    ],
+                    n,
+                    col,
+                    mat_k,
+                    ccw,
+                    is_glow_face,
+                    &glow_sources,
+                );
+            }
+
+            // Emit individual quads with per-vertex canonical AO.
+            for (cu, cv) in individual {
+                let ao00 = canonical_vertex_ao(map, axis, sign, depth, cu, cv, src_oid);
+                let ao10 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv, src_oid);
+                let ao11 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv + 1, src_oid);
+                let ao01 = canonical_vertex_ao(map, axis, sign, depth, cu, cv + 1, src_oid);
+                emit_quad(
+                    &mut out,
+                    [
+                        (quad_corner(axis, sign, depth, cu, cv), ao00),
+                        (quad_corner(axis, sign, depth, cu + 1, cv), ao10),
+                        (quad_corner(axis, sign, depth, cu + 1, cv + 1), ao11),
+                        (quad_corner(axis, sign, depth, cu, cv + 1), ao01),
+                    ],
+                    n,
+                    col,
+                    mat_k,
+                    ccw,
+                    is_glow_face,
+                    &glow_sources,
+                );
             }
         }
     }
@@ -1749,7 +1844,7 @@ impl PreviewInstancedResult {
         Self {
             solid_instances: Vec::new(),
             wire_instances: Vec::new(),
-            cube_half: 0.53,
+            cube_half: 0.5,
             extra_solid: MeshBuffers::default(),
             extra_wire: MeshBuffers::default(),
         }
@@ -2416,17 +2511,14 @@ pub fn mesh_buffers_selection_overlay_solid(
         combined.insert(*k, *v);
     }
     for &c in sel_mesh.iter() {
-        let (actual_color, oid) = world
-            .get(&c)
-            .map(|v| (v.color, v.object_id))
-            .unwrap_or((0xe8e8e8, 0));
+        let oid = world.get(&c).map(|v| v.object_id).unwrap_or(0);
         combined.insert(
             c,
             Voxel {
                 x: c.0,
                 y: c.1,
                 z: c.2,
-                color: actual_color,
+                color: SELECTION_OVERLAY_COLOR,
                 material: MaterialId::Plastic,
                 object_id: oid,
             },
@@ -2618,6 +2710,49 @@ pub fn voxel_surface_grid_line_vertices(
 mod gpu_pack_tests {
     use super::*;
     use crate::voxelle::MaterialId;
+
+    /// Neighbor (du, dv) triplets per corner index — `AO_NEIGHBORS` in `greedyMeshCore.ts`.
+    const AO_DU_DV: [[(i32, i32); 3]; 4] = [
+        [(-1, 0), (0, -1), (-1, -1)],
+        [(1, 0), (0, -1), (1, -1)],
+        [(1, 0), (0, 1), (1, 1)],
+        [(-1, 0), (0, 1), (-1, 1)],
+    ];
+
+    /// Matches `getAONeighborCoords` / `getCornerAO` in `greedyMeshCore.ts` (strong preset).
+    pub(super) fn corner_ao_factor(
+        map: &AHashMap<VoxelCoord, Voxel>,
+        axis: usize,
+        sign: i32,
+        depth: i32,
+        cu: i32,
+        cv: i32,
+        corner_index: usize,
+    ) -> f32 {
+        let Some(face_voxel) = map.get(&grid_pos(axis, depth, cu, cv)) else {
+            return 1.0;
+        };
+        let source_object_id = face_voxel.object_id;
+        let d_idx = axis;
+        let (u_idx, v_idx) = match axis {
+            0 => (1usize, 2usize),
+            1 => (0usize, 2usize),
+            _ => (0usize, 1usize),
+        };
+        let du_dv = AO_DU_DV[corner_index.min(3)];
+        let mut p = [0i32; 3];
+        let mut bits = [0u32; 3];
+        for i in 0..3 {
+            let (du, dv) = du_dv[i];
+            p[d_idx] = depth + sign;
+            p[u_idx] = cu + du;
+            p[v_idx] = cv + dv;
+            let pos = (p[0], p[1], p[2]);
+            bits[i] = u32::from(ao_cell_occludes_for_owner(map, pos, source_object_id));
+        }
+        let st = ao_state(bits[0], bits[1], bits[2]);
+        ao_state_to_multiplier(st)
+    }
 
     #[test]
     fn pack_gpu_greedy_single_voxel_ok() {

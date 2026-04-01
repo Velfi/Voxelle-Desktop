@@ -12,9 +12,7 @@ pub const MAX_LAPLACIAN_ROI_CELLS: i64 = 70_000;
 const SMOOTH_NEIGHBOR_RADIUS_MAX: i32 = 6;
 const PROXY_COLOR: u32 = 0x888888;
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SculptSmoothVariant {
     #[default]
@@ -84,7 +82,8 @@ pub fn apply_sculpt_smooth_majority_pass(
     _stroke_color: u32,
     _stroke_material: MaterialId,
 ) -> Vec<VoxelEditDelta> {
-    let r = (neighbor_radius.min(SMOOTH_NEIGHBOR_RADIUS_MAX.max(0) as u32) as i32).min(SMOOTH_NEIGHBOR_RADIUS_MAX);
+    let r = (neighbor_radius.min(SMOOTH_NEIGHBOR_RADIUS_MAX.max(0) as u32) as i32)
+        .min(SMOOTH_NEIGHBOR_RADIUS_MAX);
     let mut seen: AHashSet<VoxelCoord> = AHashSet::with_capacity(footprint.len());
     let mut unique: Vec<VoxelCoord> = Vec::new();
     for &p in footprint {
@@ -171,14 +170,20 @@ pub fn apply_sculpt_smooth_majority_pass(
             }
             file.voxels.pop();
             voxel_map.remove(&(x, y, z));
-            out.push(VoxelEditDelta::Removed { voxel: removed_voxel });
+            out.push(VoxelEditDelta::Removed {
+                voxel: removed_voxel,
+            });
         }
     }
 
     out
 }
 
-fn roi_from_footprint_margin(footprint: &[VoxelCoord], margin: i32, grid_size: i32) -> Option<(i32, i32, i32, i32, i32, i32)> {
+fn roi_from_footprint_margin(
+    footprint: &[VoxelCoord],
+    margin: i32,
+    grid_size: i32,
+) -> Option<(i32, i32, i32, i32, i32, i32)> {
     if footprint.is_empty() {
         return None;
     }
@@ -218,7 +223,10 @@ fn roi_cell_count(min_x: i32, min_y: i32, min_z: i32, max_x: i32, max_y: i32, ma
     w * h * d
 }
 
-fn build_full_voxel_map(file: &VoxelleFile, voxel_map: &AHashMap<VoxelCoord, usize>) -> AHashMap<VoxelCoord, Voxel> {
+fn build_full_voxel_map(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+) -> AHashMap<VoxelCoord, Voxel> {
     let mut m = AHashMap::with_capacity(voxel_map.len());
     for (&coord, &idx) in voxel_map {
         m.insert(coord, file.voxels[idx]);
@@ -253,7 +261,17 @@ fn build_adjacency(vertex_count: usize, indices: &[u32]) -> Vec<Vec<usize>> {
     adj
 }
 
-fn is_pinned_vertex(px: f64, py: f64, pz: f64, min_x: f64, min_y: f64, min_z: f64, max_x: f64, max_y: f64, max_z: f64) -> bool {
+fn is_pinned_vertex(
+    px: f64,
+    py: f64,
+    pz: f64,
+    min_x: f64,
+    min_y: f64,
+    min_z: f64,
+    max_x: f64,
+    max_y: f64,
+    max_z: f64,
+) -> bool {
     const EPS: f64 = 1e-5;
     let on_x = (px - min_x).abs() < EPS || (max_x + 1.0 - px).abs() < EPS;
     let on_y = (py - min_y).abs() < EPS || (max_y + 1.0 - py).abs() < EPS;
@@ -340,13 +358,7 @@ fn taubin_smooth_mesh(
 }
 
 #[inline]
-fn ray_triangle_moller(
-    orig: Vec3,
-    dir: Vec3,
-    v0: Vec3,
-    v1: Vec3,
-    v2: Vec3,
-) -> Option<f32> {
+fn ray_triangle_moller(orig: Vec3, dir: Vec3, v0: Vec3, v1: Vec3, v2: Vec3) -> Option<f32> {
     const EPS: f32 = 1e-7;
     let e1 = v1 - v0;
     let e2 = v2 - v0;
@@ -374,13 +386,7 @@ fn ray_triangle_moller(
     }
 }
 
-fn count_ray_hits_plus_x(
-    ox: f64,
-    oy: f64,
-    oz: f64,
-    pos: &[f64],
-    indices: &[u32],
-) -> i32 {
+fn count_ray_hits_plus_x(ox: f64, oy: f64, oz: f64, pos: &[f64], indices: &[u32]) -> i32 {
     const T_MERGE: f64 = 1e-4;
     let orig = Vec3::new(ox as f32, oy as f32, oz as f32);
     let dir = Vec3::X;
@@ -473,7 +479,12 @@ fn voxel_cell_inside_mesh(
     false
 }
 
-fn nearest_original_voxel(cx: f64, cy: f64, cz: f64, originals: &[(i32, i32, i32, Voxel)]) -> Option<Voxel> {
+fn nearest_original_voxel(
+    cx: f64,
+    cy: f64,
+    cz: f64,
+    originals: &[(i32, i32, i32, Voxel)],
+) -> Option<Voxel> {
     let mut best_d = f64::INFINITY;
     let mut best: Option<Voxel> = None;
     for &(ox, oy, oz, v) in originals {

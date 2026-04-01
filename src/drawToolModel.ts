@@ -42,27 +42,16 @@ export function deriveSelectionMethod(s: {
 }): SelectionMethod {
   if (s.drawStrokeMode === "fill") return "fill";
   /** Spray stroke mode (`DrawStrokeMode::Spray`) or brush path with scatter &gt; 0. */
-  if (
-    s.drawStrokeMode === "spray" ||
-    (s.strokeDrawStyle === "brush" && s.sprayDensity > 0)
-  ) {
+  if (s.drawStrokeMode === "spray" || (s.strokeDrawStyle === "brush" && s.sprayDensity > 0)) {
     return "spray";
   }
   if (s.strokeDrawStyle === "brush" && s.sprayDensity === 0) {
     return "surface";
   }
-  if (
-    s.strokeDrawStyle === "line" &&
-    s.sprayDensity === 0 &&
-    s.strokeFamilyVariant === "solid"
-  ) {
+  if (s.strokeDrawStyle === "line" && s.sprayDensity === 0 && s.strokeFamilyVariant === "solid") {
     return "solid";
   }
-  if (
-    s.strokeDrawStyle === "line" &&
-    s.sprayDensity === 0 &&
-    s.strokeFamilyVariant === "stroke"
-  ) {
+  if (s.strokeDrawStyle === "line" && s.sprayDensity === 0 && s.strokeFamilyVariant === "stroke") {
     return "stroke";
   }
   return "stroke";
@@ -141,11 +130,7 @@ export function drawToolFromInteractionMode(mode: string): DrawTool | null {
 }
 
 export function isMenubarTemporarySelectMode(mode: string): boolean {
-  return (
-    mode === "selectByColor" ||
-    mode === "selectCoplanar" ||
-    mode === "selectCoplanarEmpty"
-  );
+  return mode === "selectByColor" || mode === "selectCoplanar" || mode === "selectCoplanarEmpty";
 }
 
 /**
@@ -166,10 +151,8 @@ export function getStrokeDispatch(mode: string): StrokeDispatch | null {
   if (mode === "remove") return { kind: "edit", tool: "remove" };
   if (mode === "paint") return { kind: "edit", tool: "paint" };
   if (mode === "select") return { kind: "selection", interaction: "select" };
-  if (mode === "selectByColor")
-    return { kind: "selection", interaction: "selectByColor" };
-  if (mode === "selectCoplanar")
-    return { kind: "selection", interaction: "selectCoplanar" };
+  if (mode === "selectByColor") return { kind: "selection", interaction: "selectByColor" };
+  if (mode === "selectCoplanar") return { kind: "selection", interaction: "selectCoplanar" };
   if (mode === "selectCoplanarEmpty")
     return { kind: "selection", interaction: "selectCoplanarEmpty" };
   return null;

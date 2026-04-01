@@ -1,5 +1,3 @@
-- Rope and Cloth need some polish. previews are very slow
-  - I may have fixed the preview issue
 - Broken generators
   - flora
   - fauna
@@ -7,9 +5,7 @@
   - Insecta
 - Fly mode jumps forward  when moving forward and moving the mouse
 - weird degenerate normals on flat surfaces with voxels scattered on top. It's not shadows or AO, I checked already
-- MacOS and Windows support HDR, can we make an HDR setting? Can we make the sun really bright?
 - I want the ability to extrude a selected face
-- ray tracing
 - Terrain brush doesn't work
 - sculpt brushes shouldn't snap to surface, they should embed
   - is this still happening?

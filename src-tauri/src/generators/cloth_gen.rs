@@ -128,10 +128,7 @@ pub fn cloth_patch_centerline_from_pins(
         .iter()
         .enumerate()
         .filter(|(i, p)| {
-            *i == 0
-                || pins[i - 1][0] != p[0]
-                || pins[i - 1][1] != p[1]
-                || pins[i - 1][2] != p[2]
+            *i == 0 || pins[i - 1][0] != p[0] || pins[i - 1][1] != p[1] || pins[i - 1][2] != p[2]
         })
         .map(|(_, p)| *p)
         .collect();
@@ -140,30 +137,17 @@ pub fn cloth_patch_centerline_from_pins(
         return Vec::new();
     }
 
-    let o = [
-        raw[0][0] as f64,
-        raw[0][1] as f64,
-        raw[0][2] as f64,
-    ];
-    let e1 = vec_sub(
-        [raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64],
-        o,
-    );
+    let o = [raw[0][0] as f64, raw[0][1] as f64, raw[0][2] as f64];
+    let e1 = vec_sub([raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64], o);
     let mut nvec = vec_cross(
         e1,
-        vec_sub(
-            [raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64],
-            o,
-        ),
+        vec_sub([raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64], o),
     );
     let mut k = 3usize;
     while vec_len(nvec) < 1e-9 && k < raw.len() {
         nvec = vec_cross(
             e1,
-            vec_sub(
-                [raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64],
-                o,
-            ),
+            vec_sub([raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64], o),
         );
         k += 1;
     }
@@ -175,7 +159,11 @@ pub fn cloth_patch_centerline_from_pins(
         for i in 0..n {
             let seg = voxel_line_dda(
                 (raw[i][0], raw[i][1], raw[i][2]),
-                (raw[(i + 1) % n][0], raw[(i + 1) % n][1], raw[(i + 1) % n][2]),
+                (
+                    raw[(i + 1) % n][0],
+                    raw[(i + 1) % n][1],
+                    raw[(i + 1) % n][2],
+                ),
             );
             for p in seg {
                 if seen.insert(p) {
@@ -198,10 +186,7 @@ pub fn cloth_patch_centerline_from_pins(
 
     let mut uv_poly: Vec<(f64, f64)> = Vec::with_capacity(raw.len());
     for p in &raw {
-        let d = vec_sub(
-            [p[0] as f64, p[1] as f64, p[2] as f64],
-            o,
-        );
+        let d = vec_sub([p[0] as f64, p[1] as f64, p[2] as f64], o);
         uv_poly.push((vec_dot3(d, uaxis), vec_dot3(d, vaxis)));
     }
 
@@ -313,11 +298,7 @@ pub fn cloth_patch_centerline_from_pins(
             let dv = ivf - uvp.1;
             let d2 = du * du + dv * dv;
             if d2 < 0.01 {
-                return [
-                    raw[j][0] as f64,
-                    raw[j][1] as f64,
-                    raw[j][2] as f64,
-                ];
+                return [raw[j][0] as f64, raw[j][1] as f64, raw[j][2] as f64];
             }
             let w = 1.0 / d2;
             w_sum += w;
@@ -350,11 +331,7 @@ pub fn cloth_patch_centerline_from_pins(
                 let pin_idx = pinned_grid_keys.get(&gk).copied();
                 let pinned = pin_idx.is_some();
                 let pos = if let Some(pi) = pin_idx {
-                    [
-                        raw[pi][0] as f64,
-                        raw[pi][1] as f64,
-                        raw[pi][2] as f64,
-                    ]
+                    [raw[pi][0] as f64, raw[pi][1] as f64, raw[pi][2] as f64]
                 } else {
                     interpolate_from_pins(iu, iv, &uv_poly, &raw)
                 };
@@ -477,7 +454,11 @@ pub fn cloth_patch_centerline_from_pins(
     const MAX_BRIDGE_DIAG: i32 = 24;
     const MAX_VERTICAL_ALIGN: f64 = 0.92;
 
-    let bridge_chord = |pa: VoxelCoord, pb: VoxelCoord, max_cheb: i32, path_seen: &mut HashSet<(i32, i32, i32)>, path: &mut Vec<VoxelCoord>| {
+    let bridge_chord = |pa: VoxelCoord,
+                        pb: VoxelCoord,
+                        max_cheb: i32,
+                        path_seen: &mut HashSet<(i32, i32, i32)>,
+                        path: &mut Vec<VoxelCoord>| {
         let dx = pb.0 - pa.0;
         let dy = pb.1 - pa.1;
         let dz = pb.2 - pa.2;
@@ -492,7 +473,8 @@ pub fn cloth_patch_centerline_from_pins(
         if dist < 1e-9 {
             return;
         }
-        let align = ((dx as f64) * g_dir[0] + (dy as f64) * g_dir[1] + (dz as f64) * g_dir[2]).abs() / dist;
+        let align =
+            ((dx as f64) * g_dir[0] + (dy as f64) * g_dir[1] + (dz as f64) * g_dir[2]).abs() / dist;
         if align > MAX_VERTICAL_ALIGN {
             return;
         }
@@ -558,12 +540,7 @@ pub fn preview_cloth_voxels(
     brush_shape: BrushShape,
     sim: &ClothSimOptions,
 ) -> Vec<VoxelCoord> {
-    let path = cloth_patch_centerline_from_pins(
-        pins,
-        tension as f64,
-        gravity_direction,
-        sim,
-    );
+    let path = cloth_patch_centerline_from_pins(pins, tension as f64, gravity_direction, sim);
     if path.is_empty() {
         return Vec::new();
     }
@@ -582,12 +559,7 @@ pub fn generator_cloth_from_pins(
     material: MaterialId,
     sim: ClothSimOptions,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let path = cloth_patch_centerline_from_pins(
-        pins,
-        tension as f64,
-        gravity_direction,
-        &sim,
-    );
+    let path = cloth_patch_centerline_from_pins(pins, tension as f64, gravity_direction, &sim);
     if path.is_empty() {
         return Ok(Vec::new());
     }

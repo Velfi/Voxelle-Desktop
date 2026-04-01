@@ -20,7 +20,13 @@ fn gravity_unit(dir: &str) -> [f32; 3] {
 }
 
 /// Discrete voxel samples along a catenary between `a` and `b` in world space (grid coords).
-pub fn catenary_voxel_arc(a: VoxelCoord, b: VoxelCoord, sag: f32, segments: i32, gravity_direction: &str) -> Vec<VoxelCoord> {
+pub fn catenary_voxel_arc(
+    a: VoxelCoord,
+    b: VoxelCoord,
+    sag: f32,
+    segments: i32,
+    gravity_direction: &str,
+) -> Vec<VoxelCoord> {
     let n = segments.max(4).min(128);
     let ax = a.0 as f32;
     let ay = a.1 as f32;

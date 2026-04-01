@@ -521,9 +521,12 @@ fn sample_grad(
     z: i32,
     out: &mut [f32; 3],
 ) {
-    let gx = sample_field(values, x - 1, y, z, nx, ny, nz) - sample_field(values, x + 1, y, z, nx, ny, nz);
-    let gy = sample_field(values, x, y - 1, z, nx, ny, nz) - sample_field(values, x, y + 1, z, nx, ny, nz);
-    let gz = sample_field(values, x, y, z - 1, nx, ny, nz) - sample_field(values, x, y, z + 1, nx, ny, nz);
+    let gx = sample_field(values, x - 1, y, z, nx, ny, nz)
+        - sample_field(values, x + 1, y, z, nx, ny, nz);
+    let gy = sample_field(values, x, y - 1, z, nx, ny, nz)
+        - sample_field(values, x, y + 1, z, nx, ny, nz);
+    let gz = sample_field(values, x, y, z - 1, nx, ny, nz)
+        - sample_field(values, x, y, z + 1, nx, ny, nz);
     let gl = (gx * gx + gy * gy + gz * gz).sqrt();
     if gl > EPS {
         out[0] = gx / gl;
@@ -786,19 +789,20 @@ fn dual_contour_bucket(
                 let max_wz = node_min_z as f32 + cz as f32 + 1.5;
 
                 let nh = n_herm as f64;
-                let (px, py, pz) = if let Some(s) = solve3x3(a00, a01, a02, a11, a12, a22, bb0, bb1, bb2) {
-                    (
-                        s[0].clamp(min_wx as f64, max_wx as f64) as f32,
-                        s[1].clamp(min_wy as f64, max_wy as f64) as f32,
-                        s[2].clamp(min_wz as f64, max_wz as f64) as f32,
-                    )
-                } else {
-                    (
-                        (cx_sum / nh).clamp(min_wx as f64, max_wx as f64) as f32,
-                        (cy_sum / nh).clamp(min_wy as f64, max_wy as f64) as f32,
-                        (cz_sum / nh).clamp(min_wz as f64, max_wz as f64) as f32,
-                    )
-                };
+                let (px, py, pz) =
+                    if let Some(s) = solve3x3(a00, a01, a02, a11, a12, a22, bb0, bb1, bb2) {
+                        (
+                            s[0].clamp(min_wx as f64, max_wx as f64) as f32,
+                            s[1].clamp(min_wy as f64, max_wy as f64) as f32,
+                            s[2].clamp(min_wz as f64, max_wz as f64) as f32,
+                        )
+                    } else {
+                        (
+                            (cx_sum / nh).clamp(min_wx as f64, max_wx as f64) as f32,
+                            (cy_sum / nh).clamp(min_wy as f64, max_wy as f64) as f32,
+                            (cz_sum / nh).clamp(min_wz as f64, max_wz as f64) as f32,
+                        )
+                    };
 
                 let vi = (positions.len() / 3) as u32;
                 cell_vertex.insert((cx, cy, cz), vi);
@@ -843,15 +847,7 @@ fn dual_contour_bucket(
         for iy in 0..ny {
             for iz in 0..nz {
                 let va = sample_field(&values, ix as i32, iy as i32, iz as i32, nx, ny, nz);
-                let vb = sample_field(
-                    &values,
-                    ix as i32 + 1,
-                    iy as i32,
-                    iz as i32,
-                    nx,
-                    ny,
-                    nz,
-                );
+                let vb = sample_field(&values, ix as i32 + 1, iy as i32, iz as i32, nx, ny, nz);
                 if (va >= ISO) == (vb >= ISO) {
                     continue;
                 }
@@ -875,15 +871,7 @@ fn dual_contour_bucket(
         for ix in 0..nx {
             for iz in 0..nz {
                 let va = sample_field(&values, ix as i32, iy as i32, iz as i32, nx, ny, nz);
-                let vb = sample_field(
-                    &values,
-                    ix as i32,
-                    iy as i32 + 1,
-                    iz as i32,
-                    nx,
-                    ny,
-                    nz,
-                );
+                let vb = sample_field(&values, ix as i32, iy as i32 + 1, iz as i32, nx, ny, nz);
                 if (va >= ISO) == (vb >= ISO) {
                     continue;
                 }
@@ -907,15 +895,7 @@ fn dual_contour_bucket(
         for ix in 0..nx {
             for iy in 0..ny {
                 let va = sample_field(&values, ix as i32, iy as i32, iz as i32, nx, ny, nz);
-                let vb = sample_field(
-                    &values,
-                    ix as i32,
-                    iy as i32,
-                    iz as i32 + 1,
-                    nx,
-                    ny,
-                    nz,
-                );
+                let vb = sample_field(&values, ix as i32, iy as i32, iz as i32 + 1, nx, ny, nz);
                 if (va >= ISO) == (vb >= ISO) {
                     continue;
                 }
@@ -1008,7 +988,10 @@ where
     let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
         let k = bucket_key_parts(v);
-        buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
+        buckets
+            .entry(k)
+            .or_default()
+            .insert(coord_key(v.x, v.y, v.z), *v);
     }
     let n_buckets = buckets.len();
     log::info!(
@@ -1082,7 +1065,10 @@ where
     let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
         let k = bucket_key_parts(v);
-        buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
+        buckets
+            .entry(k)
+            .or_default()
+            .insert(coord_key(v.x, v.y, v.z), *v);
     }
     let n_buckets = buckets.len();
     log::info!(

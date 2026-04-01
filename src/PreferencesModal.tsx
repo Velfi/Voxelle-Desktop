@@ -45,8 +45,7 @@ export function PreferencesModal({
   onCollabHostPortChange,
   collabHosting = false,
 }: Props) {
-  const [prefs, setPrefs] =
-    useState<VoxelleDesktopPreferences>(loadPreferences);
+  const [prefs, setPrefs] = useState<VoxelleDesktopPreferences>(loadPreferences);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeSection, setActiveSection] = useState<SectionId>("prefs-general");
 
@@ -76,9 +75,7 @@ export function PreferencesModal({
   }, [open]);
 
   const applyToneToGpu = (t: ToneMappingPreference) => {
-    void invoke("set_tone_mapping", { mode: toneMappingToGpuMode(t) }).catch(
-      () => {},
-    );
+    void invoke("set_tone_mapping", { mode: toneMappingToGpuMode(t) }).catch(() => {});
   };
 
   const onMovementDelta = (checked: boolean) => {
@@ -128,11 +125,7 @@ export function PreferencesModal({
 
   const onCollabName = (raw: string) => {
     const clipped = raw.slice(0, 32);
-    const toSave = preferencesWithCollabIdentity(
-      prefs,
-      clipped,
-      prefs.collabAccentColor,
-    );
+    const toSave = preferencesWithCollabIdentity(prefs, clipped, prefs.collabAccentColor);
     setPrefs({
       ...prefs,
       collabDisplayName: toSave.collabDisplayName,
@@ -143,11 +136,7 @@ export function PreferencesModal({
   };
 
   const onCollabColor = (raw: string) => {
-    const toSave = preferencesWithCollabIdentity(
-      prefs,
-      prefs.collabDisplayName,
-      raw,
-    );
+    const toSave = preferencesWithCollabIdentity(prefs, prefs.collabDisplayName, raw);
     setPrefs({
       ...prefs,
       collabDisplayName: toSave.collabDisplayName,
@@ -179,11 +168,26 @@ export function PreferencesModal({
     void invoke("set_soft_shadows", { enabled: checked }).catch(() => {});
   };
 
-const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
-    void invoke(
-      "set_autosave_settings",
-      autosaveSettingsInvokeArgs(next),
-    ).catch(() => {});
+  const onSoftSunshafts = (checked: boolean) => {
+    const next = { ...prefs, softSunshafts: checked };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_soft_sunshafts", { enabled: checked }).catch(() => {});
+  };
+
+  const onHdr = (checked: boolean) => {
+    const next = { ...prefs, hdr: checked };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_hdr_output", { enabled: checked }).catch(() => {});
+    // Switch tone mapper: HDR mode (6) when on, restore user pref when off.
+    void invoke("set_tone_mapping", {
+      mode: checked ? 6 : toneMappingToGpuMode(next.toneMapping),
+    }).catch(() => {});
+  };
+
+  const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
+    void invoke("set_autosave_settings", autosaveSettingsInvokeArgs(next)).catch(() => {});
   };
 
   const onAutosaveEnabled = (checked: boolean) => {
@@ -242,203 +246,257 @@ const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
             ))}
           </nav>
           <div className="modal--preferences-scroll" ref={scrollRef} onScroll={onPrefsScroll}>
-          <div id="prefs-general" className="prefs-section-anchor" />
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.showMovementDeltaHint}
-              onChange={(e) => onMovementDelta(e.target.checked)}
-            />
-            Movement hints while drawing
-          </label>
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.showDragDeltaHint}
-              onChange={(e) => onDragDelta(e.target.checked)}
-            />
-            Selection move hints
-          </label>
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.showFpsCounter}
-              onChange={(e) => onFps(e.target.checked)}
-            />
-            FPS overlay
-          </label>
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.reopenLastProject}
-              onChange={(e) => onReopenLastProject(e.target.checked)}
-            />
-            Automatically reopen last project on startup
-          </label>
-          <label className="prefs-select-label">
-            <span className="prefs-select-label-text">Appearance</span>
-            <select
-              className="prefs-tone-select"
-              value={prefs.appearanceTheme}
-              onChange={(e) =>
-                onAppearanceTheme(e.target.value as AppearanceTheme)
-              }
-            >
-              {APPEARANCE_THEME_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <span className="prefs-field-hint">
-              Light uses an unbleached paper tone. Auto follows this device.
-            </span>
-          </label>
-          <hr className="prefs-section-divider" />
-          <h4 id="prefs-collab" className="prefs-section-title">Collaboration</h4>
-          <label className="prefs-select-label">
-            <span className="prefs-select-label-text">Display name</span>
-            <input
-              type="text"
-              className="prefs-text-input"
-              value={prefs.collabDisplayName}
-              maxLength={32}
-              onChange={(e) => onCollabName(e.target.value)}
-            />
-          </label>
-          <label className="prefs-select-label">
-            <span className="prefs-select-label-text">Accent color</span>
-            <input
-              type="color"
-              className="prefs-color-input"
-              value={prefs.collabAccentColor}
-              onChange={(e) => onCollabColor(e.target.value)}
-            />
-          </label>
-          {collabHosting ? (
+            <div id="prefs-general" className="prefs-section-anchor" />
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showMovementDeltaHint}
+                onChange={(e) => onMovementDelta(e.target.checked)}
+              />
+              Movement hints while drawing
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showDragDeltaHint}
+                onChange={(e) => onDragDelta(e.target.checked)}
+              />
+              Selection move hints
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showFpsCounter}
+                onChange={(e) => onFps(e.target.checked)}
+              />
+              FPS overlay
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.reopenLastProject}
+                onChange={(e) => onReopenLastProject(e.target.checked)}
+              />
+              Automatically reopen last project on startup
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Appearance</span>
+              <select
+                className="prefs-tone-select"
+                value={prefs.appearanceTheme}
+                onChange={(e) => onAppearanceTheme(e.target.value as AppearanceTheme)}
+              >
+                {APPEARANCE_THEME_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <span className="prefs-field-hint">
+                Light uses an unbleached paper tone. Auto follows this device.
+              </span>
+            </label>
             <p className="prefs-field-hint prefs-section-hint">
-              Port and internet sharing are locked while you host. End the
-              session to change them.
+              Coordinates for the real-time sun position button in the lighting panel.
             </p>
-          ) : null}
-          <label
-            className={`prefs-select-label${collabHosting ? " is-disabled" : ""}`}
-          >
-            <span className="prefs-select-label-text">Host port</span>
-            <input
-              type="number"
-              className="prefs-number-input"
-              min={1}
-              max={65535}
-              disabled={collabHosting}
-              value={prefs.collabHostPort}
-              onChange={(e) => onCollabHostPort(Number(e.target.value))}
-            />
-            <span className="prefs-field-hint">Default 27300.</span>
-          </label>
-          <p
-            className={`prefs-field-hint prefs-section-hint${collabHosting ? " is-disabled" : ""}`}
-          >
-            Lets friends online join without manual router setup. Leave off
-            unless you need it.
-          </p>
-          <label
-            className={`prefs-checkbox-label${collabHosting ? " is-disabled" : ""}`}
-          >
-            <input
-              type="checkbox"
-              checked={prefs.enableUpnp}
-              disabled={collabHosting}
-              onChange={(e) => onEnableUpnp(e.target.checked)}
-            />
-            Internet guests (UPnP)
-          </label>
-          <hr className="prefs-section-divider" />
-          <h4 id="prefs-autosave" className="prefs-section-title">Autosave</h4>
-          <p className="prefs-field-hint prefs-section-hint">
-            Backups live in the app — your file on disk updates when you save.
-          </p>
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.autosaveEnabled}
-              onChange={(e) => onAutosaveEnabled(e.target.checked)}
-            />
-            Timed backups
-          </label>
-          <label
-            className={`prefs-select-label${prefs.autosaveEnabled ? "" : " is-disabled"}`}
-          >
-            <span className="prefs-select-label-text">Every (seconds)</span>
-            <input
-              type="number"
-              className="prefs-number-input"
-              min={0}
-              max={86400}
-              disabled={!prefs.autosaveEnabled}
-              value={prefs.autosaveIntervalSecs}
-              onChange={(e) => onAutosaveInterval(Number(e.target.value))}
-            />
-            <span className="prefs-field-hint">0 turns off the timer.</span>
-          </label>
-          <label
-            className={`prefs-select-label${prefs.autosaveEnabled ? "" : " is-disabled"}`}
-          >
-            <span className="prefs-select-label-text">Keep backups</span>
-            <input
-              type="number"
-              className="prefs-number-input"
-              min={1}
-              max={64}
-              disabled={!prefs.autosaveEnabled}
-              value={prefs.autosaveKeepCount}
-              onChange={(e) => onAutosaveKeep(Number(e.target.value))}
-            />
-            <span className="prefs-field-hint">
-              Per project; oldest drops first.
-            </span>
-          </label>
-          <label className="prefs-select-label">
-            <span className="prefs-select-label-text">Display look</span>
-            <select
-              className="prefs-tone-select"
-              value={prefs.toneMapping}
-              onChange={(e) => onTone(e.target.value as ToneMappingPreference)}
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Latitude</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={-90}
+                max={90}
+                step={0.1}
+                value={prefs.sunLocationLat}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  const next = { ...prefs, sunLocationLat: Math.max(-90, Math.min(90, v)) };
+                  setPrefs(next);
+                  savePreferences(next);
+                }}
+              />
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Longitude</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={-180}
+                max={180}
+                step={0.1}
+                value={prefs.sunLocationLon}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  const next = { ...prefs, sunLocationLon: Math.max(-180, Math.min(180, v)) };
+                  setPrefs(next);
+                  savePreferences(next);
+                }}
+              />
+            </label>
+            <hr className="prefs-section-divider" />
+            <h4 id="prefs-collab" className="prefs-section-title">
+              Collaboration
+            </h4>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Display name</span>
+              <input
+                type="text"
+                className="prefs-text-input"
+                value={prefs.collabDisplayName}
+                maxLength={32}
+                onChange={(e) => onCollabName(e.target.value)}
+              />
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Accent color</span>
+              <input
+                type="color"
+                className="prefs-color-input"
+                value={prefs.collabAccentColor}
+                onChange={(e) => onCollabColor(e.target.value)}
+              />
+            </label>
+            {collabHosting ? (
+              <p className="prefs-field-hint prefs-section-hint">
+                Port and internet sharing are locked while you host. End the session to change them.
+              </p>
+            ) : null}
+            <label className={`prefs-select-label${collabHosting ? " is-disabled" : ""}`}>
+              <span className="prefs-select-label-text">Host port</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={1}
+                max={65535}
+                disabled={collabHosting}
+                value={prefs.collabHostPort}
+                onChange={(e) => onCollabHostPort(Number(e.target.value))}
+              />
+              <span className="prefs-field-hint">Default 27300.</span>
+            </label>
+            <p
+              className={`prefs-field-hint prefs-section-hint${collabHosting ? " is-disabled" : ""}`}
             >
-              {TONE_MAPPING_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <hr className="prefs-section-divider" />
-          <h4 id="prefs-graphics" className="prefs-section-title">Graphics</h4>
-          <p className="prefs-field-hint prefs-section-hint">
-            Changing these settings rebuilds the scene mesh.
-          </p>
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.enableEmissionLighting}
-              onChange={(e) => onEmissionLighting(e.target.checked)}
-            />
-            Emission lighting
-          </label>
-          <p className="prefs-field-hint prefs-section-hint">
-            Glow voxels cast colored light onto nearby surfaces.
-          </p>
-          <label className="prefs-checkbox-label">
-            <input
-              type="checkbox"
-              checked={prefs.softShadows}
-              onChange={(e) => onSoftShadows(e.target.checked)}
-            />
-            Soft shadows
-          </label>
-          <p className="prefs-field-hint prefs-section-hint">
-            Smooths shadow edges using multi-tap filtering.
-          </p>
+              Lets friends online join without manual router setup. Leave off unless you need it.
+            </p>
+            <label className={`prefs-checkbox-label${collabHosting ? " is-disabled" : ""}`}>
+              <input
+                type="checkbox"
+                checked={prefs.enableUpnp}
+                disabled={collabHosting}
+                onChange={(e) => onEnableUpnp(e.target.checked)}
+              />
+              Internet guests (UPnP)
+            </label>
+            <hr className="prefs-section-divider" />
+            <h4 id="prefs-autosave" className="prefs-section-title">
+              Autosave
+            </h4>
+            <p className="prefs-field-hint prefs-section-hint">
+              Backups live in the app — your file on disk updates when you save.
+            </p>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.autosaveEnabled}
+                onChange={(e) => onAutosaveEnabled(e.target.checked)}
+              />
+              Timed backups
+            </label>
+            <label className={`prefs-select-label${prefs.autosaveEnabled ? "" : " is-disabled"}`}>
+              <span className="prefs-select-label-text">Every (seconds)</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={0}
+                max={86400}
+                disabled={!prefs.autosaveEnabled}
+                value={prefs.autosaveIntervalSecs}
+                onChange={(e) => onAutosaveInterval(Number(e.target.value))}
+              />
+              <span className="prefs-field-hint">0 turns off the timer.</span>
+            </label>
+            <label className={`prefs-select-label${prefs.autosaveEnabled ? "" : " is-disabled"}`}>
+              <span className="prefs-select-label-text">Keep backups</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={1}
+                max={64}
+                disabled={!prefs.autosaveEnabled}
+                value={prefs.autosaveKeepCount}
+                onChange={(e) => onAutosaveKeep(Number(e.target.value))}
+              />
+              <span className="prefs-field-hint">Per project; oldest drops first.</span>
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Display look</span>
+              <select
+                className="prefs-tone-select"
+                value={prefs.toneMapping}
+                onChange={(e) => onTone(e.target.value as ToneMappingPreference)}
+              >
+                {TONE_MAPPING_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <hr className="prefs-section-divider" />
+            <h4 id="prefs-graphics" className="prefs-section-title">
+              Graphics
+            </h4>
+            <p className="prefs-field-hint prefs-section-hint">
+              Changing these settings rebuilds the scene mesh.
+            </p>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.enableEmissionLighting}
+                onChange={(e) => onEmissionLighting(e.target.checked)}
+              />
+              Emission lighting
+            </label>
+            <p className="prefs-field-hint prefs-section-hint">
+              Glow voxels cast colored light onto nearby surfaces.
+            </p>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.softShadows}
+                onChange={(e) => onSoftShadows(e.target.checked)}
+              />
+              Soft shadows
+            </label>
+            <p className="prefs-field-hint prefs-section-hint">
+              Smooths shadow edges using multi-tap filtering.
+            </p>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.softSunshafts}
+                onChange={(e) => onSoftSunshafts(e.target.checked)}
+              />
+              Soft sunshafts
+            </label>
+            <p className="prefs-field-hint prefs-section-hint">
+              Smooths sun shaft banding with per-pixel jitter.
+            </p>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.hdr}
+                onChange={(e) => onHdr(e.target.checked)}
+              />
+              HDR output
+            </label>
+            <p className="prefs-field-hint prefs-section-hint">
+              Extended dynamic range — highlights can exceed SDR white. Requires an HDR-capable
+              display.
+            </p>
           </div>
         </div>
         <div className="modal-buttons modal--preferences-footer">

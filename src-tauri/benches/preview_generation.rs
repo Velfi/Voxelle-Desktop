@@ -110,26 +110,41 @@ fn bench_single_cube_generation(c: &mut Criterion) {
     c.bench_function("single preview_cube_mesh + wireframe", |b| {
         b.iter(|| {
             let _s = greedy_mesh::preview_cube_mesh(5.0, 5.0, 5.0, 0.53, [1.0, 0.5, 0.3], 1.0);
-            let _w = greedy_mesh::preview_cube_wireframe_mesh(5.0, 5.0, 5.0, 0.53, [0.8, 0.4, 0.2], 2.0);
+            let _w =
+                greedy_mesh::preview_cube_wireframe_mesh(5.0, 5.0, 5.0, 0.53, [0.8, 0.4, 0.2], 2.0);
         })
     });
 }
 
 /// Simulate the new GPU-instanced path: only generate instance data (no per-voxel meshes).
-fn generate_preview_instances(coords: &[VoxelCoord]) -> (Vec<greedy_mesh::PreviewInstance>, Vec<greedy_mesh::PreviewInstance>) {
+fn generate_preview_instances(
+    coords: &[VoxelCoord],
+) -> (
+    Vec<greedy_mesh::PreviewInstance>,
+    Vec<greedy_mesh::PreviewInstance>,
+) {
     let _model_cols = glam::Mat4::IDENTITY.to_cols_array_2d();
     let mut solid = Vec::with_capacity(coords.len());
     let mut wire = Vec::with_capacity(coords.len());
     for &(cx, cy, cz) in coords {
-        let translate = glam::Mat4::from_translation(glam::Vec3::new(cx as f32, cy as f32, cz as f32));
+        let translate =
+            glam::Mat4::from_translation(glam::Vec3::new(cx as f32, cy as f32, cz as f32));
         let cols = translate.to_cols_array_2d();
         solid.push(greedy_mesh::PreviewInstance {
-            model_c0: cols[0], model_c1: cols[1], model_c2: cols[2], model_c3: cols[3],
-            color: [1.0, 0.5, 0.3], mat_kind: 1.0,
+            model_c0: cols[0],
+            model_c1: cols[1],
+            model_c2: cols[2],
+            model_c3: cols[3],
+            color: [1.0, 0.5, 0.3],
+            mat_kind: 1.0,
         });
         wire.push(greedy_mesh::PreviewInstance {
-            model_c0: cols[0], model_c1: cols[1], model_c2: cols[2], model_c3: cols[3],
-            color: [0.8, 0.4, 0.2], mat_kind: 2.0,
+            model_c0: cols[0],
+            model_c1: cols[1],
+            model_c2: cols[2],
+            model_c3: cols[3],
+            color: [0.8, 0.4, 0.2],
+            mat_kind: 2.0,
         });
     }
     (solid, wire)

@@ -423,13 +423,11 @@ fn generate_paired_fin(
     let fan_width = (mul * 0.4 * t_half).ceil().max(1.0) as i32;
 
     // Find nearest station to t_center
-    let station = stations
-        .iter()
-        .min_by(|a, b| {
-            ((a.t - t_center).abs())
-                .partial_cmp(&(b.t - t_center).abs())
-                .unwrap()
-        });
+    let station = stations.iter().min_by(|a, b| {
+        ((a.t - t_center).abs())
+            .partial_cmp(&(b.t - t_center).abs())
+            .unwrap()
+    });
     let Some(st) = station else { return };
 
     let outline = species_outline(species, st.t, w_half, t_half);
@@ -496,7 +494,10 @@ fn generate_adipose_fin(
         let outline = species_outline(species, st.t, w_half, t_half);
 
         for j in 0..hi {
-            let p = vec3_add(st.pos, vec3_scale(st.up, outline.half_dorsal + j as f32 + 1.0));
+            let p = vec3_add(
+                st.pos,
+                vec3_scale(st.up, outline.half_dorsal + j as f32 + 1.0),
+            );
             let x = p[0].round() as i32;
             let y = p[1].round() as i32;
             let z = p[2].round() as i32;
@@ -546,10 +547,7 @@ fn generate_body(
 
                 let world = vec3_add(
                     st.pos,
-                    vec3_add(
-                        vec3_scale(st.side, dv as f32),
-                        vec3_scale(st.up, dw as f32),
-                    ),
+                    vec3_add(vec3_scale(st.side, dv as f32), vec3_scale(st.up, dw as f32)),
                 );
                 let x = world[0].round() as i32;
                 let y = world[1].round() as i32;
@@ -663,8 +661,18 @@ fn generate_piscina_deltas(
             _ => 0.22,
         };
         generate_paired_fin(
-            &stations, species, w_half, t_half, fin_pectoral, tc, file, voxel_map, &mut seen,
-            &mut out, color, material,
+            &stations,
+            species,
+            w_half,
+            t_half,
+            fin_pectoral,
+            tc,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            color,
+            material,
         );
     }
 
@@ -683,8 +691,17 @@ fn generate_piscina_deltas(
     // 7. Adipose fin (trout, salmon-family)
     if show_fin_adipose {
         generate_adipose_fin(
-            &stations, species, w_half, t_half, fin_adipose, file, voxel_map, &mut seen, &mut out,
-            color, material,
+            &stations,
+            species,
+            w_half,
+            t_half,
+            fin_adipose,
+            file,
+            voxel_map,
+            &mut seen,
+            &mut out,
+            color,
+            material,
         );
     }
 

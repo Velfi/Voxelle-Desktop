@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getSunPosition } from "./solarPosition";
+import { loadPreferences } from "./preferences";
 
 export type SceneLightingPayload = {
   ambientIntensity: number;
@@ -129,10 +131,7 @@ function safeHex(v: string, fallback: string): string {
   return /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(t) ? t : fallback;
 }
 
-function matchesPreset(
-  l: SceneLightingPayload,
-  p: (typeof LIGHT_PRESETS)[number],
-): boolean {
+function matchesPreset(l: SceneLightingPayload, p: (typeof LIGHT_PRESETS)[number]): boolean {
   return (
     l.ambientIntensity === p.ambientIntensity &&
     l.sunlightIntensity === p.sunlightIntensity &&
@@ -152,8 +151,7 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
   const disabled = loading || workBusy;
   const [orthographic, setOrthographic] = useState(false);
   const [focalMm, setFocalMm] = useState(29);
-  const [lighting, setLighting] =
-    useState<SceneLightingPayload>(defaultLighting);
+  const [lighting, setLighting] = useState<SceneLightingPayload>(defaultLighting);
 
   const refreshFromNative = useCallback(() => {
     void invoke<boolean>("get_orthographic")
@@ -227,9 +225,7 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
               <option key={mm} value={mm} label={`${mm}mm`} />
             ))}
           </datalist>
-          <span className="tool-options-range-value">
-            {Math.round(focalMm)}mm
-          </span>
+          <span className="tool-options-range-value">{Math.round(focalMm)}mm</span>
         </div>
       ) : (
         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
@@ -262,22 +258,14 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
       </label>
 
       <div className="sidebar-viewport-preset-row">
-        <span className="sidebar-section-label sidebar-section-label-inline">
-          Light
-        </span>
-        <div
-          className="sidebar-preset-toolbar"
-          role="toolbar"
-          aria-label="Lighting presets"
-        >
+        <span className="sidebar-section-label sidebar-section-label-inline">Light</span>
+        <div className="sidebar-preset-toolbar" role="toolbar" aria-label="Lighting presets">
           {LIGHT_PRESETS.map((p) => (
             <button
               key={p.id}
               type="button"
               className={
-                matchesPreset(lighting, p)
-                  ? "sidebar-preset-btn is-active"
-                  : "sidebar-preset-btn"
+                matchesPreset(lighting, p) ? "sidebar-preset-btn is-active" : "sidebar-preset-btn"
               }
               disabled={disabled}
               title={p.title}
@@ -370,16 +358,14 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
             });
           }}
         />
-        <span className="tool-options-range-value">
-          {lighting.ambientIntensity.toFixed(2)}
-        </span>
+        <span className="tool-options-range-value">{lighting.ambientIntensity.toFixed(2)}</span>
       </label>
       <label className="tool-options-range-label tool-options-range-with-value">
         <span>Sunlight</span>
         <input
           type="range"
           min={0}
-          max={4}
+          max={20}
           step={0.05}
           value={lighting.sunlightIntensity}
           disabled={disabled}
@@ -390,9 +376,7 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
             });
           }}
         />
-        <span className="tool-options-range-value">
-          {lighting.sunlightIntensity.toFixed(2)}
-        </span>
+        <span className="tool-options-range-value">{lighting.sunlightIntensity.toFixed(2)}</span>
       </label>
       <label className="tool-options-range-label">
         <span>Sun color</span>
@@ -421,10 +405,33 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
             });
           }}
         />
-        <span className="tool-options-range-value">
-          {Math.round(lighting.lightAngle)}°
-        </span>
+        <span className="tool-options-range-value">{Math.round(lighting.lightAngle)}°</span>
       </label>
+      <div className="sidebar-sun-position-row">
+        <button
+          type="button"
+          className="sidebar-sun-position-btn"
+          disabled={disabled}
+          title="Set angle and elevation to the current real sun position"
+          aria-label="Apply real-time sun position"
+          onClick={() => {
+            const prefs = loadPreferences();
+            const { azimuthDeg, altitudeDeg } = getSunPosition(
+              new Date(),
+              prefs.sunLocationLat,
+              prefs.sunLocationLon,
+            );
+            void pushLighting({
+              ...lighting,
+              lightAngle: ((Math.round(azimuthDeg) % 360) + 360) % 360,
+              lightElevation: Math.max(5, Math.min(90, Math.round(altitudeDeg))),
+            });
+          }}
+        >
+          <span aria-hidden>🕐</span>
+          <span>Real sun</span>
+        </button>
+      </div>
       <label className="tool-options-range-label tool-options-range-with-value">
         <span>Elevation</span>
         <input
@@ -441,9 +448,7 @@ export function ViewportSettingsSidebar({ loading, workBusy }: Props) {
             });
           }}
         />
-        <span className="tool-options-range-value">
-          {Math.round(lighting.lightElevation)}°
-        </span>
+        <span className="tool-options-range-value">{Math.round(lighting.lightElevation)}°</span>
       </label>
       <label className="tool-options-checkbox-row">
         <input

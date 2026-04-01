@@ -85,12 +85,8 @@ pub fn ashlar_world_coords(
     for x in 0..wx {
         for y in 0..wy {
             for z in 0..wz {
-                let on_boundary = x == 0
-                    || x == wx - 1
-                    || y == 0
-                    || y == wy - 1
-                    || z == 0
-                    || z == wz - 1;
+                let on_boundary =
+                    x == 0 || x == wx - 1 || y == 0 || y == wy - 1 || z == 0 || z == wz - 1;
                 if on_boundary && rough > 0.0 {
                     let h = hash3(seed + 0xabcd_i32, x, y, z);
                     if h < rough * 0.4 {
@@ -122,7 +118,13 @@ pub fn ashlar_world_coords(
 
     // Offset along the face normal by half the normal-axis extent so the block
     // sits adjacent to the clicked face (not floating with a large gap).
-    let normal_dim = if fn_x != 0 { wx } else if fn_y != 0 { wy } else { wz };
+    let normal_dim = if fn_x != 0 {
+        wx
+    } else if fn_y != 0 {
+        wy
+    } else {
+        wz
+    };
     let half = ((normal_dim as f32) / 2.0).ceil() as i32;
     let ox = face_empty.0 + fn_x * half;
     let oy = face_empty.1 + fn_y * half;
@@ -158,7 +160,15 @@ pub fn generate_ashlar_deltas(
     thickness: Option<i32>,
     thickness_axis: Option<i32>,
 ) -> Vec<VoxelEditDelta> {
-    let coords = ashlar_world_coords(face_empty, solid, seed, size, roughness, thickness, thickness_axis);
+    let coords = ashlar_world_coords(
+        face_empty,
+        solid,
+        seed,
+        size,
+        roughness,
+        thickness,
+        thickness_axis,
+    );
     let mut out = Vec::new();
     for (x, y, z) in coords {
         ensure_grid_fits_coord(file, x, y, z);
@@ -203,10 +213,18 @@ pub fn preview_ashlar_at_screen(
     let Some(face_empty) = prev else {
         return Vec::new();
     };
-    ashlar_world_coords(face_empty, solid, seed, size, roughness, Some(thickness), None)
-        .into_iter()
-        .filter(|c| !voxel_map.contains_key(c))
-        .collect()
+    ashlar_world_coords(
+        face_empty,
+        solid,
+        seed,
+        size,
+        roughness,
+        Some(thickness),
+        None,
+    )
+    .into_iter()
+    .filter(|c| !voxel_map.contains_key(c))
+    .collect()
 }
 
 /// Face-click ashlar generator (web parity).

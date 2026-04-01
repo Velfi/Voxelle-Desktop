@@ -13,8 +13,7 @@ export const TONE_MAPPING_OPTIONS = [
   { value: "reinhard" as const, label: "Reinhard" },
 ] as const;
 
-export type ToneMappingPreference =
-  (typeof TONE_MAPPING_OPTIONS)[number]["value"];
+export type ToneMappingPreference = (typeof TONE_MAPPING_OPTIONS)[number]["value"];
 
 export type AppearanceTheme = "auto" | "light" | "dark";
 
@@ -41,9 +40,7 @@ export function toneMappingToGpuMode(t: ToneMappingPreference): number {
   return Math.max(0, TONE_ORDER.indexOf(t));
 }
 
-export function isToneMappingPreference(
-  v: unknown,
-): v is ToneMappingPreference {
+export function isToneMappingPreference(v: unknown): v is ToneMappingPreference {
   return typeof v === "string" && (TONE_ORDER as readonly string[]).includes(v);
 }
 
@@ -76,6 +73,14 @@ export type VoxelleDesktopPreferences = {
   raytraceEnabled: boolean;
   /** Use PCF soft shadows instead of hard single-tap shadows. */
   softShadows: boolean;
+  /** Jitter sun-shaft ray march to smooth banding artefacts. */
+  softSunshafts: boolean;
+  /** Output HDR (Rgba16Float) to the display when supported. */
+  hdr: boolean;
+  /** Latitude for real-time sun position (-90 to 90). */
+  sunLocationLat: number;
+  /** Longitude for real-time sun position (-180 to 180). */
+  sunLocationLon: number;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -95,6 +100,10 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   enableEmissionLighting: true,
   raytraceEnabled: false,
   softShadows: true,
+  softSunshafts: true,
+  hdr: false,
+  sunLocationLat: 41.9,
+  sunLocationLon: -87.6,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -109,9 +118,7 @@ export function normalizeCollabDisplayName(raw: string): string {
 }
 
 /** Whether `theme` resolves to the light (paper) UI, including OS preference when `auto`. */
-export function appearanceThemeResolvesToLight(
-  theme: AppearanceTheme,
-): boolean {
+export function appearanceThemeResolvesToLight(theme: AppearanceTheme): boolean {
   if (theme === "light") return true;
   if (theme === "dark") return false;
   if (typeof window === "undefined") return false;
@@ -158,8 +165,7 @@ function clampInt(n: number, min: number, max: number): number {
 
 /** Collaboration host listen port (TCP / WebSocket). */
 export function normalizeCollabHostPort(raw: unknown): number {
-  if (typeof raw === "number" && Number.isFinite(raw))
-    return clampInt(raw, 1, 65535);
+  if (typeof raw === "number" && Number.isFinite(raw)) return clampInt(raw, 1, 65535);
   return DEFAULTS.collabHostPort;
 }
 
@@ -179,15 +185,12 @@ export function loadPreferences(): VoxelleDesktopPreferences {
     }
     if (!raw) {
       const base = { ...DEFAULTS };
-      if (legacyInterval !== undefined)
-        base.autosaveIntervalSecs = legacyInterval;
+      if (legacyInterval !== undefined) base.autosaveIntervalSecs = legacyInterval;
       try {
         const ln = localStorage.getItem(LEGACY_COLLAB_NAME_KEY);
         const lc = localStorage.getItem(LEGACY_COLLAB_COLOR_KEY);
-        if (ln != null && ln.trim() !== "")
-          base.collabDisplayName = normalizeCollabDisplayName(ln);
-        if (lc != null && lc.trim() !== "")
-          base.collabAccentColor = normalizeCollabAccentColor(lc);
+        if (ln != null && ln.trim() !== "") base.collabDisplayName = normalizeCollabDisplayName(ln);
+        if (lc != null && lc.trim() !== "") base.collabAccentColor = normalizeCollabAccentColor(lc);
       } catch {
         /* ignore */
       }
@@ -209,13 +212,9 @@ export function loadPreferences(): VoxelleDesktopPreferences {
           ? o.showMovementDeltaHint
           : DEFAULTS.showMovementDeltaHint,
       showDragDeltaHint:
-        typeof o.showDragDeltaHint === "boolean"
-          ? o.showDragDeltaHint
-          : DEFAULTS.showDragDeltaHint,
+        typeof o.showDragDeltaHint === "boolean" ? o.showDragDeltaHint : DEFAULTS.showDragDeltaHint,
       showFpsCounter:
-        typeof o.showFpsCounter === "boolean"
-          ? o.showFpsCounter
-          : DEFAULTS.showFpsCounter,
+        typeof o.showFpsCounter === "boolean" ? o.showFpsCounter : DEFAULTS.showFpsCounter,
       collabDisplayName: (() => {
         if (typeof o.collabDisplayName === "string")
           return normalizeCollabDisplayName(o.collabDisplayName);
@@ -224,8 +223,7 @@ export function loadPreferences(): VoxelleDesktopPreferences {
             typeof localStorage !== "undefined"
               ? localStorage.getItem(LEGACY_COLLAB_NAME_KEY)
               : null;
-          if (leg != null && leg.trim() !== "")
-            return normalizeCollabDisplayName(leg);
+          if (leg != null && leg.trim() !== "") return normalizeCollabDisplayName(leg);
         } catch {
           /* ignore */
         }
@@ -239,52 +237,48 @@ export function loadPreferences(): VoxelleDesktopPreferences {
             typeof localStorage !== "undefined"
               ? localStorage.getItem(LEGACY_COLLAB_COLOR_KEY)
               : null;
-          if (leg != null && leg.trim() !== "")
-            return normalizeCollabAccentColor(leg);
+          if (leg != null && leg.trim() !== "") return normalizeCollabAccentColor(leg);
         } catch {
           /* ignore */
         }
         return DEFAULTS.collabAccentColor;
       })(),
       collabHostPort:
-        typeof o.collabHostPort === "number" &&
-        Number.isFinite(o.collabHostPort)
+        typeof o.collabHostPort === "number" && Number.isFinite(o.collabHostPort)
           ? normalizeCollabHostPort(o.collabHostPort)
           : DEFAULTS.collabHostPort,
-      enableUpnp:
-        typeof o.enableUpnp === "boolean" ? o.enableUpnp : DEFAULTS.enableUpnp,
-      toneMapping: isToneMappingPreference(o.toneMapping)
-        ? o.toneMapping
-        : DEFAULTS.toneMapping,
+      enableUpnp: typeof o.enableUpnp === "boolean" ? o.enableUpnp : DEFAULTS.enableUpnp,
+      toneMapping: isToneMappingPreference(o.toneMapping) ? o.toneMapping : DEFAULTS.toneMapping,
       autosaveEnabled:
-        typeof o.autosaveEnabled === "boolean"
-          ? o.autosaveEnabled
-          : DEFAULTS.autosaveEnabled,
+        typeof o.autosaveEnabled === "boolean" ? o.autosaveEnabled : DEFAULTS.autosaveEnabled,
       autosaveIntervalSecs: interval,
       autosaveKeepCount:
-        typeof o.autosaveKeepCount === "number" &&
-        Number.isFinite(o.autosaveKeepCount)
+        typeof o.autosaveKeepCount === "number" && Number.isFinite(o.autosaveKeepCount)
           ? clampInt(o.autosaveKeepCount, 1, 64)
           : DEFAULTS.autosaveKeepCount,
       appearanceTheme: isAppearanceTheme(o.appearanceTheme)
         ? o.appearanceTheme
         : DEFAULTS.appearanceTheme,
       reopenLastProject:
-        typeof o.reopenLastProject === "boolean"
-          ? o.reopenLastProject
-          : DEFAULTS.reopenLastProject,
+        typeof o.reopenLastProject === "boolean" ? o.reopenLastProject : DEFAULTS.reopenLastProject,
       enableEmissionLighting:
         typeof o.enableEmissionLighting === "boolean"
           ? o.enableEmissionLighting
           : DEFAULTS.enableEmissionLighting,
       raytraceEnabled:
-        typeof o.raytraceEnabled === "boolean"
-          ? o.raytraceEnabled
-          : DEFAULTS.raytraceEnabled,
-      softShadows:
-        typeof o.softShadows === "boolean"
-          ? o.softShadows
-          : DEFAULTS.softShadows,
+        typeof o.raytraceEnabled === "boolean" ? o.raytraceEnabled : DEFAULTS.raytraceEnabled,
+      softShadows: typeof o.softShadows === "boolean" ? o.softShadows : DEFAULTS.softShadows,
+      softSunshafts:
+        typeof o.softSunshafts === "boolean" ? o.softSunshafts : DEFAULTS.softSunshafts,
+      hdr: typeof o.hdr === "boolean" ? o.hdr : DEFAULTS.hdr,
+      sunLocationLat:
+        typeof o.sunLocationLat === "number" && Number.isFinite(o.sunLocationLat)
+          ? Math.max(-90, Math.min(90, o.sunLocationLat as number))
+          : DEFAULTS.sunLocationLat,
+      sunLocationLon:
+        typeof o.sunLocationLon === "number" && Number.isFinite(o.sunLocationLon)
+          ? Math.max(-180, Math.min(180, o.sunLocationLon as number))
+          : DEFAULTS.sunLocationLon,
     };
   } catch {
     return { ...DEFAULTS };
@@ -299,8 +293,7 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     if (prevRaw) {
       try {
         const p = JSON.parse(prevRaw) as unknown;
-        if (p && typeof p === "object")
-          merged = { ...(p as object) } as Record<string, unknown>;
+        if (p && typeof p === "object") merged = { ...(p as object) } as Record<string, unknown>;
       } catch {
         /* ignore */
       }
@@ -321,6 +314,10 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.enableEmissionLighting = prefs.enableEmissionLighting;
     merged.raytraceEnabled = prefs.raytraceEnabled;
     merged.softShadows = prefs.softShadows;
+    merged.softSunshafts = prefs.softSunshafts;
+    merged.hdr = prefs.hdr;
+    merged.sunLocationLat = prefs.sunLocationLat;
+    merged.sunLocationLon = prefs.sunLocationLon;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

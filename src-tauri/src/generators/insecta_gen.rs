@@ -117,7 +117,7 @@ fn segment_radii(
     if dist < thorax_start {
         // Head segment
         let t = dist / head_len.max(1.0); // 0=nose, 1=back-of-head
-        // Head shape: 0=round, 1=pointed, 2=flat
+                                          // Head shape: 0=round, 1=pointed, 2=flat
         let profile = match head_shape {
             1 => {
                 // Pointed: narrow at nose, wider at back
@@ -125,7 +125,11 @@ fn segment_radii(
             }
             2 => {
                 // Flat: nearly full width immediately
-                if t < 0.15 { t / 0.15 } else { 1.0 }
+                if t < 0.15 {
+                    t / 0.15
+                } else {
+                    1.0
+                }
             }
             _ => {
                 // Round: elliptical profile
@@ -550,7 +554,11 @@ fn generate_insecta_deltas(
 
     // Anchor: face_empty shifted by (u, v) in face plane
     let anchor = v3_add(
-        (face_empty.0 as f32, face_empty.1 as f32, face_empty.2 as f32),
+        (
+            face_empty.0 as f32,
+            face_empty.1 as f32,
+            face_empty.2 as f32,
+        ),
         v3_add(
             v3_scale(side, anchor_offset_u as f32),
             v3_scale(up, anchor_offset_v as f32),
@@ -586,10 +594,7 @@ fn generate_insecta_deltas(
         let arch_offset = body_arch * (dist / tl).powi(2);
         let slice_center = v3_add(
             nose,
-            v3_add(
-                v3_scale(forward, dist),
-                v3_scale(up, arch_offset),
-            ),
+            v3_add(v3_scale(forward, dist), v3_scale(up, arch_offset)),
         );
         // Fill elliptical cross-section
         let iw = rw.ceil() as i32;
@@ -606,7 +611,9 @@ fn generate_insecta_deltas(
                     v3_add(v3_scale(side, du as f32), v3_scale(up, dv as f32)),
                 );
                 let (x, y, z) = v3_round(p);
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
@@ -632,9 +639,14 @@ fn generate_insecta_deltas(
                 if eu * eu + ev * ev > 1.0 {
                     continue;
                 }
-                let vp = v3_add(p, v3_add(v3_scale(side, du as f32), v3_scale(up, dv as f32)));
+                let vp = v3_add(
+                    p,
+                    v3_add(v3_scale(side, du as f32), v3_scale(up, dv as f32)),
+                );
                 let (x, y, z) = v3_round(vp);
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
@@ -651,10 +663,7 @@ fn generate_insecta_deltas(
                 nose,
                 v3_add(
                     v3_scale(forward, eye_center_dist),
-                    v3_add(
-                        v3_scale(side, sign * bhw * 0.9),
-                        v3_scale(up, bhh * 0.5),
-                    ),
+                    v3_add(v3_scale(side, sign * bhw * 0.9), v3_scale(up, bhh * 0.5)),
                 ),
             );
             let er = (bhw * 0.45).max(1.0);
@@ -666,12 +675,11 @@ fn generate_insecta_deltas(
                         if d > er {
                             continue;
                         }
-                        let p = v3_add(
-                            eye_center,
-                            (dx as f32, dy as f32, dz as f32),
-                        );
+                        let p = v3_add(eye_center, (dx as f32, dy as f32, dz as f32));
                         let (x, y, z) = v3_round(p);
-                        if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                        if !emit_voxel(
+                            file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                        ) {
                             return out;
                         }
                     }
@@ -724,13 +732,17 @@ fn generate_insecta_deltas(
             let foot_v = v3_round(foot);
             // hip → knee
             for (x, y, z) in bresenham_line(hip_v, knee_v) {
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
             // knee → foot
             for (x, y, z) in bresenham_line(knee_v, foot_v) {
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
@@ -762,7 +774,9 @@ fn generate_insecta_deltas(
             let rv = v3_round(root_pos);
             let tv = v3_round(tip);
             for (x, y, z) in bresenham_line(rv, tv) {
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
@@ -784,7 +798,9 @@ fn generate_insecta_deltas(
             let rv = v3_round(mand_root);
             let tv = v3_round(tip);
             for (x, y, z) in bresenham_line(rv, tv) {
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
@@ -802,10 +818,7 @@ fn generate_insecta_deltas(
                 nose,
                 v3_add(
                     v3_scale(forward, hinge_fwd),
-                    v3_add(
-                        v3_scale(side, sign * bhw * 0.7),
-                        v3_scale(up, bhh * 0.8),
-                    ),
+                    v3_add(v3_scale(side, sign * bhw * 0.7), v3_scale(up, bhh * 0.8)),
                 ),
             );
             let cells = wing_sheet(
@@ -822,7 +835,9 @@ fn generate_insecta_deltas(
                 wing_fore_forward_cant,
             );
             for (x, y, z) in cells {
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }
@@ -837,10 +852,7 @@ fn generate_insecta_deltas(
                 nose,
                 v3_add(
                     v3_scale(forward, hinge_fwd),
-                    v3_add(
-                        v3_scale(side, sign * bhw * 0.6),
-                        v3_scale(up, bhh * 0.7),
-                    ),
+                    v3_add(v3_scale(side, sign * bhw * 0.6), v3_scale(up, bhh * 0.7)),
                 ),
             );
             let cells = wing_sheet(
@@ -857,7 +869,9 @@ fn generate_insecta_deltas(
                 0.0, // hind wings have no forward cant
             );
             for (x, y, z) in cells {
-                if !emit_voxel(file, voxel_map, &mut seen, &mut out, x, y, z, color, material) {
+                if !emit_voxel(
+                    file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
+                ) {
                     return out;
                 }
             }

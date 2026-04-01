@@ -430,6 +430,8 @@ body,
   overflow-y: auto;
 }
 
+
+
 .sidebar-section-label {
   margin: 0;
   font-size: 0.62rem;
@@ -634,225 +636,91 @@ body,
   opacity: 0.5;
 }
 
-/* Hierarchical menu system for collapsed sidebar */
+/* Collapsed sidebar: simple icon stack */
 
-.sidebar-collapsed-section {
+.sidebar-collapsed-tools {
   display: flex;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.2rem;
   align-items: stretch;
-  padding-bottom: 0.35rem;
-  border-bottom: 1px solid var(--app-border-muted);
-  position: relative;
 }
 
-.sidebar-collapsed-section:last-of-type {
-  border-bottom: none;
-  padding-bottom: 0;
-}
-
-/* Interaction mode selector button */
-.sidebar-interaction-mode-button {
+.sidebar-collapsed-tool-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 2.35rem;
+  min-height: 2rem;
   padding: 0.2rem;
-  font-size: 1.05rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
   background: var(--app-control-surface);
   border: 1px solid var(--app-control-border);
   border-radius: 6px;
-  cursor: pointer;
-  position: relative;
-}
-
-.sidebar-interaction-mode-button:hover {
-  background: var(--app-control-surface-hover);
-}
-
-/* Interaction mode dropdown menu */
-.sidebar-interaction-mode-menu {
-  position: absolute;
-  left: 100%;
-  top: 0;
-  margin-left: 0.25rem;
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  z-index: 1100;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  min-width: 140px;
-  max-width: 200px;
-  padding: 0.25rem 0;
-}
-
-.sidebar-interaction-mode-menu button {
-  background: none;
-  border: none;
-  padding: 0.35rem 0.5rem;
-  text-align: left;
-  font-size: 0.8rem;
-  cursor: pointer;
-  color: var(--app-text);
-  display: flex;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.sidebar-interaction-mode-menu button:hover {
-  background: rgba(var(--theme-accent-rgb) / 0.1);
-}
-
-/* Selection mode button */
-.sidebar-selection-mode-button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 2.35rem;
-  padding: 0.2rem;
-  font-size: 1.05rem;
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
-  cursor: pointer;
-  position: relative;
-}
-
-.sidebar-selection-mode-button:hover {
-  background: var(--app-control-surface-hover);
-}
-
-/* Selection mode dropdown menu */
-.sidebar-selection-menu {
-  position: absolute;
-  left: 100%;
-  top: 0;
-  margin-left: 0.25rem;
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-  z-index: 1100;
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  min-width: 140px;
-  padding: 0.25rem 0;
-}
-
-.sidebar-selection-menu button {
-  background: none;
-  border: none;
-  padding: 0.35rem 0.5rem;
-  text-align: left;
-  font-size: 0.8rem;
   cursor: pointer;
   color: var(--app-text);
 }
 
-.sidebar-selection-menu button:hover {
-  background: rgba(var(--theme-accent-rgb) / 0.1);
-}
-
-/* TLT Selector (Tool selector grid) */
-.sidebar-tlt-selector {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.25rem;
-}
-
-/* TLT Button */
-.sidebar-tlt-button {
-  min-height: 1.8rem;
-  padding: 0.15rem;
-  font-size: 0.85rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  aspect-ratio: 1;
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.sidebar-tlt-button:hover {
+.sidebar-collapsed-tool-btn:hover:not(:disabled) {
   background: var(--app-control-surface-hover);
 }
 
-.sidebar-tlt-button.is-active {
+.sidebar-collapsed-tool-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.sidebar-collapsed-tool-btn.is-active {
   background: rgb(var(--theme-accent-rgb) / 0.22);
   border-color: rgb(var(--theme-accent-rgb) / 0.35);
 }
 
-/* Subtools Container (when TLT selected) */
-.sidebar-subtools {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.25rem;
-  align-items: flex-start;
+.sidebar-collapsed-tool-icon {
+  line-height: 1;
 }
 
-/* Subtool Button */
-.sidebar-subtool-button {
-  min-height: 1.8rem;
-  padding: 0.15rem;
-  font-size: 0.85rem;
+.sidebar-collapsed-tool-separator {
+  height: 1px;
+  margin: 0.15rem 0;
+  background: var(--app-border-muted);
+}
+
+.sidebar-collapsed-section-label {
+  font-size: 0.55rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--app-text-muted);
+  padding: 0.15rem 0.1rem 0;
+}
+
+.sidebar-collapsed-sub-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  aspect-ratio: 1;
+  min-height: 1.5rem;
+  padding: 0.1rem 0.15rem;
+  font-size: 0.6rem;
+  font-weight: 500;
   background: var(--app-control-surface);
   border: 1px solid var(--app-control-border);
-  border-radius: 6px;
-  cursor: pointer;
-}
-
-.sidebar-subtool-button:hover {
-  background: var(--app-control-surface-hover);
-}
-
-.sidebar-subtool-button.is-active {
-  background: rgb(var(--theme-accent-rgb) / 0.22);
-  border-color: rgb(var(--theme-accent-rgb) / 0.35);
-}
-
-/* Back Button (return to TLT selector) */
-.sidebar-back-button {
-  grid-column: 1 / -1;
-  min-height: 1.8rem;
-  padding: 0.15rem;
-  font-size: 0.85rem;
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
   color: var(--app-text);
 }
 
-.sidebar-back-button:hover {
+.sidebar-collapsed-sub-btn:hover:not(:disabled) {
   background: var(--app-control-surface-hover);
 }
 
-/* Palette Icon Button */
-.sidebar-palette-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 2.35rem;
-  padding: 0.2rem;
-  font-size: 1.05rem;
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
-  cursor: pointer;
+.sidebar-collapsed-sub-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
-.sidebar-palette-icon:hover {
-  background: var(--app-control-surface-hover);
+.sidebar-collapsed-sub-btn.is-active {
+  background: rgb(var(--theme-accent-rgb) / 0.22);
+  border-color: rgb(var(--theme-accent-rgb) / 0.35);
 }
 
 /* Floating palette panel container */
@@ -868,7 +736,9 @@ body,
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   z-index: 1000;
   user-select: none;
-  min-width: 200px;
+  min-width: 140px;
+  min-height: 120px;
+  overflow: hidden;
 }
 
 /* Draggable header */
@@ -901,13 +771,13 @@ body,
 /* Color palette grid in floating panel */
 .floating-palette-panel .sidebar-palette-swatches {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(1.5rem, 1fr));
   gap: 3px;
 }
 
 .floating-palette-panel .sidebar-palette-swatch {
-  width: 1.5rem;
-  height: 1.5rem;
+  width: auto;
+  height: auto;
   border-radius: 4px;
   aspect-ratio: 1;
   cursor: pointer;
@@ -1104,11 +974,7 @@ body,
 .collab-join-progress-bar {
   height: 100%;
   border-radius: 4px;
-  background: linear-gradient(
-    90deg,
-    rgb(var(--theme-accent-rgb) / 0.55),
-    rgb(255 213 79 / 0.88)
-  );
+  background: linear-gradient(90deg, rgb(var(--theme-accent-rgb) / 0.55), rgb(255 213 79 / 0.88));
   transition: width 0.12s ease-out;
 }
 
@@ -1243,7 +1109,9 @@ body,
   border-radius: 5px;
   color: var(--app-text);
   border-left: 2px solid transparent;
-  transition: color 0.1s, background 0.1s;
+  transition:
+    color 0.1s,
+    background 0.1s;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1642,8 +1510,7 @@ body,
   background: transparent;
   box-shadow: none;
   right: max(0.75rem, env(safe-area-inset-right, 0px));
-  padding: 0 max(0.75rem, env(safe-area-inset-right, 0px))
-    clamp(1rem, 4vh, 2rem) 0;
+  padding: 0 max(0.75rem, env(safe-area-inset-right, 0px)) clamp(1rem, 4vh, 2rem) 0;
 }
 
 .viewport-wrap.is-start-screen .viewport-empty-open-stack {
@@ -2803,38 +2670,33 @@ body,
   line-height: 1;
 }
 
-/* Collapsed sidebar tool icons section */
-.sidebar-tool-icons {
+.sidebar-sun-position-row {
   display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
-  align-items: stretch;
+  justify-content: flex-end;
+  padding: 0.1rem 0;
 }
 
-/* Tab-style button for collapsed tool icons */
-.sidebar-pane-tab.is-collapsed {
-  min-height: 2.35rem;
-  padding: 0.2rem;
-  font-size: 1.05rem;
-  line-height: 1;
-  color: var(--app-text);
-  background: var(--app-control-surface);
-  border: 1px solid var(--app-control-border);
-  border-radius: 6px;
+.sidebar-sun-position-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.15rem 0.45rem;
+  border: 1px solid var(--app-border);
+  border-radius: 5px;
+  background: var(--app-bg-raised);
+  color: var(--app-text-muted);
+  font-size: 0.7rem;
   cursor: pointer;
+  line-height: 1.4;
 }
 
-.sidebar-pane-tab.is-collapsed:hover:not(:disabled) {
-  background: var(--app-control-surface-hover);
+.sidebar-sun-position-btn:hover:not(:disabled) {
+  color: var(--app-text);
+  border-color: rgb(var(--theme-accent-rgb) / 0.6);
 }
 
-.sidebar-pane-tab.is-collapsed.is-active {
-  background: rgb(var(--theme-accent-rgb) / 0.22);
-  border-color: rgb(var(--theme-accent-rgb) / 0.35);
-}
-
-.sidebar-pane-tab.is-collapsed:disabled {
-  opacity: 0.45;
+.sidebar-sun-position-btn:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -2908,6 +2770,32 @@ body,
   flex-direction: column;
   gap: 0.35rem;
   min-width: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* Resize handle at bottom-right corner */
+.floating-palette-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  border-radius: 0 0 8px 0;
+}
+
+.floating-palette-resize-handle::after {
+  content: "";
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--app-text-muted);
+  border-bottom: 2px solid var(--app-text-muted);
+  opacity: 0.5;
 }
 
 /* Ensure floating palette panel uses proper background */
@@ -3107,7 +2995,9 @@ body,
   border-radius: 5px;
   cursor: pointer;
   border: 1px solid transparent;
-  transition: background 0.1s, border-color 0.1s;
+  transition:
+    background 0.1s,
+    border-color 0.1s;
 }
 
 .stamp-book-item:hover {
@@ -3189,7 +3079,9 @@ body,
   color: var(--app-text-muted);
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
-  transition: color 0.1s, border-color 0.1s;
+  transition:
+    color 0.1s,
+    border-color 0.1s;
 }
 
 .stamp-book-tab:hover {
@@ -3299,7 +3191,9 @@ body,
   padding: 0.35rem 0.8rem;
   border-radius: 6px;
   border: 1px solid var(--app-control-border-strong);
-  transition: filter 0.1s, opacity 0.1s;
+  transition:
+    filter 0.1s,
+    opacity 0.1s;
 }
 
 .stamp-book-btn:disabled {

@@ -91,9 +91,9 @@ struct PostCompositeOpts {
     ss_samples: f32,
     ss_sun_uv_x: f32,
     ss_sun_uv_y: f32,
-    // Row 14: bloom
+    // Row 14: bloom + soft sunshafts
     bloom_strength: f32,
-    _pad14a: f32,
+    ss_soft: f32,
     _pad14b: f32,
     _pad14c: f32,
 }
@@ -147,6 +147,18 @@ fn agx_like_tonemap(c: vec3<f32>) -> vec3<f32> {
     return pow(clamp(t, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(1.0 / 2.4));
 }
 
+/// HDR display tone map: linear passthrough in the SDR range [0,1], soft
+/// shoulder compression above.  Peak output ≈ 5× SDR white — typical EDR
+/// headroom on macOS (Metal) and Windows (scRGB).
+fn hdr_display_tonemap(c: vec3<f32>) -> vec3<f32> {
+    let knee = 1.0;
+    let peak = 5.0;
+    let shoulder = peak - knee;
+    let over = max(c - vec3<f32>(knee), vec3<f32>(0.0));
+    let compressed = vec3<f32>(knee) + shoulder * over / (over + vec3<f32>(shoulder));
+    return select(c, compressed, c > vec3<f32>(knee));
+}
+
 fn apply_tone(mode: u32, rgb: vec3<f32>) -> vec3<f32> {
     switch mode {
         case 0u: { return neutral_tonemap(rgb); }
@@ -155,6 +167,7 @@ fn apply_tone(mode: u32, rgb: vec3<f32>) -> vec3<f32> {
         case 3u: { return clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0)); }
         case 4u: { return agx_like_tonemap(rgb); }
         case 5u: { return linear_to_display_srgb(reinhard_v3(rgb)); }
+        case 6u: { return hdr_display_tonemap(rgb); }
         default: { return aces_tonemap(rgb); }
     }
 }
@@ -294,7 +307,10 @@ fn apply_sun_shafts(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     let num_samples = i32(po.ss_samples);
     let delta_uv = (sun_uv - uv) / f32(num_samples);
 
-    var sample_uv = uv;
+    // Jitter the starting offset by a per-pixel hash to break banding,
+    // same idea as the IGN rotation used for PCF shadow smoothing.
+    let jitter = select(0.0, hash12(uv * vec2<f32>(po.ss_sun_uv_x * 761.0 + 13.0, po.ss_sun_uv_y * 547.0 + 7.0)), po.ss_soft > 0.5);
+    var sample_uv = uv + delta_uv * jitter;
     var illumination: f32 = 0.0;
     var decay_accum: f32 = 1.0;
     var current_density = po.ss_density;

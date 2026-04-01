@@ -9,32 +9,17 @@ use tauri::{TitleBarStyle, WebviewWindow};
 
 /// Dark `--app-paper` base: `rgb(12 12 14)`.
 fn ns_color_dark_paper() -> Retained<NSColor> {
-    NSColor::colorWithSRGBRed_green_blue_alpha(
-        12.0 / 255.0,
-        12.0 / 255.0,
-        14.0 / 255.0,
-        1.0,
-    )
+    NSColor::colorWithSRGBRed_green_blue_alpha(12.0 / 255.0, 12.0 / 255.0, 14.0 / 255.0, 1.0)
 }
 
 /// Light `--app-paper`: `#f5f0e6`.
 fn ns_color_light_paper() -> Retained<NSColor> {
-    NSColor::colorWithSRGBRed_green_blue_alpha(
-        245.0 / 255.0,
-        240.0 / 255.0,
-        230.0 / 255.0,
-        1.0,
-    )
+    NSColor::colorWithSRGBRed_green_blue_alpha(245.0 / 255.0, 240.0 / 255.0, 230.0 / 255.0, 1.0)
 }
 
 /// Dev-mode accent yellow: `--theme-accent: #fbc02d` / `rgb(251 192 45)`.
 fn ns_color_dev_accent() -> Retained<NSColor> {
-    NSColor::colorWithSRGBRed_green_blue_alpha(
-        251.0 / 255.0,
-        192.0 / 255.0,
-        45.0 / 255.0,
-        1.0,
-    )
+    NSColor::colorWithSRGBRed_green_blue_alpha(251.0 / 255.0, 192.0 / 255.0, 45.0 / 255.0, 1.0)
 }
 
 pub fn apply_transparent_titlebar<R: tauri::Runtime>(

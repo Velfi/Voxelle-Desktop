@@ -11,9 +11,14 @@ use raw_window_handle::{
     WindowsDisplayHandle,
 };
 use std::num::NonZeroIsize;
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, HINSTANCE, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::*;
+
+/// Wrapper so we can use `DefWindowProcW` as an `extern "system"` fn pointer.
+unsafe extern "system" fn def_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    DefWindowProcW(hwnd, msg, wparam, lparam)
+}
 
 /// Owns a child HWND used as the wgpu render surface.
 pub struct ChildRenderWindow {
@@ -30,15 +35,15 @@ impl ChildRenderWindow {
     /// The caller must call [`reposition`] once the viewport dimensions are known.
     pub fn new(parent: HWND) -> Result<Self, String> {
         unsafe {
-            let hinstance =
-                GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
+            let hmodule = GetModuleHandleW(None).map_err(|e| format!("GetModuleHandleW: {e}"))?;
+            let hinstance = HINSTANCE(hmodule.0);
 
             let class_name = windows::core::w!("VoxelleRenderSurface");
 
             let wc = WNDCLASSW {
                 style: CS_OWNDC,
-                lpfnWndProc: Some(DefWindowProcW),
-                hInstance: hinstance.into(),
+                lpfnWndProc: Some(def_wnd_proc),
+                hInstance: hinstance,
                 lpszClassName: class_name,
                 ..Default::default()
             };
@@ -54,9 +59,9 @@ impl ChildRenderWindow {
                 0,
                 1,
                 1,
-                Some(parent),
+                parent,
                 None,
-                Some(hinstance.into()),
+                hinstance,
                 None,
             )
             .map_err(|e| format!("CreateWindowExW child: {e}"))?;
@@ -64,7 +69,7 @@ impl ChildRenderWindow {
             // Place behind all siblings (WebView2) in z-order.
             let _ = SetWindowPos(
                 hwnd,
-                Some(HWND_BOTTOM),
+                HWND_BOTTOM,
                 0,
                 0,
                 1,
@@ -83,15 +88,7 @@ impl ChildRenderWindow {
     /// within the parent window's client area.
     pub fn reposition(&self, x: i32, y: i32, w: i32, h: i32) {
         unsafe {
-            let _ = SetWindowPos(
-                self.hwnd,
-                Some(HWND_BOTTOM),
-                x,
-                y,
-                w,
-                h,
-                SWP_NOACTIVATE,
-            );
+            let _ = SetWindowPos(self.hwnd, HWND_BOTTOM, x, y, w, h, SWP_NOACTIVATE);
         }
     }
 

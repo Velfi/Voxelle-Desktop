@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
@@ -162,18 +156,14 @@ const LS_TOOLS_FLOATING = "voxelleToolsFloating";
 const LS_TOOLS_FLOAT_POS = "voxelleToolsFloatPos";
 const LS_PALETTE_FLOATING = "voxellePaletteFloating";
 const LS_PALETTE_FLOAT_POS = "voxellePaletteFloatPos";
+const LS_PALETTE_FLOAT_SIZE = "voxellePaletteFloatSize";
 /** `localStorage` = `"1"`: show JS vs Rust viewport cursor overlay (see `get_viewport_cursor_debug`). */
 const LS_VIEWPORT_CURSOR_DEBUG = "voxelleDebugViewportCursor";
 const LS_PAINT_COLOR_DISTRIB = "voxellePaintColorDistrib";
 
 // ── Multi-color paint distribution ─────────────────────────────────────────
 
-type PaintColorMode =
-  | "whiteNoise"
-  | "randomSingle"
-  | "fbmNoise"
-  | "gradient"
-  | "dither";
+type PaintColorMode = "whiteNoise" | "randomSingle" | "fbmNoise" | "gradient" | "dither";
 
 interface FbmParams {
   octaves: number;
@@ -252,10 +242,7 @@ function layoutViewportCssSize(): { w: number; h: number } {
 }
 
 /** Map texture-normalized nx, ny to position inside `.viewport` for debug overlay markers. */
-function viewportCursorOverlayPercent(
-  nx: number,
-  ny: number,
-): { leftPct: number; topPct: number } {
+function viewportCursorOverlayPercent(nx: number, ny: number): { leftPct: number; topPct: number } {
   return { leftPct: nx * 100, topPct: ny * 100 };
 }
 
@@ -307,14 +294,7 @@ let startScreenLogoInvokeSent = false;
 
 type RenderingMode = "greedy" | "marchingCubes" | "dualContour" | "ray";
 
-type StartShape =
-  | "cube"
-  | "orb"
-  | "cylinder"
-  | "hollowCube"
-  | "plane"
-  | "circle"
-  | "empty";
+type StartShape = "cube" | "orb" | "cylinder" | "hollowCube" | "plane" | "circle" | "empty";
 
 type RosterEntry = {
   peerId: number;
@@ -369,8 +349,7 @@ function basename(path: string): string {
 
 /** Maps low-level Tauri updater errors to text users can act on. */
 function userFacingUpdaterError(err: unknown): string {
-  const raw =
-    err instanceof Error ? err.message : String(err ?? "unknown error");
+  const raw = err instanceof Error ? err.message : String(err ?? "unknown error");
   if (
     raw.includes("None of the fallback platforms") &&
     raw.includes("were found in the response")
@@ -402,27 +381,16 @@ const ONGOING_UNSAVED_PROJECT_LABEL = "An unsaved project";
 /** Optional note when reopening (backup vs file). */
 function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
   if (!info.lastDocumentPath) return null;
-  if (
-    info.lastDocumentPath === ONGOING_UNSAVED_PROJECT_LABEL &&
-    info.autosaveExists
-  ) {
+  if (info.lastDocumentPath === ONGOING_UNSAVED_PROJECT_LABEL && info.autosaveExists) {
     return "The project is an autosave and will be overwritten by your next autosave.";
   }
   if (!info.documentExists && info.autosaveExists) {
     return "Couldn't find the file — opened your backup instead.";
   }
-  if (
-    info.documentExists &&
-    info.autosaveExists &&
-    info.autosaveNewerThanDocument
-  ) {
+  if (info.documentExists && info.autosaveExists && info.autosaveNewerThanDocument) {
     return "Backup is newer than the saved file.";
   }
-  if (
-    info.documentExists &&
-    info.autosaveExists &&
-    !info.autosaveNewerThanDocument
-  ) {
+  if (info.documentExists && info.autosaveExists && !info.autosaveNewerThanDocument) {
     return null;
   }
   return null;
@@ -431,6 +399,7 @@ function lastProjectReopenBlurb(info: LastSessionInfo): string | null {
 type InteractionMode =
   | "navigate"
   | "fly"
+  | "walk"
   | "add"
   | "remove"
   | "paint"
@@ -445,23 +414,10 @@ type InteractionMode =
   | "generator"
   | "squishy";
 
-type ToolsPane =
-  | "hand"
-  | "draw"
-  | "sculpt"
-  | "generators"
-  | "squishy"
-  | "mood"
-  | "fly";
+type ToolsPane = "hand" | "draw" | "sculpt" | "generators" | "squishy" | "mood" | "fly" | "walk";
 
 /** Matches Rust `SculptStrokeMode` (JSON camelCase). */
-type SculptStrokeModeApi =
-  | "draw"
-  | "smooth"
-  | "gouge"
-  | "wall"
-  | "terrain"
-  | "extrude";
+type SculptStrokeModeApi = "draw" | "smooth" | "gouge" | "wall" | "terrain" | "extrude";
 /** Matches Rust `TerrainSculptOp`. */
 type TerrainSculptOpApi = "raise" | "lower" | "smooth";
 
@@ -476,13 +432,7 @@ type GeneratorKindId =
   | "piscina"
   | "insecta"
   | "fauna";
-type ClothGravityDirectionId =
-  | "down"
-  | "up"
-  | "left"
-  | "right"
-  | "forward"
-  | "back";
+type ClothGravityDirectionId = "down" | "up" | "left" | "right" | "forward" | "back";
 
 type BrushShape = "sphere" | "cube" | "pyramid" | "square" | "circle";
 
@@ -500,15 +450,7 @@ function sculptBrushShapeToRust(s: SculptBrushShapeUi): BrushShape {
 type WallAreaShapeApi = "brush" | "circle" | "polygon";
 /** Web `SculptSmoothVariant`; Rust serde camelCase. */
 type SculptSmoothVariantApi = "majority" | "meshLaplacian";
-type SprayDirectionApi =
-  | "auto"
-  | "none"
-  | "right"
-  | "left"
-  | "up"
-  | "down"
-  | "back"
-  | "forward";
+type SprayDirectionApi = "auto" | "none" | "right" | "left" | "up" | "down" | "back" | "forward";
 
 const MATERIAL_OPTIONS: { id: string; label: string }[] = [
   { id: "plastic", label: "Plastic" },
@@ -525,10 +467,8 @@ function MultiColorPaintSection(props: {
   setDistrib: (d: PaintColorDistrib) => void;
 }) {
   const { distrib, setDistrib } = props;
-  const patch = (part: Partial<PaintColorDistrib>) =>
-    setDistrib({ ...distrib, ...part });
-  const patchFbm = (part: Partial<FbmParams>) =>
-    patch({ fbm: { ...distrib.fbm, ...part } });
+  const patch = (part: Partial<PaintColorDistrib>) => setDistrib({ ...distrib, ...part });
+  const patchFbm = (part: Partial<FbmParams>) => patch({ fbm: { ...distrib.fbm, ...part } });
   const patchGrad = (part: Partial<GradientParams>) =>
     patch({ gradient: { ...distrib.gradient, ...part } });
   const patchDither = (part: Partial<DitherParams>) =>
@@ -558,9 +498,7 @@ function MultiColorPaintSection(props: {
       {distrib.mode === "fbmNoise" && (
         <>
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Octaves {distrib.fbm.octaves}
-            </label>
+            <label className="sidebar-label-sm">Octaves {distrib.fbm.octaves}</label>
             <input
               type="range"
               min={1}
@@ -571,9 +509,7 @@ function MultiColorPaintSection(props: {
             />
           </div>
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Frequency {distrib.fbm.frequency.toFixed(2)}
-            </label>
+            <label className="sidebar-label-sm">Frequency {distrib.fbm.frequency.toFixed(2)}</label>
             <input
               type="range"
               min={0.02}
@@ -606,9 +542,7 @@ function MultiColorPaintSection(props: {
               max={1}
               step={0.05}
               value={distrib.fbm.persistence}
-              onChange={(e) =>
-                patchFbm({ persistence: Number(e.target.value) })
-              }
+              onChange={(e) => patchFbm({ persistence: Number(e.target.value) })}
             />
           </div>
           <div className="sidebar-row">
@@ -630,9 +564,7 @@ function MultiColorPaintSection(props: {
             <select
               className="sidebar-select-sm"
               value={distrib.gradient.kind}
-              onChange={(e) =>
-                patchGrad({ kind: e.target.value as "linear" | "radial" })
-              }
+              onChange={(e) => patchGrad({ kind: e.target.value as "linear" | "radial" })}
             >
               <option value="linear">Linear</option>
               <option value="radial">Radial</option>
@@ -644,9 +576,7 @@ function MultiColorPaintSection(props: {
               <select
                 className="sidebar-select-sm"
                 value={distrib.gradient.linearAxis}
-                onChange={(e) =>
-                  patchGrad({ linearAxis: Number(e.target.value) as 0 | 1 | 2 })
-                }
+                onChange={(e) => patchGrad({ linearAxis: Number(e.target.value) as 0 | 1 | 2 })}
               >
                 <option value={0}>X</option>
                 <option value={1}>Y</option>
@@ -666,11 +596,7 @@ function MultiColorPaintSection(props: {
                     style={{ width: "3.5rem" }}
                     value={distrib.gradient.radialCenter[i]}
                     onChange={(e) => {
-                      const c = [...distrib.gradient.radialCenter] as [
-                        number,
-                        number,
-                        number,
-                      ];
+                      const c = [...distrib.gradient.radialCenter] as [number, number, number];
                       c[i] = Number(e.target.value);
                       patchGrad({ radialCenter: c });
                     }}
@@ -680,9 +606,7 @@ function MultiColorPaintSection(props: {
             </div>
           )}
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Scale {distrib.gradient.scale.toFixed(3)}
-            </label>
+            <label className="sidebar-label-sm">Scale {distrib.gradient.scale.toFixed(3)}</label>
             <input
               type="range"
               min={0.01}
@@ -693,9 +617,7 @@ function MultiColorPaintSection(props: {
             />
           </div>
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Phase {distrib.gradient.phase.toFixed(2)}
-            </label>
+            <label className="sidebar-label-sm">Phase {distrib.gradient.phase.toFixed(2)}</label>
             <input
               type="range"
               min={-3.15}
@@ -745,9 +667,7 @@ function MultiColorPaintSection(props: {
               max={1}
               step={0.05}
               value={distrib.dither.orderedStrength}
-              onChange={(e) =>
-                patchDither({ orderedStrength: Number(e.target.value) })
-              }
+              onChange={(e) => patchDither({ orderedStrength: Number(e.target.value) })}
             />
           </div>
           <div className="sidebar-row">
@@ -780,14 +700,8 @@ function PaletteSwatches(props: {
   disabled: boolean;
   palette: readonly string[];
 }) {
-  const {
-    activeColor,
-    selectedColors,
-    setActiveColor,
-    setSelectedColors,
-    disabled,
-    palette,
-  } = props;
+  const { activeColor, selectedColors, setActiveColor, setSelectedColors, disabled, palette } =
+    props;
   const dragStartIdxRef = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const shiftHeldRef = useRef(false);
@@ -797,15 +711,9 @@ function PaletteSwatches(props: {
     return idx !== null ? Number(idx) : -1;
   }
 
-  function selectRange(
-    lo: number,
-    hi: number,
-    baseColors?: number[],
-  ): number[] {
+  function selectRange(lo: number, hi: number, baseColors?: number[]): number[] {
     const [a, b] = lo <= hi ? [lo, hi] : [hi, lo];
-    const rangeRgbs = palette
-      .slice(a, b + 1)
-      .map((hex) => Number.parseInt(hex.slice(1), 16));
+    const rangeRgbs = palette.slice(a, b + 1).map((hex) => Number.parseInt(hex.slice(1), 16));
     if (baseColors) {
       const merged = new Set([...baseColors, ...rangeRgbs]);
       return Array.from(merged);
@@ -880,8 +788,7 @@ function PaletteSwatches(props: {
     >
       {palette.map((hex, idx) => {
         const rgb = Number.parseInt(hex.slice(1), 16);
-        const isActive =
-          selectedColors.length === 0 && (activeColor & 0xffffff) === rgb;
+        const isActive = selectedColors.length === 0 && (activeColor & 0xffffff) === rgb;
         const isSelected = selectedSet.has(rgb);
         let cls = "sidebar-palette-swatch";
         if (isActive) cls += " is-active";
@@ -961,9 +868,7 @@ function SymmetryColorSidebarSections(props: {
           <button
             type="button"
             className={
-              interactionMode === "eyedropper"
-                ? "sidebar-mode-btn is-active"
-                : "sidebar-mode-btn"
+              interactionMode === "eyedropper" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
             }
             disabled={loading || workBusy}
             onClick={() => setInteractionMode("eyedropper")}
@@ -995,10 +900,7 @@ function SymmetryColorSidebarSections(props: {
           palette={MATERIAL_BUILTIN_PALETTE_HEX}
         />
         {selectedColors.length > 1 && (
-          <MultiColorPaintSection
-            distrib={paintColorDistrib}
-            setDistrib={setPaintColorDistrib}
-          />
+          <MultiColorPaintSection distrib={paintColorDistrib} setDistrib={setPaintColorDistrib} />
         )}
       </div>
     </div>
@@ -1016,9 +918,7 @@ function App() {
   const lastLayoutViewportCssRef = useRef({ w: 0, h: 0 });
   const lastRef = useRef({ x: 0, y: 0 });
   /** Last pointer position over `.viewport` in physical pixels (for Z = ping pick). */
-  const lastViewportPickNormRef = useRef<{ nx: number; ny: number } | null>(
-    null,
-  );
+  const lastViewportPickNormRef = useRef<{ nx: number; ny: number } | null>(null);
   const pointerStartRef = useRef<{ x: number; y: number } | null>(null);
   const maxPointerMoveRef = useRef(0);
   /** After pick probe: camera orbit/pan/dolly vs voxel click-to-edit (matches web: no hit → camera). */
@@ -1045,9 +945,7 @@ function App() {
   const planeAxisRef = useRef<PlaneAxisApi>("auto");
   const sprayDensityRef = useRef(0);
   /** Normalized viewport start of stroke (for line stroke); matches Rust `viewport_texels_from_norm`. */
-  const strokeViewportStartRef = useRef<{ nx: number; ny: number } | null>(
-    null,
-  );
+  const strokeViewportStartRef = useRef<{ nx: number; ny: number } | null>(null);
   /** Previous brush sample (normalized viewport). */
   const lastStrokeNormRef = useRef<{ nx: number; ny: number } | null>(null);
   const lastStrokeEditMsRef = useRef(0);
@@ -1072,20 +970,17 @@ function App() {
   /** Physical-pixel look deltas coalesced per animation frame (pointermove IPC was starving RAF and inflating fly dt). */
   const flyPendingLookDxRef = useRef(0);
   const flyPendingLookDyRef = useRef(0);
-  const [interactionMode, setInteractionMode] =
-    useState<InteractionMode>("navigate");
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>("navigate");
   const [mood, setMood] = useState<MoodState>(() => defaultMoodState());
   const [selectionCount, setSelectionCount] = useState(0);
   const selectionCountRef = useRef(0);
-  const [viewportCursorDebugEnabled, setViewportCursorDebugEnabled] = useState(
-    () => {
-      try {
-        return localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) === "1";
-      } catch {
-        return false;
-      }
-    },
-  );
+  const [viewportCursorDebugEnabled, setViewportCursorDebugEnabled] = useState(() => {
+    try {
+      return localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [viewportCursorDebugJs, setViewportCursorDebugJs] = useState<{
     nx: number;
     ny: number;
@@ -1095,21 +990,17 @@ function App() {
   const [viewportCursorDebugScreen, setViewportCursorDebugScreen] =
     useState<ViewportCursorDebugScreen | null>(null);
   /** Synchronous copy for debug ingest (React state can lag behind rAF). */
-  const viewportCursorDebugScreenRef = useRef<ViewportCursorDebugScreen | null>(
-    null,
-  );
+  const viewportCursorDebugScreenRef = useRef<ViewportCursorDebugScreen | null>(null);
   const viewportCursorDebugRafRef = useRef<number | null>(null);
   const [hideUI, setHideUI] = useState(false);
-  const [matchMaterialSelectColor, setMatchMaterialSelectColor] =
-    useState(false);
+  const [matchMaterialSelectColor, setMatchMaterialSelectColor] = useState(false);
   const matchMaterialSelectColorRef = useRef(false);
   const [activeColor, setActiveColor] = useState(0x8899aa);
   /** Multi-color palette selection (empty = single-color mode). */
   const [selectedColors, setSelectedColors] = useState<number[]>([]);
   const selectedColorsRef = useRef<number[]>([]);
-  const [paintColorDistrib, setPaintColorDistrib] = useState<PaintColorDistrib>(
-    loadPaintColorDistrib,
-  );
+  const [paintColorDistrib, setPaintColorDistrib] =
+    useState<PaintColorDistrib>(loadPaintColorDistrib);
   const paintColorDistribRef = useRef<PaintColorDistrib>(paintColorDistrib);
   /** Deterministic seed for the current stroke (randomSingle / preview consistency). */
   const currentStrokeSeedRef = useRef<number>(0);
@@ -1118,13 +1009,10 @@ function App() {
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
   /** Brush: clip to half-space along the face outward normal from the pick (see Rust `brush_clip_half_normal_from_screen`). */
   const [brushClipBottomHalf, setBrushClipBottomHalf] = useState(false);
-  const [strokeDrawStyle, setStrokeDrawStyle] =
-    useState<StrokeDrawStyle>("line");
-  const [strokeFamilyVariant, setStrokeFamilyVariant] =
-    useState<StrokeFamilyVariant>("stroke");
+  const [strokeDrawStyle, setStrokeDrawStyle] = useState<StrokeDrawStyle>("line");
+  const [strokeFamilyVariant, setStrokeFamilyVariant] = useState<StrokeFamilyVariant>("stroke");
   const strokeFamilyVariantRef = useRef<StrokeFamilyVariant>("stroke");
-  const [drawStrokeMode, setDrawStrokeMode] =
-    useState<DrawStrokeModeApi>("line");
+  const [drawStrokeMode, setDrawStrokeMode] = useState<DrawStrokeModeApi>("line");
   const [planeAxis, setPlaneAxis] = useState<PlaneAxisApi>("auto");
   const [sprayDensity, setSprayDensity] = useState(0);
   /** Selection fill (web `fillSelectDiagonals` / `fillRespectsColor`). */
@@ -1139,17 +1027,13 @@ function App() {
   const [toolsPane, setToolsPane] = useState<ToolsPane>("draw");
   const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
   const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("rocks");
-  const [squishyMode, setSquishyMode] = useState<"add" | "edit" | "delete">(
-    "add",
-  );
+  const [squishyMode, setSquishyMode] = useState<"add" | "edit" | "delete">("add");
   const squishyModeRef = useRef<"add" | "edit" | "delete">("add");
   const [squishyHollow, setSquishyHollow] = useState(false);
   const [squishyWallThickness, setSquishyWallThickness] = useState(1);
   const [squishySnapToSurface, setSquishySnapToSurface] = useState(true);
-  const [selectionStrokeSnapToSurface, setSelectionStrokeSnapToSurface] =
-    useState(true);
-  const [selectionStrokeAxisAlign, setSelectionStrokeAxisAlign] =
-    useState(true);
+  const [selectionStrokeSnapToSurface, setSelectionStrokeSnapToSurface] = useState(true);
+  const [selectionStrokeAxisAlign, setSelectionStrokeAxisAlign] = useState(true);
   const selectionStrokeSnapToSurfaceRef = useRef(true);
   const selectionStrokeAxisAlignRef = useRef(true);
   const [surfacePlaneHollow, setSurfacePlaneHollow] = useState(false);
@@ -1176,9 +1060,7 @@ function App() {
   const [fillConstrainToPlane, setFillConstrainToPlane] = useState(false);
   const fillConstrainToPlaneRef = useRef(false);
   const [squishyBallCount, setSquishyBallCount] = useState(0);
-  const [strokePolygonVerts, setStrokePolygonVerts] = useState<
-    [number, number, number][]
-  >([]);
+  const [strokePolygonVerts, setStrokePolygonVerts] = useState<[number, number, number][]>([]);
   /** Kept in sync with `strokePolygonVerts` for `sync_preview_input` / `mergedStrokeAux` (no stale closure). */
   const strokePolygonVertsRef = useRef<[number, number, number][]>([]);
   const strokeClickRef = useRef<{
@@ -1230,9 +1112,7 @@ function App() {
   /** Inline depth field: draft while focused; +/- still updates value + draft when editing. */
   const [extrusionDepthEditing, setExtrusionDepthEditing] = useState(false);
   const [extrusionDepthDraft, setExtrusionDepthDraft] = useState("");
-  const strokePolygonLastScreenRef = useRef<{ nx: number; ny: number } | null>(
-    null,
-  );
+  const strokePolygonLastScreenRef = useRef<{ nx: number; ny: number } | null>(null);
   const [ropeFirstScreen, setRopeFirstScreen] = useState<{
     nx: number;
     ny: number;
@@ -1302,9 +1182,7 @@ function App() {
   /** 0 = loose, 1 = taut (web ropeTension). */
   const [ropeTension, setRopeTension] = useState(0.5);
   const [ropeBrushRadiusIndex, setRopeBrushRadiusIndex] = useState(2);
-  const [ropeBrushShapeUi, setRopeBrushShapeUi] = useState<"sphere" | "cube">(
-    "sphere",
-  );
+  const [ropeBrushShapeUi, setRopeBrushShapeUi] = useState<"sphere" | "cube">("sphere");
   /** Cloth: corner pins (surface picks), then Apply in tool options. */
   const [clothPins, setClothPins] = useState<[number, number, number][]>([]);
   const clothPinsRef = useRef<[number, number, number][]>([]);
@@ -1319,11 +1197,9 @@ function App() {
   const [ashlarThickness, setAshlarThickness] = useState(3);
   const [rockCount, setRockCount] = useState(1);
   const [rockClusterRadius, setRockClusterRadius] = useState(1);
-  const [rockSinkDirection, setRockSinkDirection] = useState<
-    "none" | "under" | "over"
-  >("none");
+  const [rockSinkDirection, setRockSinkDirection] = useState<"none" | "under" | "over">("none");
   const [rockSinkAmount, setRockSinkAmount] = useState(0);
-  const [grassDensity, setGrassDensity] = useState(4);
+  const [grassDensity, setGrassDensity] = useState(0.6);
   const [grassMaxHeight, setGrassMaxHeight] = useState(3);
   // Flora params
   const [floraHeight, setFloraHeight] = useState(14);
@@ -1346,19 +1222,13 @@ function App() {
   const [roofHollow, setRoofHollow] = useState(false);
   const [roofPins, setRoofPins] = useState<[number, number, number][]>([]);
   const roofPinsRef = useRef<[number, number, number][]>([]);
-  const [roofAreaShape, setRoofAreaShape] = useState<
-    "polygon" | "square" | "circle"
-  >("polygon");
+  const [roofAreaShape, setRoofAreaShape] = useState<"polygon" | "square" | "circle">("polygon");
   const roofAreaShapeRef = useRef<"polygon" | "square" | "circle">("polygon");
   // First click anchor for square/circle roof modes
-  const [roofFirstClick, setRoofFirstClick] = useState<
-    [number, number, number] | null
-  >(null);
+  const [roofFirstClick, setRoofFirstClick] = useState<[number, number, number] | null>(null);
   const roofFirstClickRef = useRef<[number, number, number] | null>(null);
-  const [sculptStrokeMode, setSculptStrokeMode] =
-    useState<SculptStrokeModeApi>("draw");
-  const [terrainSculptOp, setTerrainSculptOp] =
-    useState<TerrainSculptOpApi>("raise");
+  const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
+  const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
   const [terrainBaseY, setTerrainBaseY] = useState(0);
   const [terrainStrength, setTerrainStrength] = useState(4);
   const [terrainSmoothRadius, setTerrainSmoothRadius] = useState(2);
@@ -1367,28 +1237,20 @@ function App() {
   const [sculptBrushRadius, setSculptBrushRadius] = useState(2);
   const [sculptBrushStrength, setSculptBrushStrength] = useState(100);
   const [sculptBrushFalloff, setSculptBrushFalloff] = useState(0);
-  const [sculptBrushShapeUi, setSculptBrushShapeUi] =
-    useState<SculptBrushShapeUi>("circle");
+  const [sculptBrushShapeUi, setSculptBrushShapeUi] = useState<SculptBrushShapeUi>("circle");
   // Extrude-specific params
   const [extrudeDirectionRef, setExtrudeDirectionRef] = useState<
     "camera" | "auto" | "x" | "y" | "z"
   >("camera");
-  const extrudeDirectionRefRef = useRef<"camera" | "auto" | "x" | "y" | "z">(
-    "camera",
-  );
+  const extrudeDirectionRefRef = useRef<"camera" | "auto" | "x" | "y" | "z">("camera");
   extrudeDirectionRefRef.current = extrudeDirectionRef;
-  const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">(
-    "cube",
-  );
-  const [extrudeEndCap, setExtrudeEndCap] = useState<
-    "flat" | "rounded" | "pointed"
-  >("flat");
+  const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">("cube");
+  const [extrudeEndCap, setExtrudeEndCap] = useState<"flat" | "rounded" | "pointed">("flat");
   const [extrudeTaper, setExtrudeTaper] = useState(false);
   const [extrudeTaperStart, setExtrudeTaperStart] = useState(3);
   const [extrudeTaperEnd, setExtrudeTaperEnd] = useState(0);
   const [wallAreaShape, setWallAreaShape] = useState<WallAreaShapeApi>("brush");
-  const [sprayDirection, setSprayDirection] =
-    useState<SprayDirectionApi>("auto");
+  const [sprayDirection, setSprayDirection] = useState<SprayDirectionApi>("auto");
   const [wallWidthIndex, setWallWidthIndex] = useState(0);
   const [wallHeightVox, setWallHeightVox] = useState(2);
   const [wallLockStartHeight, setWallLockStartHeight] = useState(false);
@@ -1401,9 +1263,9 @@ function App() {
   const [smoothLaplacianIterations, setSmoothLaplacianIterations] = useState(4);
   const [smoothLaplacianRelaxPct, setSmoothLaplacianRelaxPct] = useState(50);
   /** Wall + polygon area: corner voxels (object-local), then Done commits a wall stroke. */
-  const [wallSculptPolygonVerts, setWallSculptPolygonVerts] = useState<
-    [number, number, number][]
-  >([]);
+  const [wallSculptPolygonVerts, setWallSculptPolygonVerts] = useState<[number, number, number][]>(
+    [],
+  );
   const [pathLabel, setPathLabel] = useState("");
   /** Cold-start title mesh from `Logo.voxelle`; enables bottom menu layout and viewport orbit. */
   const [startScreenLogoLoaded, setStartScreenLogoLoaded] = useState(false);
@@ -1428,13 +1290,16 @@ function App() {
   const [fillOperationPending, setFillOperationPending] = useState(false);
   const fillOperationPendingRef = useRef(false);
   const [fpsDisplayed, setFpsDisplayed] = useState(0);
-  const [showFpsCounter, setShowFpsCounter] = useState(
-    () => loadPreferences().showFpsCounter,
-  );
+  const [showFpsCounter, setShowFpsCounter] = useState(() => loadPreferences().showFpsCounter);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newGridSize, setNewGridSize] = useState(32);
   const [newGridShape, setNewGridShape] = useState<StartShape>("circle");
+  const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
+  const [rotateDialogAxis, setRotateDialogAxis] = useState<0 | 1 | 2>(1);
+  const [rotateDialogDegrees, setRotateDialogDegrees] = useState(90);
+  const [scaleDialogOpen, setScaleDialogOpen] = useState(false);
+  const [scaleDialogFactor, setScaleDialogFactor] = useState(2);
   const [sidebarExpanded, setSidebarExpanded] = useState(() => {
     if (typeof localStorage === "undefined") return false;
     return localStorage.getItem(LS_SIDEBAR_EXPANDED) === "1";
@@ -1491,12 +1356,24 @@ function App() {
   const toolPanePosRef = useRef(toolPanePos);
   toolPanePosRef.current = toolPanePos;
 
+  const [colorPaletteSize, setColorPaletteSize] = useState(() => {
+    if (typeof localStorage === "undefined") return { w: 200, h: 260 };
+    try {
+      const s = localStorage.getItem(LS_PALETTE_FLOAT_SIZE);
+      if (s) {
+        const j = JSON.parse(s) as { w?: unknown; h?: unknown };
+        if (typeof j.w === "number" && typeof j.h === "number") {
+          return { w: j.w, h: j.h };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return { w: 200, h: 260 };
+  });
   const colorPalettePosRef = useRef(colorPalettePos);
   colorPalettePosRef.current = colorPalettePos;
 
-  const [interactionModeMenuOpen, setInteractionModeMenuOpen] = useState(false);
-  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
-  const [activeTLT, setActiveTLT] = useState<ToolsPane | null>(null);
 
   const [stampBookOpen, setStampBookOpen] = useState(false);
   /** True when a stamp was loaded from the stamp book (not from the edit selection). */
@@ -1509,12 +1386,8 @@ function App() {
     const r = loadRecentJoinUrls();
     return r[0] ?? "ws://127.0.0.1:27300";
   });
-  const [displayName, setDisplayName] = useState(
-    () => loadPreferences().collabDisplayName,
-  );
-  const [accentColor, setAccentColor] = useState(
-    () => loadPreferences().collabAccentColor,
-  );
+  const [displayName, setDisplayName] = useState(() => loadPreferences().collabDisplayName);
+  const [accentColor, setAccentColor] = useState(() => loadPreferences().collabAccentColor);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [chatLines, setChatLines] = useState<string[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -1532,19 +1405,14 @@ function App() {
   const [pingHudTick, setPingHudTick] = useState(0);
   const collabActiveRef = useRef(false);
   const localPeerIdRef = useRef(0);
-  const [hostPort, setHostPort] = useState(
-    () => loadPreferences().collabHostPort,
-  );
+  const [hostPort, setHostPort] = useState(() => loadPreferences().collabHostPort);
   /** From preferences: UPnP when hosting (default off). */
-  const [prefsEnableUpnp, setPrefsEnableUpnp] = useState(
-    () => loadPreferences().enableUpnp,
-  );
+  const [prefsEnableUpnp, setPrefsEnableUpnp] = useState(() => loadPreferences().enableUpnp);
   /** Set when UPnP reports a public WebSocket URL (host only). */
   const [hostWanUrl, setHostWanUrl] = useState<string | null>(null);
   const [natPending, setNatPending] = useState(false);
   const [natError, setNatError] = useState<string | null>(null);
-  const [lastSessionInfo, setLastSessionInfo] =
-    useState<LastSessionInfo | null>(null);
+  const [lastSessionInfo, setLastSessionInfo] = useState<LastSessionInfo | null>(null);
   const [lastSessionReady, setLastSessionReady] = useState(false);
   /** True from startup until we've resolved whether to auto-reopen; hides start screen during that window. */
   const [pendingAutoReopen, setPendingAutoReopen] = useState(
@@ -1559,9 +1427,7 @@ function App() {
   const [sceneObjectsErr, setSceneObjectsErr] = useState<string | null>(null);
 
   const refreshSceneObjects = useCallback(() => {
-    void invoke<{ objects: SceneObjectRow[]; activeObjectId: number }>(
-      "get_scene_objects",
-    )
+    void invoke<{ objects: SceneObjectRow[]; activeObjectId: number }>("get_scene_objects")
       .then((p) => {
         setSceneObjects(p.objects);
         setActiveObjectId(p.activeObjectId);
@@ -1608,10 +1474,7 @@ function App() {
     const surf = surfacePhysRef.current;
     // Height-first bootstrap matches typical swapchain rounding and pairs with viewport math below.
     const bootstrapH = Math.max(1, Math.round(layoutH * dpr));
-    const bootstrapW = Math.max(
-      1,
-      Math.round(bootstrapH * (layoutW / layoutH)),
-    );
+    const bootstrapW = Math.max(1, Math.round(bootstrapH * (layoutW / layoutH)));
     // After a window resize, native size is unknown until the next frame — use bootstrap for configure + origin.
     const useNativeSurface = surf.w > 0 && surf.h > 0 && !innerChanged;
     const surfaceWidth = useNativeSurface ? surf.w : bootstrapW;
@@ -1620,20 +1483,11 @@ function App() {
     // Derive viewport texture size from the same surface×layout fractions as viewportX/Y. Using
     // round(rh*dpr) here while origin uses (rect.top/ih)*surfaceHeight caused vertical drift when
     // surfaceHeight ≠ ih*dpr (native swapchain vs CSS estimate).
-    const viewportHeight = Math.max(
-      1,
-      Math.round((rh / layoutH) * surfaceHeight),
-    );
+    const viewportHeight = Math.max(1, Math.round((rh / layoutH) * surfaceHeight));
     const viewportWidth = Math.max(1, Math.round(viewportHeight * (rw / rh)));
     // Proportional placement in the same pixel space as the swapchain (not raw rect×dpr alone).
-    const viewportX = Math.max(
-      0,
-      Math.round((rect.left / layoutW) * surfaceWidth),
-    );
-    const viewportY = Math.max(
-      0,
-      Math.round((rect.top / layoutH) * surfaceHeight),
-    );
+    const viewportX = Math.max(0, Math.round((rect.left / layoutW) * surfaceWidth));
+    const viewportY = Math.max(0, Math.round((rect.top / layoutH) * surfaceHeight));
     viewportPhysRef.current = { w: viewportWidth, h: viewportHeight };
     void invoke("viewer_resize", {
       surfaceWidth,
@@ -1754,34 +1608,28 @@ function App() {
         setLoadProgress(0);
         setLoadPhase("");
       }),
-      listen<{ fraction: number; phase: string }>(
-        "voxelle-load-progress",
-        (e) => {
-          const p = e.payload;
-          setLoadProgress(p.fraction);
-          setLoadPhase(p.phase);
-          if (p.fraction >= 1) {
-            setLoading(false);
-            setLoadPhase("");
-          }
-        },
-      ),
-      listen<{ fraction: number; phase: string }>(
-        "voxelle-work-progress",
-        (e) => {
-          const p = e.payload;
-          setWorkProgress(p.fraction);
-          setWorkPhase(p.phase);
-          if (p.fraction >= 1) {
-            setWorkBusy(false);
-            setWorkPhase("");
-            fillOperationPendingRef.current = false;
-            setFillOperationPending(false);
-          } else {
-            setWorkBusy(true);
-          }
-        },
-      ),
+      listen<{ fraction: number; phase: string }>("voxelle-load-progress", (e) => {
+        const p = e.payload;
+        setLoadProgress(p.fraction);
+        setLoadPhase(p.phase);
+        if (p.fraction >= 1) {
+          setLoading(false);
+          setLoadPhase("");
+        }
+      }),
+      listen<{ fraction: number; phase: string }>("voxelle-work-progress", (e) => {
+        const p = e.payload;
+        setWorkProgress(p.fraction);
+        setWorkPhase(p.phase);
+        if (p.fraction >= 1) {
+          setWorkBusy(false);
+          setWorkPhase("");
+          fillOperationPendingRef.current = false;
+          setFillOperationPending(false);
+        } else {
+          setWorkBusy(true);
+        }
+      }),
       listen<unknown>("voxelle-loaded", (e) => {
         setLoadError(null);
         const p = e.payload;
@@ -1907,9 +1755,7 @@ function App() {
           setChatToasts((prev) => {
             const id = ++chatToastIdRef.current;
             const next = [...prev, { id, text: line }];
-            return next.length > CHAT_TOAST_CAP
-              ? next.slice(-CHAT_TOAST_CAP)
-              : next;
+            return next.length > CHAT_TOAST_CAP ? next.slice(-CHAT_TOAST_CAP) : next;
           });
         }
       }),
@@ -1943,13 +1789,8 @@ function App() {
             reason?: string;
           };
           const name =
-            typeof j.displayName === "string" && j.displayName.length > 0
-              ? j.displayName
-              : "Guest";
-          const text =
-            j.reason === "left"
-              ? `${name} left the session.`
-              : `${name} disconnected.`;
+            typeof j.displayName === "string" && j.displayName.length > 0 ? j.displayName : "Guest";
+          const text = j.reason === "left" ? `${name} left the session.` : `${name} disconnected.`;
           setCollabBanner({ text, tone: "info" });
         } catch {
           /* ignore */
@@ -1971,29 +1812,21 @@ function App() {
                 })
               : (raw as { wanUrl?: string | null; error?: string | null });
           setNatPending(false);
-          setNatError(
-            typeof j.error === "string" && j.error.length > 0 ? j.error : null,
-          );
-          setHostWanUrl(
-            typeof j.wanUrl === "string" && j.wanUrl.length > 0
-              ? j.wanUrl
-              : null,
-          );
+          setNatError(typeof j.error === "string" && j.error.length > 0 ? j.error : null);
+          setHostWanUrl(typeof j.wanUrl === "string" && j.wanUrl.length > 0 ? j.wanUrl : null);
         } catch {
           setNatPending(false);
         }
       }),
       listen<string>("collab-ended", (e) => {
-        const text =
-          typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+        const text = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
         if (text.trim().length > 0) {
           setCollabBanner({ text, tone: "info" });
         }
         clearCollabSessionUi();
       }),
       listen<string>("collab-kicked", (e) => {
-        const msg =
-          typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+        const msg = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
         setCollabBanner({
           text: `Removed from session: ${msg}`,
           tone: "alert",
@@ -2020,22 +1853,13 @@ function App() {
       }),
       listen<string>("voxelle-rendering-mode-changed", (e) => {
         const m = e.payload;
-        if (
-          m === "greedy" ||
-          m === "marchingCubes" ||
-          m === "dualContour" ||
-          m === "ray"
-        ) {
+        if (m === "greedy" || m === "marchingCubes" || m === "dualContour" || m === "ray") {
           localStorage.setItem(LS_RENDERING_MODE, m);
         }
       }),
       listen<string>("voxelle-menu-selection-mode", (e) => {
         const m = e.payload;
-        if (
-          m === "selectByColor" ||
-          m === "selectCoplanar" ||
-          m === "selectCoplanarEmpty"
-        ) {
+        if (m === "selectByColor" || m === "selectCoplanar" || m === "selectCoplanarEmpty") {
           setInteractionMode(m);
         }
       }),
@@ -2081,7 +1905,10 @@ function App() {
           `avg ${f(r.avg_ms)} ms  σ ${f(r.stddev_ms)} ms  min ${f(r.min_ms)} ms  p50 ${f(r.p50_ms)} ms  p95 ${f(r.p95_ms)} ms  p99 ${f(r.p99_ms)} ms  max ${f(r.max_ms)} ms`,
         );
         console.log(`total ${f(r.total_ms)} ms over ${r.frame_count} frames`);
-        console.log("frame times (ms):", r.frame_times_ms.map((t) => +t.toFixed(2)));
+        console.log(
+          "frame times (ms):",
+          r.frame_times_ms.map((t) => +t.toFixed(2)),
+        );
         console.groupEnd();
       }),
       listen<boolean>("voxelle-hide-ui", (e) => {
@@ -2092,25 +1919,19 @@ function App() {
       }),
       listen<string>("voxelle-selection-combine-mode", (e) => {
         const p = e.payload;
-        if (
-          p === "replace" ||
-          p === "add" ||
-          p === "subtract" ||
-          p === "intersect"
-        ) {
+        if (p === "replace" || p === "add" || p === "subtract" || p === "intersect") {
           setSelectionCombineMode(p);
         }
       }),
       listen<string>("voxelle-menu-not-implemented", (e) => {
-        const msg =
-          typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
+        const msg = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
         console.warn(msg);
       }),
       listen("voxelle-menu-rotate-selection", () => {
-        // "Rotate by degrees…" menu item — rotate 90° around Y (most common).
-        void invoke("selection_rotate", { axis: 1, quarters: 1 }).catch(
-          () => {},
-        );
+        setRotateDialogOpen(true);
+      }),
+      listen("voxelle-menu-scale-selection", () => {
+        setScaleDialogOpen(true);
       }),
     ]).then((unlisteners) => {
       if (!active) {
@@ -2220,11 +2041,17 @@ function App() {
   }, [pingHudTick]);
 
   useEffect(() => {
+    const prev = interactionModeRef.current;
     interactionModeRef.current = interactionMode;
+    // Clear squishy session when leaving squishy mode
+    if (prev === "squishy" && interactionMode !== "squishy") {
+      void invoke("squishy_session_clear")
+        .then(() => setSquishyBallCount(0))
+        .catch(() => {});
+    }
   }, [interactionMode]);
 
-  const prevInteractionModeForEyedropperRef =
-    useRef<InteractionMode>(interactionMode);
+  const prevInteractionModeForEyedropperRef = useRef<InteractionMode>(interactionMode);
   const eyedropperReturnModeRef = useRef<InteractionMode | null>(null);
   useLayoutEffect(() => {
     const prev = prevInteractionModeForEyedropperRef.current;
@@ -2253,9 +2080,11 @@ function App() {
     activeColorRef.current = activeColor;
     if (selectionCountRef.current > 0) {
       void invoke("paint_selection", {
-        color: activeColor,
-        strokeSeed: Math.floor(Math.random() * 0xffffffff),
-        material: activeMaterialRef.current,
+        args: {
+          color: activeColor,
+          strokeSeed: Math.floor(Math.random() * 0xffffffff),
+          material: activeMaterialRef.current,
+        },
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
   }, [activeColor]);
@@ -2263,21 +2092,20 @@ function App() {
     selectedColorsRef.current = selectedColors;
     if (selectionCountRef.current > 0 && selectedColors.length >= 1) {
       void invoke("paint_selection", {
-        color: activeColorRef.current,
-        palette: selectedColors,
-        paintColorDistrib: paintColorDistribRef.current,
-        strokeSeed: Math.floor(Math.random() * 0xffffffff),
-        material: activeMaterialRef.current,
+        args: {
+          color: activeColorRef.current,
+          palette: selectedColors,
+          paintColorDistrib: paintColorDistribRef.current,
+          strokeSeed: Math.floor(Math.random() * 0xffffffff),
+          material: activeMaterialRef.current,
+        },
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
   }, [selectedColors]);
   useEffect(() => {
     paintColorDistribRef.current = paintColorDistrib;
     try {
-      localStorage.setItem(
-        LS_PAINT_COLOR_DISTRIB,
-        JSON.stringify(paintColorDistrib),
-      );
+      localStorage.setItem(LS_PAINT_COLOR_DISTRIB, JSON.stringify(paintColorDistrib));
     } catch {}
   }, [paintColorDistrib]);
   useEffect(() => {
@@ -2286,12 +2114,12 @@ function App() {
       const palette = selectedColorsRef.current;
       const multiColor = palette.length > 1;
       void invoke("paint_selection", {
-        color: activeColorRef.current,
-        ...(multiColor
-          ? { palette, paintColorDistrib: paintColorDistribRef.current }
-          : {}),
-        strokeSeed: Math.floor(Math.random() * 0xffffffff),
-        material: activeMaterial,
+        args: {
+          color: activeColorRef.current,
+          ...(multiColor ? { palette, paintColorDistrib: paintColorDistribRef.current } : {}),
+          strokeSeed: Math.floor(Math.random() * 0xffffffff),
+          material: activeMaterial,
+        },
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
   }, [activeMaterial]);
@@ -2570,9 +2398,7 @@ function App() {
     }).catch(() => {});
   }, [squishyHollow, squishySnapToSurface, squishyWallThickness]);
 
-  function mergedStrokeAux(
-    base: Record<string, unknown> = {},
-  ): Record<string, unknown> {
+  function mergedStrokeAux(base: Record<string, unknown> = {}): Record<string, unknown> {
     const sm = drawStrokeModeRef.current;
     const constrainToPlane =
       sm === "fill"
@@ -2594,16 +2420,12 @@ function App() {
       sprayRadiusMin: sprayRadiusMinRef.current,
       sprayRadiusMax: sprayRadiusMaxRef.current,
       sprayBrushShape: sm === "spray" ? sprayBrushShapeRef.current : undefined,
-      constrainToPlaneRef: constrainToPlane
-        ? sprayConstrainToPlaneRefRef.current
-        : undefined,
+      constrainToPlaneRef: constrainToPlane ? sprayConstrainToPlaneRefRef.current : undefined,
       strokeFamilyVariant: strokeFamilyVariantRef.current,
       strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
       strokeAxisAlign: selectionStrokeAxisAlignRef.current,
       brushClipBottomHalf: brushClipBottomHalfRef.current,
-      ...(polygonVertices != null && polygonVertices.length > 0
-        ? { polygonVertices }
-        : {}),
+      ...(polygonVertices != null && polygonVertices.length > 0 ? { polygonVertices } : {}),
     };
     if (sm === "cuboid" && cuboidPhase.ref.current) {
       out.cuboidDepth = cuboidDepthRef.current;
@@ -2679,13 +2501,7 @@ function App() {
         strokeLineStartNy: lineStart.ny,
       },
     }).catch(() => {});
-  }, [
-    cylinderPhase.snapshot,
-    cylinderDepthUi,
-    loading,
-    workBusy,
-    interactionMode,
-  ]);
+  }, [cylinderPhase.snapshot, cylinderDepthUi, loading, workBusy, interactionMode]);
 
   // Cancel extrude phase if interaction mode changes
   useEffect(() => {
@@ -2702,12 +2518,8 @@ function App() {
         extrudeProfile: extrudeProfileRef.current,
         extrudeEndCap: extrudeEndCapRef.current,
         extrudeTaper: extrudeTaperRef.current,
-        extrudeTaperStart: extrudeTaperRef.current
-          ? extrudeTaperStartRef.current
-          : 0,
-        extrudeTaperEnd: extrudeTaperRef.current
-          ? extrudeTaperEndRef.current
-          : 0,
+        extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
+        extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
       },
     }).catch(() => {});
   }, [
@@ -2806,11 +2618,7 @@ function App() {
             generatorRopeFirstNy: ropeFirstScreenRef.current?.ny,
             generatorRopeTension: ropeTensionRef.current,
             generatorRopeGravityDirection: clothGravityDirectionRef.current,
-            generatorClothPins: clothPinsRef.current.map((p) => [
-              p[0],
-              p[1],
-              p[2],
-            ]),
+            generatorClothPins: clothPinsRef.current.map((p) => [p[0], p[1], p[2]]),
             generatorClothTension: clothTensionRef.current,
             generatorClothGravityDirection: clothGravityDirectionRef.current,
             generatorClothGravityScale: clothSimGravityPctRef.current / 100,
@@ -2833,14 +2641,11 @@ function App() {
                   ? 1
                   : 0,
             generatorRockSinkAmount: rockSinkAmountRef.current,
+            generatorGrassRadius: Math.max(1, generatorSphereRadiusRef.current),
             generatorGrassDensity: grassDensityRef.current,
             generatorGrassMaxHeight: grassMaxHeightRef.current,
             generatorGrassSeed: grassPreviewSeedRef.current,
-            generatorRoofPins: roofPinsRef.current.map((p) => [
-              p[0],
-              p[1],
-              p[2],
-            ]),
+            generatorRoofPins: roofPinsRef.current.map((p) => [p[0], p[1], p[2]]),
             generatorRoofStyle: roofStyleRef.current,
             generatorRoofHeight: roofHeightRef.current,
             generatorRoofThickness: 1,
@@ -2931,9 +2736,7 @@ function App() {
       })
         .then((n) => {
           if (n > 0) {
-            void invoke<number>("selection_get_count").then((c) =>
-              setSelectionCount(c),
-            );
+            void invoke<number>("selection_get_count").then((c) => setSelectionCount(c));
           }
         })
         .catch(() => {})
@@ -2944,11 +2747,7 @@ function App() {
   }
 
   /** Specialized selection single-click commands (selectByColor, selectCoplanar, selectCoplanarEmpty). */
-  function invokeSelectionSpecialClick(
-    interaction: string,
-    nx: number,
-    ny: number,
-  ) {
+  function invokeSelectionSpecialClick(interaction: string, nx: number, ny: number) {
     const cmd =
       interaction === "selectByColor"
         ? "selection_add_by_color_at_screen"
@@ -2965,9 +2764,7 @@ function App() {
     void invoke<number>(cmd, { args })
       .then((n) => {
         if (n > 0) {
-          void invoke<number>("selection_get_count").then((c) =>
-            setSelectionCount(c),
-          );
+          void invoke<number>("selection_get_count").then((c) => setSelectionCount(c));
         }
       })
       .catch(() => {});
@@ -2977,17 +2774,14 @@ function App() {
     const dispatch = getStrokeDispatch(interactionModeRef.current);
     if (!dispatch) return;
     const tool = dispatch.kind === "edit" ? dispatch.tool : "remove";
-    const c = await invoke<[number, number, number] | null>(
-      "voxel_stroke_anchor_coord_at_screen",
-      {
-        args: {
-          nx,
-          ny,
-          tool,
-          strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-        },
+    const c = await invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+      args: {
+        nx,
+        ny,
+        tool,
+        strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
       },
-    );
+    });
     if (!c) return;
     const sm = drawStrokeModeRef.current;
     if (sm === "fill") {
@@ -2996,9 +2790,7 @@ function App() {
     }
     if (sm === "polygon" || sm === "polygonHull") {
       setStrokePolygonVerts((v) => {
-        const idx = v.findIndex(
-          (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
-        );
+        const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
         const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
         strokePolygonVertsRef.current = next;
         return next;
@@ -3006,11 +2798,7 @@ function App() {
       strokePolygonLastScreenRef.current = { nx, ny };
       queueMicrotask(() => {
         void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(
-            nx,
-            ny,
-            previewModeForSync(interactionModeRef.current),
-          ),
+          args: buildSyncPreviewPayload(nx, ny, previewModeForSync(interactionModeRef.current)),
         }).catch(() => {});
       });
       return;
@@ -3031,22 +2819,17 @@ function App() {
   }
 
   async function handleWallSculptPolygonClick(nx: number, ny: number) {
-    const c = await invoke<[number, number, number] | null>(
-      "voxel_stroke_anchor_coord_at_screen",
-      {
-        args: {
-          nx,
-          ny,
-          tool: "add",
-          strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-        },
+    const c = await invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+      args: {
+        nx,
+        ny,
+        tool: "add",
+        strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
       },
-    );
+    });
     if (!c) return;
     setWallSculptPolygonVerts((v) => {
-      const idx = v.findIndex(
-        (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
-      );
+      const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
       const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
       wallSculptPolygonVertsRef.current = next;
       return next;
@@ -3054,22 +2837,17 @@ function App() {
   }
 
   async function handleClothPinClick(nx: number, ny: number) {
-    const c = await invoke<[number, number, number] | null>(
-      "voxel_stroke_anchor_coord_at_screen",
-      {
-        args: {
-          nx,
-          ny,
-          tool: "add",
-          strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-        },
+    const c = await invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+      args: {
+        nx,
+        ny,
+        tool: "add",
+        strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
       },
-    );
+    });
     if (!c) return;
     setClothPins((v) => {
-      const idx = v.findIndex(
-        (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
-      );
+      const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
       const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
       clothPinsRef.current = next;
       return next;
@@ -3078,8 +2856,7 @@ function App() {
 
   function applyPolygonStrokeFill() {
     if (strokePolygonVerts.length < 3) return;
-    const scr =
-      strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
+    const scr = strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
     const nx = scr?.nx ?? 0;
     const ny = scr?.ny ?? 0;
     runStrokeAtScreen(nx, ny, {
@@ -3126,6 +2903,10 @@ function App() {
   useEffect(() => {
     if (interactionMode === "fly") {
       setToolsPane("fly");
+      return;
+    }
+    if (interactionMode === "walk") {
+      setToolsPane("walk");
       return;
     }
     if (interactionMode === "navigate") {
@@ -3176,10 +2957,7 @@ function App() {
 
   useEffect(() => {
     // Don't overwrite a book-loaded stamp clipboard with an empty selection
-    if (
-      !stampBookPatternActive &&
-      (interactionMode === "stamp" || interactionMode === "punch")
-    ) {
+    if (!stampBookPatternActive && (interactionMode === "stamp" || interactionMode === "punch")) {
       void invoke("clipboard_copy_selection").catch(() => {});
     }
   }, [interactionMode, stampBookPatternActive]);
@@ -3193,6 +2971,7 @@ function App() {
     if (m === "stamp") return "stamp";
     if (m === "punch") return "punch";
     if (m === "fly") return "fly";
+    if (m === "walk") return "walk";
     if (m === "squishy") return "squishy";
     if (
       m === "select" ||
@@ -3214,10 +2993,7 @@ function App() {
     const start = strokeViewportStartRef.current;
     if (!start) return null;
     if (strokeDrawStyleRef.current === "line") return start;
-    if (
-      strokeDrawStyleRef.current === "brush" &&
-      drawStrokeModeRef.current !== "spray"
-    ) {
+    if (strokeDrawStyleRef.current === "brush" && drawStrokeModeRef.current !== "spray") {
       return start;
     }
     return null;
@@ -3259,11 +3035,7 @@ function App() {
     const onKey = (e: KeyboardEvent) => {
       if (e.code !== "Escape") return;
       if (e.repeat) return;
-      if (
-        !fillOperationPendingRef.current &&
-        !/fill/i.test(workPhaseRef.current)
-      )
-        return;
+      if (!fillOperationPendingRef.current && !/fill/i.test(workPhaseRef.current)) return;
       e.preventDefault();
       void invoke("voxel_fill_cancel").catch(() => {});
     };
@@ -3309,10 +3081,7 @@ function App() {
   }, [sidebarExpanded]);
 
   useEffect(() => {
-    localStorage.setItem(
-      LS_RIGHT_SIDEBAR_EXPANDED,
-      rightSidebarExpanded ? "1" : "0",
-    );
+    localStorage.setItem(LS_RIGHT_SIDEBAR_EXPANDED, rightSidebarExpanded ? "1" : "0");
   }, [rightSidebarExpanded]);
 
   useEffect(() => {
@@ -3342,10 +3111,15 @@ function App() {
   }, [colorPalettePos]);
 
   useEffect(() => {
-    const p = loadPreferences();
-    void invoke("set_autosave_settings", autosaveSettingsInvokeArgs(p)).catch(
-      () => {},
+    localStorage.setItem(
+      LS_PALETTE_FLOAT_SIZE,
+      JSON.stringify({ w: colorPaletteSize.w, h: colorPaletteSize.h }),
     );
+  }, [colorPaletteSize]);
+
+  useEffect(() => {
+    const p = loadPreferences();
+    void invoke("set_autosave_settings", autosaveSettingsInvokeArgs(p)).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -3393,18 +3167,20 @@ function App() {
 
   useEffect(() => {
     const p = loadPreferences();
-    void invoke("set_tone_mapping", {
-      mode: toneMappingToGpuMode(p.toneMapping),
-    }).catch(() => {});
+    if (p.hdr) {
+      void invoke("set_hdr_output", { enabled: true })
+        .then(() => invoke("set_tone_mapping", { mode: 6 }))
+        .catch(() => {});
+    } else {
+      void invoke("set_tone_mapping", {
+        mode: toneMappingToGpuMode(p.toneMapping),
+      }).catch(() => {});
+    }
   }, []);
 
   useEffect(() => {
-    const saved = localStorage.getItem(
-      LS_RENDERING_MODE,
-    ) as RenderingMode | null;
-    const valid =
-      saved &&
-      ["greedy", "marchingCubes", "dualContour"].includes(saved);
+    const saved = localStorage.getItem(LS_RENDERING_MODE) as RenderingMode | null;
+    const valid = saved && ["greedy", "marchingCubes", "dualContour"].includes(saved);
     void invoke<RenderingMode>("get_rendering_mode")
       .then((m) => {
         if (valid && saved !== m) {
@@ -3454,21 +3230,10 @@ function App() {
       if (meta) return;
       if (e.repeat) return;
       const t = e.target as HTMLElement | null;
-      if (
-        t &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.isContentEditable)
-      ) {
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
         return;
       }
-      if (
-        preferencesOpen ||
-        stampBookOpen ||
-        joinModalOpen ||
-        newProjectOpen ||
-        collabJoinPending
-      )
+      if (preferencesOpen || stampBookOpen || joinModalOpen || newProjectOpen || collabJoinPending)
         return;
       const p = lastViewportPickNormRef.current;
       if (!p) return;
@@ -3617,6 +3382,7 @@ function App() {
 
   const activateFlyMouseLook = useCallback(async (_pointerId: number) => {
     const el = viewportRef.current;
+    console.log("[walk-debug] activateFlyMouseLook called, el=", !!el);
     if (!el) return;
     flySkipNextFlyMoveRef.current = false;
     flyPendingLookDxRef.current = 0;
@@ -3626,8 +3392,12 @@ function App() {
     // before any awaits, otherwise the browser drops the gesture context.
     try {
       await el.requestPointerLock();
-    } catch {
-      /* pointer lock unavailable */
+      console.log(
+        "[walk-debug] requestPointerLock succeeded, pointerLockElement=",
+        document.pointerLockElement === el,
+      );
+    } catch (err) {
+      console.warn("[walk-debug] requestPointerLock FAILED:", err);
     }
     const r = el.getBoundingClientRect();
     const cx = r.left + r.width / 2;
@@ -3933,6 +3703,158 @@ function App() {
     };
   }, [interactionMode, releaseFlyMouseLook]);
 
+  // ── Walk mode: first-person with gravity, collision, jumping ──
+  useEffect(() => {
+    if (interactionMode !== "walk") {
+      void invoke("set_walk_mode", { enabled: false }).catch(() => {});
+      keysDownRef.current.clear();
+      void releaseFlyMouseLook();
+      return;
+    }
+    console.log("[walk-debug] walk useEffect SETUP — activating walk mode");
+    void invoke("set_walk_mode", { enabled: true })
+      .then(() => {
+        console.log("[walk-debug] set_walk_mode(true) resolved OK");
+      })
+      .catch((err) => {
+        console.error("[walk-debug] set_walk_mode(true) FAILED:", err);
+      });
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (e.code === "Escape" && flyMouseLookActiveRef.current) {
+        void releaseFlyMouseLook();
+        e.preventDefault();
+        return;
+      }
+      keysDownRef.current.add(e.code);
+      if (
+        e.code === "KeyW" ||
+        e.code === "KeyS" ||
+        e.code === "KeyA" ||
+        e.code === "KeyD" ||
+        e.code === "Space" ||
+        e.code === "ShiftLeft" ||
+        e.code === "ShiftRight"
+      ) {
+        e.preventDefault();
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      keysDownRef.current.delete(e.code);
+      if (
+        e.code === "KeyW" ||
+        e.code === "KeyS" ||
+        e.code === "KeyA" ||
+        e.code === "KeyD" ||
+        e.code === "Space" ||
+        e.code === "ShiftLeft" ||
+        e.code === "ShiftRight"
+      ) {
+        e.preventDefault();
+      }
+    };
+    const dpr = () => window.devicePixelRatio || 1;
+    const onWalkPointerMove = (e: PointerEvent) => {
+      const vp = viewportRef.current;
+      const s = dpr();
+      if (!flyMouseLookActiveRef.current || !vp) return;
+      if (document.pointerLockElement === vp) {
+        const dxCss = e.movementX;
+        const dyCss = e.movementY;
+        if (dxCss === 0 && dyCss === 0) return;
+        flyPendingLookDxRef.current += dxCss * s;
+        flyPendingLookDyRef.current += dyCss * s;
+        return;
+      }
+      // Fallback: manual recentering when pointer lock is unavailable
+      if (flySkipNextFlyMoveRef.current) {
+        flySkipNextFlyMoveRef.current = false;
+        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+      let dxCss = e.movementX;
+      let dyCss = e.movementY;
+      if (dxCss === 0 && dyCss === 0) {
+        const last = flyLastClientRef.current;
+        if (last == null) {
+          flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+          return;
+        }
+        dxCss = e.clientX - last.x;
+        dyCss = e.clientY - last.y;
+        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+        if (dxCss === 0 && dyCss === 0) return;
+      } else {
+        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
+      }
+      flyPendingLookDxRef.current += dxCss * s;
+      flyPendingLookDyRef.current += dyCss * s;
+      const r = vp.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      void getCurrentWindow()
+        .setCursorPosition(new LogicalPosition(cx, cy))
+        .then(() => {
+          flySkipNextFlyMoveRef.current = true;
+          flyLastClientRef.current = { x: cx, y: cy };
+        })
+        .catch(() => {});
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    document.addEventListener("pointermove", onWalkPointerMove, true);
+    const tick = () => {
+      const pdx = flyPendingLookDxRef.current;
+      const pdy = flyPendingLookDyRef.current;
+      flyPendingLookDxRef.current = 0;
+      flyPendingLookDyRef.current = 0;
+      if (pdx !== 0 || pdy !== 0) {
+        void invoke("camera_fly_look", {
+          args: { dx: pdx, dy: pdy },
+        }).catch(() => {});
+      }
+      const k = keysDownRef.current;
+      let forward = 0;
+      let right = 0;
+      if (k.has("KeyW")) forward += 1;
+      if (k.has("KeyS")) forward -= 1;
+      if (k.has("KeyD")) right += 1;
+      if (k.has("KeyA")) right -= 1;
+      const jump = k.has("Space");
+      const slow = k.has("ShiftLeft") || k.has("ShiftRight");
+      const speedScale = slow ? 1 / 3 : 1;
+      void invoke("sync_fly_input", {
+        args: { forward, right, up: 0, speedScale, jump },
+      }).catch(() => {});
+      // Recenter cursor each frame when using Tauri fallback (not pointer lock)
+      if (flyMouseLookActiveRef.current && !document.pointerLockElement) {
+        const vp = viewportRef.current;
+        if (vp) {
+          const r = vp.getBoundingClientRect();
+          const cx = r.left + r.width / 2;
+          const cy = r.top + r.height / 2;
+          void getCurrentWindow()
+            .setCursorPosition(new LogicalPosition(cx, cy))
+            .then(() => {
+              flySkipNextFlyMoveRef.current = true;
+              flyLastClientRef.current = { x: cx, y: cy };
+            })
+            .catch(() => {});
+        }
+      }
+      flyRafRef.current = requestAnimationFrame(tick);
+    };
+    flyRafRef.current = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(flyRafRef.current);
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      document.removeEventListener("pointermove", onWalkPointerMove, true);
+      void invoke("set_walk_mode", { enabled: false }).catch(() => {});
+      void releaseFlyMouseLook();
+    };
+  }, [interactionMode, releaseFlyMouseLook]);
+
   useEffect(() => {
     if (
       interactionMode !== "select" &&
@@ -3980,36 +3902,14 @@ function App() {
 
   const planeStrokeDebugEnabledRef = useRef(true);
   const logPlaneStrokeDebug = useCallback(
-    (phase: string, e: React.PointerEvent, extra?: Record<string, unknown>) => {
+    (_phase: string, _e: React.PointerEvent, _extra?: Record<string, unknown>) => {
       if (!planeStrokeDebugEnabledRef.current) return;
       const mode = interactionModeRef.current;
       const sm = drawStrokeModeRef.current;
-      if (
-        !(
-          sm === "plane" &&
-          (mode === "add" || mode === "remove" || mode === "paint")
-        )
-      ) {
+      if (!(sm === "plane" && (mode === "add" || mode === "remove" || mode === "paint"))) {
         return;
       }
-      const g = gestureRef.current;
-      console.debug("[voxelle][plane-stroke]", {
-        phase,
-        eventType: e.type,
-        pointerId: e.pointerId,
-        button: e.button,
-        buttons: e.buttons,
-        mode,
-        strokeMode: sm,
-        gestureMode: g?.mode ?? null,
-        gesturePointerId: g?.pointerId ?? null,
-        activePointerId: activePointerIdRef.current,
-        capturedPointerId: capturedPointerIdRef.current,
-        probing: probingRef.current,
-        dragDidEdit: dragDidEditRef.current,
-        movedPx: maxPointerMoveRef.current,
-        ...extra,
-      });
+      void gestureRef.current;
     },
     [],
   );
@@ -4062,7 +3962,15 @@ function App() {
   const onPointerDown = async (e: React.PointerEvent) => {
     logPlaneStrokeDebug("down:received", e);
     const modeEarly = interactionModeRef.current;
-    if (modeEarly === "fly" && (e.button === 0 || e.button === 2)) {
+    if ((modeEarly === "fly" || modeEarly === "walk") && (e.button === 0 || e.button === 2)) {
+      console.log(
+        "[walk-debug] pointer-down in",
+        modeEarly,
+        "mode, button=",
+        e.button,
+        "mouseLookActive=",
+        flyMouseLookActiveRef.current,
+      );
       e.preventDefault();
       if (flyMouseLookActiveRef.current) {
         void releaseFlyMouseLook();
@@ -4108,7 +4016,7 @@ function App() {
     const pointerId = e.pointerId;
     const middleButton = e.button === 1;
     const mode = interactionModeRef.current;
-    const navigate = mode === "navigate" || mode === "fly";
+    const navigate = mode === "navigate" || mode === "fly" || mode === "walk";
     const forceCamera =
       middleButton ||
       (mode === "add" && e.button !== 0) ||
@@ -4126,10 +4034,7 @@ function App() {
       (mode === "squishy" && e.button !== 0);
 
     const logoSplashPointer =
-      startScreenLogoLoadedRef.current &&
-      !loading &&
-      !workBusy &&
-      e.button === 0;
+      startScreenLogoLoadedRef.current && !loading && !workBusy && e.button === 0;
 
     if (
       mode === "squishy" &&
@@ -4155,7 +4060,14 @@ function App() {
     }
 
     // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
-    if (e.button === 0 && !loading && !workBusy && !logoSplashPointer && !navigate && !forceCamera) {
+    if (
+      e.button === 0 &&
+      !loading &&
+      !workBusy &&
+      !logoSplashPointer &&
+      !navigate &&
+      !forceCamera
+    ) {
       if (gizmoRef.current?.startDragIfHit(e.clientX, e.clientY)) {
         probingRef.current = false;
         gestureRef.current = { pointerId, mode: "selectionGizmo" };
@@ -4240,17 +4152,13 @@ function App() {
         if (drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current) {
           cuboidPhase.cancel();
         }
-        if (
-          drawStrokeModeRef.current === "cylinder" &&
-          cylinderPhase.ref.current
-        ) {
+        if (drawStrokeModeRef.current === "cylinder" && cylinderPhase.ref.current) {
           cylinderPhase.cancel();
         }
         dragDidEditRef.current = false;
         strokeViewportStartRef.current = { nx, ny };
         lastStrokeNormRef.current = { nx, ny };
-        currentStrokeSeedRef.current =
-          Math.floor(Math.random() * 0xffffffff) >>> 0;
+        currentStrokeSeedRef.current = Math.floor(Math.random() * 0xffffffff) >>> 0;
         if (dispatch?.kind === "selection") {
           selectionStrokeBegunRef.current = true;
           void invoke("selection_stroke_begin").catch(() => {});
@@ -4271,6 +4179,29 @@ function App() {
             }).catch(() => {});
           }
         }
+      }
+      // Roof square/circle: resolve first anchor for drag-to-define.
+      if (
+        mode === "generator" &&
+        generatorKindRef.current === "roof" &&
+        (roofAreaShapeRef.current === "square" || roofAreaShapeRef.current === "circle")
+      ) {
+        dragDidEditRef.current = false;
+        void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+          args: {
+            nx,
+            ny,
+            tool: "add",
+            strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+          },
+        })
+          .then((c) => {
+            if (c) {
+              roofFirstClickRef.current = c;
+              setRoofFirstClick(c);
+            }
+          })
+          .catch(() => {});
       }
     }
 
@@ -4311,8 +4242,7 @@ function App() {
     const includeStrokeSeed = opts.includeStrokeSeed !== false;
     const lineStart =
       sm === "wall" &&
-      (wallAreaShapeRef.current === "circle" ||
-        wallAreaShapeRef.current === "brush") &&
+      (wallAreaShapeRef.current === "circle" || wallAreaShapeRef.current === "brush") &&
       strokeViewportStartRef.current
         ? {
             strokeLineStartNx: strokeViewportStartRef.current.nx,
@@ -4324,11 +4254,7 @@ function App() {
       wallAreaShapeRef.current === "polygon" &&
       wallSculptPolygonVertsRef.current.length >= 2
         ? {
-            wallPolygonVertices: wallSculptPolygonVertsRef.current.map((v) => [
-              v[0],
-              v[1],
-              v[2],
-            ]),
+            wallPolygonVertices: wallSculptPolygonVertsRef.current.map((v) => [v[0], v[1], v[2]]),
           }
         : {};
     const seg = opts.strokeSegmentPrev
@@ -4382,9 +4308,7 @@ function App() {
       extrudeProfile: extrudeProfileRef.current,
       extrudeEndCap: extrudeEndCapRef.current,
       extrudeTaper: extrudeTaperRef.current,
-      extrudeTaperStart: extrudeTaperRef.current
-        ? extrudeTaperStartRef.current
-        : 0,
+      extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
       extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
       ...lineStart,
       ...wallPoly,
@@ -4445,103 +4369,82 @@ function App() {
               const scrSnap = viewportCursorDebugScreenRef.current;
               const iw = scrSnap?.layoutWidth ?? layoutViewportCssSize().w;
               const ih = scrSnap?.layoutHeight ?? layoutViewportCssSize().h;
-              fetch(
-                "http://127.0.0.1:7756/ingest/93734617-b27b-4379-bb59-e5971936c3d4",
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "X-Debug-Session-Id": "0e537f",
-                  },
-                  body: JSON.stringify({
-                    sessionId: "0e537f",
-                    runId: "rect-mapping",
-                    hypothesisId: "H_innerY_vs_relY",
-                    location: "App.tsx:viewportDebugRaf",
-                    message:
-                      "pick uses rel/rect; compare inner*surface−origin Y vs relY/rh",
-                    data: (() => {
-                      const scr = viewportCursorDebugScreenRef.current;
-                      const pick = lastViewportPickNormRef.current;
-                      let nxFromRel: number | null = null;
-                      let nxWindow: number | null = null;
-                      let deltaWinVsRel: number | null = null;
-                      let nyFromRel: number | null = null;
-                      let nyFromInner: number | null = null;
-                      let deltaInnerVsRelNy: number | null = null;
-                      if (
-                        scr &&
-                        rV &&
-                        rV.width > 0 &&
-                        rV.height > 0 &&
-                        phys.w > 0 &&
-                        phys.h > 0 &&
-                        iw > 0 &&
-                        ih > 0 &&
-                        surf.w > 0 &&
-                        surf.h > 0
-                      ) {
-                        nxFromRel = scr.relX / rV.width;
-                        nyFromRel = scr.relY / rV.height;
-                        const ox = Math.max(
-                          0,
-                          Math.round((rV.left / iw) * surf.w),
-                        );
-                        const oy = Math.max(
-                          0,
-                          Math.round((rV.top / ih) * surf.h),
-                        );
-                        nxWindow = ((scr.clientX / iw) * surf.w - ox) / phys.w;
-                        deltaWinVsRel = nxWindow - nxFromRel;
-                        nyFromInner =
-                          ((scr.clientY / ih) * surf.h - oy) / phys.h;
-                        deltaInnerVsRelNy = nyFromInner - nyFromRel;
-                      }
-                      return {
-                        viewportRw: rV?.width,
-                        viewportRh: rV?.height,
-                        wrapRw: rW?.width,
-                        wrapRh: rW?.height,
-                        rectDeltaW: rV && rW ? rV.width - rW.width : null,
-                        rectDeltaH: rV && rW ? rV.height - rW.height : null,
-                        aspectDom:
-                          rV && rV.height > 0 ? rV.width / rV.height : null,
-                        physW: phys.w,
-                        physH: phys.h,
-                        aspectPhys: phys.h > 0 ? phys.w / phys.h : null,
-                        rustW: d.viewportWidth,
-                        rustH: d.viewportHeight,
-                        aspectRust:
-                          d.viewportHeight > 0
-                            ? d.viewportWidth / d.viewportHeight
-                            : null,
-                        surfaceW: surf.w,
-                        surfaceH: surf.h,
-                        vwPerRw: rV && rV.width > 0 ? phys.w / rV.width : null,
-                        swPerIw: iw > 0 ? surf.w / iw : null,
-                        shPerIh: ih > 0 ? surf.h / ih : null,
-                        nxFromRel,
-                        nxWindow,
-                        deltaWinVsRel,
-                        nyFromRel,
-                        nyFromInner,
-                        deltaInnerVsRelNy,
-                        nxPick: pick?.nx ?? null,
-                        nyPick: pick?.ny ?? null,
-                        deltaPickVsRelNx:
-                          pick && nxFromRel != null
-                            ? pick.nx - nxFromRel
-                            : null,
-                        deltaPickVsRelNy:
-                          pick && nyFromRel != null
-                            ? pick.ny - nyFromRel
-                            : null,
-                      };
-                    })(),
-                    timestamp: Date.now(),
-                  }),
+              fetch("http://127.0.0.1:7756/ingest/93734617-b27b-4379-bb59-e5971936c3d4", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-Debug-Session-Id": "0e537f",
                 },
-              ).catch(() => {});
+                body: JSON.stringify({
+                  sessionId: "0e537f",
+                  runId: "rect-mapping",
+                  hypothesisId: "H_innerY_vs_relY",
+                  location: "App.tsx:viewportDebugRaf",
+                  message: "pick uses rel/rect; compare inner*surface−origin Y vs relY/rh",
+                  data: (() => {
+                    const scr = viewportCursorDebugScreenRef.current;
+                    const pick = lastViewportPickNormRef.current;
+                    let nxFromRel: number | null = null;
+                    let nxWindow: number | null = null;
+                    let deltaWinVsRel: number | null = null;
+                    let nyFromRel: number | null = null;
+                    let nyFromInner: number | null = null;
+                    let deltaInnerVsRelNy: number | null = null;
+                    if (
+                      scr &&
+                      rV &&
+                      rV.width > 0 &&
+                      rV.height > 0 &&
+                      phys.w > 0 &&
+                      phys.h > 0 &&
+                      iw > 0 &&
+                      ih > 0 &&
+                      surf.w > 0 &&
+                      surf.h > 0
+                    ) {
+                      nxFromRel = scr.relX / rV.width;
+                      nyFromRel = scr.relY / rV.height;
+                      const ox = Math.max(0, Math.round((rV.left / iw) * surf.w));
+                      const oy = Math.max(0, Math.round((rV.top / ih) * surf.h));
+                      nxWindow = ((scr.clientX / iw) * surf.w - ox) / phys.w;
+                      deltaWinVsRel = nxWindow - nxFromRel;
+                      nyFromInner = ((scr.clientY / ih) * surf.h - oy) / phys.h;
+                      deltaInnerVsRelNy = nyFromInner - nyFromRel;
+                    }
+                    return {
+                      viewportRw: rV?.width,
+                      viewportRh: rV?.height,
+                      wrapRw: rW?.width,
+                      wrapRh: rW?.height,
+                      rectDeltaW: rV && rW ? rV.width - rW.width : null,
+                      rectDeltaH: rV && rW ? rV.height - rW.height : null,
+                      aspectDom: rV && rV.height > 0 ? rV.width / rV.height : null,
+                      physW: phys.w,
+                      physH: phys.h,
+                      aspectPhys: phys.h > 0 ? phys.w / phys.h : null,
+                      rustW: d.viewportWidth,
+                      rustH: d.viewportHeight,
+                      aspectRust: d.viewportHeight > 0 ? d.viewportWidth / d.viewportHeight : null,
+                      surfaceW: surf.w,
+                      surfaceH: surf.h,
+                      vwPerRw: rV && rV.width > 0 ? phys.w / rV.width : null,
+                      swPerIw: iw > 0 ? surf.w / iw : null,
+                      shPerIh: ih > 0 ? surf.h / ih : null,
+                      nxFromRel,
+                      nxWindow,
+                      deltaWinVsRel,
+                      nyFromRel,
+                      nyFromInner,
+                      deltaInnerVsRelNy,
+                      nxPick: pick?.nx ?? null,
+                      nyPick: pick?.ny ?? null,
+                      deltaPickVsRelNx: pick && nxFromRel != null ? pick.nx - nxFromRel : null,
+                      deltaPickVsRelNy: pick && nyFromRel != null ? pick.ny - nyFromRel : null,
+                    };
+                  })(),
+                  timestamp: Date.now(),
+                }),
+              }).catch(() => {});
               // #endregion
             })
             .catch(() => setViewportCursorDebugRust(null));
@@ -4567,8 +4470,7 @@ function App() {
       return;
     }
     const overGizmo =
-      !gestureRef.current &&
-      (gizmoRef.current?.updateHover(e.clientX, e.clientY) ?? false);
+      !gestureRef.current && (gizmoRef.current?.updateHover(e.clientX, e.clientY) ?? false);
     if (
       !overGizmo &&
       !probingRef.current &&
@@ -4611,7 +4513,9 @@ function App() {
         lastWallHoverMsRef.current = now;
         void invoke("voxel_sculpt_stroke_preview_at_screen", {
           args: {
-            ...buildSculptStrokeInvokeArgs(px, py, { includeStrokeSeed: false }),
+            ...buildSculptStrokeInvokeArgs(px, py, {
+              includeStrokeSeed: false,
+            }),
             strokeLineStartNx: px,
             strokeLineStartNy: py,
             strokeSeed: 0,
@@ -4650,12 +4554,8 @@ function App() {
               extrudeProfile: extrudeProfileRef.current,
               extrudeEndCap: extrudeEndCapRef.current,
               extrudeTaper: extrudeTaperRef.current,
-              extrudeTaperStart: extrudeTaperRef.current
-                ? extrudeTaperStartRef.current
-                : 0,
-              extrudeTaperEnd: extrudeTaperRef.current
-                ? extrudeTaperEndRef.current
-                : 0,
+              extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
+              extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
             },
           }).catch((err) => {
             console.error("[extrude_ray_preview re-drag]", err);
@@ -4672,10 +4572,7 @@ function App() {
       if (pointerStartRef.current) {
         const dx = e.clientX - pointerStartRef.current.x;
         const dy = e.clientY - pointerStartRef.current.y;
-        maxPointerMoveRef.current = Math.max(
-          maxPointerMoveRef.current,
-          Math.hypot(dx, dy),
-        );
+        maxPointerMoveRef.current = Math.max(maxPointerMoveRef.current, Math.hypot(dx, dy));
       }
       const m = interactionModeRef.current;
       {
@@ -4687,13 +4584,8 @@ function App() {
           !workBusy &&
           !fillOperationPending &&
           !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
-          !(
-            drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current
-          ) &&
-          !(
-            drawStrokeModeRef.current === "cylinder" &&
-            cylinderPhase.ref.current
-          )
+          !(drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current) &&
+          !(drawStrokeModeRef.current === "cylinder" && cylinderPhase.ref.current)
         ) {
           const now = Date.now();
           if (now - lastStrokeEditMsRef.current >= 24) {
@@ -4701,8 +4593,7 @@ function App() {
             dragDidEditRef.current = true;
             const lineStart = strokeViewportLineStartNorm();
             const brushPrev =
-              strokeDrawStyleRef.current === "brush" &&
-              lastStrokeNormRef.current
+              strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
                 ? lastStrokeNormRef.current
                 : null;
             if (dispatch.kind === "edit") {
@@ -4765,13 +4656,7 @@ function App() {
           }
         }
       }
-      if (
-        e.buttons &&
-        m === "sculpt" &&
-        !loading &&
-        !workBusy &&
-        !fillOperationPending
-      ) {
+      if (e.buttons && m === "sculpt" && !loading && !workBusy && !fillOperationPending) {
         const now = Date.now();
         if (now - lastStrokeEditMsRef.current >= 24) {
           lastStrokeEditMsRef.current = now;
@@ -4783,14 +4668,10 @@ function App() {
           ) {
             // Ray-based extrude: compute screen delta and send to Rust.
             // Use stored start position for re-drags during settings phase.
-            const startNorm =
-              extrudeStartNormRef.current ?? strokeViewportStartRef.current;
+            const startNorm = extrudeStartNormRef.current ?? strokeViewportStartRef.current;
             if (startNorm) {
               // On first drag, persist the start position for later re-drags.
-              if (
-                !extrudeStartNormRef.current &&
-                strokeViewportStartRef.current
-              ) {
+              if (!extrudeStartNormRef.current && strokeViewportStartRef.current) {
                 extrudeStartNormRef.current = {
                   ...strokeViewportStartRef.current,
                 };
@@ -4808,21 +4689,15 @@ function App() {
                   color: activeColorRef.current,
                   material: activeMaterialRef.current,
                   brushRadius: sculptBrushRadiusRef.current,
-                  brushShape: sculptBrushShapeToRust(
-                    sculptBrushShapeUiRef.current,
-                  ),
+                  brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
                   brushStrength: sculptBrushStrengthRef.current,
                   brushFalloff: sculptBrushFalloffRef.current,
                   strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
                   extrudeProfile: extrudeProfileRef.current,
                   extrudeEndCap: extrudeEndCapRef.current,
                   extrudeTaper: extrudeTaperRef.current,
-                  extrudeTaperStart: extrudeTaperRef.current
-                    ? extrudeTaperStartRef.current
-                    : 0,
-                  extrudeTaperEnd: extrudeTaperRef.current
-                    ? extrudeTaperEndRef.current
-                    : 0,
+                  extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
+                  extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
                 },
               }).catch((err) => {
                 console.error("[extrude_ray_preview]", err);
@@ -4842,15 +4717,91 @@ function App() {
           }
         }
       }
+      // Roof square/circle drag: compute pins during drag.
+      if (
+        e.buttons &&
+        m === "generator" &&
+        generatorKindRef.current === "roof" &&
+        roofFirstClickRef.current &&
+        !loading &&
+        !workBusy
+      ) {
+        const shape = roofAreaShapeRef.current;
+        if (shape === "square" || shape === "circle") {
+          const now = Date.now();
+          if (now - lastStrokeEditMsRef.current >= 40) {
+            lastStrokeEditMsRef.current = now;
+            dragDidEditRef.current = true;
+            void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+              args: {
+                nx: px,
+                ny: py,
+                tool: "add",
+                strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
+              },
+            })
+              .then((c) => {
+                if (!c || !roofFirstClickRef.current) return;
+                const first = roofFirstClickRef.current;
+                let pins: [number, number, number][];
+                if (shape === "square") {
+                  const [x1, y1, z1] = first;
+                  const [x2, , z2] = c;
+                  pins = [
+                    [x1, y1, z1],
+                    [x2, y1, z1],
+                    [x2, y1, z2],
+                    [x1, y1, z2],
+                  ];
+                } else {
+                  const [cx, cy, cz] = first;
+                  const [ex, , ez] = c;
+                  const dx = ex - cx;
+                  const dz = ez - cz;
+                  const r = Math.sqrt(dx * dx + dz * dz);
+                  const N = 16;
+                  pins = [];
+                  for (let i = 0; i < N; i++) {
+                    const angle = (2 * Math.PI * i) / N;
+                    pins.push([
+                      Math.round(cx + r * Math.cos(angle)),
+                      cy,
+                      Math.round(cz + r * Math.sin(angle)),
+                    ]);
+                  }
+                }
+                // Ensure pins wind so the roof grows upward (+Y).
+                // In the XZ plane, positive signed area means CW from
+                // above, which gives a downward normal — reverse to fix.
+                let areaXZ = 0;
+                for (let i = 0; i < pins.length; i++) {
+                  const p = pins[i];
+                  const q = pins[(i + 1) % pins.length];
+                  areaXZ += p[0] * q[2] - q[0] * p[2];
+                }
+                if (areaXZ >= 0) {
+                  pins.reverse();
+                }
+                setRoofPins(pins);
+                roofPinsRef.current = pins;
+                void invoke("sync_preview_input", {
+                  args: buildSyncPreviewPayload(
+                    px,
+                    py,
+                    previewModeForSync(interactionModeRef.current),
+                  ),
+                }).catch(() => {});
+              })
+              .catch(() => {});
+          }
+        }
+      }
       return;
     }
     if (pointerStartRef.current) {
       const dx = e.clientX - pointerStartRef.current.x;
       const dy = e.clientY - pointerStartRef.current.y;
-      maxPointerMoveRef.current = Math.max(
-        maxPointerMoveRef.current,
-        Math.hypot(dx, dy),
-      );
+      maxPointerMoveRef.current = Math.max(maxPointerMoveRef.current, Math.hypot(dx, dy));
     }
     const dpr = window.devicePixelRatio || 1;
     const dx = (e.clientX - lastRef.current.x) * dpr;
@@ -4858,10 +4809,7 @@ function App() {
     lastRef.current = { x: e.clientX, y: e.clientY };
     if (e.buttons === 0) {
       logPlaneStrokeDebug("move:buttons-zero", e);
-      if (
-        startScreenLogoLoadedRef.current &&
-        interactionModeRef.current !== "fly"
-      ) {
+      if (startScreenLogoLoadedRef.current && interactionModeRef.current !== "fly") {
         const { nx, ny } = clientToViewportNormalized(e);
         void invoke("viewport_pointer", {
           ev: {
@@ -4935,9 +4883,7 @@ function App() {
     let hasPointerCaptureForUp = capturedPointerIdRef.current === e.pointerId;
     if (!hasPointerCaptureForUp && viewportRef.current) {
       try {
-        hasPointerCaptureForUp = viewportRef.current.hasPointerCapture(
-          e.pointerId,
-        );
+        hasPointerCaptureForUp = viewportRef.current.hasPointerCapture(e.pointerId);
       } catch {
         hasPointerCaptureForUp = false;
       }
@@ -4961,9 +4907,7 @@ function App() {
             args: { nx, ny },
           }).catch(() => {});
         } else if (m === "punch") {
-          void invoke("clipboard_punch_at_screen", { args: { nx, ny } }).catch(
-            () => {},
-          );
+          void invoke("clipboard_punch_at_screen", { args: { nx, ny } }).catch(() => {});
         } else if (m === "generator") {
           const gk = generatorKindRef.current;
           if (gk === "rocks") {
@@ -4980,11 +4924,7 @@ function App() {
                 count: rockCount,
                 clusterRadius: rockClusterRadius,
                 sinkDirection:
-                  rockSinkDirection === "under"
-                    ? -1
-                    : rockSinkDirection === "over"
-                      ? 1
-                      : 0,
+                  rockSinkDirection === "under" ? -1 : rockSinkDirection === "over" ? 1 : 0,
                 sinkAmount: rockSinkAmount,
               },
             }).catch(() => {});
@@ -4996,6 +4936,7 @@ function App() {
                 nx,
                 ny,
                 seed: (Math.random() * 1e9) | 0,
+                radius: Math.max(1, generatorSphereRadiusRef.current),
                 density: grassDensity,
                 maxHeight: grassMaxHeight,
                 color: activeColorRef.current,
@@ -5062,75 +5003,31 @@ function App() {
               },
             }).catch(() => {});
           } else if (gk === "roof") {
-            void invoke<[number, number, number] | null>(
-              "voxel_stroke_anchor_coord_at_screen",
-              {
+            // Square/circle use drag-to-define (handled in pointer move/up).
+            // Polygon still uses click-to-add-pin.
+            if (roofAreaShapeRef.current === "polygon") {
+              void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
                 args: {
                   nx,
                   ny,
                   tool: "add",
                   strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
                 },
-              },
-            )
-              .then((c) => {
-                if (!c) return;
-                const shape = roofAreaShapeRef.current;
-                if (shape === "polygon") {
+              })
+                .then((c) => {
+                  if (!c) return;
                   setRoofPins((v) => {
-                    const next = [...v, c];
+                    // Click on existing pin → remove it.
+                    const idx = v.findIndex(
+                      (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
+                    );
+                    const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
                     roofPinsRef.current = next;
                     return next;
                   });
-                } else if (shape === "square") {
-                  const first = roofFirstClickRef.current;
-                  if (!first) {
-                    roofFirstClickRef.current = c;
-                    setRoofFirstClick(c);
-                  } else {
-                    roofFirstClickRef.current = null;
-                    setRoofFirstClick(null);
-                    const [x1, y1, z1] = first;
-                    const [x2, , z2] = c;
-                    // Build 4 corners of a rectangle in the horizontal (XZ) plane.
-                    const pins: [number, number, number][] = [
-                      [x1, y1, z1],
-                      [x2, y1, z1],
-                      [x2, y1, z2],
-                      [x1, y1, z2],
-                    ];
-                    setRoofPins(pins);
-                    roofPinsRef.current = pins;
-                  }
-                } else if (shape === "circle") {
-                  const first = roofFirstClickRef.current;
-                  if (!first) {
-                    roofFirstClickRef.current = c;
-                    setRoofFirstClick(c);
-                  } else {
-                    roofFirstClickRef.current = null;
-                    setRoofFirstClick(null);
-                    const [cx, cy, cz] = first;
-                    const [ex, , ez] = c;
-                    const dx = ex - cx;
-                    const dz = ez - cz;
-                    const r = Math.sqrt(dx * dx + dz * dz);
-                    const N = 16;
-                    const pins: [number, number, number][] = [];
-                    for (let i = 0; i < N; i++) {
-                      const angle = (2 * Math.PI * i) / N;
-                      pins.push([
-                        Math.round(cx + r * Math.cos(angle)),
-                        cy,
-                        Math.round(cz + r * Math.sin(angle)),
-                      ]);
-                    }
-                    setRoofPins(pins);
-                    roofPinsRef.current = pins;
-                  }
-                }
-              })
-              .catch(() => {});
+                })
+                .catch(() => {});
+            }
           } else if (gk === "piscina") {
             void invoke("generator_piscina_at_screen", {
               args: {
@@ -5276,9 +5173,7 @@ function App() {
                 return invoke("squishy_metaball_select", { args: { id } });
               });
             })
-            .then(() =>
-              invoke<{ balls: { id: number }[] }>("squishy_session_get"),
-            )
+            .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
             .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
             .catch(() => {});
         }
@@ -5322,8 +5217,7 @@ function App() {
         ) {
           const phase = sm === "cuboid" ? cuboidPhase : cylinderPhase;
           const depthRef = sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
-          const setDepthUi =
-            sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
+          const setDepthUi = sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
           depthRef.current = 1;
           setDepthUi(1);
           phase.enter("depth", {
@@ -5337,16 +5231,11 @@ function App() {
         // end command can race ahead and clear the accumulator.
         let clickStrokePromise: Promise<void> | null = null;
         if (!dragDidEditRef.current && moved < 5) {
-          if (
-            (sm === "cuboid" || sm === "cylinder") &&
-            strokeViewportStartRef.current
-          ) {
+          if ((sm === "cuboid" || sm === "cylinder") && strokeViewportStartRef.current) {
             // Single-click cuboid/cylinder: enter depth phase
             const phase = sm === "cuboid" ? cuboidPhase : cylinderPhase;
-            const depthRef =
-              sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
-            const setDepthUi =
-              sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
+            const depthRef = sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
+            const setDepthUi = sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
             depthRef.current = 1;
             setDepthUi(1);
             phase.enter("depth", {
@@ -5409,23 +5298,22 @@ function App() {
           void invoke("voxel_stroke_end").catch(() => {});
           lastStrokeNormRef.current = null;
         }
+      } else if (m === "generator" && generatorKindRef.current === "roof") {
+        // Roof square/circle drag complete: clear first-click anchor.
+        // Pins are already set from the move handler during drag.
+        const shape = roofAreaShapeRef.current;
+        if (shape === "square" || shape === "circle") {
+          roofFirstClickRef.current = null;
+          setRoofFirstClick(null);
+        }
       }
-    } else if (
-      isThisPointer &&
-      g?.mode === "voxel" &&
-      e.button === 0 &&
-      !hasPointerCaptureForUp
-    ) {
+    } else if (isThisPointer && g?.mode === "voxel" && e.button === 0 && !hasPointerCaptureForUp) {
       logPlaneStrokeDebug("up:ignored-no-capture", e, {
         moved,
       });
     }
 
-    if (
-      isThisPointer &&
-      g?.mode === "camera" &&
-      interactionModeRef.current !== "fly"
-    ) {
+    if (isThisPointer && g?.mode === "camera" && interactionModeRef.current !== "fly") {
       const { nx, ny } = clientToViewportNormalized(e);
       void invoke("viewport_pointer", {
         ev: {
@@ -5468,7 +5356,9 @@ function App() {
       im !== "select" &&
       im !== "selectByColor" &&
       im !== "selectCoplanar" &&
-      im !== "selectCoplanarEmpty"
+      im !== "selectCoplanarEmpty" &&
+      im !== "squishy" &&
+      im !== "generator"
     ) {
       clearPreview();
     }
@@ -5478,10 +5368,7 @@ function App() {
       viewportCursorDebugScreenRef.current = null;
       setViewportCursorDebugScreen(null);
     }
-    if (
-      startScreenLogoLoadedRef.current &&
-      interactionModeRef.current !== "fly"
-    ) {
+    if (startScreenLogoLoadedRef.current && interactionModeRef.current !== "fly") {
       void invoke("viewport_pointer", {
         ev: {
           kind: "leave",
@@ -5509,7 +5396,7 @@ function App() {
 
   const onWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    if (interactionModeRef.current === "fly") return;
+    if (interactionModeRef.current === "fly" || interactionModeRef.current === "walk") return;
     void invoke("viewport_wheel", {
       ev: { delta_x: e.deltaX, delta_y: e.deltaY },
     });
@@ -5631,8 +5518,7 @@ function App() {
     }
   }, [lastSessionInfo]);
 
-  const lastProjectBlurb =
-    lastSessionInfo != null ? lastProjectReopenBlurb(lastSessionInfo) : null;
+  const lastProjectBlurb = lastSessionInfo != null ? lastProjectReopenBlurb(lastSessionInfo) : null;
 
   /** Phase + progress for the top-center viewport HUD (load / mesh / fill / etc.). */
   const viewportTopCenterHud = (() => {
@@ -5712,9 +5598,7 @@ function App() {
   };
 
   const setCanEdit = (peerId: number, canEdit: boolean) => {
-    void invoke("collab_set_can_edit", { targetPeer: peerId, canEdit }).catch(
-      () => {},
-    );
+    void invoke("collab_set_can_edit", { targetPeer: peerId, canEdit }).catch(() => {});
   };
 
   const isSelectionInteractionMode =
@@ -5724,9 +5608,7 @@ function App() {
     interactionMode === "selectCoplanarEmpty";
 
   const isDrawVoxelEditMode =
-    interactionMode === "add" ||
-    interactionMode === "remove" ||
-    interactionMode === "paint";
+    interactionMode === "add" || interactionMode === "remove" || interactionMode === "paint";
 
   const showDrawPaneToolMatrix =
     toolsPane === "draw" && (isDrawVoxelEditMode || isSelectionInteractionMode);
@@ -5752,8 +5634,7 @@ function App() {
       ropePhase.active ||
       clothPhase.active ||
       (generatorKind === "cloth" && clothPins.length > 0) ||
-      (generatorKind === "roof" &&
-        (roofPins.length > 0 || roofFirstClick !== null)) ||
+      (generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null)) ||
       showPolygonPhaseHud ||
       showWallSculptPolygonHud);
 
@@ -5792,22 +5673,14 @@ function App() {
         {showEditorChrome ? (
           <aside
             className={`${
-              sidebarExpanded
-                ? "app-sidebar is-expanded"
-                : "app-sidebar is-collapsed"
+              sidebarExpanded ? "app-sidebar is-expanded" : "app-sidebar is-collapsed"
             }${toolsPaneFloating ? " is-floating" : ""}`}
-            style={
-              toolsPaneFloating
-                ? { left: toolPanePos.x, top: toolPanePos.y }
-                : undefined
-            }
+            style={toolsPaneFloating ? { left: toolPanePos.x, top: toolPanePos.y } : undefined}
             aria-label="Tools"
           >
             <div
               className={
-                toolsPaneFloating
-                  ? "sidebar-header sidebar-header-floating"
-                  : "sidebar-header"
+                toolsPaneFloating ? "sidebar-header sidebar-header-floating" : "sidebar-header"
               }
             >
               {toolsPaneFloating ? (
@@ -5820,9 +5693,7 @@ function App() {
                     <span className="floating-tools-grip" aria-hidden>
                       ⋮⋮
                     </span>
-                    {sidebarExpanded ? (
-                      <span className="floating-tools-title">Tools</span>
-                    ) : null}
+                    {sidebarExpanded ? <span className="floating-tools-title">Tools</span> : null}
                   </div>
                   <div className="floating-tools-header-actions">
                     <button
@@ -5838,9 +5709,7 @@ function App() {
                       className="sidebar-expand-toggle floating-tools-collapse-toggle"
                       onClick={() => setSidebarExpanded((v) => !v)}
                       aria-expanded={sidebarExpanded}
-                      title={
-                        sidebarExpanded ? "Collapse tools" : "Expand tools"
-                      }
+                      title={sidebarExpanded ? "Collapse tools" : "Expand tools"}
                     >
                       <span className="sidebar-expand-toggle-icon" aria-hidden>
                         {sidebarExpanded ? "«" : "»"}
@@ -5879,18 +5748,12 @@ function App() {
             <div className="sidebar-scroll">
               {sidebarExpanded ? (
                 <>
-                  <div
-                    className="sidebar-toolpane-tabs"
-                    role="tablist"
-                    aria-label="Tool panes"
-                  >
+                  <div className="sidebar-toolpane-tabs" role="tablist" aria-label="Tool panes">
                     <button
                       type="button"
                       role="tab"
                       className={
-                        toolsPane === "hand"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
+                        toolsPane === "hand" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
                       }
                       aria-selected={toolsPane === "hand"}
                       disabled={loading || workBusy}
@@ -5905,9 +5768,7 @@ function App() {
                       type="button"
                       role="tab"
                       className={
-                        toolsPane === "draw"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
+                        toolsPane === "draw" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
                       }
                       aria-selected={toolsPane === "draw"}
                       disabled={loading || workBusy}
@@ -5922,9 +5783,7 @@ function App() {
                       type="button"
                       role="tab"
                       className={
-                        toolsPane === "sculpt"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
+                        toolsPane === "sculpt" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
                       }
                       aria-selected={toolsPane === "sculpt"}
                       disabled={loading || workBusy}
@@ -5956,9 +5815,7 @@ function App() {
                       type="button"
                       role="tab"
                       className={
-                        toolsPane === "squishy"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
+                        toolsPane === "squishy" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
                       }
                       aria-selected={toolsPane === "squishy"}
                       disabled={loading || workBusy}
@@ -5973,9 +5830,7 @@ function App() {
                       type="button"
                       role="tab"
                       className={
-                        toolsPane === "mood"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
+                        toolsPane === "mood" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
                       }
                       aria-selected={toolsPane === "mood"}
                       disabled={loading || workBusy}
@@ -5987,9 +5842,7 @@ function App() {
                       type="button"
                       role="tab"
                       className={
-                        toolsPane === "fly"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
+                        toolsPane === "fly" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
                       }
                       aria-selected={toolsPane === "fly"}
                       disabled={loading || workBusy}
@@ -6000,21 +5853,38 @@ function App() {
                     >
                       Fly
                     </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "walk" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "walk"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("walk");
+                        setInteractionMode("walk");
+                      }}
+                    >
+                      Walk
+                    </button>
                   </div>
-                  <div
-                    className="sidebar-expanded-slot"
-                    aria-label="Tool pane options"
-                  >
+                  <div className="sidebar-expanded-slot" aria-label="Tool pane options">
                     {toolsPane === "hand" ? (
-                      <p className="sidebar-pane-hint">
-                        Drag in viewport to orbit/pan.
-                      </p>
+                      <p className="sidebar-pane-hint">Drag in viewport to orbit/pan.</p>
                     ) : null}
 
                     {toolsPane === "fly" ? (
                       <p className="sidebar-pane-hint">
-                        Click viewport to capture pointer. WASD move, E/Q
-                        up/down, Shift slow. Mouse looks. Esc releases pointer.
+                        Click viewport to capture pointer. WASD move, E/Q up/down, Shift slow. Mouse
+                        looks. Esc releases pointer.
+                      </p>
+                    ) : null}
+
+                    {toolsPane === "walk" ? (
+                      <p className="sidebar-pane-hint">
+                        Click viewport to capture pointer. WASD to walk, Space to jump, Shift slow.
+                        Mouse looks. Esc releases pointer.
                       </p>
                     ) : null}
 
@@ -6028,31 +5898,27 @@ function App() {
                           <div className="sidebar-tool-selection-col">
                             <div className="sidebar-section-label">Tool</div>
                             <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
-                              {(["add", "remove", "paint"] as const).map(
-                                (m) => (
-                                  <button
-                                    key={m}
-                                    type="button"
-                                    className={
-                                      interactionMode === m
-                                        ? "sidebar-mode-btn is-active"
-                                        : "sidebar-mode-btn"
-                                    }
-                                    disabled={loading || workBusy}
-                                    onClick={() => setInteractionMode(m)}
-                                  >
-                                    <span className="sidebar-mode-label">
-                                      {m[0].toUpperCase() + m.slice(1)}
-                                    </span>
-                                  </button>
-                                ),
-                              )}
+                              {(["add", "remove", "paint"] as const).map((m) => (
+                                <button
+                                  key={m}
+                                  type="button"
+                                  className={
+                                    interactionMode === m
+                                      ? "sidebar-mode-btn is-active"
+                                      : "sidebar-mode-btn"
+                                  }
+                                  disabled={loading || workBusy}
+                                  onClick={() => setInteractionMode(m)}
+                                >
+                                  <span className="sidebar-mode-label">
+                                    {m[0].toUpperCase() + m.slice(1)}
+                                  </span>
+                                </button>
+                              ))}
                             </div>
                           </div>
                           <div className="sidebar-tool-selection-col">
-                            <div className="sidebar-section-label">
-                              Selection
-                            </div>
+                            <div className="sidebar-section-label">Selection</div>
                             <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
                               <button
                                 type="button"
@@ -6064,9 +5930,7 @@ function App() {
                                 disabled={loading || workBusy}
                                 onClick={() => setInteractionMode("select")}
                               >
-                                <span className="sidebar-mode-label">
-                                  Select
-                                </span>
+                                <span className="sidebar-mode-label">Select</span>
                               </button>
                               <button
                                 type="button"
@@ -6078,14 +5942,11 @@ function App() {
                                 disabled={
                                   loading ||
                                   workBusy ||
-                                  (selectionCount === 0 &&
-                                    !stampBookPatternActive)
+                                  (selectionCount === 0 && !stampBookPatternActive)
                                 }
                                 onClick={() => setInteractionMode("stamp")}
                               >
-                                <span className="sidebar-mode-label">
-                                  Stamp
-                                </span>
+                                <span className="sidebar-mode-label">Stamp</span>
                               </button>
                               <button
                                 type="button"
@@ -6094,22 +5955,16 @@ function App() {
                                     ? "sidebar-mode-btn is-active"
                                     : "sidebar-mode-btn"
                                 }
-                                disabled={
-                                  loading || workBusy || selectionCount === 0
-                                }
+                                disabled={loading || workBusy || selectionCount === 0}
                                 onClick={() => setInteractionMode("punch")}
                               >
-                                <span className="sidebar-mode-label">
-                                  Punch
-                                </span>
+                                <span className="sidebar-mode-label">Punch</span>
                               </button>
                             </div>
                           </div>
                         </div>
 
-                        <div className="sidebar-section-label">
-                          Selection method
-                        </div>
+                        <div className="sidebar-section-label">Selection method</div>
                         <div className="sidebar-mode-grid sidebar-mode-grid-3">
                           <button
                             type="button"
@@ -6265,16 +6120,10 @@ function App() {
                                   ? "sidebar-mode-btn is-active"
                                   : "sidebar-mode-btn"
                               }
-                              disabled={
-                                loading ||
-                                workBusy ||
-                                interactionMode !== "sculpt"
-                              }
+                              disabled={loading || workBusy || interactionMode !== "sculpt"}
                               onClick={() => setSculptStrokeMode(id)}
                             >
-                              <span className="sidebar-mode-label">
-                                {label}
-                              </span>
+                              <span className="sidebar-mode-label">{label}</span>
                             </button>
                           ))}
                         </div>
@@ -6291,8 +6140,7 @@ function App() {
                           setPaintColorDistrib={setPaintColorDistrib}
                         />
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                          Brush and terrain options are in the tool options
-                          panel.
+                          Brush and terrain options are in the tool options panel.
                         </p>
                       </>
                     ) : null}
@@ -6300,19 +6148,6 @@ function App() {
                     {toolsPane === "generators" ? (
                       <>
                         <div className="sidebar-section-label">Generators</div>
-                        <button
-                          type="button"
-                          className={
-                            interactionMode === "generator"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("generator")}
-                        >
-                          <span className="sidebar-mode-label">Place</span>
-                        </button>
-                        <div className="sidebar-section-label">Tool</div>
                         <div className="sidebar-mode-grid sidebar-mode-grid-2">
                           {(
                             [
@@ -6348,9 +6183,7 @@ function App() {
                                 }
                               }}
                             >
-                              <span className="sidebar-mode-label">
-                                {label}
-                              </span>
+                              <span className="sidebar-mode-label">{label}</span>
                             </button>
                           ))}
                         </div>
@@ -6366,53 +6199,35 @@ function App() {
                           paintColorDistrib={paintColorDistrib}
                           setPaintColorDistrib={setPaintColorDistrib}
                         />
-                        {generatorKind === "rope" &&
-                        ropeFirstScreen &&
-                        !ropePhase.active ? (
-                          <p
-                            className="sidebar-pane-hint sidebar-toolpanel-hint"
-                            role="status"
-                          >
+                        {generatorKind === "rope" && ropeFirstScreen && !ropePhase.active ? (
+                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
                             Click second point for rope.
                           </p>
                         ) : null}
                         {generatorKind === "rope" && ropePhase.active ? (
-                          <p
-                            className="sidebar-pane-hint sidebar-toolpanel-hint"
-                            role="status"
-                          >
+                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
                             Adjust tension and sag, then Done.
                           </p>
                         ) : null}
                         {generatorKind === "cloth" && !clothPhase.active ? (
-                          <p
-                            className="sidebar-pane-hint sidebar-toolpanel-hint"
-                            role="status"
-                          >
-                            Cloth: click surface to add pins (3+ corners), then
-                            Done.
+                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
+                            Cloth: click surface to add pins (3+ corners), then Done.
                           </p>
                         ) : null}
                         {generatorKind === "cloth" && clothPhase.active ? (
-                          <p
-                            className="sidebar-pane-hint sidebar-toolpanel-hint"
-                            role="status"
-                          >
+                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
                             Adjust settings, then Done.
                           </p>
                         ) : null}
                         {generatorKind === "roof" ? (
-                          <p
-                            className="sidebar-pane-hint sidebar-toolpanel-hint"
-                            role="status"
-                          >
-                            Roof: click the surface to add pins (3+ corners),
-                            then Apply in tool options.
+                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
+                            Roof: click the surface to add pins (3+ corners), then Apply in tool
+                            options.
                           </p>
                         ) : null}
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                          Size and shape in the tool options panel. Rope: two
-                          clicks. Cloth: multi-pin + Apply.
+                          Size and shape in the tool options panel. Rope: two clicks. Cloth:
+                          multi-pin + Apply.
                         </p>
                       </>
                     ) : null}
@@ -6445,8 +6260,7 @@ function App() {
                           setPaintColorDistrib={setPaintColorDistrib}
                         />
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                          Add / pick / delete blobs in the viewport; commit in
-                          tool options.
+                          Add / pick / delete blobs in the viewport; commit in tool options.
                         </p>
                       </>
                     ) : null}
@@ -6457,287 +6271,199 @@ function App() {
                       </p>
                     ) : null}
 
-                    <ViewportSettingsSidebar
-                      loading={loading}
-                      workBusy={workBusy}
-                    />
+                    <ViewportSettingsSidebar loading={loading} workBusy={workBusy} />
                   </div>
                 </>
               ) : (
-                <>
-                  {/* Mode Buttons - Interaction + Selection */}
-                  <div className="sidebar-collapsed-section sidebar-mode-buttons">
+                <div className="sidebar-collapsed-tools">
+                  {/* ── Pane tabs ── */}
+                  {([
+                    { pane: "hand", label: "Hand", mode: "navigate" },
+                    { pane: "draw", label: "Draw", mode: "add" },
+                    { pane: "sculpt", label: "Sculpt", mode: "sculpt" },
+                    { pane: "generators", label: "Gen", mode: "generator" },
+                    { pane: "squishy", label: "Sqsh", mode: "squishy" },
+                    { pane: "mood", label: "Mood", mode: null },
+                    { pane: "fly", label: "Fly", mode: "fly" },
+                    { pane: "walk", label: "Walk", mode: "walk" },
+                  ] as const).map(({ pane, label, mode }) => (
                     <button
+                      key={pane}
                       type="button"
-                      className="sidebar-interaction-mode-button"
-                      onClick={() =>
-                        setInteractionModeMenuOpen(!interactionModeMenuOpen)
-                      }
+                      className={`sidebar-collapsed-tool-btn${toolsPane === pane ? " is-active" : ""}`}
                       disabled={loading || workBusy}
-                      title="Interaction modes"
+                      title={label}
+                      onClick={() => {
+                        setToolsPane(pane as typeof toolsPane);
+                        if (mode) setInteractionMode(mode);
+                      }}
                     >
-                      {interactionMode === "navigate"
-                        ? "✋"
-                        : interactionMode === "fly"
-                          ? "✈"
-                          : interactionMode === "sculpt"
-                            ? "∧"
-                            : ["add", "remove", "paint"].includes(
-                                  interactionMode,
-                                )
-                              ? "⊕"
-                              : "◻️"}
+                      <span className="sidebar-collapsed-tool-icon">{label}</span>
                     </button>
-                    {interactionModeMenuOpen && (
-                      <div className="sidebar-interaction-mode-menu">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("navigate");
-                            setInteractionModeMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          <span>✋</span>
-                          <span>Navigate</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("fly");
-                            setInteractionModeMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          <span>✈</span>
-                          <span>Fly</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("sculpt");
-                            setInteractionModeMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          <span>∧</span>
-                          <span>Sculpt</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("add");
-                            setInteractionModeMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          <span>⊕</span>
-                          <span>Add/Remove</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("paint");
-                            setInteractionModeMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          <span>🎨</span>
-                          <span>Paint</span>
-                        </button>
-                      </div>
-                    )}
-                    <button
-                      type="button"
-                      className="sidebar-selection-mode-button"
-                      onClick={() => setSelectionMenuOpen(!selectionMenuOpen)}
-                      disabled={loading || workBusy}
-                      title="Selection modes"
-                    >
-                      📋
-                    </button>
-                    {selectionMenuOpen && (
-                      <div className="sidebar-selection-menu">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("select");
-                            setSelectionMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          Select
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("selectByColor");
-                            setSelectionMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          Select by Color
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("selectCoplanar");
-                            setSelectionMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          Select Coplanar
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setInteractionMode("selectCoplanarEmpty");
-                            setSelectionMenuOpen(false);
-                          }}
-                          disabled={loading || workBusy}
-                        >
-                          Select Coplanar Empty
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                  ))}
 
-                  {/* TLT Selector or Subtools */}
-                  <div className="sidebar-collapsed-section">
-                    {!activeTLT ? (
-                      <div className="sidebar-tlt-selector">
+                  {/* ── Draw sub-options ── */}
+                  {toolsPane === "draw" && (
+                    <>
+                      <div className="sidebar-collapsed-tool-separator" />
+                      <div className="sidebar-collapsed-section-label">Tool</div>
+                      {(["add", "remove", "paint"] as const).map((m) => (
                         <button
+                          key={m}
                           type="button"
-                          className={`sidebar-tlt-button ${activeTLT === "draw" ? "is-active" : ""}`}
-                          onClick={() => setActiveTLT("draw")}
+                          className={`sidebar-collapsed-sub-btn${interactionMode === m ? " is-active" : ""}`}
                           disabled={loading || workBusy}
-                          title="Draw tools"
+                          onClick={() => setInteractionMode(m)}
                         >
-                          📝
+                          {m[0].toUpperCase() + m.slice(1)}
                         </button>
+                      ))}
+                      <div className="sidebar-collapsed-section-label">Select</div>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "select" ? " is-active" : ""}`}
+                        disabled={loading || workBusy}
+                        onClick={() => setInteractionMode("select")}
+                      >
+                        Select
+                      </button>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "stamp" ? " is-active" : ""}`}
+                        disabled={
+                          loading ||
+                          workBusy ||
+                          (selectionCount === 0 && !stampBookPatternActive)
+                        }
+                        onClick={() => setInteractionMode("stamp")}
+                      >
+                        Stamp
+                      </button>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "punch" ? " is-active" : ""}`}
+                        disabled={loading || workBusy || selectionCount === 0}
+                        onClick={() => setInteractionMode("punch")}
+                      >
+                        Punch
+                      </button>
+                      <div className="sidebar-collapsed-section-label">Method</div>
+                      {(["stroke", "surface", "solid", "spray", "fill"] as const).map((m) => (
                         <button
+                          key={m}
                           type="button"
-                          className={`sidebar-tlt-button ${activeTLT === "sculpt" ? "is-active" : ""}`}
-                          onClick={() => setActiveTLT("sculpt")}
+                          className={`sidebar-collapsed-sub-btn${selectionMethod === m ? " is-active" : ""}`}
                           disabled={loading || workBusy}
-                          title="Sculpt tools"
+                          onClick={() => {
+                            const s = selectionMethodToState(m);
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
+                          }}
                         >
-                          🔨
+                          {m[0].toUpperCase() + m.slice(1)}
                         </button>
-                        <button
-                          type="button"
-                          className={`sidebar-tlt-button ${activeTLT === "generators" ? "is-active" : ""}`}
-                          onClick={() => setActiveTLT("generators")}
-                          disabled={loading || workBusy}
-                          title="Generators"
-                        >
-                          ⚙️
-                        </button>
-                        <button
-                          type="button"
-                          className={`sidebar-tlt-button ${activeTLT === "fly" ? "is-active" : ""}`}
-                          onClick={() => setActiveTLT("fly")}
-                          disabled={loading || workBusy}
-                          title="Fly mode"
-                        >
-                          ✈
-                        </button>
-                      </div>
-                    ) : (
-                      <div className="sidebar-subtools">
-                        {activeTLT === "draw" && (
-                          <>
-                            <button
-                              type="button"
-                              className={`sidebar-subtool-button ${interactionMode === "add" ? "is-active" : ""}`}
-                              onClick={() => setInteractionMode("add")}
-                              disabled={loading || workBusy}
-                              title="Add"
-                            >
-                              ⊕
-                            </button>
-                            <button
-                              type="button"
-                              className={`sidebar-subtool-button ${interactionMode === "remove" ? "is-active" : ""}`}
-                              onClick={() => setInteractionMode("remove")}
-                              disabled={loading || workBusy}
-                              title="Remove"
-                            >
-                              ⊖
-                            </button>
-                            <button
-                              type="button"
-                              className={`sidebar-subtool-button ${interactionMode === "paint" ? "is-active" : ""}`}
-                              onClick={() => setInteractionMode("paint")}
-                              disabled={loading || workBusy}
-                              title="Paint"
-                            >
-                              🎨
-                            </button>
-                          </>
-                        )}
-                        {activeTLT === "sculpt" && (
-                          <button
-                            type="button"
-                            className={`sidebar-subtool-button ${interactionMode === "sculpt" ? "is-active" : ""}`}
-                            onClick={() => setInteractionMode("sculpt")}
-                            disabled={loading || workBusy}
-                            title="Sculpt"
-                          >
-                            🔨
-                          </button>
-                        )}
-                        {activeTLT === "generators" && (
-                          <button
-                            type="button"
-                            className={`sidebar-subtool-button ${interactionMode === "generator" ? "is-active" : ""}`}
-                            onClick={() => setInteractionMode("generator")}
-                            disabled={loading || workBusy}
-                            title="Generators"
-                          >
-                            ⚙️
-                          </button>
-                        )}
-                        {activeTLT === "fly" && (
-                          <button
-                            type="button"
-                            className={`sidebar-subtool-button ${interactionMode === "fly" ? "is-active" : ""}`}
-                            onClick={() => setInteractionMode("fly")}
-                            disabled={loading || workBusy}
-                            title="Fly"
-                          >
-                            ✈
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className="sidebar-back-button"
-                          onClick={() => setActiveTLT(null)}
-                          disabled={loading || workBusy}
-                          title="Back to tools"
-                        >
-                          ←
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                      ))}
+                    </>
+                  )}
 
-                  {/* Palette Icon */}
-                  <div className="sidebar-collapsed-section">
-                    <button
-                      type="button"
-                      className="sidebar-palette-icon"
-                      onClick={() =>
-                        setColorPaletteFloating(!colorPaletteFloating)
-                      }
-                      disabled={loading || workBusy}
-                      title="Toggle color palette"
-                      aria-label="Toggle color palette"
-                    >
-                      🎨
-                    </button>
-                  </div>
-                </>
+                  {/* ── Sculpt sub-options ── */}
+                  {toolsPane === "sculpt" && (
+                    <>
+                      <div className="sidebar-collapsed-tool-separator" />
+                      <div className="sidebar-collapsed-section-label">Mode</div>
+                      {(
+                        [
+                          ["draw", "Draw"],
+                          ["gouge", "Scrape"],
+                          ["smooth", "Smooth"],
+                          ["wall", "Wall"],
+                          ["extrude", "Extrude"],
+                          ["terrain", "Terrain"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className={`sidebar-collapsed-sub-btn${sculptStrokeMode === id ? " is-active" : ""}`}
+                          disabled={loading || workBusy || interactionMode !== "sculpt"}
+                          onClick={() => setSculptStrokeMode(id)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {/* ── Generators sub-options ── */}
+                  {toolsPane === "generators" && (
+                    <>
+                      <div className="sidebar-collapsed-tool-separator" />
+                      <div className="sidebar-collapsed-section-label">Kind</div>
+                      {(
+                        [
+                          ["rocks", "Rocks"],
+                          ["grass", "Grass"],
+                          ["rope", "Rope"],
+                          ["cloth", "Cloth"],
+                          ["ashlar", "Ashlar"],
+                          ["flora", "Flora"],
+                          ["roof", "Roof"],
+                          ["piscina", "Fish"],
+                          ["insecta", "Insect"],
+                          ["fauna", "Creature"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className={`sidebar-collapsed-sub-btn${generatorKind === id ? " is-active" : ""}`}
+                          disabled={loading || workBusy}
+                          onClick={() => {
+                            setGeneratorKind(id);
+                            if (ropePhase.active) ropePhase.cancel();
+                            else setRopeFirstScreen(null);
+                            if (clothPhase.active) clothPhase.cancel();
+                            else {
+                              setClothPins([]);
+                              clothPinsRef.current = [];
+                            }
+                          }}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {/* ── Squishy sub-options ── */}
+                  {toolsPane === "squishy" && (
+                    <>
+                      <div className="sidebar-collapsed-tool-separator" />
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "squishy" ? " is-active" : ""}`}
+                        disabled={loading || workBusy}
+                        onClick={() => setInteractionMode("squishy")}
+                      >
+                        Metaballs
+                      </button>
+                    </>
+                  )}
+
+                  {/* ── Palette toggle ── */}
+                  <div className="sidebar-collapsed-tool-separator" />
+                  <button
+                    type="button"
+                    className="sidebar-collapsed-tool-btn"
+                    onClick={() => setColorPaletteFloating(!colorPaletteFloating)}
+                    disabled={loading || workBusy}
+                    title="Toggle color palette"
+                  >
+                    <span className="sidebar-collapsed-tool-icon">🎨</span>
+                  </button>
+                </div>
               )}
             </div>
           </aside>
@@ -6745,7 +6471,12 @@ function App() {
         {colorPaletteFloating && showEditorChrome ? (
           <div
             className="floating-palette-panel"
-            style={{ left: colorPalettePos.x, top: colorPalettePos.y }}
+            style={{
+              left: colorPalettePos.x,
+              top: colorPalettePos.y,
+              width: colorPaletteSize.w,
+              height: colorPaletteSize.h,
+            }}
             role="region"
             aria-label="Floating color palette"
           >
@@ -6771,24 +6502,12 @@ function App() {
 
                   const handleUp = (upE: PointerEvent) => {
                     if (upE.pointerId !== pid) return;
-                    document.removeEventListener(
-                      "pointermove",
-                      handleMove as EventListener,
-                    );
-                    document.removeEventListener(
-                      "pointerup",
-                      handleUp as EventListener,
-                    );
+                    document.removeEventListener("pointermove", handleMove as EventListener);
+                    document.removeEventListener("pointerup", handleUp as EventListener);
                   };
 
-                  document.addEventListener(
-                    "pointermove",
-                    handleMove as EventListener,
-                  );
-                  document.addEventListener(
-                    "pointerup",
-                    handleUp as EventListener,
-                  );
+                  document.addEventListener("pointermove", handleMove as EventListener);
+                  document.addEventListener("pointerup", handleUp as EventListener);
                 }}
                 aria-label="Drag to move palette"
               >
@@ -6844,13 +6563,41 @@ function App() {
                 palette={MATERIAL_BUILTIN_PALETTE_HEX}
               />
             </div>
+            <div
+              className="floating-palette-resize-handle"
+              onPointerDown={(e) => {
+                const pid = e.pointerId;
+                const startX = e.clientX;
+                const startY = e.clientY;
+                const origW = colorPaletteSize.w;
+                const origH = colorPaletteSize.h;
+
+                const handleMove = (moveE: PointerEvent) => {
+                  if (moveE.pointerId !== pid) return;
+                  const dx = moveE.clientX - startX;
+                  const dy = moveE.clientY - startY;
+                  setColorPaletteSize({
+                    w: Math.max(140, origW + dx),
+                    h: Math.max(120, origH + dy),
+                  });
+                };
+
+                const handleUp = (upE: PointerEvent) => {
+                  if (upE.pointerId !== pid) return;
+                  document.removeEventListener("pointermove", handleMove as EventListener);
+                  document.removeEventListener("pointerup", handleUp as EventListener);
+                };
+
+                document.addEventListener("pointermove", handleMove as EventListener);
+                document.addEventListener("pointerup", handleUp as EventListener);
+              }}
+              aria-label="Resize palette"
+            />
           </div>
         ) : null}
         <div
           className={`viewport-wrap${showStartScreen ? " is-start-screen" : ""}${
-            showEditorChrome && !rightSidebarExpanded
-              ? " is-right-sidebar-collapsed"
-              : ""
+            showEditorChrome && !rightSidebarExpanded ? " is-right-sidebar-collapsed" : ""
           }`}
         >
           {loading || workBusy ? (
@@ -6859,10 +6606,7 @@ function App() {
                 className="load-bar-fill"
                 style={{
                   width: `${Math.round(
-                    Math.min(
-                      1,
-                      Math.max(0, loading ? loadProgress : workProgress),
-                    ) * 100,
+                    Math.min(1, Math.max(0, loading ? loadProgress : workProgress)) * 100,
                   )}%`,
                 }}
               />
@@ -6883,7 +6627,7 @@ function App() {
             className={
               interactionMode === "navigate"
                 ? "viewport viewport-mode-navigate"
-                : interactionMode === "fly"
+                : interactionMode === "fly" || interactionMode === "walk"
                   ? "viewport viewport-mode-fly"
                   : "viewport viewport-mode-edit"
             }
@@ -7013,12 +6757,8 @@ function App() {
                       ? (() => {
                           const s = viewportCursorDebugScreen;
                           const r = viewportCursorDebugRust;
-                          const expX = Math.round(
-                            (s.rectLeft / s.layoutWidth) * r.surfaceWidth,
-                          );
-                          const expY = Math.round(
-                            (s.rectTop / s.layoutHeight) * r.surfaceHeight,
-                          );
+                          const expX = Math.round((s.rectLeft / s.layoutWidth) * r.surfaceWidth);
+                          const expY = Math.round((s.rectTop / s.layoutHeight) * r.surfaceHeight);
                           const dx = expX - r.viewportOriginX;
                           const dy = expY - r.viewportOriginY;
                           return `expect (${expX}, ${expY}) · Rust (${r.viewportOriginX}, ${r.viewportOriginY}) · Δ (${dx}, ${dy}) · surface ${r.surfaceWidth}×${r.surfaceHeight} · layout ${s.layoutWidth}×${s.layoutHeight} · inner ${s.innerWidth}×${s.innerHeight} · rect @ ${s.rectLeft.toFixed(0)},${s.rectTop.toFixed(0)}`;
@@ -7043,29 +6783,16 @@ function App() {
               </div>
             ) : null}
             {showViewportTopCenterStack ? (
-              <div
-                className="viewport-top-center-hud"
-                onPointerDown={(e) => e.stopPropagation()}
-              >
+              <div className="viewport-top-center-hud" onPointerDown={(e) => e.stopPropagation()}>
                 {viewportTopCenterHud ? (
-                  <div
-                    className="viewport-work-phase-chip"
-                    role="status"
-                    aria-live="polite"
-                  >
-                    <span className="viewport-work-phase-text">
-                      {viewportTopCenterHud.label}
-                    </span>
-                    <span className="viewport-work-phase-pct">
-                      {viewportTopCenterHud.pct}%
-                    </span>
+                  <div className="viewport-work-phase-chip" role="status" aria-live="polite">
+                    <span className="viewport-work-phase-text">{viewportTopCenterHud.label}</span>
+                    <span className="viewport-work-phase-pct">{viewportTopCenterHud.pct}%</span>
                     {viewportTopCenterHud.showFillCancel ? (
                       <button
                         type="button"
                         className="viewport-work-phase-cancel"
-                        onClick={() =>
-                          void invoke("voxel_fill_cancel").catch(() => {})
-                        }
+                        onClick={() => void invoke("voxel_fill_cancel").catch(() => {})}
                       >
                         Cancel
                       </button>
@@ -7077,9 +6804,7 @@ function App() {
                     className="viewport-cuboid-depth-bar"
                     role="dialog"
                     aria-label={
-                      cuboidPhase.active
-                        ? "Cuboid extrusion depth"
-                        : "Cylinder extrusion depth"
+                      cuboidPhase.active ? "Cuboid extrusion depth" : "Cylinder extrusion depth"
                     }
                   >
                     <span>Depth</span>
@@ -7091,14 +6816,12 @@ function App() {
                           const n = Math.max(-256, cuboidDepthUi - 1);
                           cuboidDepthRef.current = n;
                           setCuboidDepthUi(n);
-                          if (extrusionDepthEditing)
-                            setExtrusionDepthDraft(String(n));
+                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
                         } else {
                           const n = Math.max(-256, cylinderDepthUi - 1);
                           cylinderDepthRef.current = n;
                           setCylinderDepthUi(n);
-                          if (extrusionDepthEditing)
-                            setExtrusionDepthDraft(String(n));
+                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
                         }
                       }}
                     >
@@ -7113,11 +6836,7 @@ function App() {
                       value={
                         extrusionDepthEditing
                           ? extrusionDepthDraft
-                          : String(
-                              cuboidPhase.active
-                                ? cuboidDepthUi
-                                : cylinderDepthUi,
-                            )
+                          : String(cuboidPhase.active ? cuboidDepthUi : cylinderDepthUi)
                       }
                       onChange={(e) => {
                         const v = e.target.value;
@@ -7126,17 +6845,13 @@ function App() {
                         }
                       }}
                       onFocus={(e) => {
-                        const cur = cuboidPhase.active
-                          ? cuboidDepthUi
-                          : cylinderDepthUi;
+                        const cur = cuboidPhase.active ? cuboidDepthUi : cylinderDepthUi;
                         setExtrusionDepthEditing(true);
                         setExtrusionDepthDraft(String(cur));
                         e.target.select();
                       }}
                       onBlur={() => {
-                        const current = cuboidPhase.active
-                          ? cuboidDepthUi
-                          : cylinderDepthUi;
+                        const current = cuboidPhase.active ? cuboidDepthUi : cylinderDepthUi;
                         let n = parseInt(extrusionDepthDraft, 10);
                         if (Number.isNaN(n)) n = current;
                         n = Math.max(-256, Math.min(256, n));
@@ -7163,14 +6878,12 @@ function App() {
                           const n = Math.min(256, cuboidDepthUi + 1);
                           cuboidDepthRef.current = n;
                           setCuboidDepthUi(n);
-                          if (extrusionDepthEditing)
-                            setExtrusionDepthDraft(String(n));
+                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
                         } else {
                           const n = Math.min(256, cylinderDepthUi + 1);
                           cylinderDepthRef.current = n;
                           setCylinderDepthUi(n);
-                          if (extrusionDepthEditing)
-                            setExtrusionDepthDraft(String(n));
+                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
                         }
                       }}
                     >
@@ -7180,8 +6893,7 @@ function App() {
                       type="button"
                       className="tool-options-shape-btn"
                       onClick={() => {
-                        if (cuboidPhase.active)
-                          void commitCuboidSolidAtScreen();
+                        if (cuboidPhase.active) void commitCuboidSolidAtScreen();
                         else void commitCylinderSolidAtScreen();
                       }}
                     >
@@ -7195,9 +6907,7 @@ function App() {
                     role="dialog"
                     aria-label="Extrude settings"
                   >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
-                      Extrude
-                    </span>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Extrude</span>
                     <span
                       style={{
                         fontSize: "0.78rem",
@@ -7224,16 +6934,13 @@ function App() {
                   </div>
                 ) : null}
                 {/* Roof placing phase: pin/anchor count + Cancel */}
-                {generatorKind === "roof" &&
-                (roofPins.length > 0 || roofFirstClick !== null) ? (
+                {generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null) ? (
                   <div
                     className="viewport-cuboid-depth-bar"
                     role="dialog"
                     aria-label="Roof placement"
                   >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
-                      Roof
-                    </span>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Roof</span>
                     <span
                       style={{
                         fontSize: "0.78rem",
@@ -7246,35 +6953,63 @@ function App() {
                           : "click opposite corner"
                         : `${roofPins.length} pin${roofPins.length !== 1 ? "s" : ""}`}
                     </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => {
-                        setRoofPins([]);
-                        roofPinsRef.current = [];
-                        roofFirstClickRef.current = null;
-                        setRoofFirstClick(null);
-                        void invoke("voxel_stroke_preview_reset").catch(
-                          () => {},
-                        );
-                      }}
-                    >
-                      Cancel
-                    </button>
+                    <div className="viewport-polygon-phase-actions">
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        disabled={loading || workBusy || roofPins.length < 3}
+                        onClick={() => {
+                          void invoke("generator_roof_from_pins_cmd", {
+                            args: {
+                              pins: roofPins,
+                              style: roofStyle,
+                              height: roofHeight,
+                              thickness: 1,
+                              shedEdgeIndex: 0,
+                              gableOrientation: 0,
+                              breakRatio: 0.5,
+                              wallHeight: 3,
+                              parapetHeight: 2,
+                              saltSkew: 0,
+                              hollow: roofHollow,
+                              color: activeColor,
+                              material: activeMaterialRef.current,
+                            },
+                          })
+                            .then(() => {
+                              setRoofPins([]);
+                              roofPinsRef.current = [];
+                              void invoke("voxel_stroke_preview_reset").catch(() => {});
+                            })
+                            .catch(() => {});
+                        }}
+                      >
+                        Done
+                      </button>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        onClick={() => {
+                          setRoofPins([]);
+                          roofPinsRef.current = [];
+                          roofFirstClickRef.current = null;
+                          setRoofFirstClick(null);
+                          void invoke("voxel_stroke_preview_reset").catch(() => {});
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
                 ) : null}
                 {/* Cloth placing phase: pin count + Done/Cancel */}
-                {generatorKind === "cloth" &&
-                !clothPhase.active &&
-                clothPins.length > 0 ? (
+                {generatorKind === "cloth" && !clothPhase.active && clothPins.length > 0 ? (
                   <div
                     className="viewport-cuboid-depth-bar"
                     role="dialog"
                     aria-label="Cloth pin placement"
                   >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
-                      Cloth
-                    </span>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Cloth</span>
                     <span
                       style={{
                         fontSize: "0.78rem",
@@ -7289,9 +7024,7 @@ function App() {
                       onClick={() => {
                         setClothPins([]);
                         clothPinsRef.current = [];
-                        void invoke("voxel_stroke_preview_reset").catch(
-                          () => {},
-                        );
+                        void invoke("voxel_stroke_preview_reset").catch(() => {});
                       }}
                     >
                       Cancel
@@ -7313,9 +7046,7 @@ function App() {
                     role="dialog"
                     aria-label="Cloth settings"
                   >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
-                      Cloth
-                    </span>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Cloth</span>
                     <span
                       style={{
                         fontSize: "0.78rem",
@@ -7330,9 +7061,7 @@ function App() {
                       max={1}
                       step={0.02}
                       value={clothTension}
-                      onChange={(ev) =>
-                        setClothTension(Number(ev.target.value))
-                      }
+                      onChange={(ev) => setClothTension(Number(ev.target.value))}
                       style={{ width: 80 }}
                       title="0 = loose drape, 1 = stiff"
                     />
@@ -7368,9 +7097,7 @@ function App() {
                     role="dialog"
                     aria-label="Rope settings"
                   >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
-                      Rope
-                    </span>
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Rope</span>
                     <span
                       style={{
                         fontSize: "0.78rem",
@@ -7421,8 +7148,8 @@ function App() {
                     aria-label="Wall polygon outline"
                   >
                     <p className="viewport-polygon-phase-hint">
-                      Wall outline: {wallSculptPolygonVerts.length} corners.
-                      Click the surface to add; Done applies (min 2 corners).
+                      Wall outline: {wallSculptPolygonVerts.length} corners. Click the surface to
+                      add; Done applies (min 2 corners).
                     </p>
                     <div className="viewport-polygon-phase-actions">
                       <button
@@ -7436,11 +7163,7 @@ function App() {
                       <button
                         type="button"
                         className="tool-options-shape-btn"
-                        disabled={
-                          loading ||
-                          workBusy ||
-                          wallSculptPolygonVerts.length < 2
-                        }
+                        disabled={loading || workBusy || wallSculptPolygonVerts.length < 2}
                         onClick={() => commitWallSculptPolygonStroke()}
                       >
                         Done
@@ -7455,8 +7178,8 @@ function App() {
                     aria-label="Polygon area"
                   >
                     <p className="viewport-polygon-phase-hint">
-                      Vertices: {strokePolygonVerts.length}. Click to add
-                      corners; Apply with three or more.
+                      Vertices: {strokePolygonVerts.length}. Click to add corners; Apply with three
+                      or more.
                     </p>
                     <div className="viewport-polygon-phase-actions">
                       <button
@@ -7473,9 +7196,7 @@ function App() {
                       <button
                         type="button"
                         className="tool-options-shape-btn"
-                        disabled={
-                          loading || workBusy || strokePolygonVerts.length < 3
-                        }
+                        disabled={loading || workBusy || strokePolygonVerts.length < 3}
                         onClick={() => {
                           if (isDrawVoxelEditMode) applyPolygonStrokeFill();
                           else applyPolygonStrokeFill();
@@ -7491,30 +7212,22 @@ function App() {
             <SelectionGizmo
               ref={gizmoRef}
               selectionCount={selectionCount}
-              flyMode={interactionMode === "fly"}
+              flyMode={interactionMode === "fly" || interactionMode === "walk"}
               loadingOrBusy={loading || workBusy}
               viewportEl={viewportRef.current}
             />
           </div>
           {showEditorChrome ? (
             <ViewportCameraHud
-              flyMode={interactionMode === "fly"}
+              flyMode={interactionMode === "fly" || interactionMode === "walk"}
               loadingOrBusy={loading || workBusy}
             />
           ) : null}
           {showToolOptionsPanel ? (
             <div
-              className={`tool-options-panel${
-                toolsPaneFloating ? " is-tools-floating" : ""
-              }${
-                !toolsPaneFloating && sidebarExpanded
-                  ? " is-sidebar-expanded"
-                  : ""
-              }${
-                !toolsPaneFloating && !sidebarExpanded
-                  ? " is-sidebar-collapsed"
-                  : ""
-              }`}
+              className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""}${
+                !toolsPaneFloating && sidebarExpanded ? " is-sidebar-expanded" : ""
+              }${!toolsPaneFloating && !sidebarExpanded ? " is-sidebar-collapsed" : ""}`}
               role="dialog"
               aria-label="Tool options"
               onPointerDown={(e) => e.stopPropagation()}
@@ -7531,11 +7244,7 @@ function App() {
                       gap: "0.5rem",
                     }}
                   >
-                    <span
-                      className="tool-panel-selection-count"
-                      role="status"
-                      aria-live="polite"
-                    >
+                    <span className="tool-panel-selection-count" role="status" aria-live="polite">
                       {selectionCount} selected
                     </span>
                     <button
@@ -7560,9 +7269,8 @@ function App() {
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Fill</div>
                   <p className="tool-options-hint">
-                    Click a solid voxel. The connected region is filled,
-                    recolored, or added to the selection per your current tool
-                    and the options below.
+                    Click a solid voxel. The connected region is filled, recolored, or added to the
+                    selection per your current tool and the options below.
                   </p>
                 </div>
               ) : null}
@@ -7631,9 +7339,7 @@ function App() {
                     brushRadius={brushRadius}
                     setBrushRadius={setBrushRadius}
                     selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
-                    setSelectionStrokeSnapToSurface={
-                      setSelectionStrokeSnapToSurface
-                    }
+                    setSelectionStrokeSnapToSurface={setSelectionStrokeSnapToSurface}
                     selectionStrokeAxisAlign={selectionStrokeAxisAlign}
                     setSelectionStrokeAxisAlign={setSelectionStrokeAxisAlign}
                     surfacePlaneHollow={surfacePlaneHollow}
@@ -7663,8 +7369,7 @@ function App() {
                     <div className="tool-options-section">
                       <div className="tool-options-heading">By color</div>
                       <p className="tool-options-hint">
-                        Click a voxel to select all connected voxels of the same
-                        color.
+                        Click a voxel to select all connected voxels of the same color.
                       </p>
                       <label
                         className="tool-options-range-label"
@@ -7677,9 +7382,7 @@ function App() {
                         <input
                           type="checkbox"
                           checked={matchMaterialSelectColor}
-                          onChange={(ev) =>
-                            setMatchMaterialSelectColor(ev.target.checked)
-                          }
+                          onChange={(ev) => setMatchMaterialSelectColor(ev.target.checked)}
                           disabled={loading || workBusy}
                         />
                         <span>Match material when matching color</span>
@@ -7690,8 +7393,7 @@ function App() {
                     <div className="tool-options-section">
                       <div className="tool-options-heading">Coplanar</div>
                       <p className="tool-options-hint">
-                        Click a solid voxel to extend the selection along the
-                        same face plane.
+                        Click a solid voxel to extend the selection along the same face plane.
                       </p>
                     </div>
                   ) : null}
@@ -7699,8 +7401,7 @@ function App() {
                     <div className="tool-options-section">
                       <div className="tool-options-heading">Coplanar void</div>
                       <p className="tool-options-hint">
-                        Click empty space on a plane to select the coplanar
-                        empty region.
+                        Click empty space on a plane to select the coplanar empty region.
                       </p>
                     </div>
                   ) : null}
@@ -7721,15 +7422,11 @@ function App() {
                           min={0}
                           max={SCULPT_BRUSH_MAX_INDEX}
                           value={sculptBrushRadius}
-                          onChange={(ev) =>
-                            setSculptBrushRadius(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setSculptBrushRadius(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="Brush size (1–64 voxels)"
                         />
-                        <span className="tool-options-range-value">
-                          {sculptBrushRadius + 1}
-                        </span>
+                        <span className="tool-options-range-value">{sculptBrushRadius + 1}</span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Strength</span>
@@ -7738,15 +7435,11 @@ function App() {
                           min={1}
                           max={100}
                           value={sculptBrushStrength}
-                          onChange={(ev) =>
-                            setSculptBrushStrength(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setSculptBrushStrength(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="How strongly the brush applies (with falloff)"
                         />
-                        <span className="tool-options-range-value">
-                          {sculptBrushStrength}
-                        </span>
+                        <span className="tool-options-range-value">{sculptBrushStrength}</span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Falloff</span>
@@ -7755,15 +7448,11 @@ function App() {
                           min={0}
                           max={100}
                           value={sculptBrushFalloff}
-                          onChange={(ev) =>
-                            setSculptBrushFalloff(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setSculptBrushFalloff(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="0 = hard edge; higher = softer falloff toward brush radius"
                         />
-                        <span className="tool-options-range-value">
-                          {sculptBrushFalloff}
-                        </span>
+                        <span className="tool-options-range-value">{sculptBrushFalloff}</span>
                       </label>
                       {sculptStrokeMode === "draw" ||
                       sculptStrokeMode === "smooth" ||
@@ -7777,9 +7466,7 @@ function App() {
                           <input
                             type="checkbox"
                             checked={brushClipBottomHalf}
-                            onChange={(ev) =>
-                              setBrushClipBottomHalf(ev.target.checked)
-                            }
+                            onChange={(ev) => setBrushClipBottomHalf(ev.target.checked)}
                             disabled={loading || workBusy}
                           />
                           <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
@@ -7791,10 +7478,7 @@ function App() {
                       sculptStrokeMode === "smooth" ||
                       sculptStrokeMode === "gouge" ? (
                         <>
-                          <div
-                            className="tool-options-heading"
-                            style={{ marginTop: "0.35rem" }}
-                          >
+                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
                             Brush shape
                           </div>
                           <div
@@ -7853,10 +7537,7 @@ function App() {
                       ) : null}
                       {sculptStrokeMode === "extrude" ? (
                         <>
-                          <div
-                            className="tool-options-heading"
-                            style={{ marginTop: "0.35rem" }}
-                          >
+                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
                             Direction
                           </div>
                           <div
@@ -7900,10 +7581,7 @@ function App() {
                               </button>
                             ))}
                           </div>
-                          <div
-                            className="tool-options-heading"
-                            style={{ marginTop: "0.35rem" }}
-                          >
+                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
                             Profile
                           </div>
                           <div
@@ -7981,9 +7659,7 @@ function App() {
                             <input
                               type="checkbox"
                               checked={extrudeTaper}
-                              onChange={(ev) =>
-                                setExtrudeTaper(ev.target.checked)
-                              }
+                              onChange={(ev) => setExtrudeTaper(ev.target.checked)}
                               disabled={loading || workBusy}
                             />
                             <span>Taper</span>
@@ -7997,11 +7673,7 @@ function App() {
                                   min={0}
                                   max={24}
                                   value={extrudeTaperStart}
-                                  onChange={(ev) =>
-                                    setExtrudeTaperStart(
-                                      Number(ev.target.value),
-                                    )
-                                  }
+                                  onChange={(ev) => setExtrudeTaperStart(Number(ev.target.value))}
                                   disabled={loading || workBusy}
                                 />
                                 <span className="tool-options-range-value">
@@ -8015,9 +7687,7 @@ function App() {
                                   min={0}
                                   max={24}
                                   value={extrudeTaperEnd}
-                                  onChange={(ev) =>
-                                    setExtrudeTaperEnd(Number(ev.target.value))
-                                  }
+                                  onChange={(ev) => setExtrudeTaperEnd(Number(ev.target.value))}
                                   disabled={loading || workBusy}
                                 />
                                 <span className="tool-options-range-value">
@@ -8030,10 +7700,7 @@ function App() {
                       ) : null}
                       {sculptStrokeMode === "terrain" ? (
                         <>
-                          <div
-                            className="tool-options-heading"
-                            style={{ marginTop: "0.35rem" }}
-                          >
+                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
                             Brush shape
                           </div>
                           <div
@@ -8044,8 +7711,7 @@ function App() {
                             <button
                               type="button"
                               className={
-                                sculptBrushShapeUi === "circle" ||
-                                sculptBrushShapeUi === "sphere"
+                                sculptBrushShapeUi === "circle" || sculptBrushShapeUi === "sphere"
                                   ? "tool-options-shape-btn is-active"
                                   : "tool-options-shape-btn"
                               }
@@ -8058,8 +7724,7 @@ function App() {
                             <button
                               type="button"
                               className={
-                                sculptBrushShapeUi === "square" ||
-                                sculptBrushShapeUi === "cube"
+                                sculptBrushShapeUi === "square" || sculptBrushShapeUi === "cube"
                                   ? "tool-options-shape-btn is-active"
                                   : "tool-options-shape-btn"
                               }
@@ -8067,13 +7732,10 @@ function App() {
                               onClick={() => setSculptBrushShapeUi("square")}
                               title="Square footprint in XZ"
                             >
-                              Circle
+                              Square
                             </button>
                           </div>
-                          <div
-                            className="tool-options-heading"
-                            style={{ marginTop: "0.35rem" }}
-                          >
+                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
                             Terrain
                           </div>
                           <div
@@ -8122,15 +7784,12 @@ function App() {
                               onChange={(ev) => {
                                 const n = Number(ev.target.value);
                                 if (Number.isNaN(n)) return;
-                                setTerrainBaseY(
-                                  Math.max(-512, Math.min(512, n)),
-                                );
+                                setTerrainBaseY(Math.max(-512, Math.min(512, n)));
                               }}
                               disabled={loading || workBusy}
                             />
                           </label>
-                          {terrainSculptOp === "raise" ||
-                          terrainSculptOp === "lower" ? (
+                          {terrainSculptOp === "raise" || terrainSculptOp === "lower" ? (
                             <label className="tool-options-range-label tool-options-range-with-value">
                               <span>Strength</span>
                               <input
@@ -8138,14 +7797,10 @@ function App() {
                                 min={1}
                                 max={32}
                                 value={terrainStrength}
-                                onChange={(ev) =>
-                                  setTerrainStrength(Number(ev.target.value))
-                                }
+                                onChange={(ev) => setTerrainStrength(Number(ev.target.value))}
                                 disabled={loading || workBusy}
                               />
-                              <span className="tool-options-range-value">
-                                {terrainStrength}
-                              </span>
+                              <span className="tool-options-range-value">{terrainStrength}</span>
                             </label>
                           ) : null}
                           {terrainSculptOp === "smooth" ? (
@@ -8156,11 +7811,7 @@ function App() {
                                 min={0}
                                 max={8}
                                 value={terrainSmoothRadius}
-                                onChange={(ev) =>
-                                  setTerrainSmoothRadius(
-                                    Number(ev.target.value),
-                                  )
-                                }
+                                onChange={(ev) => setTerrainSmoothRadius(Number(ev.target.value))}
                                 disabled={loading || workBusy}
                               />
                               <span className="tool-options-range-value">
@@ -8216,14 +7867,10 @@ function App() {
                               min={1}
                               max={8}
                               value={sculptSmoothPasses}
-                              onChange={(ev) =>
-                                setSculptSmoothPasses(Number(ev.target.value))
-                              }
+                              onChange={(ev) => setSculptSmoothPasses(Number(ev.target.value))}
                               disabled={loading || workBusy}
                             />
-                            <span className="tool-options-range-value">
-                              {sculptSmoothPasses}
-                            </span>
+                            <span className="tool-options-range-value">{sculptSmoothPasses}</span>
                           </label>
                           <label className="tool-options-range-label tool-options-range-with-value">
                             <span>Neighbor radius</span>
@@ -8232,15 +7879,11 @@ function App() {
                               min={0}
                               max={6}
                               value={smoothNeighborRadius}
-                              onChange={(ev) =>
-                                setSmoothNeighborRadius(Number(ev.target.value))
-                              }
+                              onChange={(ev) => setSmoothNeighborRadius(Number(ev.target.value))}
                               disabled={loading || workBusy}
                               title="0 = six face neighbors only"
                             />
-                            <span className="tool-options-range-value">
-                              {smoothNeighborRadius}
-                            </span>
+                            <span className="tool-options-range-value">{smoothNeighborRadius}</span>
                           </label>
                           <label className="tool-options-range-label tool-options-range-with-value">
                             <span>Aggressiveness</span>
@@ -8249,14 +7892,10 @@ function App() {
                               min={0}
                               max={100}
                               value={smoothAggressiveness}
-                              onChange={(ev) =>
-                                setSmoothAggressiveness(Number(ev.target.value))
-                              }
+                              onChange={(ev) => setSmoothAggressiveness(Number(ev.target.value))}
                               disabled={loading || workBusy}
                             />
-                            <span className="tool-options-range-value">
-                              {smoothAggressiveness}
-                            </span>
+                            <span className="tool-options-range-value">{smoothAggressiveness}</span>
                           </label>
                         </>
                       ) : (
@@ -8269,9 +7908,7 @@ function App() {
                               max={20}
                               value={smoothLaplacianIterations}
                               onChange={(ev) =>
-                                setSmoothLaplacianIterations(
-                                  Number(ev.target.value),
-                                )
+                                setSmoothLaplacianIterations(Number(ev.target.value))
                               }
                               disabled={loading || workBusy}
                             />
@@ -8286,11 +7923,7 @@ function App() {
                               min={0}
                               max={100}
                               value={smoothLaplacianRelaxPct}
-                              onChange={(ev) =>
-                                setSmoothLaplacianRelaxPct(
-                                  Number(ev.target.value),
-                                )
-                              }
+                              onChange={(ev) => setSmoothLaplacianRelaxPct(Number(ev.target.value))}
                               disabled={loading || workBusy}
                             />
                             <span className="tool-options-range-value">
@@ -8304,15 +7937,11 @@ function App() {
                               min={0}
                               max={6}
                               value={smoothNeighborRadius}
-                              onChange={(ev) =>
-                                setSmoothNeighborRadius(Number(ev.target.value))
-                              }
+                              onChange={(ev) => setSmoothNeighborRadius(Number(ev.target.value))}
                               disabled={loading || workBusy}
                               title="Neighborhood margin + mesh fallback"
                             />
-                            <span className="tool-options-range-value">
-                              {smoothNeighborRadius}
-                            </span>
+                            <span className="tool-options-range-value">{smoothNeighborRadius}</span>
                           </label>
                           <label className="tool-options-range-label tool-options-range-with-value">
                             <span>Fallback aggressiveness</span>
@@ -8321,24 +7950,17 @@ function App() {
                               min={0}
                               max={100}
                               value={smoothAggressiveness}
-                              onChange={(ev) =>
-                                setSmoothAggressiveness(Number(ev.target.value))
-                              }
+                              onChange={(ev) => setSmoothAggressiveness(Number(ev.target.value))}
                               disabled={loading || workBusy}
                             />
-                            <span className="tool-options-range-value">
-                              {smoothAggressiveness}
-                            </span>
+                            <span className="tool-options-range-value">{smoothAggressiveness}</span>
                           </label>
                         </>
                       )}
                     </div>
                   ) : null}
                   {sculptStrokeMode === "wall" ? (
-                    <div
-                      className="tool-options-section"
-                      aria-label="Sculpt wall"
-                    >
+                    <div className="tool-options-section" aria-label="Sculpt wall">
                       <div className="tool-options-heading">Area shape</div>
                       <div
                         className="tool-options-shape-row"
@@ -8393,11 +8015,7 @@ function App() {
                           className="sidebar-material-select"
                           style={{ flex: 1, maxWidth: "12rem" }}
                           value={sprayDirection}
-                          onChange={(ev) =>
-                            setSprayDirection(
-                              ev.target.value as SprayDirectionApi,
-                            )
-                          }
+                          onChange={(ev) => setSprayDirection(ev.target.value as SprayDirectionApi)}
                           disabled={loading || workBusy}
                           title="Auto = face normal; or pick a world axis"
                           aria-label="Wall extrusion direction"
@@ -8419,15 +8037,11 @@ function App() {
                           min={0}
                           max={SCULPT_BRUSH_MAX_INDEX}
                           value={wallWidthIndex}
-                          onChange={(ev) =>
-                            setWallWidthIndex(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setWallWidthIndex(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="Path thickness (1–64 voxels)"
                         />
-                        <span className="tool-options-range-value">
-                          {wallWidthIndex + 1}
-                        </span>
+                        <span className="tool-options-range-value">{wallWidthIndex + 1}</span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Height</span>
@@ -8436,26 +8050,17 @@ function App() {
                           min={2}
                           max={20}
                           value={wallHeightVox}
-                          onChange={(ev) =>
-                            setWallHeightVox(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setWallHeightVox(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="Voxels to extend along direction (min 2)"
                         />
-                        <span className="tool-options-range-value">
-                          {wallHeightVox}
-                        </span>
+                        <span className="tool-options-range-value">{wallHeightVox}</span>
                       </label>
-                      <label
-                        className="tool-options-checkbox-row"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
                         <input
                           type="checkbox"
                           checked={wallLockStartHeight}
-                          onChange={(ev) =>
-                            setWallLockStartHeight(ev.target.checked)
-                          }
+                          onChange={(ev) => setWallLockStartHeight(ev.target.checked)}
                           disabled={loading || workBusy}
                         />
                         <span>Lock start height</span>
@@ -8474,9 +8079,7 @@ function App() {
                 </>
               ) : toolsPane === "sculpt" ? (
                 <div className="tool-options-section">
-                  <p className="tool-options-hint">
-                    Select Sculpt mode in the sidebar.
-                  </p>
+                  <p className="tool-options-hint">Select Sculpt mode in the sidebar.</p>
                 </div>
               ) : null}
               {toolsPane === "generators" ? (
@@ -8491,9 +8094,7 @@ function App() {
                           min={1}
                           max={20}
                           value={Math.min(20, generatorSphereRadius)}
-                          onChange={(ev) =>
-                            setGeneratorSphereRadius(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setGeneratorSphereRadius(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8505,9 +8106,7 @@ function App() {
                           max={1}
                           step={0.02}
                           value={rockRoughness}
-                          onChange={(ev) =>
-                            setRockRoughness(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setRockRoughness(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8518,9 +8117,7 @@ function App() {
                           min={1}
                           max={5}
                           value={rockCount}
-                          onChange={(ev) =>
-                            setRockCount(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setRockCount(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8532,26 +8129,19 @@ function App() {
                             min={0}
                             max={3}
                             value={rockClusterRadius}
-                            onChange={(ev) =>
-                              setRockClusterRadius(Number(ev.target.value))
-                            }
+                            onChange={(ev) => setRockClusterRadius(Number(ev.target.value))}
                             disabled={loading || workBusy}
                           />
                         </label>
                       ) : null}
                       <div className="tool-options-range-label">
                         <span>Sink</span>
-                        <div
-                          className="stroke-mode-buttons"
-                          style={{ display: "flex", gap: 2 }}
-                        >
+                        <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2 }}>
                           {(["over", "none", "under"] as const).map((dir) => (
                             <button
                               key={dir}
                               type="button"
-                              className={
-                                rockSinkDirection === dir ? "active" : ""
-                              }
+                              className={rockSinkDirection === dir ? "active" : ""}
                               onClick={() => setRockSinkDirection(dir)}
                               disabled={loading || workBusy}
                               style={{
@@ -8573,9 +8163,7 @@ function App() {
                             min={1}
                             max={5}
                             value={rockSinkAmount}
-                            onChange={(ev) =>
-                              setRockSinkAmount(Number(ev.target.value))
-                            }
+                            onChange={(ev) => setRockSinkAmount(Number(ev.target.value))}
                             disabled={loading || workBusy}
                           />
                         </label>
@@ -8585,28 +8173,37 @@ function App() {
                   {generatorKind === "grass" ? (
                     <>
                       <label className="tool-options-range-label">
-                        <span>Density</span>
+                        <span>Radius</span>
                         <input
                           type="range"
-                          min={1}
-                          max={8}
-                          value={grassDensity}
-                          onChange={(ev) =>
-                            setGrassDensity(Number(ev.target.value))
-                          }
+                          min={2}
+                          max={20}
+                          step={1}
+                          value={Math.min(20, Math.max(2, generatorSphereRadius))}
+                          onChange={(ev) => setGeneratorSphereRadius(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
                       <label className="tool-options-range-label">
-                        <span>Max height</span>
+                        <span>Density</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          step={1}
+                          value={Math.round(grassDensity * 100)}
+                          onChange={(ev) => setGrassDensity(Number(ev.target.value) / 100)}
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Height</span>
                         <input
                           type="range"
                           min={1}
-                          max={8}
+                          max={40}
                           value={grassMaxHeight}
-                          onChange={(ev) =>
-                            setGrassMaxHeight(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setGrassMaxHeight(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8614,18 +8211,13 @@ function App() {
                   ) : null}
                   {generatorKind === "rope" ? (
                     <>
-                      <label
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
                         <span>Gravity</span>
                         <select
                           aria-label="Rope gravity direction"
                           value={clothGravityDirection}
                           onChange={(ev) =>
-                            setClothGravityDirection(
-                              ev.target.value as ClothGravityDirectionId,
-                            )
+                            setClothGravityDirection(ev.target.value as ClothGravityDirectionId)
                           }
                           disabled={loading || workBusy}
                         >
@@ -8680,31 +8272,22 @@ function App() {
                           min={0}
                           max={SCULPT_BRUSH_MAX_INDEX}
                           value={ropeBrushRadiusIndex}
-                          onChange={(ev) =>
-                            setRopeBrushRadiusIndex(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setRopeBrushRadiusIndex(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
-                        <span className="tool-options-range-value">
-                          {ropeBrushRadiusIndex + 1}
-                        </span>
+                        <span className="tool-options-range-value">{ropeBrushRadiusIndex + 1}</span>
                       </label>
                     </>
                   ) : null}
                   {generatorKind === "cloth" ? (
                     <>
-                      <label
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
                         <span>Gravity</span>
                         <select
                           aria-label="Cloth gravity direction"
                           value={clothGravityDirection}
                           onChange={(ev) =>
-                            setClothGravityDirection(
-                              ev.target.value as ClothGravityDirectionId,
-                            )
+                            setClothGravityDirection(ev.target.value as ClothGravityDirectionId)
                           }
                           disabled={loading || workBusy}
                         >
@@ -8759,14 +8342,10 @@ function App() {
                           min={0}
                           max={SCULPT_BRUSH_MAX_INDEX}
                           value={ropeBrushRadiusIndex}
-                          onChange={(ev) =>
-                            setRopeBrushRadiusIndex(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setRopeBrushRadiusIndex(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
-                        <span className="tool-options-range-value">
-                          {ropeBrushRadiusIndex + 1}
-                        </span>
+                        <span className="tool-options-range-value">{ropeBrushRadiusIndex + 1}</span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Sim gravity</span>
@@ -8776,15 +8355,11 @@ function App() {
                           max={200}
                           step={5}
                           value={clothSimGravityPct}
-                          onChange={(ev) =>
-                            setClothSimGravityPct(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setClothSimGravityPct(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="PBD gravity step scale"
                         />
-                        <span className="tool-options-range-value">
-                          {clothSimGravityPct}%
-                        </span>
+                        <span className="tool-options-range-value">{clothSimGravityPct}%</span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Stiffness</span>
@@ -8794,14 +8369,10 @@ function App() {
                           max={150}
                           step={5}
                           value={clothSimStiffnessPct}
-                          onChange={(ev) =>
-                            setClothSimStiffnessPct(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setClothSimStiffnessPct(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
-                        <span className="tool-options-range-value">
-                          {clothSimStiffnessPct}%
-                        </span>
+                        <span className="tool-options-range-value">{clothSimStiffnessPct}%</span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
                         <span>Iterations</span>
@@ -8811,16 +8382,12 @@ function App() {
                           max={64}
                           step={1}
                           value={clothSimIterations}
-                          onChange={(ev) =>
-                            setClothSimIterations(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setClothSimIterations(Number(ev.target.value))}
                           disabled={loading || workBusy}
                           title="0 = automatic from tension"
                         />
                         <span className="tool-options-range-value">
-                          {clothSimIterations === 0
-                            ? "Auto"
-                            : String(clothSimIterations)}
+                          {clothSimIterations === 0 ? "Auto" : String(clothSimIterations)}
                         </span>
                       </label>
                       <label className="tool-options-range-label tool-options-range-with-value">
@@ -8831,14 +8398,10 @@ function App() {
                           max={6}
                           step={1}
                           value={clothSimConstraintPasses}
-                          onChange={(ev) =>
-                            setClothSimConstraintPasses(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setClothSimConstraintPasses(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
-                        <span className="tool-options-range-value">
-                          {clothSimConstraintPasses}
-                        </span>
+                        <span className="tool-options-range-value">{clothSimConstraintPasses}</span>
                       </label>
                     </>
                   ) : null}
@@ -8851,9 +8414,7 @@ function App() {
                           min={1}
                           max={20}
                           value={Math.min(20, generatorSphereRadius)}
-                          onChange={(ev) =>
-                            setGeneratorSphereRadius(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setGeneratorSphereRadius(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8865,9 +8426,7 @@ function App() {
                           max={1}
                           step={0.02}
                           value={rockRoughness}
-                          onChange={(ev) =>
-                            setRockRoughness(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setRockRoughness(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8879,9 +8438,7 @@ function App() {
                           max={20}
                           step={1}
                           value={ashlarThickness}
-                          onChange={(ev) =>
-                            setAshlarThickness(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setAshlarThickness(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8896,9 +8453,7 @@ function App() {
                           min={1}
                           max={96}
                           value={floraHeight}
-                          onChange={(ev) =>
-                            setFloraHeight(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setFloraHeight(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8909,9 +8464,7 @@ function App() {
                           min={0}
                           max={20}
                           value={floraGirth}
-                          onChange={(ev) =>
-                            setFloraGirth(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setFloraGirth(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8922,9 +8475,7 @@ function App() {
                           min={1}
                           max={8}
                           value={floraStemCount}
-                          onChange={(ev) =>
-                            setFloraStemCount(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setFloraStemCount(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8935,9 +8486,7 @@ function App() {
                           min={0}
                           max={6}
                           value={floraBranchCount}
-                          onChange={(ev) =>
-                            setFloraBranchCount(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setFloraBranchCount(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8949,9 +8498,7 @@ function App() {
                           max={1}
                           step={0.02}
                           value={floraCanopy}
-                          onChange={(ev) =>
-                            setFloraCanopy(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setFloraCanopy(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -8959,44 +8506,36 @@ function App() {
                   ) : null}
                   {generatorKind === "roof" ? (
                     <>
-                      <div
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <div className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
                         <span>Area</span>
                         <div
-                          className="stroke-mode-buttons"
-                          style={{ display: "flex", gap: 2 }}
+                          className="tool-options-shape-row"
+                          role="group"
+                          aria-label="Roof area shape"
                         >
-                          {(["polygon", "square", "circle"] as const).map(
-                            (shape) => (
-                              <button
-                                key={shape}
-                                type="button"
-                                className={
-                                  roofAreaShape === shape ? "active" : ""
-                                }
-                                onClick={() => {
-                                  setRoofAreaShape(shape);
-                                  setRoofPins([]);
-                                  roofPinsRef.current = [];
-                                  roofFirstClickRef.current = null;
-                                  setRoofFirstClick(null);
-                                  void invoke(
-                                    "voxel_stroke_preview_reset",
-                                  ).catch(() => {});
-                                }}
-                                disabled={loading || workBusy}
-                                style={{
-                                  flex: 1,
-                                  textTransform: "capitalize",
-                                  fontSize: 11,
-                                }}
-                              >
-                                {shape}
-                              </button>
-                            ),
-                          )}
+                          {(["polygon", "square", "circle"] as const).map((shape) => (
+                            <button
+                              key={shape}
+                              type="button"
+                              className={
+                                roofAreaShape === shape
+                                  ? "tool-options-shape-btn is-active"
+                                  : "tool-options-shape-btn"
+                              }
+                              onClick={() => {
+                                setRoofAreaShape(shape);
+                                setRoofPins([]);
+                                roofPinsRef.current = [];
+                                roofFirstClickRef.current = null;
+                                setRoofFirstClick(null);
+                                void invoke("voxel_stroke_preview_reset").catch(() => {});
+                              }}
+                              disabled={loading || workBusy}
+                              style={{ textTransform: "capitalize" }}
+                            >
+                              {shape}
+                            </button>
+                          ))}
                         </div>
                       </div>
                       <label className="tool-options-range-label">
@@ -9028,9 +8567,7 @@ function App() {
                           min={1}
                           max={32}
                           value={roofHeight}
-                          onChange={(ev) =>
-                            setRoofHeight(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setRoofHeight(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -9043,63 +8580,18 @@ function App() {
                         />
                         <span>Hollow</span>
                       </label>
-                      <p
-                        className="sidebar-pane-hint"
-                        style={{ marginTop: "0.25rem" }}
-                      >
+                      <p className="sidebar-pane-hint" style={{ marginTop: "0.25rem" }}>
                         {roofAreaShape === "polygon"
                           ? `Click surface to add pins (${roofPins.length} placed).`
                           : roofAreaShape === "square"
-                            ? roofFirstClick
-                              ? "Click opposite corner."
-                              : "Click first corner."
-                            : roofFirstClick
-                              ? "Click edge to set radius."
-                              : "Click center."}
+                            ? "Drag on a face to define the rectangle."
+                            : "Drag from center to set radius."}
                       </p>
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        style={{ marginTop: "0.5rem", width: "100%" }}
-                        disabled={loading || workBusy || roofPins.length < 3}
-                        onClick={() => {
-                          void invoke("generator_roof_from_pins_cmd", {
-                            args: {
-                              pins: roofPins,
-                              style: roofStyle,
-                              height: roofHeight,
-                              thickness: 1,
-                              shedEdgeIndex: 0,
-                              gableOrientation: 0,
-                              breakRatio: 0.5,
-                              wallHeight: 3,
-                              parapetHeight: 2,
-                              saltSkew: 0,
-                              hollow: roofHollow,
-                              color: activeColor,
-                              material: activeMaterialRef.current,
-                            },
-                          })
-                            .then(() => {
-                              setRoofPins([]);
-                              roofPinsRef.current = [];
-                              void invoke("voxel_stroke_preview_reset").catch(
-                                () => {},
-                              );
-                            })
-                            .catch(() => {});
-                        }}
-                      >
-                        Apply roof
-                      </button>
                     </>
                   ) : null}
                   {generatorKind === "piscina" ? (
                     <>
-                      <label
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
                         <span>Species</span>
                         <select
                           value={piscinaSpecies}
@@ -9120,9 +8612,7 @@ function App() {
                           min={4}
                           max={72}
                           value={piscinaLength}
-                          onChange={(ev) =>
-                            setPiscinaLength(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setPiscinaLength(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -9130,10 +8620,7 @@ function App() {
                   ) : null}
                   {generatorKind === "insecta" ? (
                     <>
-                      <label
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
                         <span>Species</span>
                         <select
                           value={insectaSpecies}
@@ -9154,9 +8641,7 @@ function App() {
                           min={12}
                           max={72}
                           value={insectaTotalLength}
-                          onChange={(ev) =>
-                            setInsectaTotalLength(Number(ev.target.value))
-                          }
+                          onChange={(ev) => setInsectaTotalLength(Number(ev.target.value))}
                           disabled={loading || workBusy}
                         />
                       </label>
@@ -9164,10 +8649,7 @@ function App() {
                   ) : null}
                   {generatorKind === "fauna" ? (
                     <>
-                      <label
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
-                      >
+                      <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
                         <span>Stance</span>
                         <select
                           value={faunaStance}
@@ -9178,10 +8660,7 @@ function App() {
                           <option value="biped">Biped</option>
                         </select>
                       </label>
-                      <label
-                        className="tool-options-range-label"
-                        style={{ marginTop: "0.25rem" }}
-                      >
+                      <label className="tool-options-range-label" style={{ marginTop: "0.25rem" }}>
                         <span>Archetype</span>
                         <select
                           value={faunaArchetype}
@@ -9200,11 +8679,7 @@ function App() {
               {toolsPane === "squishy" && interactionMode === "squishy" ? (
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Squishy session</div>
-                  <div
-                    className="tool-options-shape-row"
-                    role="group"
-                    aria-label="Squishy mode"
-                  >
+                  <div className="tool-options-shape-row" role="group" aria-label="Squishy mode">
                     <button
                       type="button"
                       className={
@@ -9249,8 +8724,8 @@ function App() {
                       margin: "0.25rem 0",
                     }}
                   >
-                    Metaballs: {squishyBallCount}. Click viewport to
-                    add/pick/delete; Commit voxelizes the combined field.
+                    Metaballs: {squishyBallCount}. Click viewport to add/pick/delete; Commit
+                    voxelizes the combined field.
                   </p>
                   <label className="tool-options-range-label">
                     <span>Blob radius (add)</span>
@@ -9259,9 +8734,7 @@ function App() {
                       min={2}
                       max={10}
                       value={Math.min(10, Math.max(2, generatorSphereRadius))}
-                      onChange={(ev) =>
-                        setGeneratorSphereRadius(Number(ev.target.value))
-                      }
+                      onChange={(ev) => setGeneratorSphereRadius(Number(ev.target.value))}
                       disabled={loading || workBusy}
                     />
                   </label>
@@ -9290,9 +8763,7 @@ function App() {
                         max={8}
                         step={1}
                         value={Math.min(8, Math.max(1, squishyWallThickness))}
-                        onChange={(ev) =>
-                          setSquishyWallThickness(Number(ev.target.value))
-                        }
+                        onChange={(ev) => setSquishyWallThickness(Number(ev.target.value))}
                         disabled={loading || workBusy}
                       />
                     </label>
@@ -9308,17 +8779,12 @@ function App() {
                     <input
                       type="checkbox"
                       checked={squishySnapToSurface}
-                      onChange={(ev) =>
-                        setSquishySnapToSurface(ev.target.checked)
-                      }
+                      onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
                       disabled={loading || workBusy}
                     />
                     <span>Snap add to surface</span>
                   </label>
-                  <div
-                    className="tool-options-shape-row"
-                    style={{ marginTop: "0.35rem" }}
-                  >
+                  <div className="tool-options-shape-row" style={{ marginTop: "0.35rem" }}>
                     <button
                       type="button"
                       className="tool-options-shape-btn"
@@ -9330,14 +8796,8 @@ function App() {
                             material: activeMaterialRef.current,
                           },
                         })
-                          .then(() =>
-                            invoke<{ balls: { id: number }[] }>(
-                              "squishy_session_get",
-                            ),
-                          )
-                          .then((s) =>
-                            setSquishyBallCount(s.balls?.length ?? 0),
-                          )
+                          .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
+                          .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
                           .catch(() => {});
                       }}
                     >
@@ -9359,9 +8819,7 @@ function App() {
                 </div>
               ) : toolsPane === "squishy" ? (
                 <div className="tool-options-section">
-                  <p className="tool-options-hint">
-                    Select Squishy mode in the sidebar.
-                  </p>
+                  <p className="tool-options-hint">Select Squishy mode in the sidebar.</p>
                 </div>
               ) : null}
               {toolsPane === "mood" ? (
@@ -9379,9 +8837,7 @@ function App() {
                       type="checkbox"
                       checked={mood.grainEnabled}
                       onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, { grainEnabled: ev.target.checked }),
-                        )
+                        setMood((p) => moodWith(p, { grainEnabled: ev.target.checked }))
                       }
                       disabled={loading || workBusy}
                     />
@@ -9418,9 +8874,7 @@ function App() {
                           type="checkbox"
                           checked={mood.grainAnimated}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { grainAnimated: ev.target.checked }),
-                            )
+                            setMood((p) => moodWith(p, { grainAnimated: ev.target.checked }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -9457,9 +8911,7 @@ function App() {
                           type="checkbox"
                           checked={mood.grainColorful}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { grainColorful: ev.target.checked }),
-                            )
+                            setMood((p) => moodWith(p, { grainColorful: ev.target.checked }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -9469,10 +8921,7 @@ function App() {
                   )}
 
                   {/* ── Bloom ────────────────────────────── */}
-                  <div
-                    className="tool-options-heading"
-                    style={{ marginTop: "0.75rem" }}
-                  >
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
                     Bloom
                   </div>
                   <label className="tool-options-range-label">
@@ -9495,10 +8944,7 @@ function App() {
                   </label>
 
                   {/* ── Vignette ─────────────────────────── */}
-                  <div
-                    className="tool-options-heading"
-                    style={{ marginTop: "0.75rem" }}
-                  >
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
                     Vignette
                   </div>
                   <label className="tool-options-range-label">
@@ -9510,19 +8956,14 @@ function App() {
                       step={0.02}
                       value={mood.vignette}
                       onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, { vignette: Number(ev.target.value) }),
-                        )
+                        setMood((p) => moodWith(p, { vignette: Number(ev.target.value) }))
                       }
                       disabled={loading || workBusy}
                     />
                   </label>
 
                   {/* ── Atmosphere ────────────────────────── */}
-                  <div
-                    className="tool-options-heading"
-                    style={{ marginTop: "0.75rem" }}
-                  >
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
                     Atmosphere
                   </div>
                   <label
@@ -9536,9 +8977,7 @@ function App() {
                       type="checkbox"
                       checked={mood.atmEnabled}
                       onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, { atmEnabled: ev.target.checked }),
-                        )
+                        setMood((p) => moodWith(p, { atmEnabled: ev.target.checked }))
                       }
                       disabled={loading || workBusy}
                     />
@@ -9552,9 +8991,7 @@ function App() {
                           type="color"
                           value={mood.atmColor}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { atmColor: ev.target.value }),
-                            )
+                            setMood((p) => moodWith(p, { atmColor: ev.target.value }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -9613,9 +9050,7 @@ function App() {
                             type="radio"
                             name="atm-spatial"
                             checked={mood.atmAerial}
-                            onChange={() =>
-                              setMood((p) => moodWith(p, { atmAerial: true }))
-                            }
+                            onChange={() => setMood((p) => moodWith(p, { atmAerial: true }))}
                             disabled={loading || workBusy}
                           />
                           <span>Aerial</span>
@@ -9631,9 +9066,7 @@ function App() {
                             type="radio"
                             name="atm-spatial"
                             checked={!mood.atmAerial}
-                            onChange={() =>
-                              setMood((p) => moodWith(p, { atmAerial: false }))
-                            }
+                            onChange={() => setMood((p) => moodWith(p, { atmAerial: false }))}
                             disabled={loading || workBusy}
                           />
                           <span>Plane</span>
@@ -9659,9 +9092,7 @@ function App() {
                               name="atm-mode"
                               checked={!mood.atmPositiveSide}
                               onChange={() =>
-                                setMood((p) =>
-                                  moodWith(p, { atmPositiveSide: false }),
-                                )
+                                setMood((p) => moodWith(p, { atmPositiveSide: false }))
                               }
                               disabled={loading || workBusy}
                             />
@@ -9679,9 +9110,7 @@ function App() {
                               name="atm-mode"
                               checked={mood.atmPositiveSide}
                               onChange={() =>
-                                setMood((p) =>
-                                  moodWith(p, { atmPositiveSide: true }),
-                                )
+                                setMood((p) => moodWith(p, { atmPositiveSide: true }))
                               }
                               disabled={loading || workBusy}
                             />
@@ -9809,10 +9238,7 @@ function App() {
                   )}
 
                   {/* ── Distance tint ────────────────────── */}
-                  <div
-                    className="tool-options-heading"
-                    style={{ marginTop: "0.75rem" }}
-                  >
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
                     Distance tint
                   </div>
                   <label
@@ -9826,9 +9252,7 @@ function App() {
                       type="checkbox"
                       checked={mood.dtEnabled}
                       onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, { dtEnabled: ev.target.checked }),
-                        )
+                        setMood((p) => moodWith(p, { dtEnabled: ev.target.checked }))
                       }
                       disabled={loading || workBusy}
                     />
@@ -9842,9 +9266,7 @@ function App() {
                           type="color"
                           value={mood.dtNearColor}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { dtNearColor: ev.target.value }),
-                            )
+                            setMood((p) => moodWith(p, { dtNearColor: ev.target.value }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -9855,9 +9277,7 @@ function App() {
                           type="color"
                           value={mood.dtMidColor}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { dtMidColor: ev.target.value }),
-                            )
+                            setMood((p) => moodWith(p, { dtMidColor: ev.target.value }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -9868,9 +9288,7 @@ function App() {
                           type="color"
                           value={mood.dtFarColor}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { dtFarColor: ev.target.value }),
-                            )
+                            setMood((p) => moodWith(p, { dtFarColor: ev.target.value }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -9933,10 +9351,7 @@ function App() {
                   )}
 
                   {/* ── Sun shafts ────────────────────────── */}
-                  <div
-                    className="tool-options-heading"
-                    style={{ marginTop: "0.75rem" }}
-                  >
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
                     Sun shafts
                   </div>
                   <label
@@ -9950,9 +9365,7 @@ function App() {
                       type="checkbox"
                       checked={mood.ssEnabled}
                       onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, { ssEnabled: ev.target.checked }),
-                        )
+                        setMood((p) => moodWith(p, { ssEnabled: ev.target.checked }))
                       }
                       disabled={loading || workBusy}
                     />
@@ -9987,9 +9400,7 @@ function App() {
                           step={0.01}
                           value={mood.ssDecay}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, { ssDecay: Number(ev.target.value) }),
-                            )
+                            setMood((p) => moodWith(p, { ssDecay: Number(ev.target.value) }))
                           }
                           disabled={loading || workBusy}
                         />
@@ -10052,10 +9463,7 @@ function App() {
                   )}
 
                   {/* ── Screen-space reflections ──────────────── */}
-                  <div
-                    className="tool-options-heading"
-                    style={{ marginTop: "0.75rem" }}
-                  >
+                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
                     Reflections
                   </div>
                   <label
@@ -10069,9 +9477,7 @@ function App() {
                       type="checkbox"
                       checked={mood.ssrEnabled}
                       onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, { ssrEnabled: ev.target.checked }),
-                        )
+                        setMood((p) => moodWith(p, { ssrEnabled: ev.target.checked }))
                       }
                       disabled={loading || workBusy}
                     />
@@ -10104,24 +9510,17 @@ function App() {
             </div>
           ) : null}
           {showEmptyOpenFile ? (
-            <div
-              className="viewport-empty-open"
-              role="region"
-              aria-label="No file open"
-            >
+            <div className="viewport-empty-open" role="region" aria-label="No file open">
               <div className="viewport-empty-open-stack">
                 {lastSessionReady &&
                 lastSessionInfo?.lastDocumentPath &&
-                (lastSessionInfo.documentExists ||
-                  lastSessionInfo.autosaveExists) ? (
+                (lastSessionInfo.documentExists || lastSessionInfo.autosaveExists) ? (
                   <div
                     className="viewport-empty-last"
                     role="group"
                     aria-label="Continue last project"
                   >
-                    <div className="viewport-empty-last-title">
-                      Continue where you left off
-                    </div>
+                    <div className="viewport-empty-last-title">Continue where you left off</div>
                     {lastSessionInfo.documentBasename ? (
                       <div
                         className="viewport-empty-last-filename"
@@ -10131,10 +9530,7 @@ function App() {
                       </div>
                     ) : null}
                     {lastProjectBlurb ? (
-                      <p
-                        id="viewport-empty-last-desc"
-                        className="viewport-empty-last-blurb"
-                      >
+                      <p id="viewport-empty-last-desc" className="viewport-empty-last-blurb">
                         {lastProjectBlurb}
                       </p>
                     ) : null}
@@ -10152,11 +9548,7 @@ function App() {
                         className="viewport-empty-open-btn is-secondary"
                         onClick={reopenLastProject}
                         disabled={loading || workBusy}
-                        aria-describedby={
-                          lastProjectBlurb
-                            ? "viewport-empty-last-desc"
-                            : undefined
-                        }
+                        aria-describedby={lastProjectBlurb ? "viewport-empty-last-desc" : undefined}
                       >
                         Reopen last project
                       </button>
@@ -10166,9 +9558,7 @@ function App() {
                 <button
                   type="button"
                   className="viewport-empty-open-btn is-secondary"
-                  onClick={() =>
-                    void invoke("open_voxelle_dialog").catch(() => {})
-                  }
+                  onClick={() => void invoke("open_voxelle_dialog").catch(() => {})}
                 >
                   Open file…
                 </button>
@@ -10178,11 +9568,7 @@ function App() {
                     className="viewport-empty-open-btn is-secondary"
                     onClick={() => setJoinModalOpen(true)}
                     disabled={collabActive}
-                    title={
-                      collabActive
-                        ? "Leave your session first"
-                        : "Paste a host link"
-                    }
+                    title={collabActive ? "Leave your session first" : "Paste a host link"}
                   >
                     Join Session
                   </button>
@@ -10198,11 +9584,7 @@ function App() {
                         : undefined
                     }
                   >
-                    {hostWsUrl
-                      ? "Stop hosting"
-                      : collabGuest
-                        ? "Leave"
-                        : "Start Session"}
+                    {hostWsUrl ? "Stop hosting" : collabGuest ? "Leave" : "Start Session"}
                   </button>
                 </div>
               </div>
@@ -10226,9 +9608,7 @@ function App() {
           {collabBanner ? (
             <div
               className={
-                collabBanner.tone === "alert"
-                  ? "viewport-notice is-alert"
-                  : "viewport-notice"
+                collabBanner.tone === "alert" ? "viewport-notice is-alert" : "viewport-notice"
               }
               role={collabBanner.tone === "alert" ? "alert" : "status"}
             >
@@ -10243,11 +9623,7 @@ function App() {
             </div>
           ) : null}
           {collabActive && chatToasts.length > 0 ? (
-            <div
-              className="chat-toast-stack"
-              aria-live="polite"
-              aria-label="New chat messages"
-            >
+            <div className="chat-toast-stack" aria-live="polite" aria-label="New chat messages">
               {chatToasts.map((t) => (
                 <div
                   key={t.id}
@@ -10262,9 +9638,7 @@ function App() {
                     aria-label="Dismiss notification"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setChatToasts((prev) =>
-                        prev.filter((x) => x.id !== t.id),
-                      );
+                      setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
                     }}
                   >
                     ×
@@ -10274,11 +9648,7 @@ function App() {
             </div>
           ) : null}
           {chatPanelOpen ? (
-            <div
-              className="chat-float-panel"
-              role="dialog"
-              aria-label="Collaboration chat"
-            >
+            <div className="chat-float-panel" role="dialog" aria-label="Collaboration chat">
               <div className="chat-float-header">
                 <h3 className="chat-float-title">Chat</h3>
                 <button
@@ -10300,20 +9670,12 @@ function App() {
                   className="collab-grow"
                   type="text"
                   value={chatInput}
-                  placeholder={
-                    collabActive ? "Message…" : "Join or host to chat"
-                  }
+                  placeholder={collabActive ? "Message…" : "Join or host to chat"}
                   disabled={!collabActive}
                   onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) =>
-                    collabActive && e.key === "Enter" && sendChat()
-                  }
+                  onKeyDown={(e) => collabActive && e.key === "Enter" && sendChat()}
                 />
-                <button
-                  type="button"
-                  onClick={sendChat}
-                  disabled={!collabActive}
-                >
+                <button type="button" onClick={sendChat} disabled={!collabActive}>
                   Send
                 </button>
               </div>
@@ -10335,17 +9697,11 @@ function App() {
                 className="sidebar-expand-toggle sidebar-expand-toggle-right"
                 onClick={() => setRightSidebarExpanded((v) => !v)}
                 aria-expanded={rightSidebarExpanded}
-                title={
-                  rightSidebarExpanded
-                    ? "Collapse inspector"
-                    : "Expand inspector"
-                }
+                title={rightSidebarExpanded ? "Collapse inspector" : "Expand inspector"}
               >
                 {rightSidebarExpanded ? (
                   <>
-                    <span className="sidebar-expand-toggle-label">
-                      Inspector
-                    </span>
+                    <span className="sidebar-expand-toggle-label">Inspector</span>
                     <span className="sidebar-expand-toggle-icon" aria-hidden>
                       »
                     </span>
@@ -10365,15 +9721,11 @@ function App() {
                 >
                   <div className="inspector-objects">
                     <h4 className="inspector-heading">Objects</h4>
-                    {sceneObjectsErr ? (
-                      <p className="inspector-hint">{sceneObjectsErr}</p>
-                    ) : null}
+                    {sceneObjectsErr ? <p className="inspector-hint">{sceneObjectsErr}</p> : null}
                     <ul className="inspector-object-list">
                       {sceneObjects
                         .slice()
-                        .sort(
-                          (a, b) => a.sortOrder - b.sortOrder || a.id - b.id,
-                        )
+                        .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id)
                         .map((o) => (
                           <li key={o.id} className="inspector-object-row">
                             <label className="inspector-active">
@@ -10390,9 +9742,7 @@ function App() {
                                   });
                                 }}
                               />
-                              <span className="inspector-object-name">
-                                {o.name}
-                              </span>
+                              <span className="inspector-object-name">{o.name}</span>
                             </label>
                             <label className="inspector-visible">
                               <input
@@ -10431,9 +9781,7 @@ function App() {
                             type="button"
                             className="inspector-copy-invite-btn"
                             onClick={copyHostingJoinAddress}
-                            title={
-                              hostingCopied ? "Copied" : "Copy invite link"
-                            }
+                            title={hostingCopied ? "Copied" : "Copy invite link"}
                           >
                             <span className="inspector-copy-invite-label">
                               {hostingCopied ? "Copied!" : "Copy invite link"}
@@ -10460,16 +9808,13 @@ function App() {
                               className="collab-hint collab-hint-warn inspector-collab-hint"
                               role="alert"
                             >
-                              {natError} You can forward port {hostPort} in your
-                              router settings. Some networks won&apos;t allow
-                              guests over the internet.
+                              {natError} You can forward port {hostPort} in your router settings.
+                              Some networks won&apos;t allow guests over the internet.
                             </p>
                           ) : null}
                         </>
                       ) : null}
-                      <h4 className="inspector-heading inspector-roster-heading">
-                        Roster
-                      </h4>
+                      <h4 className="inspector-heading inspector-roster-heading">Roster</h4>
                       <ul className="collab-roster inspector-collab-roster">
                         {roster.map((r) => (
                           <li key={r.peerId}>
@@ -10496,9 +9841,7 @@ function App() {
                                   <input
                                     type="checkbox"
                                     checked={r.canEdit}
-                                    onChange={(e) =>
-                                      setCanEdit(r.peerId, e.target.checked)
-                                    }
+                                    onChange={(e) => setCanEdit(r.peerId, e.target.checked)}
                                   />
                                   Edit
                                 </label>
@@ -10551,24 +9894,18 @@ function App() {
                 >
                   {hostingCopied
                     ? "Copied invite link"
-                    : `Hosting · ${roster.length} ${
-                        roster.length === 1 ? "person" : "people"
-                      }`}
+                    : `Hosting · ${roster.length} ${roster.length === 1 ? "person" : "people"}`}
                 </button>
               ) : (
                 <span className="status-bar-hosting-btn is-guest">
-                  {`In session · ${roster.length} ${
-                    roster.length === 1 ? "person" : "people"
-                  }`}
+                  {`In session · ${roster.length} ${roster.length === 1 ? "person" : "people"}`}
                 </span>
               )}
               <button
                 type="button"
                 className="status-bar-hosting-btn is-leave"
                 onClick={() => {
-                  const msg = hostWsUrl
-                    ? "End the session for everyone?"
-                    : "Leave this session?";
+                  const msg = hostWsUrl ? "End the session for everyone?" : "Leave this session?";
                   if (window.confirm(msg)) leaveSession();
                 }}
                 title={hostWsUrl ? "End session" : "Leave session"}
@@ -10623,11 +9960,13 @@ function App() {
               color,
               material: mat ?? "plastic",
             })),
-          }).then(() => {
-            void invoke("selection_clear").catch(() => {});
-            setStampBookPatternActive(true);
-            setInteractionMode("stamp");
-          }).catch(() => {});
+          })
+            .then(() => {
+              void invoke("selection_clear").catch(() => {});
+              setStampBookPatternActive(true);
+              setInteractionMode("stamp");
+            })
+            .catch(() => {});
         }}
       />
       <PreferencesModal
@@ -10640,15 +9979,108 @@ function App() {
         onCollabHostPortChange={setHostPort}
         collabHosting={hostWsUrl != null}
       />
+      {rotateDialogOpen ? (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+          onClick={(e) => e.target === e.currentTarget && setRotateDialogOpen(false)}
+          onKeyDown={(e) => e.key === "Escape" && setRotateDialogOpen(false)}
+        >
+          <div className="modal">
+            <h3>Rotate selection</h3>
+            <label className="modal-field">
+              Axis
+              <select
+                value={rotateDialogAxis}
+                onChange={(e) => setRotateDialogAxis(Number(e.target.value) as 0 | 1 | 2)}
+              >
+                <option value={0}>X</option>
+                <option value={1}>Y</option>
+                <option value={2}>Z</option>
+              </select>
+            </label>
+            <label className="modal-field">
+              Degrees
+              <select
+                value={rotateDialogDegrees}
+                onChange={(e) => setRotateDialogDegrees(Number(e.target.value))}
+              >
+                <option value={90}>90°</option>
+                <option value={180}>180°</option>
+                <option value={270}>270°</option>
+              </select>
+            </label>
+            <div className="modal-buttons">
+              <button
+                type="button"
+                onClick={() => {
+                  const quarters = rotateDialogDegrees / 90;
+                  void invoke("selection_rotate", {
+                    axis: rotateDialogAxis,
+                    quarters,
+                  }).catch(() => {});
+                  setRotateDialogOpen(false);
+                }}
+              >
+                Rotate
+              </button>
+              <button type="button" onClick={() => setRotateDialogOpen(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+      {scaleDialogOpen ? (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+          onClick={(e) => e.target === e.currentTarget && setScaleDialogOpen(false)}
+          onKeyDown={(e) => e.key === "Escape" && setScaleDialogOpen(false)}
+        >
+          <div className="modal">
+            <h3>Scale selection</h3>
+            <label className="modal-field">
+              Factor
+              <input
+                type="number"
+                min={0.1}
+                max={8}
+                step={0.25}
+                value={scaleDialogFactor}
+                onChange={(e) => setScaleDialogFactor(Math.max(0.1, Math.min(8, Number(e.target.value))))}
+              />
+            </label>
+            <div className="modal-buttons">
+              <button
+                type="button"
+                onClick={() => {
+                  void invoke("selection_scale", {
+                    factor: scaleDialogFactor,
+                  }).catch(() => {});
+                  setScaleDialogOpen(false);
+                }}
+              >
+                Scale
+              </button>
+              <button type="button" onClick={() => setScaleDialogOpen(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
       {newProjectOpen ? (
         <div
           className="modal-overlay"
           role="dialog"
           aria-modal="true"
           tabIndex={-1}
-          onClick={(e) =>
-            e.target === e.currentTarget && setNewProjectOpen(false)
-          }
+          onClick={(e) => e.target === e.currentTarget && setNewProjectOpen(false)}
           onKeyDown={(e) => e.key === "Escape" && setNewProjectOpen(false)}
         >
           <div className="modal">

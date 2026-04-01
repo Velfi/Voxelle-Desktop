@@ -119,9 +119,6 @@ fn show_crash_dialog(path: &std::path::Path, clipboard_ok: bool) {
     } else {
         ""
     };
-    eprintln!(
-        "Voxelle crashed. Log saved to: {}{clip}",
-        path.display()
-    );
+    eprintln!("Voxelle crashed. Log saved to: {}{clip}", path.display());
     let _ = std::process::Command::new("xdg-open").arg(path).status();
 }

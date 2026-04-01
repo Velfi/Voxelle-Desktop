@@ -1,18 +1,18 @@
 //! Multi-user editing: WebSocket host/client, host-authoritative voxel ops, per-peer undo on host.
 
 use crate::camera::Spherical;
-use crate::VoxelGpuRefreshReason;
 use crate::voxel_edit;
 use crate::voxelle::{empty_collab_placeholder, encode_payload_v4};
 use crate::ViewerState;
+use crate::VoxelGpuRefreshReason;
 use futures_util::{SinkExt, StreamExt};
 use glam::Vec3;
 use igd_next::aio::tokio::search_gateway;
-use igd_next::{PortMappingProtocol, SearchOptions};
+use igd_next::{AddPortError, PortMappingProtocol, SearchOptions};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use parking_lot::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,6 +32,11 @@ const GUEST_ACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 const CLIENT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 /// Maximum time allowed for the entire client join handshake (connect + send join + receive welcome).
 const CLIENT_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+/// UPnP lease duration in seconds.  Many consumer routers reject permanent
+/// leases (`0`), so we request a 1-hour lease and renew periodically.
+const UPNP_LEASE_SECS: u32 = 3600;
+/// How often to re-call `add_port` to keep the lease alive (75 % of lease).
+const UPNP_RENEW_INTERVAL: Duration = Duration::from_secs(45 * 60);
 /// Host → guests: lightweight message so clients can tell the host is still alive (see [`CLIENT_HOST_SILENCE_TIMEOUT`]).
 const HOST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Guest: if no inbound WebSocket frame for this long, treat the host as unresponsive.
@@ -159,19 +164,16 @@ pub fn record_ping_flash_colored(
 pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i32) {
     let (color_rgb, display_name) = {
         let c = state.collab.lock();
-        c.roster
-            .iter()
-            .find(|r| r.peer_id == peer_id)
-            .map(|r| {
-                (
-                    r.color_rgb,
-                    if r.display_name.is_empty() {
-                        "Guest".to_string()
-                    } else {
-                        r.display_name.clone()
-                    },
-                )
-            })
+        c.roster.iter().find(|r| r.peer_id == peer_id).map(|r| {
+            (
+                r.color_rgb,
+                if r.display_name.is_empty() {
+                    "Guest".to_string()
+                } else {
+                    r.display_name.clone()
+                },
+            )
+        })
     }
     .unwrap_or((0xffff44, "Guest".to_string()));
     record_ping_flash_colored(state, x, y, z, color_rgb, display_name);
@@ -292,6 +294,8 @@ pub struct CollabRuntime {
     pub guest_last_activity: HashMap<u32, Instant>,
     /// TCP port we opened on the IGD via UPnP (usually same as listen port); cleared when mapping is removed.
     pub upnp_external_tcp_port: Option<u16>,
+    /// Token to cancel the background UPnP lease renewal loop (host only).
+    pub upnp_renew_cancel: Option<CancellationToken>,
     /// Token to cancel an in-flight client join attempt.
     pub join_cancel: Option<CancellationToken>,
 }
@@ -313,6 +317,7 @@ impl Default for CollabRuntime {
             host_peer_kick_tx: HashMap::new(),
             guest_last_activity: HashMap::new(),
             upnp_external_tcp_port: None,
+            upnp_renew_cancel: None,
             join_cancel: None,
         }
     }
@@ -354,6 +359,9 @@ impl CollabRuntime {
         self.client_tx = None;
         self.host_peer_kick_tx.clear();
         self.guest_last_activity.clear();
+        if let Some(t) = self.upnp_renew_cancel.take() {
+            t.cancel();
+        }
         self.upnp_external_tcp_port = None;
         self.join_cancel = None;
     }
@@ -370,7 +378,6 @@ pub fn schedule_remove_upnp_mapping(external_tcp_port: u16) {
             .await;
     });
 }
-
 
 /// Read binary WebSocket frames carrying snapshot chunks and reassemble them.
 /// Emits `voxelle-load-progress` events so the join modal shows download progress.
@@ -404,7 +411,12 @@ where
         };
         let msg = frame
             .ok_or_else(|| "Host closed the connection while sending map chunks.".to_string())?
-            .map_err(|e| format!("Error receiving map chunk {}/{chunk_count}: {e}", received + 1))?;
+            .map_err(|e| {
+                format!(
+                    "Error receiving map chunk {}/{chunk_count}: {e}",
+                    received + 1
+                )
+            })?;
         match msg {
             Message::Binary(data) => {
                 buf.extend_from_slice(&data);
@@ -444,8 +456,7 @@ async fn try_upnp_internet_share<R: Runtime>(
         emit(CollabNatResult {
             wan_url: None,
             error: Some(
-                "Internet sharing needs a LAN address; this machine only reported loopback."
-                    .into(),
+                "Internet sharing needs a LAN address; this machine only reported loopback.".into(),
             ),
         });
         return;
@@ -473,30 +484,99 @@ async fn try_upnp_internet_share<R: Runtime>(
         }
     };
     let local = SocketAddr::new(lan_ip, port);
-    if let Err(e) = gw
-        .add_port(
-            PortMappingProtocol::TCP,
-            port,
-            local,
-            0,
-            "Voxelle collaboration",
-        )
-        .await
-    {
-        emit(CollabNatResult {
-            wan_url: None,
-            error: Some(format!(
-                "Router refused port mapping ({e}). The port may be in use or blocked by policy."
-            )),
-        });
-        return;
-    }
+    // Try a timed lease first (many consumer routers reject permanent leases).
+    // Fall back to permanent (`0`) if the router only supports that.
+    let needs_renewal = {
+        let result = gw
+            .add_port(
+                PortMappingProtocol::TCP,
+                port,
+                local,
+                UPNP_LEASE_SECS,
+                "Voxelle collaboration",
+            )
+            .await;
+        match result {
+            Ok(()) => true,
+            Err(AddPortError::OnlyPermanentLeasesSupported) => {
+                if let Err(e) = gw
+                    .add_port(
+                        PortMappingProtocol::TCP,
+                        port,
+                        local,
+                        0,
+                        "Voxelle collaboration",
+                    )
+                    .await
+                {
+                    emit(CollabNatResult {
+                        wan_url: None,
+                        error: Some(format!(
+                            "Router refused port mapping ({e}). The port may be in use or blocked by policy."
+                        )),
+                    });
+                    return;
+                }
+                false
+            }
+            Err(e) => {
+                emit(CollabNatResult {
+                    wan_url: None,
+                    error: Some(format!(
+                        "Router refused port mapping ({e}). The port may be in use or blocked by policy."
+                    )),
+                });
+                return;
+            }
+        }
+    };
     // Record immediately so `collab_leave` can remove the mapping even if we fail below or the user leaves early.
     {
         let mut g = collab_mtx.lock();
         if g.is_host() {
             g.upnp_external_tcp_port = Some(port);
         }
+    }
+    // Keep the lease alive by re-requesting it before expiry.
+    if needs_renewal {
+        let cancel = CancellationToken::new();
+        {
+            let mut g = collab_mtx.lock();
+            if g.is_host() {
+                g.upnp_renew_cancel = Some(cancel.clone());
+            }
+        }
+        let cm = Arc::clone(&collab_mtx);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(UPNP_RENEW_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await; // skip immediate first tick
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
+                let Ok(gw) = search_gateway(SearchOptions::default()).await else {
+                    log::warn!("UPnP renewal: could not find gateway");
+                    continue;
+                };
+                if let Err(e) = gw
+                    .add_port(
+                        PortMappingProtocol::TCP,
+                        port,
+                        local,
+                        UPNP_LEASE_SECS,
+                        "Voxelle collaboration",
+                    )
+                    .await
+                {
+                    log::warn!("UPnP renewal failed: {e}");
+                }
+                if !cm.lock().is_host() {
+                    break;
+                }
+            }
+        });
     }
     let ext_ip = match gw.get_external_ip().await {
         Ok(ip) => ip,
@@ -619,11 +699,7 @@ fn replace_file_on_main<R: Runtime>(
     }
 }
 
-fn emit_and_broadcast<R: Runtime>(
-    collab: &Mutex<CollabRuntime>,
-    _app: &AppHandle<R>,
-    json: &str,
-) {
+fn emit_and_broadcast<R: Runtime>(collab: &Mutex<CollabRuntime>, _app: &AppHandle<R>, json: &str) {
     let g = collab.lock();
     if let Some(tx) = &g.host_broadcast {
         let _ = tx.send(Message::Text(json.to_string()));
@@ -696,10 +772,7 @@ pub fn process_inbox_item<R: Runtime>(
                     return; // peer left while queued
                 }
                 c.next_seq += 1;
-                c.host_undo
-                    .entry(peer_id)
-                    .or_default()
-                    .push(deltas.clone());
+                c.host_undo.entry(peer_id).or_default().push(deltas.clone());
                 c.host_redo.remove(&peer_id);
                 c.next_seq
             };
@@ -758,10 +831,7 @@ pub fn process_inbox_item<R: Runtime>(
                 if !c.roster.iter().any(|r| r.peer_id == peer_id) {
                     return;
                 }
-                c.host_redo
-                    .entry(peer_id)
-                    .or_default()
-                    .push(original);
+                c.host_redo.entry(peer_id).or_default().push(original);
                 c.next_seq
             };
             let br = HostToClient::Edit {
@@ -839,10 +909,7 @@ pub fn process_inbox_item<R: Runtime>(
 pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
     let bytes: Result<Vec<u8>, String> = (|| {
         let g = state.current_file.lock();
-        let file = g
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(empty_collab_placeholder);
+        let file = g.as_ref().cloned().unwrap_or_else(empty_collab_placeholder);
         encode_payload_v4(&file).map_err(|e| e.to_string())
     })();
     let Ok(bytes) = bytes else {
@@ -993,10 +1060,7 @@ async fn handle_host_connection<R: Runtime>(
 
     let snap_result: Result<Vec<u8>, String> = (|| {
         let g = state.current_file.lock();
-        let file = g
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(empty_collab_placeholder);
+        let file = g.as_ref().cloned().unwrap_or_else(empty_collab_placeholder);
         encode_payload_v4(&file).map_err(|e| format!("snapshot encode failed: {e}"))
     })();
     let snap = match snap_result {
@@ -1326,11 +1390,7 @@ pub fn start_host<R: Runtime>(
                     .collect()
             };
             for pid in stale {
-                let tx_opt = cm_watch
-                    .lock()
-                    .host_peer_kick_tx
-                    .get(&pid)
-                    .cloned();
+                let tx_opt = cm_watch.lock().host_peer_kick_tx.get(&pid).cloned();
                 if let Some(tx) = tx_opt {
                     let _ = tx.send(Some(GUEST_TIMEOUT_KICK_REASON.to_string()));
                 }
@@ -1343,8 +1403,7 @@ pub fn start_host<R: Runtime>(
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(HOST_KEEPALIVE_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let keepalive_json =
-            serde_json::to_string(&HostToClient::Keepalive).unwrap_or_default();
+        let keepalive_json = serde_json::to_string(&HostToClient::Keepalive).unwrap_or_default();
         loop {
             interval.tick().await;
             if sd_keep.load(Ordering::SeqCst) {
@@ -1434,12 +1493,7 @@ pub fn start_host<R: Runtime>(
                 g.guest_last_activity.insert(pid, Instant::now());
                 g.host_peer_kick_tx.insert(pid, kick_tx);
             }
-            let sub = cm3
-                .lock()
-                .host_broadcast
-                .as_ref()
-                .unwrap()
-                .subscribe();
+            let sub = cm3.lock().host_broadcast.as_ref().unwrap().subscribe();
             tokio::spawn(handle_host_connection(
                 ws, sub, app3, st3, cm3, pid, dname, col, kick_rx,
             ));
@@ -1495,10 +1549,12 @@ pub async fn client_connect_blocking<R: Runtime>(
     cancel: CancellationToken,
 ) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + CLIENT_JOIN_TIMEOUT;
-    let timeout_msg = || format!(
+    let timeout_msg = || {
+        format!(
         "Could not reach the host at\n{url}\n\nThe connection timed out after {} seconds.\n\nCheck the address and make sure the host is reachable on your network.",
         CLIENT_JOIN_TIMEOUT.as_secs()
-    );
+    )
+    };
 
     let (ws, _) = tokio::select! {
         res = connect_async(url) => res.map_err(|e| format_ws_connect_failure(url, e))?,
@@ -1551,9 +1607,7 @@ pub async fn client_connect_blocking<R: Runtime>(
     })?;
     match welcome {
         HostToClient::Deny { reason } => {
-            return Err(format!(
-                "The host refused the connection:\n{reason}"
-            ));
+            return Err(format!("The host refused the connection:\n{reason}"));
         }
         HostToClient::Welcome {
             peer_id,
@@ -1603,10 +1657,9 @@ pub async fn client_connect_blocking<R: Runtime>(
             );
 
             // Receive chunked snapshot.
-            let snapshot = receive_snapshot_chunks(
-                &mut read, &app, &cancel, chunk_count, snapshot_len,
-            )
-            .await?;
+            let snapshot =
+                receive_snapshot_chunks(&mut read, &app, &cancel, chunk_count, snapshot_len)
+                    .await?;
 
             if let Err(e) = replace_file_on_main(&app, &state, &snapshot) {
                 collab_mtx.lock().leave();
@@ -1655,8 +1708,7 @@ pub async fn client_connect_blocking<R: Runtime>(
         // Buffer for reassembling chunked mid-session snapshots (binary frames) from the host.
         let mut pending_snapshot: Option<(u32, u32, Vec<u8>)> = None; // (chunks_expected, chunks_received, bytes)
         loop {
-            let frame =
-                tokio::time::timeout(CLIENT_HOST_SILENCE_TIMEOUT, read.next()).await;
+            let frame = tokio::time::timeout(CLIENT_HOST_SILENCE_TIMEOUT, read.next()).await;
             let msg = match frame {
                 Err(_) => {
                     host_timed_out = true;
@@ -1686,7 +1738,9 @@ pub async fn client_connect_blocking<R: Runtime>(
                     if let Ok(ev) = serde_json::from_str::<HostToClient>(&t) {
                         match ev {
                             HostToClient::Keepalive => {}
-                            HostToClient::Edit { deltas, peer_id, .. } => {
+                            HostToClient::Edit {
+                                deltas, peer_id, ..
+                            } => {
                                 let local = cm4.lock().local_peer_id;
                                 if peer_id == local {
                                     continue;
@@ -1696,10 +1750,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                             }
                             HostToClient::Roster { roster } => {
                                 cm4.lock().roster = roster.clone();
-                                let _ = app4.emit(
-                                    "collab-roster",
-                                    serde_json::to_string(&roster).unwrap(),
-                                );
+                                let _ = app4
+                                    .emit("collab-roster", serde_json::to_string(&roster).unwrap());
                             }
                             HostToClient::Snapshot { bytes } => {
                                 let _ = replace_file_on_main(&app4, &st4, &bytes);
@@ -1710,8 +1762,11 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 ..
                             } => {
                                 // Mid-session chunked snapshot broadcast; start collecting binary frames.
-                                pending_snapshot =
-                                    Some((chunk_count, 0, Vec::with_capacity(snapshot_len as usize)));
+                                pending_snapshot = Some((
+                                    chunk_count,
+                                    0,
+                                    Vec::with_capacity(snapshot_len as usize),
+                                ));
                             }
                             HostToClient::Kicked { reason } => {
                                 {
@@ -1851,11 +1906,7 @@ mod tests {
 
         let mut kicked_reason: Option<String> = None;
         for _ in 0..32 {
-            let next = read
-                .next()
-                .await
-                .expect("frame")
-                .expect("ws");
+            let next = read.next().await.expect("frame").expect("ws");
             let Message::Text(t) = next else {
                 continue;
             };
@@ -1954,18 +2005,11 @@ mod tests {
             deltas: vec![VoxelEditDelta::Added(dummy)],
         })
         .unwrap();
-        write
-            .send(Message::Text(edit))
-            .await
-            .expect("send edit");
+        write.send(Message::Text(edit)).await.expect("send edit");
 
         let mut deny_reason: Option<String> = None;
         for _ in 0..32 {
-            let next = read
-                .next()
-                .await
-                .expect("frame")
-                .expect("ws");
+            let next = read.next().await.expect("frame").expect("ws");
             let Message::Text(t) = next else {
                 continue;
             };
@@ -2012,10 +2056,7 @@ mod tests {
         }
 
         let edit = serde_json::to_string(&ClientToHost::Edit { deltas: vec![] }).unwrap();
-        write
-            .send(Message::Text(edit))
-            .await
-            .expect("send edit");
+        write.send(Message::Text(edit)).await.expect("send edit");
 
         loop {
             let next = read.next().await.expect("frame").expect("ws");
@@ -2206,7 +2247,9 @@ mod tests {
         let fg = state.current_file.lock();
         let file = fg.as_ref().expect("file");
         assert!(
-            file.voxels.iter().any(|vx| vx.x == 10 && vx.y == 20 && vx.z == 30),
+            file.voxels
+                .iter()
+                .any(|vx| vx.x == 10 && vx.y == 20 && vx.z == 30),
             "voxel should have been added to current_file"
         );
     }
@@ -2238,7 +2281,10 @@ mod tests {
         assert_eq!(c.next_seq, prev_seq + 1, "seq should have incremented");
         let undo_stack = c.host_undo.get(&2).expect("undo stack for peer 2");
         assert_eq!(undo_stack.len(), 1, "one undo entry should exist");
-        assert!(undo_stack[0].is_empty(), "undo entry should be empty deltas");
+        assert!(
+            undo_stack[0].is_empty(),
+            "undo entry should be empty deltas"
+        );
     }
 
     // ---------------------------------------------------------------
@@ -2281,7 +2327,10 @@ mod tests {
         let fg = state.current_file.lock();
         let file = fg.as_ref().expect("file");
         assert!(
-            !file.voxels.iter().any(|vx| vx.x == 5 && vx.y == 6 && vx.z == 7),
+            !file
+                .voxels
+                .iter()
+                .any(|vx| vx.x == 5 && vx.y == 6 && vx.z == 7),
             "voxel should have been removed by undo"
         );
     }
@@ -2317,7 +2366,9 @@ mod tests {
         let fg = state.current_file.lock();
         let file = fg.as_ref().expect("file");
         assert!(
-            file.voxels.iter().any(|vx| vx.x == 8 && vx.y == 9 && vx.z == 10),
+            file.voxels
+                .iter()
+                .any(|vx| vx.x == 8 && vx.y == 9 && vx.z == 10),
             "voxel should have been added by redo"
         );
     }
@@ -2347,7 +2398,10 @@ mod tests {
         );
 
         let c = state.collab.lock();
-        assert_eq!(c.next_seq, prev_seq, "seq should NOT have incremented for missing peer");
+        assert_eq!(
+            c.next_seq, prev_seq,
+            "seq should NOT have incremented for missing peer"
+        );
         assert!(
             !c.host_undo.contains_key(&99),
             "no undo entry should exist for missing peer"
@@ -2393,7 +2447,9 @@ mod tests {
 
         let inbox = state.collab_edit_inbox.lock();
         assert!(
-            inbox.iter().any(|item| matches!(item, CollabInboxItem::Undo { peer_id: 2 })),
+            inbox
+                .iter()
+                .any(|item| matches!(item, CollabInboxItem::Undo { peer_id: 2 })),
             "inbox should contain an Undo for peer 2, got {:?} items",
             inbox.len()
         );
@@ -2437,7 +2493,9 @@ mod tests {
 
         let inbox = state.collab_edit_inbox.lock();
         assert!(
-            inbox.iter().any(|item| matches!(item, CollabInboxItem::Redo { peer_id: 2 })),
+            inbox
+                .iter()
+                .any(|item| matches!(item, CollabInboxItem::Redo { peer_id: 2 })),
             "inbox should contain a Redo for peer 2, got {:?} items",
             inbox.len()
         );
@@ -2536,7 +2594,9 @@ mod tests {
 
         let inbox = state.collab_edit_inbox.lock();
         assert!(
-            inbox.iter().any(|item| matches!(item, CollabInboxItem::Edit { peer_id: 2, .. })),
+            inbox
+                .iter()
+                .any(|item| matches!(item, CollabInboxItem::Edit { peer_id: 2, .. })),
             "inbox should contain an Edit for peer 2, got {:?} items",
             inbox.len()
         );
