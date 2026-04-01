@@ -13,6 +13,8 @@ import { check } from "@tauri-apps/plugin-updater";
 import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
 import { JoinSessionModal } from "./JoinSessionModal";
 import { PreferencesModal } from "./PreferencesModal";
+import { StampBookModal } from "./StampBookModal";
+import type { StampBookEntryTuple } from "./stampBookStorage";
 import { loadRecentJoinUrls, rememberJoinedUrl } from "./joinRecent";
 import {
   applyAppearanceToDocument,
@@ -40,6 +42,7 @@ import { DrawPaneSelectionToolOptions } from "./toolOptions/DrawPaneSelectionToo
 import { MATERIAL_BUILTIN_PALETTE_HEX } from "./materialBuiltinPalette";
 import { ViewportCameraHud } from "./ViewportCameraHud";
 import { useStrokePhase } from "./useStrokePhase";
+import { SelectionGizmo, type SelectionGizmoRef } from "./SelectionGizmo";
 
 /** Data carried through the cuboid/cylinder solid depth phase. */
 interface DepthPhaseData {
@@ -97,6 +100,11 @@ interface MoodState {
   ssDensity: number;
   ssWeight: number;
   ssSamples: number;
+  // screen-space reflections
+  ssrEnabled: boolean;
+  ssrStrength: number;
+  // bloom
+  bloomStrength: number;
 }
 
 function defaultMoodState(): MoodState {
@@ -136,6 +144,9 @@ function defaultMoodState(): MoodState {
     ssDensity: 0.8,
     ssWeight: 0.6,
     ssSamples: 32,
+    ssrEnabled: false,
+    ssrStrength: 0.8,
+    bloomStrength: 0.1,
   };
 }
 
@@ -153,13 +164,16 @@ const LS_PALETTE_FLOATING = "voxellePaletteFloating";
 const LS_PALETTE_FLOAT_POS = "voxellePaletteFloatPos";
 /** `localStorage` = `"1"`: show JS vs Rust viewport cursor overlay (see `get_viewport_cursor_debug`). */
 const LS_VIEWPORT_CURSOR_DEBUG = "voxelleDebugViewportCursor";
-/** `localStorage` = `"1"`: GPU uses full swapchain; picking uses client ÷ layout viewport (see `layoutViewportCssSize`). */
-const LS_FULL_SURFACE_VIEWPORT = "voxelleFullSurfaceViewport";
 const LS_PAINT_COLOR_DISTRIB = "voxellePaintColorDistrib";
 
 // ── Multi-color paint distribution ─────────────────────────────────────────
 
-type PaintColorMode = "whiteNoise" | "randomSingle" | "fbmNoise" | "gradient" | "dither";
+type PaintColorMode =
+  | "whiteNoise"
+  | "randomSingle"
+  | "fbmNoise"
+  | "gradient"
+  | "dither";
 
 interface FbmParams {
   octaves: number;
@@ -237,29 +251,12 @@ function layoutViewportCssSize(): { w: number; h: number } {
   return { w: Math.max(1, w), h: Math.max(1, h) };
 }
 
-function readFullSurfaceViewportEnabled(): boolean {
-  try {
-    return localStorage.getItem(LS_FULL_SURFACE_VIEWPORT) === "1";
-  } catch {
-    return false;
-  }
-}
-
 /** Map texture-normalized nx, ny to position inside `.viewport` for debug overlay markers. */
 function viewportCursorOverlayPercent(
-  fullSurfaceViewport: boolean,
   nx: number,
   ny: number,
-  rect: DOMRectReadOnly | null,
 ): { leftPct: number; topPct: number } {
-  if (!fullSurfaceViewport || !rect || rect.width <= 0 || rect.height <= 0) {
-    return { leftPct: nx * 100, topPct: ny * 100 };
-  }
-  const { w: lw, h: lh } = layoutViewportCssSize();
-  return {
-    leftPct: ((nx * lw - rect.left) / rect.width) * 100,
-    topPct: ((ny * lh - rect.top) / rect.height) * 100,
-  };
+  return { leftPct: nx * 100, topPct: ny * 100 };
 }
 
 /** Payload from `get_viewport_cursor_debug` (camelCase). */
@@ -561,30 +558,67 @@ function MultiColorPaintSection(props: {
       {distrib.mode === "fbmNoise" && (
         <>
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">Octaves {distrib.fbm.octaves}</label>
-            <input type="range" min={1} max={12} step={1} value={distrib.fbm.octaves}
-              onChange={(e) => patchFbm({ octaves: Number(e.target.value) })} />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Frequency {distrib.fbm.frequency.toFixed(2)}</label>
-            <input type="range" min={0.02} max={0.8} step={0.01} value={distrib.fbm.frequency}
-              onChange={(e) => patchFbm({ frequency: Number(e.target.value) })} />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Lacunarity {distrib.fbm.lacunarity.toFixed(2)}</label>
-            <input type="range" min={1.5} max={3.5} step={0.05} value={distrib.fbm.lacunarity}
-              onChange={(e) => patchFbm({ lacunarity: Number(e.target.value) })} />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Persistence {distrib.fbm.persistence.toFixed(2)}</label>
-            <input type="range" min={0.1} max={1} step={0.05} value={distrib.fbm.persistence}
-              onChange={(e) => patchFbm({ persistence: Number(e.target.value) })} />
+            <label className="sidebar-label-sm">
+              Octaves {distrib.fbm.octaves}
+            </label>
+            <input
+              type="range"
+              min={1}
+              max={12}
+              step={1}
+              value={distrib.fbm.octaves}
+              onChange={(e) => patchFbm({ octaves: Number(e.target.value) })}
+            />
           </div>
           <div className="sidebar-row">
             <label className="sidebar-label-sm">
-              <input type="checkbox" checked={distrib.fbm.quantized}
-                onChange={(e) => patchFbm({ quantized: e.target.checked })} />
-              {" "}Quantized (palette steps)
+              Frequency {distrib.fbm.frequency.toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min={0.02}
+              max={0.8}
+              step={0.01}
+              value={distrib.fbm.frequency}
+              onChange={(e) => patchFbm({ frequency: Number(e.target.value) })}
+            />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">
+              Lacunarity {distrib.fbm.lacunarity.toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min={1.5}
+              max={3.5}
+              step={0.05}
+              value={distrib.fbm.lacunarity}
+              onChange={(e) => patchFbm({ lacunarity: Number(e.target.value) })}
+            />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">
+              Persistence {distrib.fbm.persistence.toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={distrib.fbm.persistence}
+              onChange={(e) =>
+                patchFbm({ persistence: Number(e.target.value) })
+              }
+            />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">
+              <input
+                type="checkbox"
+                checked={distrib.fbm.quantized}
+                onChange={(e) => patchFbm({ quantized: e.target.checked })}
+              />{" "}
+              Quantized (palette steps)
             </label>
           </div>
         </>
@@ -593,8 +627,13 @@ function MultiColorPaintSection(props: {
         <>
           <div className="sidebar-row">
             <label className="sidebar-label-sm">Kind</label>
-            <select className="sidebar-select-sm" value={distrib.gradient.kind}
-              onChange={(e) => patchGrad({ kind: e.target.value as "linear" | "radial" })}>
+            <select
+              className="sidebar-select-sm"
+              value={distrib.gradient.kind}
+              onChange={(e) =>
+                patchGrad({ kind: e.target.value as "linear" | "radial" })
+              }
+            >
               <option value="linear">Linear</option>
               <option value="radial">Radial</option>
             </select>
@@ -602,8 +641,13 @@ function MultiColorPaintSection(props: {
           {distrib.gradient.kind === "linear" && (
             <div className="sidebar-row">
               <label className="sidebar-label-sm">Axis</label>
-              <select className="sidebar-select-sm" value={distrib.gradient.linearAxis}
-                onChange={(e) => patchGrad({ linearAxis: Number(e.target.value) as 0 | 1 | 2 })}>
+              <select
+                className="sidebar-select-sm"
+                value={distrib.gradient.linearAxis}
+                onChange={(e) =>
+                  patchGrad({ linearAxis: Number(e.target.value) as 0 | 1 | 2 })
+                }
+              >
                 <option value={0}>X</option>
                 <option value={1}>Y</option>
                 <option value={2}>Z</option>
@@ -616,32 +660,59 @@ function MultiColorPaintSection(props: {
               {(["X", "Y", "Z"] as const).map((axis, i) => (
                 <label key={axis} className="sidebar-label-sm">
                   {axis}
-                  <input type="number" className="sidebar-number-sm" style={{ width: "3.5rem" }}
+                  <input
+                    type="number"
+                    className="sidebar-number-sm"
+                    style={{ width: "3.5rem" }}
                     value={distrib.gradient.radialCenter[i]}
                     onChange={(e) => {
-                      const c = [...distrib.gradient.radialCenter] as [number, number, number];
+                      const c = [...distrib.gradient.radialCenter] as [
+                        number,
+                        number,
+                        number,
+                      ];
                       c[i] = Number(e.target.value);
                       patchGrad({ radialCenter: c });
-                    }} />
+                    }}
+                  />
                 </label>
               ))}
             </div>
           )}
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">Scale {distrib.gradient.scale.toFixed(3)}</label>
-            <input type="range" min={0.01} max={0.5} step={0.005} value={distrib.gradient.scale}
-              onChange={(e) => patchGrad({ scale: Number(e.target.value) })} />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Phase {distrib.gradient.phase.toFixed(2)}</label>
-            <input type="range" min={-3.15} max={3.15} step={0.05} value={distrib.gradient.phase}
-              onChange={(e) => patchGrad({ phase: Number(e.target.value) })} />
+            <label className="sidebar-label-sm">
+              Scale {distrib.gradient.scale.toFixed(3)}
+            </label>
+            <input
+              type="range"
+              min={0.01}
+              max={0.5}
+              step={0.005}
+              value={distrib.gradient.scale}
+              onChange={(e) => patchGrad({ scale: Number(e.target.value) })}
+            />
           </div>
           <div className="sidebar-row">
             <label className="sidebar-label-sm">
-              <input type="checkbox" checked={distrib.gradient.quantized}
-                onChange={(e) => patchGrad({ quantized: e.target.checked })} />
-              {" "}Quantized (palette steps)
+              Phase {distrib.gradient.phase.toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min={-3.15}
+              max={3.15}
+              step={0.05}
+              value={distrib.gradient.phase}
+              onChange={(e) => patchGrad({ phase: Number(e.target.value) })}
+            />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">
+              <input
+                type="checkbox"
+                checked={distrib.gradient.quantized}
+                onChange={(e) => patchGrad({ quantized: e.target.checked })}
+              />{" "}
+              Quantized (palette steps)
             </label>
           </div>
         </>
@@ -650,22 +721,46 @@ function MultiColorPaintSection(props: {
         <>
           <div className="sidebar-row">
             <label className="sidebar-label-sm">Bayer size</label>
-            <select className="sidebar-select-sm" value={distrib.dither.orderedSize}
-              onChange={(e) => patchDither({ orderedSize: Number(e.target.value) as 2 | 4 | 8 })}>
+            <select
+              className="sidebar-select-sm"
+              value={distrib.dither.orderedSize}
+              onChange={(e) =>
+                patchDither({
+                  orderedSize: Number(e.target.value) as 2 | 4 | 8,
+                })
+              }
+            >
               <option value={2}>2×2</option>
               <option value={4}>4×4</option>
               <option value={8}>8×8</option>
             </select>
           </div>
           <div className="sidebar-row">
-            <label className="sidebar-label-sm">Strength {distrib.dither.orderedStrength.toFixed(2)}</label>
-            <input type="range" min={0} max={1} step={0.05} value={distrib.dither.orderedStrength}
-              onChange={(e) => patchDither({ orderedStrength: Number(e.target.value) })} />
+            <label className="sidebar-label-sm">
+              Strength {distrib.dither.orderedStrength.toFixed(2)}
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={distrib.dither.orderedStrength}
+              onChange={(e) =>
+                patchDither({ orderedStrength: Number(e.target.value) })
+              }
+            />
           </div>
           <div className="sidebar-row">
             <label className="sidebar-label-sm">Error diffusion</label>
-            <select className="sidebar-select-sm" value={distrib.dither.errorDiffusion}
-              onChange={(e) => patchDither({ errorDiffusion: e.target.value as "none" | "floydSteinberg" })}>
+            <select
+              className="sidebar-select-sm"
+              value={distrib.dither.errorDiffusion}
+              onChange={(e) =>
+                patchDither({
+                  errorDiffusion: e.target.value as "none" | "floydSteinberg",
+                })
+              }
+            >
               <option value="none">None (ordered only)</option>
               <option value="floydSteinberg">Floyd–Steinberg</option>
             </select>
@@ -685,7 +780,14 @@ function PaletteSwatches(props: {
   disabled: boolean;
   palette: readonly string[];
 }) {
-  const { activeColor, selectedColors, setActiveColor, setSelectedColors, disabled, palette } = props;
+  const {
+    activeColor,
+    selectedColors,
+    setActiveColor,
+    setSelectedColors,
+    disabled,
+    palette,
+  } = props;
   const dragStartIdxRef = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const shiftHeldRef = useRef(false);
@@ -695,9 +797,15 @@ function PaletteSwatches(props: {
     return idx !== null ? Number(idx) : -1;
   }
 
-  function selectRange(lo: number, hi: number, baseColors?: number[]): number[] {
+  function selectRange(
+    lo: number,
+    hi: number,
+    baseColors?: number[],
+  ): number[] {
     const [a, b] = lo <= hi ? [lo, hi] : [hi, lo];
-    const rangeRgbs = palette.slice(a, b + 1).map((hex) => Number.parseInt(hex.slice(1), 16));
+    const rangeRgbs = palette
+      .slice(a, b + 1)
+      .map((hex) => Number.parseInt(hex.slice(1), 16));
     if (baseColors) {
       const merged = new Set([...baseColors, ...rangeRgbs]);
       return Array.from(merged);
@@ -772,7 +880,8 @@ function PaletteSwatches(props: {
     >
       {palette.map((hex, idx) => {
         const rgb = Number.parseInt(hex.slice(1), 16);
-        const isActive = selectedColors.length === 0 && (activeColor & 0xffffff) === rgb;
+        const isActive =
+          selectedColors.length === 0 && (activeColor & 0xffffff) === rgb;
         const isSelected = selectedSet.has(rgb);
         let cls = "sidebar-palette-swatch";
         if (isActive) cls += " is-active";
@@ -865,7 +974,8 @@ function SymmetryColorSidebarSections(props: {
         {selectedColors.length > 0 && (
           <div className="multi-color-hint">
             {selectedColors.length} colors selected
-            {selectedColors.length > 1 && ` · ${paintColorDistrib.mode === "whiteNoise" ? "white noise" : paintColorDistrib.mode === "randomSingle" ? "random single" : paintColorDistrib.mode === "fbmNoise" ? "FBM" : paintColorDistrib.mode === "gradient" ? "gradient" : "dither"}`}
+            {selectedColors.length > 1 &&
+              ` · ${paintColorDistrib.mode === "whiteNoise" ? "white noise" : paintColorDistrib.mode === "randomSingle" ? "random single" : paintColorDistrib.mode === "fbmNoise" ? "FBM" : paintColorDistrib.mode === "gradient" ? "gradient" : "dither"}`}
             <button
               type="button"
               className="multi-color-clear-btn"
@@ -897,14 +1007,13 @@ function SymmetryColorSidebarSections(props: {
 
 function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const gizmoRef = useRef<SelectionGizmoRef>(null);
   /** Viewport render target in physical pixels (matches projection / picking); from Rust. */
   const viewportPhysRef = useRef({ w: 0, h: 0 });
   /** Swapchain drawable in physical pixels (authoritative native size; may differ from inner×dpr). */
   const surfacePhysRef = useRef({ w: 0, h: 0 });
   /** Last layout viewport CSS size (`layoutViewportCssSize`) — when these change, do not use stale surface for mapping until Rust syncs. */
   const lastLayoutViewportCssRef = useRef({ w: 0, h: 0 });
-  /** When true, `viewer_resize` uses the full swapchain; picking uses window-normalized coords. */
-  const fullSurfaceViewportRef = useRef(readFullSurfaceViewportEnabled());
   const lastRef = useRef({ x: 0, y: 0 });
   /** Last pointer position over `.viewport` in physical pixels (for Z = ping pick). */
   const lastViewportPickNormRef = useRef<{ nx: number; ny: number } | null>(
@@ -915,7 +1024,7 @@ function App() {
   /** After pick probe: camera orbit/pan/dolly vs voxel click-to-edit (matches web: no hit → camera). */
   const gestureRef = useRef<{
     pointerId: number;
-    mode: "camera" | "voxel" | "squishyGizmo";
+    mode: "camera" | "voxel" | "squishyGizmo" | "selectionGizmo";
   } | null>(null);
   const probingRef = useRef(false);
   /** Pointer-up event that arrived while a pick probe was in-flight; replayed after the probe resolves. */
@@ -988,9 +1097,7 @@ function App() {
     null,
   );
   const viewportCursorDebugRafRef = useRef<number | null>(null);
-  const [fullSurfaceViewportEnabled, setFullSurfaceViewportEnabled] = useState(
-    readFullSurfaceViewportEnabled,
-  );
+  const [hideUI, setHideUI] = useState(false);
   const [matchMaterialSelectColor, setMatchMaterialSelectColor] =
     useState(false);
   const matchMaterialSelectColorRef = useRef(false);
@@ -998,7 +1105,9 @@ function App() {
   /** Multi-color palette selection (empty = single-color mode). */
   const [selectedColors, setSelectedColors] = useState<number[]>([]);
   const selectedColorsRef = useRef<number[]>([]);
-  const [paintColorDistrib, setPaintColorDistrib] = useState<PaintColorDistrib>(loadPaintColorDistrib);
+  const [paintColorDistrib, setPaintColorDistrib] = useState<PaintColorDistrib>(
+    loadPaintColorDistrib,
+  );
   const paintColorDistribRef = useRef<PaintColorDistrib>(paintColorDistrib);
   /** Deterministic seed for the current stroke (randomSingle / preview consistency). */
   const currentStrokeSeedRef = useRef<number>(0);
@@ -1205,9 +1314,12 @@ function App() {
   const [clothSimIterations, setClothSimIterations] = useState(0);
   const [clothSimConstraintPasses, setClothSimConstraintPasses] = useState(2);
   const [rockRoughness, setRockRoughness] = useState(0.4);
+  const [ashlarThickness, setAshlarThickness] = useState(3);
   const [rockCount, setRockCount] = useState(1);
   const [rockClusterRadius, setRockClusterRadius] = useState(1);
-  const [rockSinkDirection, setRockSinkDirection] = useState<"none" | "under" | "over">("none");
+  const [rockSinkDirection, setRockSinkDirection] = useState<
+    "none" | "under" | "over"
+  >("none");
   const [rockSinkAmount, setRockSinkAmount] = useState(0);
   const [grassDensity, setGrassDensity] = useState(4);
   const [grassMaxHeight, setGrassMaxHeight] = useState(3);
@@ -1232,10 +1344,14 @@ function App() {
   const [roofHollow, setRoofHollow] = useState(false);
   const [roofPins, setRoofPins] = useState<[number, number, number][]>([]);
   const roofPinsRef = useRef<[number, number, number][]>([]);
-  const [roofAreaShape, setRoofAreaShape] = useState<"polygon" | "square" | "circle">("polygon");
+  const [roofAreaShape, setRoofAreaShape] = useState<
+    "polygon" | "square" | "circle"
+  >("polygon");
   const roofAreaShapeRef = useRef<"polygon" | "square" | "circle">("polygon");
   // First click anchor for square/circle roof modes
-  const [roofFirstClick, setRoofFirstClick] = useState<[number, number, number] | null>(null);
+  const [roofFirstClick, setRoofFirstClick] = useState<
+    [number, number, number] | null
+  >(null);
   const roofFirstClickRef = useRef<[number, number, number] | null>(null);
   const [sculptStrokeMode, setSculptStrokeMode] =
     useState<SculptStrokeModeApi>("draw");
@@ -1255,7 +1371,9 @@ function App() {
   const [extrudeDirectionRef, setExtrudeDirectionRef] = useState<
     "camera" | "auto" | "x" | "y" | "z"
   >("camera");
-  const extrudeDirectionRefRef = useRef<"camera" | "auto" | "x" | "y" | "z">("camera");
+  const extrudeDirectionRefRef = useRef<"camera" | "auto" | "x" | "y" | "z">(
+    "camera",
+  );
   extrudeDirectionRefRef.current = extrudeDirectionRef;
   const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">(
     "cube",
@@ -1378,6 +1496,10 @@ function App() {
   const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
   const [activeTLT, setActiveTLT] = useState<ToolsPane | null>(null);
 
+  const [stampBookOpen, setStampBookOpen] = useState(false);
+  /** True when a stamp was loaded from the stamp book (not from the edit selection). */
+  const [stampBookPatternActive, setStampBookPatternActive] = useState(false);
+
   const [joinModalOpen, setJoinModalOpen] = useState(false);
   const [collabJoinPending, setCollabJoinPending] = useState(false);
   const [hostWsUrl, setHostWsUrl] = useState<string | null>(null);
@@ -1489,27 +1611,23 @@ function App() {
     const surfaceWidth = useNativeSurface ? surf.w : bootstrapW;
     const surfaceHeight = useNativeSurface ? surf.h : bootstrapH;
 
-    const fullVp = fullSurfaceViewportRef.current;
-    let viewportWidth: number;
-    let viewportHeight: number;
-    let viewportX: number;
-    let viewportY: number;
-    if (fullVp) {
-      // Experimental: render 3D to the full drawable; pick using client/inner normalized coords.
-      viewportX = 0;
-      viewportY = 0;
-      viewportWidth = surfaceWidth;
-      viewportHeight = surfaceHeight;
-    } else {
-      // Derive viewport texture size from the same surface×layout fractions as viewportX/Y. Using
-      // round(rh*dpr) here while origin uses (rect.top/ih)*surfaceHeight caused vertical drift when
-      // surfaceHeight ≠ ih*dpr (native swapchain vs CSS estimate).
-      viewportHeight = Math.max(1, Math.round((rh / layoutH) * surfaceHeight));
-      viewportWidth = Math.max(1, Math.round(viewportHeight * (rw / rh)));
-      // Proportional placement in the same pixel space as the swapchain (not raw rect×dpr alone).
-      viewportX = Math.max(0, Math.round((rect.left / layoutW) * surfaceWidth));
-      viewportY = Math.max(0, Math.round((rect.top / layoutH) * surfaceHeight));
-    }
+    // Derive viewport texture size from the same surface×layout fractions as viewportX/Y. Using
+    // round(rh*dpr) here while origin uses (rect.top/ih)*surfaceHeight caused vertical drift when
+    // surfaceHeight ≠ ih*dpr (native swapchain vs CSS estimate).
+    const viewportHeight = Math.max(
+      1,
+      Math.round((rh / layoutH) * surfaceHeight),
+    );
+    const viewportWidth = Math.max(1, Math.round(viewportHeight * (rw / rh)));
+    // Proportional placement in the same pixel space as the swapchain (not raw rect×dpr alone).
+    const viewportX = Math.max(
+      0,
+      Math.round((rect.left / layoutW) * surfaceWidth),
+    );
+    const viewportY = Math.max(
+      0,
+      Math.round((rect.top / layoutH) * surfaceHeight),
+    );
     viewportPhysRef.current = { w: viewportWidth, h: viewportHeight };
     void invoke("viewer_resize", {
       surfaceWidth,
@@ -1535,21 +1653,10 @@ function App() {
   }, []);
 
   useEffect(() => {
-    fullSurfaceViewportRef.current = fullSurfaceViewportEnabled;
-  }, [fullSurfaceViewportEnabled]);
-
-  useEffect(() => {
-    sendResize();
-  }, [fullSurfaceViewportEnabled, sendResize]);
-
-  useEffect(() => {
-    try {
-      void invoke("view_menu_sync_full_surface_viewport", {
-        enabled: readFullSurfaceViewportEnabled(),
-      }).catch(() => {});
-    } catch {
-      /* ignore */
-    }
+    const p = loadPreferences();
+    void invoke("set_emission_lighting", {
+      enabled: p.enableEmissionLighting,
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -1737,6 +1844,9 @@ function App() {
       }),
       listen("voxelle-open-preferences", () => {
         setPreferencesOpen(true);
+      }),
+      listen("voxelle-menu-stamp-book", () => {
+        setStampBookOpen(true);
       }),
       listen<string>("collab-ping", (e) => {
         try {
@@ -1941,15 +2051,8 @@ function App() {
           setViewportCursorDebugScreen(null);
         }
       }),
-      listen<boolean>("voxelle-full-surface-viewport", (e) => {
-        const enabled = e.payload;
-        try {
-          localStorage.setItem(LS_FULL_SURFACE_VIEWPORT, enabled ? "1" : "0");
-        } catch {
-          /* ignore */
-        }
-        fullSurfaceViewportRef.current = enabled;
-        setFullSurfaceViewportEnabled(enabled);
+      listen<boolean>("voxelle-hide-ui", (e) => {
+        setHideUI(e.payload);
       }),
       listen<number>("voxelle-selection-updated", (e) => {
         setSelectionCount(typeof e.payload === "number" ? e.payload : 0);
@@ -1969,6 +2072,12 @@ function App() {
         const msg =
           typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
         console.warn(msg);
+      }),
+      listen("voxelle-menu-rotate-selection", () => {
+        // "Rotate by degrees…" menu item — rotate 90° around Y (most common).
+        void invoke("selection_rotate", { axis: 1, quarters: 1 }).catch(
+          () => {},
+        );
       }),
     ]).then((unlisteners) => {
       if (!active) {
@@ -2113,7 +2222,10 @@ function App() {
   useEffect(() => {
     paintColorDistribRef.current = paintColorDistrib;
     try {
-      localStorage.setItem(LS_PAINT_COLOR_DISTRIB, JSON.stringify(paintColorDistrib));
+      localStorage.setItem(
+        LS_PAINT_COLOR_DISTRIB,
+        JSON.stringify(paintColorDistrib),
+      );
     } catch {}
   }, [paintColorDistrib]);
   useEffect(() => {
@@ -2302,6 +2414,8 @@ function App() {
   const clothSimIterationsRef = useRef(clothSimIterations);
   const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
   const rockRoughnessRef = useRef(rockRoughness);
+  const ashlarThicknessRef = useRef(ashlarThickness);
+  const ashlarPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
   const rockCountRef = useRef(rockCount);
   const rockClusterRadiusRef = useRef(rockClusterRadius);
   const rockSinkDirectionRef = useRef(rockSinkDirection);
@@ -2349,6 +2463,9 @@ function App() {
   useEffect(() => {
     rockRoughnessRef.current = rockRoughness;
   }, [rockRoughness]);
+  useEffect(() => {
+    ashlarThicknessRef.current = ashlarThickness;
+  }, [ashlarThickness]);
   useEffect(() => {
     rockCountRef.current = rockCount;
   }, [rockCount]);
@@ -2413,7 +2530,9 @@ function App() {
       sprayRadiusMin: sprayRadiusMinRef.current,
       sprayRadiusMax: sprayRadiusMaxRef.current,
       sprayBrushShape: sm === "spray" ? sprayBrushShapeRef.current : undefined,
-      constrainToPlaneRef: constrainToPlane ? sprayConstrainToPlaneRefRef.current : undefined,
+      constrainToPlaneRef: constrainToPlane
+        ? sprayConstrainToPlaneRefRef.current
+        : undefined,
       strokeFamilyVariant: strokeFamilyVariantRef.current,
       strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
       strokeAxisAlign: selectionStrokeAxisAlignRef.current,
@@ -2607,12 +2726,12 @@ function App() {
       planeAxis: isSculpt ? "auto" : planeAxisRef.current,
       strokeAux: mergedStrokeAux({}),
       color: activeColorRef.current,
-      ...((() => {
+      ...(() => {
         const pal = selectedColorsRef.current;
         return pal.length > 1
           ? { palette: pal, paintColorDistrib: paintColorDistribRef.current }
           : {};
-      })()),
+      })(),
       material: activeMaterialRef.current,
       matchMaterial: matchMaterialSelectColorRef.current,
       useBrushPreview: im !== "squishy" && !isGenerator,
@@ -2637,14 +2756,27 @@ function App() {
             generatorRockSize: Math.max(1, generatorSphereRadiusRef.current),
             generatorRockRoughness: rockRoughnessRef.current,
             generatorRockSeed: rockPreviewSeedRef.current,
+            generatorAshlarSize: Math.max(1, generatorSphereRadiusRef.current),
+            generatorAshlarRoughness: rockRoughnessRef.current,
+            generatorAshlarSeed: ashlarPreviewSeedRef.current,
+            generatorAshlarThickness: ashlarThicknessRef.current,
             generatorRockCount: rockCountRef.current,
             generatorRockClusterRadius: rockClusterRadiusRef.current,
-            generatorRockSinkDirection: rockSinkDirectionRef.current === "under" ? -1 : rockSinkDirectionRef.current === "over" ? 1 : 0,
+            generatorRockSinkDirection:
+              rockSinkDirectionRef.current === "under"
+                ? -1
+                : rockSinkDirectionRef.current === "over"
+                  ? 1
+                  : 0,
             generatorRockSinkAmount: rockSinkAmountRef.current,
             generatorGrassDensity: grassDensityRef.current,
             generatorGrassMaxHeight: grassMaxHeightRef.current,
             generatorGrassSeed: grassPreviewSeedRef.current,
-            generatorRoofPins: roofPinsRef.current.map((p) => [p[0], p[1], p[2]]),
+            generatorRoofPins: roofPinsRef.current.map((p) => [
+              p[0],
+              p[1],
+              p[2],
+            ]),
             generatorRoofStyle: roofStyleRef.current,
             generatorRoofHeight: roofHeightRef.current,
             generatorRoofThickness: 1,
@@ -2880,7 +3012,6 @@ function App() {
     });
   }
 
-
   function applyPolygonStrokeFill() {
     if (strokePolygonVerts.length < 3) return;
     const scr =
@@ -2968,11 +3099,26 @@ function App() {
   useEffect(() => {
     if (
       selectionCount === 0 &&
+      !stampBookPatternActive &&
       (interactionMode === "stamp" || interactionMode === "punch")
     ) {
       setInteractionMode("add");
     }
-  }, [selectionCount, interactionMode]);
+    // When user makes a new selection, clear the book stamp pattern
+    if (selectionCount > 0 && stampBookPatternActive) {
+      setStampBookPatternActive(false);
+    }
+  }, [selectionCount, interactionMode, stampBookPatternActive]);
+
+  useEffect(() => {
+    // Don't overwrite a book-loaded stamp clipboard with an empty selection
+    if (
+      !stampBookPatternActive &&
+      (interactionMode === "stamp" || interactionMode === "punch")
+    ) {
+      void invoke("clipboard_copy_selection").catch(() => {});
+    }
+  }, [interactionMode, stampBookPatternActive]);
 
   const previewModeForSync = (m: InteractionMode): string => {
     if (m === "add") return "add";
@@ -2980,6 +3126,8 @@ function App() {
     if (m === "paint") return "paint";
     if (m === "sculpt") return "add";
     if (m === "generator") return "add";
+    if (m === "stamp") return "stamp";
+    if (m === "punch") return "punch";
     if (m === "fly") return "fly";
     if (m === "squishy") return "squishy";
     if (
@@ -3123,7 +3271,10 @@ function App() {
   }, [colorPaletteFloating]);
 
   useEffect(() => {
-    localStorage.setItem(LS_PALETTE_FLOAT_POS, JSON.stringify({ x: colorPalettePos.x, y: colorPalettePos.y }));
+    localStorage.setItem(
+      LS_PALETTE_FLOAT_POS,
+      JSON.stringify({ x: colorPalettePos.x, y: colorPalettePos.y }),
+    );
   }, [colorPalettePos]);
 
   useEffect(() => {
@@ -3238,6 +3389,7 @@ function App() {
       }
       if (
         preferencesOpen ||
+        stampBookOpen ||
         joinModalOpen ||
         newProjectOpen ||
         collabJoinPending
@@ -3277,7 +3429,7 @@ function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [preferencesOpen, joinModalOpen, newProjectOpen, collabJoinPending]);
+  }, [preferencesOpen, stampBookOpen, joinModalOpen, newProjectOpen, collabJoinPending]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3294,6 +3446,7 @@ function App() {
       }
       if (
         preferencesOpen ||
+        stampBookOpen ||
         joinModalOpen ||
         newProjectOpen ||
         collabJoinPending
@@ -3302,16 +3455,48 @@ function App() {
       }
       if (loading || workBusy) return;
       if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.code !== "KeyX" || selectionCount === 0) return;
-      e.preventDefault();
-      e.stopPropagation();
-      void invoke<number>("selection_delete_selected_voxels").catch(() => {});
+      if (selectionCount === 0) return;
+      if (e.code === "KeyX") {
+        e.preventDefault();
+        e.stopPropagation();
+        void invoke<number>("selection_delete_selected_voxels").catch(() => {});
+        return;
+      }
+      // Arrow keys: translate (plain) or rotate 90° (Shift+arrow).
+      // X/Z plane: ← → move X. Shift+← → rotate around Y.
+      // Y axis: no arrow for Y translate; use Shift+↑↓ for rotate around X/Z.
+      const arrowMap: Record<string, [number, number, number]> = {
+        ArrowLeft: [-1, 0, 0],
+        ArrowRight: [1, 0, 0],
+        ArrowUp: [0, 0, -1],
+        ArrowDown: [0, 0, 1],
+      };
+      const rotateMap: Record<string, [number, number]> = {
+        ArrowLeft: [1, -1],
+        ArrowRight: [1, 1],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      };
+      if (!e.shiftKey && arrowMap[e.code]) {
+        e.preventDefault();
+        e.stopPropagation();
+        const [dx, dy, dz] = arrowMap[e.code];
+        void invoke("selection_translate", { dx, dy, dz }).catch(() => {});
+        return;
+      }
+      if (e.shiftKey && rotateMap[e.code]) {
+        e.preventDefault();
+        e.stopPropagation();
+        const [axis, quarters] = rotateMap[e.code];
+        void invoke("selection_rotate", { axis, quarters }).catch(() => {});
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [
     selectionCount,
     preferencesOpen,
+    stampBookOpen,
     joinModalOpen,
     newProjectOpen,
     collabJoinPending,
@@ -3488,6 +3673,7 @@ function App() {
     generatorSphereRadius,
     activeColor,
     rockRoughness,
+    ashlarThickness,
     rockCount,
     rockClusterRadius,
     rockSinkDirection,
@@ -3702,13 +3888,6 @@ function App() {
    * `layoutViewportCssSize` so the denominator matches `clientX`/`clientY` (same as `sendResize`).
    */
   const clientToViewportNormalized = useCallback((e: React.PointerEvent) => {
-    if (fullSurfaceViewportRef.current) {
-      const { w: lw, h: lh } = layoutViewportCssSize();
-      return {
-        nx: Math.min(1, Math.max(0, e.clientX / lw)),
-        ny: Math.min(1, Math.max(0, e.clientY / lh)),
-      };
-    }
     const el = viewportRef.current;
     if (!el) return { nx: 0.5, ny: 0.5 };
     const rect = el.getBoundingClientRect();
@@ -3900,15 +4079,21 @@ function App() {
       }
     }
 
+    // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
+    if (e.button === 0 && !loading && !workBusy && !logoSplashPointer && !navigate && !forceCamera) {
+      if (gizmoRef.current?.startDragIfHit(e.clientX, e.clientY)) {
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "selectionGizmo" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+    }
+
     // Generator right-click: reseed preview (web parity)
-    if (
-      mode === "generator" &&
-      e.button === 2 &&
-      !loading &&
-      !workBusy
-    ) {
+    if (mode === "generator" && e.button === 2 && !loading && !workBusy) {
       e.preventDefault();
       rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
+      ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
       // Trigger a preview sync so the new seed is sent to Rust
       const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
       void invoke("sync_preview_input", {
@@ -3989,7 +4174,8 @@ function App() {
         dragDidEditRef.current = false;
         strokeViewportStartRef.current = { nx, ny };
         lastStrokeNormRef.current = { nx, ny };
-        currentStrokeSeedRef.current = Math.floor(Math.random() * 0xffffffff) >>> 0;
+        currentStrokeSeedRef.current =
+          Math.floor(Math.random() * 0xffffffff) >>> 0;
         if (dispatch?.kind === "selection") {
           selectionStrokeBegunRef.current = true;
           void invoke("selection_stroke_begin").catch(() => {});
@@ -4282,6 +4468,19 @@ function App() {
       return;
     }
     if (
+      gestureRef.current?.mode === "selectionGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      const last = lastRef.current;
+      gizmoRef.current?.pointerMove(e.clientX, e.clientY, last.x, last.y);
+      lastRef.current = { x: e.clientX, y: e.clientY };
+      return;
+    }
+    const overGizmo =
+      !gestureRef.current &&
+      (gizmoRef.current?.updateHover(e.clientX, e.clientY) ?? false);
+    if (
+      !overGizmo &&
       !probingRef.current &&
       (interactionModeRef.current === "add" ||
         interactionModeRef.current === "remove" ||
@@ -4292,7 +4491,9 @@ function App() {
         interactionModeRef.current === "selectCoplanar" ||
         interactionModeRef.current === "selectCoplanarEmpty" ||
         interactionModeRef.current === "squishy" ||
-        interactionModeRef.current === "generator") &&
+        interactionModeRef.current === "generator" ||
+        interactionModeRef.current === "stamp" ||
+        interactionModeRef.current === "punch") &&
       !interactionBlockedRef.current
     ) {
       const m = previewModeForSync(interactionModeRef.current);
@@ -4468,8 +4669,13 @@ function App() {
               extrudeStartNormRef.current ?? strokeViewportStartRef.current;
             if (startNorm) {
               // On first drag, persist the start position for later re-drags.
-              if (!extrudeStartNormRef.current && strokeViewportStartRef.current) {
-                extrudeStartNormRef.current = { ...strokeViewportStartRef.current };
+              if (
+                !extrudeStartNormRef.current &&
+                strokeViewportStartRef.current
+              ) {
+                extrudeStartNormRef.current = {
+                  ...strokeViewportStartRef.current,
+                };
               }
               const dpr = window.devicePixelRatio || 1;
               const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
@@ -4484,7 +4690,9 @@ function App() {
                   color: activeColorRef.current,
                   material: activeMaterialRef.current,
                   brushRadius: sculptBrushRadiusRef.current,
-                  brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+                  brushShape: sculptBrushShapeToRust(
+                    sculptBrushShapeUiRef.current,
+                  ),
                   brushStrength: sculptBrushStrengthRef.current,
                   brushFalloff: sculptBrushFalloffRef.current,
                   strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
@@ -4593,6 +4801,15 @@ function App() {
       return;
     }
 
+    if (
+      gestureRef.current?.mode === "selectionGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      gizmoRef.current?.pointerUp();
+      resetPointerGesture("selection-gizmo-up", e);
+      return;
+    }
+
     const g = gestureRef.current;
     const start = pointerStartRef.current;
     const moved = maxPointerMoveRef.current;
@@ -4623,12 +4840,7 @@ function App() {
       if (moved < 5) {
         if (m === "stamp") {
           void invoke("clipboard_stamp_at_screen", {
-            args: {
-              nx,
-              ny,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-            },
+            args: { nx, ny },
           }).catch(() => {});
         } else if (m === "punch") {
           void invoke("clipboard_punch_at_screen", { args: { nx, ny } }).catch(
@@ -4649,7 +4861,12 @@ function App() {
                 material: activeMaterialRef.current,
                 count: rockCount,
                 clusterRadius: rockClusterRadius,
-                sinkDirection: rockSinkDirection === "under" ? -1 : rockSinkDirection === "over" ? 1 : 0,
+                sinkDirection:
+                  rockSinkDirection === "under"
+                    ? -1
+                    : rockSinkDirection === "over"
+                      ? 1
+                      : 0,
                 sinkAmount: rockSinkAmount,
               },
             }).catch(() => {});
@@ -4686,17 +4903,23 @@ function App() {
               });
             }
           } else if (gk === "ashlar") {
+            const placeSeed = ashlarPreviewSeedRef.current;
             void invoke("generator_ashlar_at_screen", {
               args: {
                 nx,
                 ny,
-                seed: (Math.random() * 1e9) | 0,
+                seed: placeSeed,
                 size: Math.max(1, generatorSphereRadiusRef.current),
-                roughness: rockRoughness,
+                roughness: rockRoughnessRef.current,
                 color: activeColorRef.current,
                 material: activeMaterialRef.current,
+                thickness: ashlarThicknessRef.current,
               },
-            }).catch(() => {});
+            }).catch((err: unknown) => {
+              console.error("[ashlar] placement failed:", err);
+            });
+            // Auto-reseed after placement so next preview shows a new shape
+            ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
           } else if (gk === "flora") {
             void invoke("generator_flora_at_screen", {
               args: {
@@ -5112,8 +5335,18 @@ function App() {
   const onPointerLeave = (e: React.PointerEvent) => {
     logPlaneStrokeDebug("leave", e);
     // Keep the select preview visible when the pointer moves to the sidebar / tool panel.
+    // Also keep phased-tool previews alive — their coordinates are locked to
+    // stored data anyway, so clearing on leave just creates a jarring flicker
+    // when the user mouses over the settings overlay.
     const im = interactionModeRef.current;
+    const anyPhaseActive =
+      cuboidPhase.ref.current !== null ||
+      cylinderPhase.ref.current !== null ||
+      extrudePhase.ref.current !== null ||
+      ropePhase.ref.current !== null ||
+      clothPhase.ref.current !== null;
     if (
+      !anyPhaseActive &&
       im !== "select" &&
       im !== "selectByColor" &&
       im !== "selectCoplanar" &&
@@ -5399,7 +5632,8 @@ function App() {
       ropePhase.active ||
       clothPhase.active ||
       (generatorKind === "cloth" && clothPins.length > 0) ||
-      (generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null)) ||
+      (generatorKind === "roof" &&
+        (roofPins.length > 0 || roofFirstClick !== null)) ||
       showPolygonPhaseHud ||
       showWallSculptPolygonHud);
 
@@ -5428,7 +5662,9 @@ function App() {
           isSelectionInteractionMode)));
 
   return (
-    <div className={`app${loading && !loadError ? " app-loading-cursor" : ""}`}>
+    <div
+      className={`app${loading && !loadError ? " app-loading-cursor" : ""}${hideUI ? " app--ui-hidden" : ""}`}
+    >
       <div className="app-main">
         {toolsPaneFloating && showEditorChrome ? (
           <div className="app-sidebar-spacer" aria-hidden />
@@ -5720,7 +5956,10 @@ function App() {
                                     : "sidebar-mode-btn"
                                 }
                                 disabled={
-                                  loading || workBusy || selectionCount === 0
+                                  loading ||
+                                  workBusy ||
+                                  (selectionCount === 0 &&
+                                    !stampBookPatternActive)
                                 }
                                 onClick={() => setInteractionMode("stamp")}
                               >
@@ -6111,19 +6350,81 @@ function App() {
                     <button
                       type="button"
                       className="sidebar-interaction-mode-button"
-                      onClick={() => setInteractionModeMenuOpen(!interactionModeMenuOpen)}
+                      onClick={() =>
+                        setInteractionModeMenuOpen(!interactionModeMenuOpen)
+                      }
                       disabled={loading || workBusy}
                       title="Interaction modes"
                     >
-                      {interactionMode === "navigate" ? "✋" : interactionMode === "fly" ? "✈" : interactionMode === "sculpt" ? "∧" : (["add", "remove", "paint"].includes(interactionMode)) ? "⊕" : "◻️"}
+                      {interactionMode === "navigate"
+                        ? "✋"
+                        : interactionMode === "fly"
+                          ? "✈"
+                          : interactionMode === "sculpt"
+                            ? "∧"
+                            : ["add", "remove", "paint"].includes(
+                                  interactionMode,
+                                )
+                              ? "⊕"
+                              : "◻️"}
                     </button>
                     {interactionModeMenuOpen && (
                       <div className="sidebar-interaction-mode-menu">
-                        <button type="button" onClick={() => {setInteractionMode("navigate"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>✋</span><span>Navigate</span></button>
-                        <button type="button" onClick={() => {setInteractionMode("fly"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>✈</span><span>Fly</span></button>
-                        <button type="button" onClick={() => {setInteractionMode("sculpt"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>∧</span><span>Sculpt</span></button>
-                        <button type="button" onClick={() => {setInteractionMode("add"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>⊕</span><span>Add/Remove</span></button>
-                        <button type="button" onClick={() => {setInteractionMode("paint"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>🎨</span><span>Paint</span></button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("navigate");
+                            setInteractionModeMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          <span>✋</span>
+                          <span>Navigate</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("fly");
+                            setInteractionModeMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          <span>✈</span>
+                          <span>Fly</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("sculpt");
+                            setInteractionModeMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          <span>∧</span>
+                          <span>Sculpt</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("add");
+                            setInteractionModeMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          <span>⊕</span>
+                          <span>Add/Remove</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("paint");
+                            setInteractionModeMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          <span>🎨</span>
+                          <span>Paint</span>
+                        </button>
                       </div>
                     )}
                     <button
@@ -6137,10 +6438,46 @@ function App() {
                     </button>
                     {selectionMenuOpen && (
                       <div className="sidebar-selection-menu">
-                        <button type="button" onClick={() => {setInteractionMode("select"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select</button>
-                        <button type="button" onClick={() => {setInteractionMode("selectByColor"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select by Color</button>
-                        <button type="button" onClick={() => {setInteractionMode("selectCoplanar"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select Coplanar</button>
-                        <button type="button" onClick={() => {setInteractionMode("selectCoplanarEmpty"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select Coplanar Empty</button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("select");
+                            setSelectionMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          Select
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("selectByColor");
+                            setSelectionMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          Select by Color
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("selectCoplanar");
+                            setSelectionMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          Select Coplanar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setInteractionMode("selectCoplanarEmpty");
+                            setSelectionMenuOpen(false);
+                          }}
+                          disabled={loading || workBusy}
+                        >
+                          Select Coplanar Empty
+                        </button>
                       </div>
                     )}
                   </div>
@@ -6149,25 +6486,136 @@ function App() {
                   <div className="sidebar-collapsed-section">
                     {!activeTLT ? (
                       <div className="sidebar-tlt-selector">
-                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "draw" ? "is-active" : ""}`} onClick={() => setActiveTLT("draw")} disabled={loading || workBusy} title="Draw tools">📝</button>
-                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "sculpt" ? "is-active" : ""}`} onClick={() => setActiveTLT("sculpt")} disabled={loading || workBusy} title="Sculpt tools">🔨</button>
-                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "generators" ? "is-active" : ""}`} onClick={() => setActiveTLT("generators")} disabled={loading || workBusy} title="Generators">⚙️</button>
-                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "fly" ? "is-active" : ""}`} onClick={() => setActiveTLT("fly")} disabled={loading || workBusy} title="Fly mode">✈</button>
+                        <button
+                          type="button"
+                          className={`sidebar-tlt-button ${activeTLT === "draw" ? "is-active" : ""}`}
+                          onClick={() => setActiveTLT("draw")}
+                          disabled={loading || workBusy}
+                          title="Draw tools"
+                        >
+                          📝
+                        </button>
+                        <button
+                          type="button"
+                          className={`sidebar-tlt-button ${activeTLT === "sculpt" ? "is-active" : ""}`}
+                          onClick={() => setActiveTLT("sculpt")}
+                          disabled={loading || workBusy}
+                          title="Sculpt tools"
+                        >
+                          🔨
+                        </button>
+                        <button
+                          type="button"
+                          className={`sidebar-tlt-button ${activeTLT === "generators" ? "is-active" : ""}`}
+                          onClick={() => setActiveTLT("generators")}
+                          disabled={loading || workBusy}
+                          title="Generators"
+                        >
+                          ⚙️
+                        </button>
+                        <button
+                          type="button"
+                          className={`sidebar-tlt-button ${activeTLT === "fly" ? "is-active" : ""}`}
+                          onClick={() => setActiveTLT("fly")}
+                          disabled={loading || workBusy}
+                          title="Fly mode"
+                        >
+                          ✈
+                        </button>
                       </div>
                     ) : (
                       <div className="sidebar-subtools">
-                        {activeTLT === "draw" && (<><button type="button" className={`sidebar-subtool-button ${interactionMode === "add" ? "is-active" : ""}`} onClick={() => setInteractionMode("add")} disabled={loading || workBusy} title="Add">⊕</button><button type="button" className={`sidebar-subtool-button ${interactionMode === "remove" ? "is-active" : ""}`} onClick={() => setInteractionMode("remove")} disabled={loading || workBusy} title="Remove">⊖</button><button type="button" className={`sidebar-subtool-button ${interactionMode === "paint" ? "is-active" : ""}`} onClick={() => setInteractionMode("paint")} disabled={loading || workBusy} title="Paint">🎨</button></>)}
-                        {activeTLT === "sculpt" && <button type="button" className={`sidebar-subtool-button ${interactionMode === "sculpt" ? "is-active" : ""}`} onClick={() => setInteractionMode("sculpt")} disabled={loading || workBusy} title="Sculpt">🔨</button>}
-                        {activeTLT === "generators" && <button type="button" className={`sidebar-subtool-button ${interactionMode === "generator" ? "is-active" : ""}`} onClick={() => setInteractionMode("generator")} disabled={loading || workBusy} title="Generators">⚙️</button>}
-                        {activeTLT === "fly" && <button type="button" className={`sidebar-subtool-button ${interactionMode === "fly" ? "is-active" : ""}`} onClick={() => setInteractionMode("fly")} disabled={loading || workBusy} title="Fly">✈</button>}
-                        <button type="button" className="sidebar-back-button" onClick={() => setActiveTLT(null)} disabled={loading || workBusy} title="Back to tools">←</button>
+                        {activeTLT === "draw" && (
+                          <>
+                            <button
+                              type="button"
+                              className={`sidebar-subtool-button ${interactionMode === "add" ? "is-active" : ""}`}
+                              onClick={() => setInteractionMode("add")}
+                              disabled={loading || workBusy}
+                              title="Add"
+                            >
+                              ⊕
+                            </button>
+                            <button
+                              type="button"
+                              className={`sidebar-subtool-button ${interactionMode === "remove" ? "is-active" : ""}`}
+                              onClick={() => setInteractionMode("remove")}
+                              disabled={loading || workBusy}
+                              title="Remove"
+                            >
+                              ⊖
+                            </button>
+                            <button
+                              type="button"
+                              className={`sidebar-subtool-button ${interactionMode === "paint" ? "is-active" : ""}`}
+                              onClick={() => setInteractionMode("paint")}
+                              disabled={loading || workBusy}
+                              title="Paint"
+                            >
+                              🎨
+                            </button>
+                          </>
+                        )}
+                        {activeTLT === "sculpt" && (
+                          <button
+                            type="button"
+                            className={`sidebar-subtool-button ${interactionMode === "sculpt" ? "is-active" : ""}`}
+                            onClick={() => setInteractionMode("sculpt")}
+                            disabled={loading || workBusy}
+                            title="Sculpt"
+                          >
+                            🔨
+                          </button>
+                        )}
+                        {activeTLT === "generators" && (
+                          <button
+                            type="button"
+                            className={`sidebar-subtool-button ${interactionMode === "generator" ? "is-active" : ""}`}
+                            onClick={() => setInteractionMode("generator")}
+                            disabled={loading || workBusy}
+                            title="Generators"
+                          >
+                            ⚙️
+                          </button>
+                        )}
+                        {activeTLT === "fly" && (
+                          <button
+                            type="button"
+                            className={`sidebar-subtool-button ${interactionMode === "fly" ? "is-active" : ""}`}
+                            onClick={() => setInteractionMode("fly")}
+                            disabled={loading || workBusy}
+                            title="Fly"
+                          >
+                            ✈
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="sidebar-back-button"
+                          onClick={() => setActiveTLT(null)}
+                          disabled={loading || workBusy}
+                          title="Back to tools"
+                        >
+                          ←
+                        </button>
                       </div>
                     )}
                   </div>
 
                   {/* Palette Icon */}
                   <div className="sidebar-collapsed-section">
-                    <button type="button" className="sidebar-palette-icon" onClick={() => setColorPaletteFloating(!colorPaletteFloating)} disabled={loading || workBusy} title="Toggle color palette" aria-label="Toggle color palette">🎨</button>
+                    <button
+                      type="button"
+                      className="sidebar-palette-icon"
+                      onClick={() =>
+                        setColorPaletteFloating(!colorPaletteFloating)
+                      }
+                      disabled={loading || workBusy}
+                      title="Toggle color palette"
+                      aria-label="Toggle color palette"
+                    >
+                      🎨
+                    </button>
                   </div>
                 </>
               )}
@@ -6203,12 +6651,24 @@ function App() {
 
                   const handleUp = (upE: PointerEvent) => {
                     if (upE.pointerId !== pid) return;
-                    document.removeEventListener("pointermove", handleMove as EventListener);
-                    document.removeEventListener("pointerup", handleUp as EventListener);
+                    document.removeEventListener(
+                      "pointermove",
+                      handleMove as EventListener,
+                    );
+                    document.removeEventListener(
+                      "pointerup",
+                      handleUp as EventListener,
+                    );
                   };
 
-                  document.addEventListener("pointermove", handleMove as EventListener);
-                  document.addEventListener("pointerup", handleUp as EventListener);
+                  document.addEventListener(
+                    "pointermove",
+                    handleMove as EventListener,
+                  );
+                  document.addEventListener(
+                    "pointerup",
+                    handleUp as EventListener,
+                  );
                 }}
                 aria-label="Drag to move palette"
               >
@@ -6325,20 +6785,16 @@ function App() {
                     viewportRef.current?.getBoundingClientRect() ?? null;
                   const jsPct = viewportCursorDebugJs
                     ? viewportCursorOverlayPercent(
-                        fullSurfaceViewportEnabled,
                         viewportCursorDebugJs.nx,
                         viewportCursorDebugJs.ny,
-                        overlayRect,
                       )
                     : null;
                   const rustPct =
                     viewportCursorDebugRust?.previewNx != null &&
                     viewportCursorDebugRust.previewNy != null
                       ? viewportCursorOverlayPercent(
-                          fullSurfaceViewportEnabled,
                           viewportCursorDebugRust.previewNx,
                           viewportCursorDebugRust.previewNy,
-                          overlayRect,
                         )
                       : null;
                   return (
@@ -6365,10 +6821,6 @@ function App() {
                   );
                 })()}
                 <div className="viewport-cursor-debug-legend">
-                  <div>
-                    Full-window GPU (experimental){" "}
-                    {fullSurfaceViewportEnabled ? "on" : "off"}
-                  </div>
                   <div>
                     JS{" "}
                     {viewportCursorDebugJs
@@ -6684,7 +7136,9 @@ function App() {
                         roofPinsRef.current = [];
                         roofFirstClickRef.current = null;
                         setRoofFirstClick(null);
-                        void invoke("voxel_stroke_preview_reset").catch(() => {});
+                        void invoke("voxel_stroke_preview_reset").catch(
+                          () => {},
+                        );
                       }}
                     >
                       Cancel
@@ -6813,9 +7267,7 @@ function App() {
                       max={1}
                       step={0.02}
                       value={ropeTension}
-                      onChange={(ev) =>
-                        setRopeTension(Number(ev.target.value))
-                      }
+                      onChange={(ev) => setRopeTension(Number(ev.target.value))}
                       style={{ width: 60 }}
                       title="0 = loose, 1 = taut"
                     />
@@ -6944,6 +7396,13 @@ function App() {
                 ) : null}
               </div>
             ) : null}
+            <SelectionGizmo
+              ref={gizmoRef}
+              selectionCount={selectionCount}
+              flyMode={interactionMode === "fly"}
+              loadingOrBusy={loading || workBusy}
+              viewportEl={viewportRef.current}
+            />
           </div>
           {showEditorChrome ? (
             <ViewportCameraHud
@@ -7990,15 +8449,24 @@ function App() {
                       ) : null}
                       <div className="tool-options-range-label">
                         <span>Sink</span>
-                        <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2 }}>
+                        <div
+                          className="stroke-mode-buttons"
+                          style={{ display: "flex", gap: 2 }}
+                        >
                           {(["over", "none", "under"] as const).map((dir) => (
                             <button
                               key={dir}
                               type="button"
-                              className={rockSinkDirection === dir ? "active" : ""}
+                              className={
+                                rockSinkDirection === dir ? "active" : ""
+                              }
                               onClick={() => setRockSinkDirection(dir)}
                               disabled={loading || workBusy}
-                              style={{ flex: 1, textTransform: "capitalize", fontSize: 11 }}
+                              style={{
+                                flex: 1,
+                                textTransform: "capitalize",
+                                fontSize: 11,
+                              }}
                             >
                               {dir}
                             </button>
@@ -8317,8 +8785,8 @@ function App() {
                         <input
                           type="range"
                           min={1}
-                          max={12}
-                          value={Math.min(12, generatorSphereRadius)}
+                          max={20}
+                          value={Math.min(20, generatorSphereRadius)}
                           onChange={(ev) =>
                             setGeneratorSphereRadius(Number(ev.target.value))
                           }
@@ -8335,6 +8803,20 @@ function App() {
                           value={rockRoughness}
                           onChange={(ev) =>
                             setRockRoughness(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Thickness</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={20}
+                          step={1}
+                          value={ashlarThickness}
+                          onChange={(ev) =>
+                            setAshlarThickness(Number(ev.target.value))
                           }
                           disabled={loading || workBusy}
                         />
@@ -8413,33 +8895,47 @@ function App() {
                   ) : null}
                   {generatorKind === "roof" ? (
                     <>
-                      <div className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
+                      <div
+                        className="tool-options-range-label"
+                        style={{ marginTop: "0.35rem" }}
+                      >
                         <span>Area</span>
-                        <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2 }}>
-                          {(["polygon", "square", "circle"] as const).map((shape) => (
-                            <button
-                              key={shape}
-                              type="button"
-                              className={roofAreaShape === shape ? "active" : ""}
-                              onClick={() => {
-                                setRoofAreaShape(shape);
-                                setRoofPins([]);
-                                roofPinsRef.current = [];
-                                roofFirstClickRef.current = null;
-                                setRoofFirstClick(null);
-                                void invoke("voxel_stroke_preview_reset").catch(() => {});
-                              }}
-                              disabled={loading || workBusy}
-                              style={{ flex: 1, textTransform: "capitalize", fontSize: 11 }}
-                            >
-                              {shape}
-                            </button>
-                          ))}
+                        <div
+                          className="stroke-mode-buttons"
+                          style={{ display: "flex", gap: 2 }}
+                        >
+                          {(["polygon", "square", "circle"] as const).map(
+                            (shape) => (
+                              <button
+                                key={shape}
+                                type="button"
+                                className={
+                                  roofAreaShape === shape ? "active" : ""
+                                }
+                                onClick={() => {
+                                  setRoofAreaShape(shape);
+                                  setRoofPins([]);
+                                  roofPinsRef.current = [];
+                                  roofFirstClickRef.current = null;
+                                  setRoofFirstClick(null);
+                                  void invoke(
+                                    "voxel_stroke_preview_reset",
+                                  ).catch(() => {});
+                                }}
+                                disabled={loading || workBusy}
+                                style={{
+                                  flex: 1,
+                                  textTransform: "capitalize",
+                                  fontSize: 11,
+                                }}
+                              >
+                                {shape}
+                              </button>
+                            ),
+                          )}
                         </div>
                       </div>
-                      <label
-                        className="tool-options-range-label"
-                      >
+                      <label className="tool-options-range-label">
                         <span>Style</span>
                         <select
                           value={roofStyle}
@@ -8490,12 +8986,12 @@ function App() {
                         {roofAreaShape === "polygon"
                           ? `Click surface to add pins (${roofPins.length} placed).`
                           : roofAreaShape === "square"
-                          ? roofFirstClick
-                            ? "Click opposite corner."
-                            : "Click first corner."
-                          : roofFirstClick
-                          ? "Click edge to set radius."
-                          : "Click center."}
+                            ? roofFirstClick
+                              ? "Click opposite corner."
+                              : "Click first corner."
+                            : roofFirstClick
+                              ? "Click edge to set radius."
+                              : "Click center."}
                       </p>
                       <button
                         type="button"
@@ -8523,7 +9019,9 @@ function App() {
                             .then(() => {
                               setRoofPins([]);
                               roofPinsRef.current = [];
-                              void invoke("voxel_stroke_preview_reset").catch(() => {});
+                              void invoke("voxel_stroke_preview_reset").catch(
+                                () => {},
+                              );
                             })
                             .catch(() => {});
                         }}
@@ -8806,234 +9304,737 @@ function App() {
                 <div className="tool-options-section">
                   {/* ── Grain ────────────────────────────── */}
                   <div className="tool-options-heading">Grain</div>
-                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <input type="checkbox" checked={mood.grainEnabled}
-                      onChange={(ev) => setMood((p) => moodWith(p, { grainEnabled: ev.target.checked }))}
-                      disabled={loading || workBusy} />
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={mood.grainEnabled}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, { grainEnabled: ev.target.checked }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
                     <span>Enable grain</span>
                   </label>
-                  {mood.grainEnabled && <>
-                    <label className="tool-options-range-label">
-                      <span>Strength</span>
-                      <input type="range" min={0} max={0.5} step={0.01} value={mood.grainStrength}
-                        onChange={(ev) => setMood((p) => moodWith(p, { grainStrength: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <input type="checkbox" checked={mood.grainAnimated}
-                        onChange={(ev) => setMood((p) => moodWith(p, { grainAnimated: ev.target.checked }))}
-                        disabled={loading || workBusy} />
-                      <span>Animated</span>
-                    </label>
-                    {mood.grainAnimated && (
+                  {mood.grainEnabled && (
+                    <>
                       <label className="tool-options-range-label">
-                        <span>Speed</span>
-                        <input type="range" min={0} max={4} step={0.1} value={mood.grainSpeed}
-                          onChange={(ev) => setMood((p) => moodWith(p, { grainSpeed: Number(ev.target.value) }))}
-                          disabled={loading || workBusy} />
+                        <span>Strength</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={0.5}
+                          step={0.01}
+                          value={mood.grainStrength}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                grainStrength: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
                       </label>
-                    )}
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                      <input type="checkbox" checked={mood.grainColorful}
-                        onChange={(ev) => setMood((p) => moodWith(p, { grainColorful: ev.target.checked }))}
-                        disabled={loading || workBusy} />
-                      <span>Colorful</span>
-                    </label>
-                  </>}
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mood.grainAnimated}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { grainAnimated: ev.target.checked }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Animated</span>
+                      </label>
+                      {mood.grainAnimated && (
+                        <label className="tool-options-range-label">
+                          <span>Speed</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={4}
+                            step={0.1}
+                            value={mood.grainSpeed}
+                            onChange={(ev) =>
+                              setMood((p) =>
+                                moodWith(p, {
+                                  grainSpeed: Number(ev.target.value),
+                                }),
+                              )
+                            }
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                      )}
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mood.grainColorful}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { grainColorful: ev.target.checked }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Colorful</span>
+                      </label>
+                    </>
+                  )}
 
-                  {/* ── Vignette ─────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Vignette</div>
+                  {/* ── Bloom ────────────────────────────── */}
+                  <div
+                    className="tool-options-heading"
+                    style={{ marginTop: "0.75rem" }}
+                  >
+                    Bloom
+                  </div>
                   <label className="tool-options-range-label">
                     <span>Strength</span>
-                    <input type="range" min={0} max={1} step={0.02} value={mood.vignette}
-                      onChange={(ev) => setMood((p) => moodWith(p, { vignette: Number(ev.target.value) }))}
-                      disabled={loading || workBusy} />
+                    <input
+                      type="range"
+                      min={0}
+                      max={2}
+                      step={0.02}
+                      value={mood.bloomStrength}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, {
+                            bloomStrength: Number(ev.target.value),
+                          }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
+                  </label>
+
+                  {/* ── Vignette ─────────────────────────── */}
+                  <div
+                    className="tool-options-heading"
+                    style={{ marginTop: "0.75rem" }}
+                  >
+                    Vignette
+                  </div>
+                  <label className="tool-options-range-label">
+                    <span>Strength</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={1}
+                      step={0.02}
+                      value={mood.vignette}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, { vignette: Number(ev.target.value) }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
                   </label>
 
                   {/* ── Atmosphere ────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Atmosphere</div>
-                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <input type="checkbox" checked={mood.atmEnabled}
-                      onChange={(ev) => setMood((p) => moodWith(p, { atmEnabled: ev.target.checked }))}
-                      disabled={loading || workBusy} />
+                  <div
+                    className="tool-options-heading"
+                    style={{ marginTop: "0.75rem" }}
+                  >
+                    Atmosphere
+                  </div>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={mood.atmEnabled}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, { atmEnabled: ev.target.checked }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
                     <span>Enable atmosphere</span>
                   </label>
-                  {mood.atmEnabled && <>
-                    <label className="tool-options-range-label">
-                      <span>Color</span>
-                      <input type="color" value={mood.atmColor}
-                        onChange={(ev) => setMood((p) => moodWith(p, { atmColor: ev.target.value }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Thickness</span>
-                      <input type="range" min={1} max={200} step={1} value={mood.atmThickness}
-                        onChange={(ev) => setMood((p) => moodWith(p, { atmThickness: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Density</span>
-                      <input type="range" min={0} max={1} step={0.02} value={mood.atmDensity}
-                        onChange={(ev) => setMood((p) => moodWith(p, { atmDensity: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.25rem" }}>
-                      <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                        <input type="radio" name="atm-spatial" checked={mood.atmAerial}
-                          onChange={() => setMood((p) => moodWith(p, { atmAerial: true }))}
-                          disabled={loading || workBusy} />
-                        <span>Aerial</span>
+                  {mood.atmEnabled && (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Color</span>
+                        <input
+                          type="color"
+                          value={mood.atmColor}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { atmColor: ev.target.value }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
                       </label>
-                      <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                        <input type="radio" name="atm-spatial" checked={!mood.atmAerial}
-                          onChange={() => setMood((p) => moodWith(p, { atmAerial: false }))}
-                          disabled={loading || workBusy} />
-                        <span>Plane</span>
+                      <label className="tool-options-range-label">
+                        <span>Thickness</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={200}
+                          step={1}
+                          value={mood.atmThickness}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                atmThickness: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
                       </label>
-                    </div>
-                    {!mood.atmAerial && (
-                      <div style={{ display: "flex", gap: "0.75rem", marginTop: "0.25rem" }}>
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                          <input type="radio" name="atm-mode" checked={!mood.atmPositiveSide}
-                            onChange={() => setMood((p) => moodWith(p, { atmPositiveSide: false }))}
-                            disabled={loading || workBusy} />
-                          <span>Layer (slab)</span>
+                      <label className="tool-options-range-label">
+                        <span>Density</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={mood.atmDensity}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                atmDensity: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: "0.75rem",
+                          marginTop: "0.25rem",
+                        }}
+                      >
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "0.3rem",
+                          }}
+                        >
+                          <input
+                            type="radio"
+                            name="atm-spatial"
+                            checked={mood.atmAerial}
+                            onChange={() =>
+                              setMood((p) => moodWith(p, { atmAerial: true }))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                          <span>Aerial</span>
                         </label>
-                        <label style={{ display: "flex", alignItems: "center", gap: "0.3rem" }}>
-                          <input type="radio" name="atm-mode" checked={mood.atmPositiveSide}
-                            onChange={() => setMood((p) => moodWith(p, { atmPositiveSide: true }))}
-                            disabled={loading || workBusy} />
-                          <span>Above face</span>
+                        <label
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "0.3rem",
+                          }}
+                        >
+                          <input
+                            type="radio"
+                            name="atm-spatial"
+                            checked={!mood.atmAerial}
+                            onChange={() =>
+                              setMood((p) => moodWith(p, { atmAerial: false }))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                          <span>Plane</span>
                         </label>
                       </div>
-                    )}
-                    <label className="tool-options-range-label">
-                      <span>Height bias</span>
-                      <input type="range" min={-200} max={200} step={1} value={mood.atmHeightBias}
-                        onChange={(ev) => setMood((p) => moodWith(p, { atmHeightBias: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Height falloff</span>
-                      <input type="range" min={10} max={400} step={1} value={mood.atmHeightFalloff}
-                        onChange={(ev) => setMood((p) => moodWith(p, { atmHeightFalloff: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginTop: "0.25rem" }}>
-                      <input type="checkbox" checked={mood.atmDriftEnabled}
-                        onChange={(ev) => setMood((p) => moodWith(p, { atmDriftEnabled: ev.target.checked }))}
-                        disabled={loading || workBusy} />
-                      <span>Drift</span>
-                    </label>
-                    {mood.atmDriftEnabled && <>
+                      {!mood.atmAerial && (
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: "0.75rem",
+                            marginTop: "0.25rem",
+                          }}
+                        >
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.3rem",
+                            }}
+                          >
+                            <input
+                              type="radio"
+                              name="atm-mode"
+                              checked={!mood.atmPositiveSide}
+                              onChange={() =>
+                                setMood((p) =>
+                                  moodWith(p, { atmPositiveSide: false }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span>Layer (slab)</span>
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.3rem",
+                            }}
+                          >
+                            <input
+                              type="radio"
+                              name="atm-mode"
+                              checked={mood.atmPositiveSide}
+                              onChange={() =>
+                                setMood((p) =>
+                                  moodWith(p, { atmPositiveSide: true }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span>Above face</span>
+                          </label>
+                        </div>
+                      )}
                       <label className="tool-options-range-label">
-                        <span>Amount</span>
-                        <input type="range" min={0} max={1} step={0.02} value={mood.atmDriftAmount}
-                          onChange={(ev) => setMood((p) => moodWith(p, { atmDriftAmount: Number(ev.target.value) }))}
-                          disabled={loading || workBusy} />
+                        <span>Height bias</span>
+                        <input
+                          type="range"
+                          min={-200}
+                          max={200}
+                          step={1}
+                          value={mood.atmHeightBias}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                atmHeightBias: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
                       </label>
                       <label className="tool-options-range-label">
-                        <span>Scale</span>
-                        <input type="range" min={0.001} max={0.1} step={0.001} value={mood.atmDriftScale}
-                          onChange={(ev) => setMood((p) => moodWith(p, { atmDriftScale: Number(ev.target.value) }))}
-                          disabled={loading || workBusy} />
+                        <span>Height falloff</span>
+                        <input
+                          type="range"
+                          min={10}
+                          max={400}
+                          step={1}
+                          value={mood.atmHeightFalloff}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                atmHeightFalloff: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
                       </label>
-                      <label className="tool-options-range-label">
-                        <span>Speed</span>
-                        <input type="range" min={0} max={2} step={0.02} value={mood.atmDriftSpeed}
-                          onChange={(ev) => setMood((p) => moodWith(p, { atmDriftSpeed: Number(ev.target.value) }))}
-                          disabled={loading || workBusy} />
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                          marginTop: "0.25rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mood.atmDriftEnabled}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                atmDriftEnabled: ev.target.checked,
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Drift</span>
                       </label>
-                    </>}
-                  </>}
+                      {mood.atmDriftEnabled && (
+                        <>
+                          <label className="tool-options-range-label">
+                            <span>Amount</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.02}
+                              value={mood.atmDriftAmount}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    atmDriftAmount: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Scale</span>
+                            <input
+                              type="range"
+                              min={0.001}
+                              max={0.1}
+                              step={0.001}
+                              value={mood.atmDriftScale}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    atmDriftScale: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Speed</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={2}
+                              step={0.02}
+                              value={mood.atmDriftSpeed}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    atmDriftSpeed: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                        </>
+                      )}
+                    </>
+                  )}
 
                   {/* ── Distance tint ────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Distance tint</div>
-                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <input type="checkbox" checked={mood.dtEnabled}
-                      onChange={(ev) => setMood((p) => moodWith(p, { dtEnabled: ev.target.checked }))}
-                      disabled={loading || workBusy} />
+                  <div
+                    className="tool-options-heading"
+                    style={{ marginTop: "0.75rem" }}
+                  >
+                    Distance tint
+                  </div>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={mood.dtEnabled}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, { dtEnabled: ev.target.checked }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
                     <span>Enable distance tint</span>
                   </label>
-                  {mood.dtEnabled && <>
-                    <label className="tool-options-range-label">
-                      <span>Near color</span>
-                      <input type="color" value={mood.dtNearColor}
-                        onChange={(ev) => setMood((p) => moodWith(p, { dtNearColor: ev.target.value }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Mid color</span>
-                      <input type="color" value={mood.dtMidColor}
-                        onChange={(ev) => setMood((p) => moodWith(p, { dtMidColor: ev.target.value }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Far color</span>
-                      <input type="color" value={mood.dtFarColor}
-                        onChange={(ev) => setMood((p) => moodWith(p, { dtFarColor: ev.target.value }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Near distance</span>
-                      <input type="range" min={1} max={200} step={1} value={mood.dtNearDist}
-                        onChange={(ev) => setMood((p) => moodWith(p, { dtNearDist: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Far distance</span>
-                      <input type="range" min={1} max={400} step={1} value={mood.dtFarDist}
-                        onChange={(ev) => setMood((p) => moodWith(p, { dtFarDist: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Strength</span>
-                      <input type="range" min={0} max={1} step={0.02} value={mood.dtStrength}
-                        onChange={(ev) => setMood((p) => moodWith(p, { dtStrength: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                  </>}
+                  {mood.dtEnabled && (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Near color</span>
+                        <input
+                          type="color"
+                          value={mood.dtNearColor}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { dtNearColor: ev.target.value }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Mid color</span>
+                        <input
+                          type="color"
+                          value={mood.dtMidColor}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { dtMidColor: ev.target.value }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Far color</span>
+                        <input
+                          type="color"
+                          value={mood.dtFarColor}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { dtFarColor: ev.target.value }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Near distance</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={200}
+                          step={1}
+                          value={mood.dtNearDist}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                dtNearDist: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Far distance</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={400}
+                          step={1}
+                          value={mood.dtFarDist}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                dtFarDist: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Strength</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={mood.dtStrength}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                dtStrength: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  )}
 
                   {/* ── Sun shafts ────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>Sun shafts</div>
-                  <label style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                    <input type="checkbox" checked={mood.ssEnabled}
-                      onChange={(ev) => setMood((p) => moodWith(p, { ssEnabled: ev.target.checked }))}
-                      disabled={loading || workBusy} />
+                  <div
+                    className="tool-options-heading"
+                    style={{ marginTop: "0.75rem" }}
+                  >
+                    Sun shafts
+                  </div>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={mood.ssEnabled}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, { ssEnabled: ev.target.checked }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
                     <span>Enable sun shafts</span>
                   </label>
-                  {mood.ssEnabled && <>
-                    <label className="tool-options-range-label">
-                      <span>Strength</span>
-                      <input type="range" min={0} max={10} step={0.1} value={mood.ssStrength}
-                        onChange={(ev) => setMood((p) => moodWith(p, { ssStrength: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Decay</span>
-                      <input type="range" min={0.5} max={0.99} step={0.01} value={mood.ssDecay}
-                        onChange={(ev) => setMood((p) => moodWith(p, { ssDecay: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Density</span>
-                      <input type="range" min={0.1} max={1.5} step={0.02} value={mood.ssDensity}
-                        onChange={(ev) => setMood((p) => moodWith(p, { ssDensity: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Weight</span>
-                      <input type="range" min={0} max={1.5} step={0.02} value={mood.ssWeight}
-                        onChange={(ev) => setMood((p) => moodWith(p, { ssWeight: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                    <label className="tool-options-range-label">
-                      <span>Samples</span>
-                      <input type="range" min={20} max={56} step={1} value={mood.ssSamples}
-                        onChange={(ev) => setMood((p) => moodWith(p, { ssSamples: Number(ev.target.value) }))}
-                        disabled={loading || workBusy} />
-                    </label>
-                  </>}
+                  {mood.ssEnabled && (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Strength</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={10}
+                          step={0.1}
+                          value={mood.ssStrength}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                ssStrength: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Decay</span>
+                        <input
+                          type="range"
+                          min={0.5}
+                          max={0.99}
+                          step={0.01}
+                          value={mood.ssDecay}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, { ssDecay: Number(ev.target.value) }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Density</span>
+                        <input
+                          type="range"
+                          min={0.1}
+                          max={1.5}
+                          step={0.02}
+                          value={mood.ssDensity}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                ssDensity: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Weight</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1.5}
+                          step={0.02}
+                          value={mood.ssWeight}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                ssWeight: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      <label className="tool-options-range-label">
+                        <span>Samples</span>
+                        <input
+                          type="range"
+                          min={20}
+                          max={56}
+                          step={1}
+                          value={mood.ssSamples}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                ssSamples: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  )}
+
+                  {/* ── Screen-space reflections ──────────────── */}
+                  <div
+                    className="tool-options-heading"
+                    style={{ marginTop: "0.75rem" }}
+                  >
+                    Reflections
+                  </div>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "0.5rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={mood.ssrEnabled}
+                      onChange={(ev) =>
+                        setMood((p) =>
+                          moodWith(p, { ssrEnabled: ev.target.checked }),
+                        )
+                      }
+                      disabled={loading || workBusy}
+                    />
+                    <span>Screen-space reflections</span>
+                  </label>
+                  {mood.ssrEnabled && (
+                    <>
+                      <label className="tool-options-range-label">
+                        <span>Strength</span>
+                        <input
+                          type="range"
+                          min={0}
+                          max={1}
+                          step={0.02}
+                          value={mood.ssrStrength}
+                          onChange={(ev) =>
+                            setMood((p) =>
+                              moodWith(p, {
+                                ssrStrength: Number(ev.target.value),
+                              }),
+                            )
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                    </>
+                  )}
                 </div>
               ) : null}
             </div>
@@ -9366,7 +10367,9 @@ function App() {
                             type="button"
                             className="inspector-copy-invite-btn"
                             onClick={copyHostingJoinAddress}
-                            title={hostingCopied ? "Copied" : "Copy invite link"}
+                            title={
+                              hostingCopied ? "Copied" : "Copy invite link"
+                            }
                           >
                             <span className="inspector-copy-invite-label">
                               {hostingCopied ? "Copied!" : "Copy invite link"}
@@ -9542,6 +10545,26 @@ function App() {
         loadPhase={loadPhase}
         pathLabel={pathLabel}
         onCancel={cancelJoin}
+      />
+      <StampBookModal
+        open={stampBookOpen}
+        onClose={() => setStampBookOpen(false)}
+        selectionCount={selectionCount}
+        onUseStamp={(entries: StampBookEntryTuple[]) => {
+          void invoke("stamp_book_load_entries", {
+            entries: entries.map(([dx, dy, dz, color, mat]) => ({
+              dx,
+              dy,
+              dz,
+              color,
+              material: mat ?? "plastic",
+            })),
+          }).then(() => {
+            void invoke("selection_clear").catch(() => {});
+            setStampBookPatternActive(true);
+            setInteractionMode("stamp");
+          }).catch(() => {});
+        }}
       />
       <PreferencesModal
         open={preferencesOpen}

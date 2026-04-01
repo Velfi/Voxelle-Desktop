@@ -155,6 +155,18 @@ body,
   align-items: stretch;
 }
 
+/* Hide all UI chrome, leaving only the raw viewport. */
+.app--ui-hidden .app-sidebar,
+.app--ui-hidden .app-sidebar-spacer,
+.app--ui-hidden .app-sidebar-right,
+.app--ui-hidden .app-status-bar,
+.app--ui-hidden .tool-options-panel,
+.app--ui-hidden .floating-palette-panel,
+.app--ui-hidden .viewport-orbit-gizmo,
+.app--ui-hidden .viewport-zoom-controls {
+  display: none !important;
+}
+
 .app-sidebar {
   flex: 0 0 auto;
   display: flex;
@@ -1179,10 +1191,17 @@ body,
 .modal--preferences {
   display: flex;
   flex-direction: column;
-  min-width: min(90vw, 24rem);
+  min-width: min(90vw, 36rem);
   max-height: min(90dvh, 90vh);
   min-height: 0;
   overflow: hidden;
+}
+
+.modal--preferences-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0.25rem;
 }
 
 .modal--preferences-title {
@@ -1198,6 +1217,47 @@ body,
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  padding-left: 0.75rem;
+}
+
+.prefs-section-anchor {
+  scroll-margin-top: 0;
+}
+
+.prefs-toc {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  width: 7.5rem;
+  padding-top: 0.1rem;
+  padding-right: 0.5rem;
+  border-right: 1px solid var(--app-control-border-strong);
+  gap: 0.1rem;
+}
+
+.prefs-toc-item {
+  all: unset;
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 5px;
+  color: var(--app-text);
+  border-left: 2px solid transparent;
+  transition: color 0.1s, background 0.1s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.prefs-toc-item:hover {
+  color: var(--app-text-strong);
+  background: var(--app-modal-secondary-bg);
+}
+
+.prefs-toc-item.is-active {
+  color: var(--app-text-strong);
+  border-left-color: rgb(var(--theme-accent-rgb));
+  font-weight: 500;
 }
 
 .modal--preferences-scroll .prefs-checkbox-label,
@@ -1210,8 +1270,14 @@ body,
   margin-top: 0.65rem;
 }
 
+.prefs-section-divider {
+  border: none;
+  border-top: 1px solid var(--app-control-border-strong);
+  margin: 0.25rem 0 0;
+}
+
 .prefs-section-title {
-  margin: 0.5rem 0 0.25rem;
+  margin: 0 0 0.25rem;
   font-size: 0.95rem;
   font-weight: 600;
 }
@@ -2957,4 +3023,317 @@ body,
   border-radius: 3px;
   color: var(--app-text-strong);
   margin-left: 0.15rem;
+}
+
+/* ── Stamp Book Modal ──────────────────────────────────────────────────── */
+
+.modal--stamp-book {
+  display: flex;
+  flex-direction: column;
+  min-width: min(90vw, 52rem);
+  max-width: min(90vw, 60rem);
+  max-height: min(88dvh, 88vh);
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.stamp-book-layout {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: min(72dvh, 72vh);
+}
+
+.stamp-book-list-col {
+  display: flex;
+  flex-direction: column;
+  width: 14rem;
+  flex-shrink: 0;
+  border-right: 1px solid var(--app-control-border-strong);
+}
+
+.stamp-book-list-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.75rem 0.75rem 0.5rem;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--app-control-border-strong);
+}
+
+.stamp-book-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.stamp-book-search {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.82rem;
+  font: inherit;
+  border: 1px solid var(--app-control-border-strong);
+  border-radius: 4px;
+  background: var(--app-field-bg);
+  color: var(--app-text-strong);
+}
+
+.stamp-book-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  padding: 0.35rem 0.35rem;
+  gap: 0.2rem;
+}
+
+.stamp-book-empty {
+  font-size: 0.8rem;
+  color: var(--app-text-muted);
+  padding: 0.75rem 0.5rem;
+  text-align: center;
+  line-height: 1.4;
+}
+
+.stamp-book-item {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 5px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.stamp-book-item:hover {
+  background: var(--app-modal-secondary-bg);
+}
+
+.stamp-book-item.is-selected {
+  background: rgb(var(--theme-accent-deep-rgb) / 0.28);
+  border-color: rgb(var(--theme-accent-rgb) / 0.4);
+}
+
+.stamp-book-item-swatch {
+  width: 2rem;
+  height: 2rem;
+  flex-shrink: 0;
+  border-radius: 3px;
+  background: var(--app-surface-muted);
+  border: 1px solid var(--app-control-border-strong);
+  overflow: hidden;
+}
+
+.stamp-book-item-swatch svg {
+  width: 100%;
+  height: 100%;
+}
+
+.stamp-book-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  min-width: 0;
+}
+
+.stamp-book-item-name {
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--app-text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stamp-book-item-tags {
+  font-size: 0.72rem;
+  color: var(--app-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.stamp-book-item-count {
+  font-size: 0.7rem;
+  color: var(--app-text-muted);
+}
+
+/* Right column */
+
+.stamp-book-panel-col {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.stamp-book-tabs {
+  display: flex;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--app-control-border-strong);
+  padding: 0 0.5rem;
+  gap: 0;
+}
+
+.stamp-book-tab {
+  all: unset;
+  cursor: pointer;
+  font-size: 0.82rem;
+  padding: 0.55rem 0.85rem;
+  color: var(--app-text-muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.1s, border-color 0.1s;
+}
+
+.stamp-book-tab:hover {
+  color: var(--app-text-strong);
+}
+
+.stamp-book-tab.is-active {
+  color: var(--app-text-strong);
+  border-bottom-color: rgb(var(--theme-accent-rgb));
+  font-weight: 500;
+}
+
+.stamp-book-panel-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 1rem;
+}
+
+/* Manage tab */
+
+.stamp-book-manage {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.stamp-book-voxel-count {
+  font-size: 0.8rem;
+  color: var(--app-text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.stamp-book-manage-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.25rem;
+}
+
+/* Save tab */
+
+.stamp-book-save {
+  display: flex;
+  flex-direction: column;
+}
+
+.stamp-book-hint {
+  font-size: 0.8rem;
+  color: var(--app-text-muted);
+  margin-bottom: 0.75rem;
+}
+
+.stamp-book-save-actions {
+  margin-top: 0.25rem;
+}
+
+/* Share tab */
+
+.stamp-book-share {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.stamp-book-share-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.stamp-book-share-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--app-text-strong);
+}
+
+.stamp-book-share-desc {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--app-text-muted);
+}
+
+.stamp-book-error {
+  font-size: 0.8rem;
+  color: #e57373;
+  margin-top: 0.35rem;
+}
+
+.stamp-book-success {
+  font-size: 0.8rem;
+  color: #81c784;
+  margin-top: 0.35rem;
+}
+
+/* Shared button styles */
+
+.stamp-book-btn {
+  all: unset;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font: inherit;
+  font-size: 0.83rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 6px;
+  border: 1px solid var(--app-control-border-strong);
+  transition: filter 0.1s, opacity 0.1s;
+}
+
+.stamp-book-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.stamp-book-btn:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+
+.stamp-book-btn--primary {
+  background: rgb(var(--theme-accent-deep-rgb) / 0.42);
+  border-color: rgb(var(--theme-accent-rgb) / 0.5);
+  color: var(--app-text-strong);
+}
+
+.stamp-book-btn--secondary {
+  background: var(--app-modal-secondary-bg);
+  color: var(--app-text-strong);
+}
+
+.stamp-book-btn--danger {
+  background: rgb(180 40 40 / 0.25);
+  border-color: rgb(220 80 80 / 0.4);
+  color: var(--app-text-strong);
+}
+
+/* Footer */
+
+.stamp-book-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.6rem 1rem;
+  flex-shrink: 0;
+  border-top: 1px solid var(--app-control-border-strong);
 }

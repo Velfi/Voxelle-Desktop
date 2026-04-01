@@ -6,6 +6,11 @@ use ahash::{AHashMap, AHashSet};
 use glam::{Mat4, Vec3};
 use rayon::prelude::*;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global toggle for baked emission lighting from glow voxels.
+/// Set via `set_emission_lighting` Tauri command; default on.
+pub static EMISSION_ENABLED: AtomicBool = AtomicBool::new(true);
 
 /// Integer voxel coordinate key for maps and meshing.
 pub type VoxelCoord = (i32, i32, i32);
@@ -125,7 +130,11 @@ fn ao_state_to_multiplier(state: usize) -> f32 {
 
 /// Matches `aoCellOccludesForOwner` in `greedyMeshCore.ts`: same object, non-transmissive.
 #[inline]
-fn ao_cell_occludes_for_owner(map: &AHashMap<VoxelCoord, Voxel>, pos: IVec3, source_object_id: u32) -> bool {
+fn ao_cell_occludes_for_owner(
+    map: &AHashMap<VoxelCoord, Voxel>,
+    pos: IVec3,
+    source_object_id: u32,
+) -> bool {
     map.get(&pos)
         .map(|v| v.object_id == source_object_id && !is_transmissive(v.material))
         .unwrap_or(false)
@@ -172,6 +181,35 @@ pub(super) fn corner_ao_factor(
     }
     let st = ao_state(bits[0], bits[1], bits[2]);
     ao_state_to_multiplier(st)
+}
+
+/// Maximum distance (in voxels) at which a glow voxel contributes irradiance to a surface.
+const EMISSION_RADIUS: f32 = 12.0;
+/// Emission intensity scalar. Higher = brighter indirect glow on nearby surfaces.
+const EMISSION_STRENGTH: f32 = 6.0;
+
+/// Accumulate point-light irradiance from `glow_sources` at vertex `pos` with `normal`.
+/// `glow_sources` is `(voxel_center_in_voxel_coords, linear_rgb_color)`.
+fn accumulate_emission(glow_sources: &[(IVec3, Vec3)], pos: Vec3, normal: Vec3) -> Vec3 {
+    let r2 = EMISSION_RADIUS * EMISSION_RADIUS;
+    let mut acc = Vec3::ZERO;
+    for &((sx, sy, sz), color) in glow_sources {
+        let dx = sx as f32 - pos.x;
+        let dy = sy as f32 - pos.y;
+        let dz = sz as f32 - pos.z;
+        let d2 = dx * dx + dy * dy + dz * dz;
+        if d2 > r2 || d2 < 0.01 {
+            continue;
+        }
+        let d = d2.sqrt();
+        let dir = Vec3::new(dx / d, dy / d, dz / d);
+        let ndotl = normal.dot(dir).max(0.0);
+        if ndotl < 1e-4 {
+            continue;
+        }
+        acc += color * (EMISSION_STRENGTH * ndotl / (d2 + 1.0));
+    }
+    acc
 }
 
 fn greedy_merge(cells: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
@@ -321,6 +359,9 @@ pub struct MeshBuffers {
     pub mat_kind: Vec<f32>,
     /// Per-vertex ambient factor from corner AO (`AO_STRONG_PRESET` / `greedyMeshCore` strength 2); hemisphere only in shader.
     pub ao: Vec<f32>,
+    /// Per-vertex RGB irradiance accumulated from nearby glow voxels during mesh baking.
+    /// Applied in the shader as diffuse light on non-emissive surfaces.
+    pub emission_tint: Vec<f32>,
     pub indices: Vec<u32>,
 }
 
@@ -426,14 +467,8 @@ pub fn pack_gpu_greedy_slices(
             for i in 0..6usize {
                 let axis = i / 2;
                 let sign = if i % 2 == 0 { 1 } else { -1 };
-                if !neighbor_occludes_face(
-                    map,
-                    pos,
-                    axis,
-                    sign,
-                    source.material,
-                    source.object_id,
-                ) {
+                if !neighbor_occludes_face(map, pos, axis, sign, source.material, source.object_id)
+                {
                     faces.push((pos, axis, sign));
                 }
             }
@@ -606,7 +641,13 @@ pub fn chunk_key_from_world(x: i32, y: i32, z: i32, origin: (i32, i32, i32), cs:
 
 /// Dirty chunk keys for a voxel edit: only the center chunk plus neighbors where the voxel
 /// sits on a chunk boundary (local coord 0 or cs-1 on that axis).
-pub fn dirty_chunk_keys_for_voxel(x: i32, y: i32, z: i32, origin: (i32, i32, i32), cs: i32) -> Vec<ChunkKey> {
+pub fn dirty_chunk_keys_for_voxel(
+    x: i32,
+    y: i32,
+    z: i32,
+    origin: (i32, i32, i32),
+    cs: i32,
+) -> Vec<ChunkKey> {
     let cs = cs.max(1);
     let (ox, oy, oz) = origin;
     let center = chunk_key_from_world(x, y, z, origin, cs);
@@ -614,18 +655,33 @@ pub fn dirty_chunk_keys_for_voxel(x: i32, y: i32, z: i32, origin: (i32, i32, i32
     let ly = (y - oy).rem_euclid(cs);
     let lz = (z - oz).rem_euclid(cs);
     // Which axis directions need neighbor chunks?
-    let dx: &[i32] = if lx == 0 && lx == cs - 1 { &[-1, 0, 1] }
-        else if lx == 0 { &[-1, 0] }
-        else if lx == cs - 1 { &[0, 1] }
-        else { &[0] };
-    let dy: &[i32] = if ly == 0 && ly == cs - 1 { &[-1, 0, 1] }
-        else if ly == 0 { &[-1, 0] }
-        else if ly == cs - 1 { &[0, 1] }
-        else { &[0] };
-    let dz: &[i32] = if lz == 0 && lz == cs - 1 { &[-1, 0, 1] }
-        else if lz == 0 { &[-1, 0] }
-        else if lz == cs - 1 { &[0, 1] }
-        else { &[0] };
+    let dx: &[i32] = if lx == 0 && lx == cs - 1 {
+        &[-1, 0, 1]
+    } else if lx == 0 {
+        &[-1, 0]
+    } else if lx == cs - 1 {
+        &[0, 1]
+    } else {
+        &[0]
+    };
+    let dy: &[i32] = if ly == 0 && ly == cs - 1 {
+        &[-1, 0, 1]
+    } else if ly == 0 {
+        &[-1, 0]
+    } else if ly == cs - 1 {
+        &[0, 1]
+    } else {
+        &[0]
+    };
+    let dz: &[i32] = if lz == 0 && lz == cs - 1 {
+        &[-1, 0, 1]
+    } else if lz == 0 {
+        &[-1, 0]
+    } else if lz == cs - 1 {
+        &[0, 1]
+    } else {
+        &[0]
+    };
     let mut v = Vec::with_capacity(dx.len() * dy.len() * dz.len());
     for &dix in dx {
         for &diy in dy {
@@ -693,7 +749,11 @@ pub fn mesh_buffers_for_chunk_key(
 ///
 /// `progress` is called from worker threads: `fraction` in \([0, 1]\), and `completed` / `total_chunks`
 /// count spatial buckets processed (including empty buckets). Throttled to avoid excessive UI updates.
-pub fn build_chunk_meshes_and_spatial_cache<F>(voxels: &[Voxel], cs: i32, progress: F) -> Option<(
+pub fn build_chunk_meshes_and_spatial_cache<F>(
+    voxels: &[Voxel],
+    cs: i32,
+    progress: F,
+) -> Option<(
     (i32, i32, i32),
     BTreeMap<ChunkKey, MeshBuffers>,
     SpatialMeshCache,
@@ -764,7 +824,10 @@ impl SpatialMeshCache {
                 std::thread::yield_now();
             }
             let k = chunk_key_from_world(v.x, v.y, v.z, origin, cs);
-            buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
+            buckets
+                .entry(k)
+                .or_default()
+                .insert(coord_key(v.x, v.y, v.z), *v);
         }
         Some(Self {
             origin,
@@ -902,7 +965,12 @@ mod chunk_tests {
         assert_eq!(fused.1.len(), seq.1.len(), "chunk count");
         for (k, m) in &fused.1 {
             let m2 = seq.1.get(k).expect("missing chunk");
-            assert_eq!(sorted_triangle_set(m), sorted_triangle_set(m2), "triangles {:?}", k);
+            assert_eq!(
+                sorted_triangle_set(m),
+                sorted_triangle_set(m2),
+                "triangles {:?}",
+                k
+            );
         }
     }
 
@@ -1142,6 +1210,17 @@ mod chunk_tests {
 /// Greedy mesh for `emit` voxels only, using `map` for neighbor occlusion (include a 1-voxel halo around each chunk).
 /// `mat_kind` per vertex: 0 plastic/rubber, 0.5 metal, 1 glow, 2 glass, 2.5 water.
 pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>) -> MeshBuffers {
+    // Collect glow voxel positions/colors once; used for per-vertex emission baking.
+    // Skip collection entirely when the preference is disabled.
+    let glow_sources: Vec<(IVec3, Vec3)> = if EMISSION_ENABLED.load(Ordering::Relaxed) {
+        map.iter()
+            .filter(|(_, v)| v.material == MaterialId::Glow)
+            .map(|(&pos, v)| (pos, color_rgb(v.color)))
+            .collect()
+    } else {
+        vec![]
+    };
+
     let mut buckets: AHashMap<(u32, u8), Vec<IVec3>> = AHashMap::new();
     for v in emit {
         buckets
@@ -1156,6 +1235,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
         colors: Vec::new(),
         mat_kind: Vec::new(),
         ao: Vec::new(),
+        emission_tint: Vec::new(),
         indices: Vec::new(),
     };
 
@@ -1173,14 +1253,8 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
             for i in 0..6usize {
                 let axis = i / 2;
                 let sign = if i % 2 == 0 { 1 } else { -1 };
-                if !neighbor_occludes_face(
-                    map,
-                    pos,
-                    axis,
-                    sign,
-                    source.material,
-                    source.object_id,
-                ) {
+                if !neighbor_occludes_face(map, pos, axis, sign, source.material, source.object_id)
+                {
                     faces.push((pos, axis, sign));
                 }
             }
@@ -1215,17 +1289,20 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                 let ao01 = corner_ao_factor(map, axis, sign, depth, u, v + h - 1, 3);
 
                 let base = (out.positions.len() / 3) as u32;
-                for (p, ao_v) in [
-                    (p00, ao00),
-                    (p10, ao10),
-                    (p11, ao11),
-                    (p01, ao01),
-                ] {
+                // Glow voxels are already self-illuminated; skip emission baking for them.
+                let is_glow_face = mat_k > 0.75 && mat_k < 1.25;
+                for (p, ao_v) in [(p00, ao00), (p10, ao10), (p11, ao11), (p01, ao01)] {
+                    let em = if is_glow_face || glow_sources.is_empty() {
+                        Vec3::ZERO
+                    } else {
+                        accumulate_emission(&glow_sources, p, n)
+                    };
                     out.positions.extend_from_slice(&p.to_array());
                     out.normals.extend_from_slice(&n.to_array());
                     out.colors.extend_from_slice(&col.to_array());
                     out.mat_kind.push(mat_k);
                     out.ao.push(ao_v);
+                    out.emission_tint.extend_from_slice(&em.to_array());
                 }
 
                 let ccw = if n.x != 0.0 {
@@ -1369,6 +1446,7 @@ pub fn preview_cube_mesh(
         colors,
         mat_kind,
         ao,
+        emission_tint: Vec::new(),
         indices,
     }
 }
@@ -1582,6 +1660,7 @@ pub fn preview_cube_wireframe_mesh(
         colors,
         mat_kind,
         ao,
+        emission_tint: vec![],
         indices,
     }
 }
@@ -1660,14 +1739,48 @@ pub fn preview_cube_prototype(half: f32) -> PreviewPrototype {
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     };
 
-    face(1.0, 0.0, 0.0, [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]]);
-    face(-1.0, 0.0, 0.0, [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]]);
-    face(0.0, 1.0, 0.0, [[-h, h, h], [h, h, h], [h, h, -h], [-h, h, -h]]);
-    face(0.0, -1.0, 0.0, [[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]]);
-    face(0.0, 0.0, 1.0, [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]]);
-    face(0.0, 0.0, -1.0, [[-h, -h, -h], [-h, h, -h], [h, h, -h], [h, -h, -h]]);
+    face(
+        1.0,
+        0.0,
+        0.0,
+        [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]],
+    );
+    face(
+        -1.0,
+        0.0,
+        0.0,
+        [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]],
+    );
+    face(
+        0.0,
+        1.0,
+        0.0,
+        [[-h, h, h], [h, h, h], [h, h, -h], [-h, h, -h]],
+    );
+    face(
+        0.0,
+        -1.0,
+        0.0,
+        [[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]],
+    );
+    face(
+        0.0,
+        0.0,
+        1.0,
+        [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]],
+    );
+    face(
+        0.0,
+        0.0,
+        -1.0,
+        [[-h, -h, -h], [-h, h, -h], [h, h, -h], [h, -h, -h]],
+    );
 
-    PreviewPrototype { positions, normals, indices }
+    PreviewPrototype {
+        positions,
+        normals,
+        indices,
+    }
 }
 
 /// Unit wireframe prototype at the origin (12 edges as thin boxes, same winding as
@@ -1689,12 +1802,72 @@ pub fn preview_wireframe_prototype(half: f32) -> PreviewPrototype {
     };
 
     let mut push_box = |xmin: f32, xmax: f32, ymin: f32, ymax: f32, zmin: f32, zmax: f32| {
-        face(1.0, 0.0, 0.0, [[xmax, ymin, zmin], [xmax, ymax, zmin], [xmax, ymax, zmax], [xmax, ymin, zmax]]);
-        face(-1.0, 0.0, 0.0, [[xmin, ymin, zmax], [xmin, ymax, zmax], [xmin, ymax, zmin], [xmin, ymin, zmin]]);
-        face(0.0, 1.0, 0.0, [[xmin, ymax, zmax], [xmax, ymax, zmax], [xmax, ymax, zmin], [xmin, ymax, zmin]]);
-        face(0.0, -1.0, 0.0, [[xmin, ymin, zmin], [xmax, ymin, zmin], [xmax, ymin, zmax], [xmin, ymin, zmax]]);
-        face(0.0, 0.0, 1.0, [[xmin, ymin, zmax], [xmax, ymin, zmax], [xmax, ymax, zmax], [xmin, ymax, zmax]]);
-        face(0.0, 0.0, -1.0, [[xmin, ymin, zmin], [xmin, ymax, zmin], [xmax, ymax, zmin], [xmax, ymin, zmin]]);
+        face(
+            1.0,
+            0.0,
+            0.0,
+            [
+                [xmax, ymin, zmin],
+                [xmax, ymax, zmin],
+                [xmax, ymax, zmax],
+                [xmax, ymin, zmax],
+            ],
+        );
+        face(
+            -1.0,
+            0.0,
+            0.0,
+            [
+                [xmin, ymin, zmax],
+                [xmin, ymax, zmax],
+                [xmin, ymax, zmin],
+                [xmin, ymin, zmin],
+            ],
+        );
+        face(
+            0.0,
+            1.0,
+            0.0,
+            [
+                [xmin, ymax, zmax],
+                [xmax, ymax, zmax],
+                [xmax, ymax, zmin],
+                [xmin, ymax, zmin],
+            ],
+        );
+        face(
+            0.0,
+            -1.0,
+            0.0,
+            [
+                [xmin, ymin, zmin],
+                [xmax, ymin, zmin],
+                [xmax, ymin, zmax],
+                [xmin, ymin, zmax],
+            ],
+        );
+        face(
+            0.0,
+            0.0,
+            1.0,
+            [
+                [xmin, ymin, zmax],
+                [xmax, ymin, zmax],
+                [xmax, ymax, zmax],
+                [xmin, ymax, zmax],
+            ],
+        );
+        face(
+            0.0,
+            0.0,
+            -1.0,
+            [
+                [xmin, ymin, zmin],
+                [xmin, ymax, zmin],
+                [xmax, ymax, zmin],
+                [xmax, ymin, zmin],
+            ],
+        );
     };
 
     // Bottom face edges (z = -h)
@@ -1713,7 +1886,11 @@ pub fn preview_wireframe_prototype(half: f32) -> PreviewPrototype {
     push_box(h - t, h + t, h - t, h + t, -h, h);
     push_box(-h - t, -h + t, h - t, h + t, -h, h);
 
-    PreviewPrototype { positions, normals, indices }
+    PreviewPrototype {
+        positions,
+        normals,
+        indices,
+    }
 }
 
 /// Thin solid beam between two points (used for squishy metaball wire spheres).
@@ -1733,11 +1910,7 @@ pub fn beam_segment_mesh(
     }
     let dir = d / len;
     let mid = (a + b) * 0.5;
-    let up = if dir.y.abs() < 0.9 {
-        Vec3::Y
-    } else {
-        Vec3::X
-    };
+    let up = if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
     let mut u_ax = dir.cross(up);
     if u_ax.length_squared() < 1e-10 {
         u_ax = dir.cross(Vec3::Z);
@@ -1781,42 +1954,12 @@ pub fn beam_segment_mesh(
     };
 
     // Winding CCW when viewed from outward normal (matches `preview_cube_mesh`).
-    face(
-        u_ax.x,
-        u_ax.y,
-        u_ax.z,
-        [c100, c110, c111, c101],
-    );
-    face(
-        -u_ax.x,
-        -u_ax.y,
-        -u_ax.z,
-        [c000, c001, c011, c010],
-    );
-    face(
-        v_ax.x,
-        v_ax.y,
-        v_ax.z,
-        [c010, c011, c111, c110],
-    );
-    face(
-        -v_ax.x,
-        -v_ax.y,
-        -v_ax.z,
-        [c000, c100, c101, c001],
-    );
-    face(
-        dir.x,
-        dir.y,
-        dir.z,
-        [c001, c101, c111, c011],
-    );
-    face(
-        -dir.x,
-        -dir.y,
-        -dir.z,
-        [c000, c010, c110, c100],
-    );
+    face(u_ax.x, u_ax.y, u_ax.z, [c100, c110, c111, c101]);
+    face(-u_ax.x, -u_ax.y, -u_ax.z, [c000, c001, c011, c010]);
+    face(v_ax.x, v_ax.y, v_ax.z, [c010, c011, c111, c110]);
+    face(-v_ax.x, -v_ax.y, -v_ax.z, [c000, c100, c101, c001]);
+    face(dir.x, dir.y, dir.z, [c001, c101, c111, c011]);
+    face(-dir.x, -dir.y, -dir.z, [c000, c010, c110, c100]);
 
     MeshBuffers {
         positions,
@@ -1824,6 +1967,7 @@ pub fn beam_segment_mesh(
         colors,
         mat_kind,
         ao,
+        emission_tint: vec![],
         indices,
     }
 }
@@ -1874,7 +2018,11 @@ pub fn transform_mesh_buffers(mesh: &mut MeshBuffers, model: glam::Mat4) {
         glam::Mat4::IDENTITY
     };
     for i in (0..mesh.positions.len()).step_by(3) {
-        let p = glam::Vec3::new(mesh.positions[i], mesh.positions[i + 1], mesh.positions[i + 2]);
+        let p = glam::Vec3::new(
+            mesh.positions[i],
+            mesh.positions[i + 1],
+            mesh.positions[i + 2],
+        );
         let pw = model.transform_point3(p);
         mesh.positions[i] = pw.x;
         mesh.positions[i + 1] = pw.y;
@@ -1890,7 +2038,10 @@ pub fn transform_mesh_buffers(mesh: &mut MeshBuffers, model: glam::Mat4) {
 }
 
 /// Bounds of voxel centers transformed into world space (respects object visibility).
-pub fn mesh_bounds_from_voxels_world(voxels: &[Voxel], objects: &[SceneObject]) -> Option<MeshBounds> {
+pub fn mesh_bounds_from_voxels_world(
+    voxels: &[Voxel],
+    objects: &[SceneObject],
+) -> Option<MeshBounds> {
     if voxels.is_empty() {
         return None;
     }
@@ -1933,7 +2084,11 @@ fn append_object_meshes_sorted(
         if !crate::voxelle::scene::is_object_visible(objects, oid) {
             continue;
         }
-        let emit: Vec<Voxel> = voxels.iter().filter(|v| v.object_id == oid).cloned().collect();
+        let emit: Vec<Voxel> = voxels
+            .iter()
+            .filter(|v| v.object_id == oid)
+            .cloned()
+            .collect();
         if emit.is_empty() {
             continue;
         }
@@ -2025,11 +2180,7 @@ pub fn ping_ripple_line_vertices(
             continue;
         }
         let fade = (1.0 - r / MAX_R).clamp(0.2, 1.0);
-        let c = [
-            color[0] * fade,
-            color[1] * fade,
-            color[2] * fade,
-        ];
+        let c = [color[0] * fade, color[1] * fade, color[2] * fade];
         for i in 0..SEGMENTS {
             let a0 = (i as f32) / (SEGMENTS as f32) * tau;
             let a1 = ((i + 1) as f32) / (SEGMENTS as f32) * tau;
@@ -2204,6 +2355,7 @@ pub fn axis_aligned_box_mesh(
         colors,
         mat_kind,
         ao,
+        emission_tint: vec![],
         indices,
     }
 }
@@ -2234,7 +2386,8 @@ pub fn mesh_buffers_selection_overlay_solid(
     if sel_mesh.is_empty() {
         return MeshBuffers::default();
     }
-    let mut combined: AHashMap<VoxelCoord, Voxel> = AHashMap::with_capacity(world.len() + sel_mesh.len());
+    let mut combined: AHashMap<VoxelCoord, Voxel> =
+        AHashMap::with_capacity(world.len() + sel_mesh.len());
     for (k, v) in world.iter() {
         combined.insert(*k, *v);
     }
@@ -2283,9 +2436,10 @@ pub fn selection_aabb_line_vertices(
     let g = 0xd8 as f32 / 255.0;
     let b = 0xff as f32 / 255.0;
     let pos: [f32; 72] = [
-        x0, y0, z0, x1, y0, z0, x1, y0, z0, x1, y0, z1, x1, y0, z1, x0, y0, z1, x0, y0, z1, x0, y0, z0,
-        x0, y1, z0, x1, y1, z0, x1, y1, z0, x1, y1, z1, x1, y1, z1, x0, y1, z1, x0, y1, z1, x0, y1, z0,
-        x0, y0, z0, x0, y1, z0, x1, y0, z0, x1, y1, z0, x1, y0, z1, x1, y1, z1, x0, y0, z1, x0, y1, z1,
+        x0, y0, z0, x1, y0, z0, x1, y0, z0, x1, y0, z1, x1, y0, z1, x0, y0, z1, x0, y0, z1, x0, y0,
+        z0, x0, y1, z0, x1, y1, z0, x1, y1, z0, x1, y1, z1, x1, y1, z1, x0, y1, z1, x0, y1, z1, x0,
+        y1, z0, x0, y0, z0, x0, y1, z0, x1, y0, z0, x1, y1, z0, x1, y0, z1, x1, y1, z1, x0, y0, z1,
+        x0, y1, z1,
     ];
     let mut out = Vec::with_capacity(144);
     for chunk in pos.chunks(3) {
@@ -2332,7 +2486,9 @@ const VOXEL_GRID_EDGE_NEIGHBORS: [[(i32, i32, i32); 2]; 12] = [
 /// Returns `(vertices, indices)` where vertices are `[x,y,z,r,g,b]` and indices
 /// form a line-list. Edges shared by adjacent surface voxels are emitted only
 /// once, and endpoint vertices are reused via the index buffer.
-pub fn voxel_surface_grid_line_vertices(occupancy: &AHashMap<VoxelCoord, Voxel>) -> (Vec<f32>, Vec<u32>) {
+pub fn voxel_surface_grid_line_vertices(
+    occupancy: &AHashMap<VoxelCoord, Voxel>,
+) -> (Vec<f32>, Vec<u32>) {
     if occupancy.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -2360,9 +2516,12 @@ pub fn voxel_surface_grid_line_vertices(occupancy: &AHashMap<VoxelCoord, Voxel>)
         xu | (yu << 21) | (zu << 42)
     };
 
-    let push_vert = |px: f32, py: f32, pz: f32,
-                          vert_map: &mut AHashMap<(i32, i32, i32), u32>,
-                          verts: &mut Vec<f32>| -> u32 {
+    let push_vert = |px: f32,
+                     py: f32,
+                     pz: f32,
+                     vert_map: &mut AHashMap<(i32, i32, i32), u32>,
+                     verts: &mut Vec<f32>|
+     -> u32 {
         let qk = (quantise(px), quantise(py), quantise(pz));
         if let Some(&idx) = vert_map.get(&qk) {
             return idx;

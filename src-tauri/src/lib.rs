@@ -84,6 +84,9 @@ fn mood_settings_to_params(m: &voxelle::MoodSettings) -> MoodParams {
         ss_density: m.ss_density,
         ss_weight: m.ss_weight,
         ss_samples: m.ss_samples,
+        ssr_enabled: m.ssr_enabled,
+        ssr_strength: m.ssr_strength,
+        bloom_strength: m.bloom_strength,
     }
 }
 
@@ -125,6 +128,9 @@ fn mood_params_to_settings(p: &MoodParams) -> voxelle::MoodSettings {
         ss_density: p.ss_density,
         ss_weight: p.ss_weight,
         ss_samples: p.ss_samples,
+        ssr_enabled: p.ssr_enabled,
+        ssr_strength: p.ssr_strength,
+        bloom_strength: p.bloom_strength,
     }
 }
 
@@ -168,6 +174,10 @@ pub(crate) enum PreviewMode {
     Fly,
     /// Metaball field preview + edit gizmo (Squishy tool).
     Squishy,
+    /// Ghost overlay of clipboard entries at the add-tool anchor (empty cell in front of hit).
+    Stamp,
+    /// Red overlay of clipboard entries at the hit cell (voxels that would be removed).
+    Punch,
 }
 
 impl PreviewMode {
@@ -179,6 +189,8 @@ impl PreviewMode {
             "select" => Self::Select,
             "fly" => Self::Fly,
             "squishy" => Self::Squishy,
+            "stamp" => Self::Stamp,
+            "punch" => Self::Punch,
             _ => Self::Navigate,
         }
     }
@@ -718,6 +730,10 @@ struct PreviewHoverContext {
     generator_roof_parapet_height: i32,
     generator_roof_salt_skew: f32,
     generator_roof_hollow: bool,
+    generator_ashlar_size: i32,
+    generator_ashlar_roughness: f32,
+    generator_ashlar_seed: i32,
+    generator_ashlar_thickness: i32,
 }
 
 impl Default for PreviewHoverContext {
@@ -766,6 +782,10 @@ impl Default for PreviewHoverContext {
             generator_roof_parapet_height: 2,
             generator_roof_salt_skew: 0.0,
             generator_roof_hollow: false,
+            generator_ashlar_size: 4,
+            generator_ashlar_roughness: 0.3,
+            generator_ashlar_seed: 42,
+            generator_ashlar_thickness: 3,
         }
     }
 }
@@ -3363,26 +3383,24 @@ fn view_menu_sync_show_borders(
     Ok(())
 }
 
-/// Keeps **View → Full-window GPU viewport (experimental)** in sync with webview / `localStorage`.
+/// Keeps **View → Hide UI** in sync with webview state.
 #[tauri::command]
-fn view_menu_sync_full_surface_viewport(
-    app: AppHandle,
-    enabled: bool,
-) -> Result<(), String> {
+fn view_menu_sync_hide_ui(app: AppHandle, hidden: bool) -> Result<(), String> {
     #[cfg(desktop)]
     {
         if let Some(menu) = app.try_state::<SelectionMenuState>() {
-            menu.full_surface_viewport
-                .set_checked(enabled)
+            menu.view_hide_ui
+                .set_checked(hidden)
                 .map_err(|e| e.to_string())?;
         }
     }
     #[cfg(not(desktop))]
     {
-        let _ = (app, enabled);
+        let _ = (app, hidden);
     }
     Ok(())
 }
+
 
 /// Keeps the native **Match Material** menu checkbox in sync with app state.
 #[tauri::command]
@@ -3425,6 +3443,20 @@ fn debug_menu_sync_viewport_cursor_overlay(
     {
         let _ = app;
     }
+    Ok(())
+}
+
+#[tauri::command]
+fn set_emission_lighting(
+    state: State<'_, Arc<ViewerState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    greedy_mesh::EMISSION_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+    // Invalidate the mesh cache so the next frame triggers a full remesh with the new setting.
+    if let Some(viewer) = state.viewer.lock().as_mut() {
+        viewer.invalidate_spatial_mesh_cache();
+    }
+    state.mesh_refresh_generation.fetch_add(1, std::sync::atomic::Ordering::Release);
     Ok(())
 }
 
@@ -3710,6 +3742,12 @@ fn pick_cell_for_ping(
         .or_else(|| {
             voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
         }),
+        PreviewMode::Stamp => {
+            voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
+        }
+        PreviewMode::Punch => {
+            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
+        }
     }
 }
 
@@ -5169,6 +5207,257 @@ fn selection_toggle_at_screen(
     Ok(true)
 }
 
+// ── Selection gizmo projection ────────────────────────────────────────────────
+
+#[derive(serde::Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+struct GizmoProj {
+    sx: f32,
+    sy: f32,
+    in_front: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionGizmoProjected {
+    center_sx: f32,
+    center_sy: f32,
+    /// [+X, −X, +Y, −Y, +Z, −Z] move handle tips
+    move_handles: [GizmoProj; 6],
+    /// 3 rings × 16 samples = 48 points (ring 0 = X-axis, 1 = Y-axis, 2 = Z-axis)
+    rotate_rings: Vec<GizmoProj>,
+    /// Pixels per one world unit at the selection center
+    px_per_world: f32,
+}
+
+fn gizmo_proj_point(cam: &OrbitCamera, w: f32, h: f32, p: glam::Vec3, in_front: bool) -> GizmoProj {
+    let (sx, sy) = voxel_edit::world_to_viewport_pixels(cam, w, h, p.x, p.y, p.z)
+        .unwrap_or((-99999.0, -99999.0));
+    GizmoProj { sx, sy, in_front }
+}
+
+#[tauri::command]
+fn get_selection_gizmo_projected(
+    state: State<'_, Arc<ViewerState>>,
+) -> Option<SelectionGizmoProjected> {
+    let sel = state.selection_cells.lock();
+    if sel.is_empty() { return None; }
+    let mut min_x = i32::MAX; let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX; let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX; let mut max_z = i32::MIN;
+    for &(x, y, z) in sel.iter() {
+        if x < min_x { min_x = x; } if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; } if y > max_y { max_y = y; }
+        if z < min_z { min_z = z; } if z > max_z { max_z = z; }
+    }
+    drop(sel);
+
+    let cx = (min_x + max_x) as f32 * 0.5;
+    let cy = (min_y + max_y) as f32 * 0.5;
+    let cz = (min_z + max_z) as f32 * 0.5;
+    let center = glam::Vec3::new(cx, cy, cz);
+
+    let (vw, vh) = {
+        let v = state.viewer.lock();
+        v.as_ref().map(|vw| vw.viewport_size()).unwrap_or((512, 512))
+    };
+    let w = vw as f32;
+    let h = vh as f32;
+
+    let cam = state.camera.lock();
+    let (center_sx, center_sy) =
+        voxel_edit::world_to_viewport_pixels(&cam, w, h, cx, cy, cz)?;
+
+    let inv_view = cam.view_matrix().inverse();
+    let cam_eye = glam::Vec3::new(inv_view.w_axis.x, inv_view.w_axis.y, inv_view.w_axis.z);
+    let dist = (cam_eye - center).length().max(1.0);
+    let arm_world = (dist * 0.13).clamp(1.5, 20.0);
+
+    let px_per_world = voxel_edit::world_to_viewport_pixels(&cam, w, h, cx + 1.0, cy, cz)
+        .map(|(sx2, sy2)| (sx2 - center_sx).hypot(sy2 - center_sy).max(0.5))
+        .unwrap_or(12.0);
+
+    let in_front_dir = |dir: glam::Vec3| -> bool { (cam_eye - center).dot(dir) > 0.0 };
+
+    let dirs = [
+        glam::Vec3::X, -glam::Vec3::X,
+        glam::Vec3::Y, -glam::Vec3::Y,
+        glam::Vec3::Z, -glam::Vec3::Z,
+    ];
+    let mut move_handles = [GizmoProj { sx: 0.0, sy: 0.0, in_front: true }; 6];
+    for (i, &dir) in dirs.iter().enumerate() {
+        move_handles[i] = gizmo_proj_point(&cam, w, h, center + dir * arm_world, in_front_dir(dir));
+    }
+
+    const RING_N: usize = 16;
+    let ring_radius = arm_world * 0.72;
+    // (ring_axis, u, v) — ring lies in the plane spanned by u and v, perpendicular to ring_axis
+    let ring_defs = [
+        (glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z),
+        (glam::Vec3::Y, glam::Vec3::X, glam::Vec3::Z),
+        (glam::Vec3::Z, glam::Vec3::X, glam::Vec3::Y),
+    ];
+    let mut rotate_rings = Vec::with_capacity(3 * RING_N);
+    for (_ring_axis, u, v) in &ring_defs {
+        for i in 0..RING_N {
+            let angle = i as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+            let offset = (*u * angle.cos() + *v * angle.sin()) * ring_radius;
+            let in_f = (cam_eye - center).dot(offset) > 0.0;
+            rotate_rings.push(gizmo_proj_point(&cam, w, h, center + offset, in_f));
+        }
+    }
+
+    Some(SelectionGizmoProjected { center_sx, center_sy, move_handles, rotate_rings, px_per_world })
+}
+
+// ── Selection transform commands ─────────────────────────────────────────────
+
+/// Push interleaved SelectionBefore + VoxelDeltas onto the solo undo stack.
+/// Clears redo. No-op if in collab mode (collab hosts/clients don't have
+/// selection sync, so we just apply the voxel changes without solo undo).
+fn push_selection_transform_undo(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    before_sel: AHashSet<greedy_mesh::VoxelCoord>,
+    deltas: Vec<voxel_edit::VoxelEditDelta>,
+) {
+    let cm = Arc::clone(&state.collab);
+    let cb = cm.lock();
+    if cb.is_client() || cb.is_host() {
+        return;
+    }
+    drop(cb);
+    // Push SelectionBefore first so VoxelDeltas is on top (popped first on undo).
+    state.solo_undo.lock().push(SoloUndoEntry::SelectionBefore(before_sel));
+    if !deltas.is_empty() {
+        state.solo_undo.lock().push(SoloUndoEntry::VoxelDeltas(deltas));
+    }
+    state.solo_redo.lock().clear();
+    #[cfg(target_os = "macos")]
+    macos_undo::register_solo_edit_completed(app, state);
+}
+
+#[tauri::command]
+fn selection_mirror(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    axis: u8,
+) -> Result<bool, String> {
+    let t_total = Instant::now();
+    let before_sel = state.selection_cells.lock().clone();
+    if before_sel.is_empty() {
+        return Ok(false);
+    }
+    let new_sel = voxel_edit::mirror_selection_coords(&before_sel, axis);
+    let deltas = {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else { return Err("no model loaded".into()); };
+        let Some(vmap) = vm.as_mut() else { return Err("voxel index not ready".into()); };
+        voxel_edit::mirror_selected_voxels(file, vmap, &before_sel, axis)
+    };
+    *state.selection_cells.lock() = new_sel;
+    if !deltas.is_empty() {
+        finish_voxel_edit_gpu_deltas(
+            &state,
+            &deltas,
+            0.0,
+            t_total,
+            &app,
+            VoxelGpuRefreshReason::SoloEdit,
+        )?;
+    }
+    push_selection_transform_undo(state.inner(), &app, before_sel, deltas);
+    emit_selection_updated(&app, state.inner());
+    Ok(true)
+}
+
+#[tauri::command]
+fn selection_translate(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    dx: i32,
+    dy: i32,
+    dz: i32,
+) -> Result<bool, String> {
+    if dx == 0 && dy == 0 && dz == 0 {
+        return Ok(false);
+    }
+    let t_total = Instant::now();
+    let before_sel = state.selection_cells.lock().clone();
+    if before_sel.is_empty() {
+        return Ok(false);
+    }
+    let deltas = {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else { return Err("no model loaded".into()); };
+        let Some(vmap) = vm.as_mut() else { return Err("voxel index not ready".into()); };
+        voxel_edit::translate_selected_voxels(file, vmap, &before_sel, dx, dy, dz)
+    };
+    // Update selection to shifted positions.
+    {
+        let new_sel: AHashSet<greedy_mesh::VoxelCoord> = before_sel
+            .iter()
+            .map(|&(x, y, z)| (x + dx, y + dy, z + dz))
+            .collect();
+        *state.selection_cells.lock() = new_sel;
+    }
+    if !deltas.is_empty() {
+        finish_voxel_edit_gpu_deltas(
+            &state,
+            &deltas,
+            0.0,
+            t_total,
+            &app,
+            VoxelGpuRefreshReason::SoloEdit,
+        )?;
+    }
+    push_selection_transform_undo(state.inner(), &app, before_sel, deltas);
+    emit_selection_updated(&app, state.inner());
+    Ok(true)
+}
+
+#[tauri::command]
+fn selection_rotate(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    axis: u8,
+    quarters: i32,
+) -> Result<bool, String> {
+    let q = quarters.rem_euclid(4);
+    if q == 0 {
+        return Ok(false);
+    }
+    let t_total = Instant::now();
+    let before_sel = state.selection_cells.lock().clone();
+    if before_sel.is_empty() {
+        return Ok(false);
+    }
+    let new_sel = voxel_edit::rotate_selection_coords(&before_sel, axis, quarters);
+    let deltas = {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else { return Err("no model loaded".into()); };
+        let Some(vmap) = vm.as_mut() else { return Err("voxel index not ready".into()); };
+        voxel_edit::rotate_selected_voxels(file, vmap, &before_sel, axis, quarters)
+    };
+    *state.selection_cells.lock() = new_sel;
+    if !deltas.is_empty() {
+        finish_voxel_edit_gpu_deltas(
+            &state,
+            &deltas,
+            0.0,
+            t_total,
+            &app,
+            VoxelGpuRefreshReason::SoloEdit,
+        )?;
+    }
+    push_selection_transform_undo(state.inner(), &app, before_sel, deltas);
+    emit_selection_updated(&app, state.inner());
+    Ok(true)
+}
+
 #[tauri::command]
 fn selection_clear(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
     state.selection_cells.lock().clear();
@@ -6089,20 +6378,11 @@ fn clipboard_copy_selection(state: State<'_, Arc<ViewerState>>) -> Result<bool, 
     Ok(true)
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct StampAtScreenArgs {
-    nx: f32,
-    ny: f32,
-    color: u32,
-    material: String,
-}
-
 #[tauri::command]
 fn clipboard_stamp_at_screen(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
-    args: StampAtScreenArgs,
+    args: PickAtScreen,
 ) -> Result<bool, String> {
     let clip = state
         .stamp_clipboard
@@ -6111,7 +6391,6 @@ fn clipboard_stamp_at_screen(
     let Some(clip) = clip else {
         return Ok(false);
     };
-    let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
             let v = state.viewer.lock();
@@ -6140,8 +6419,6 @@ fn clipboard_stamp_at_screen(
             sx,
             sy,
             &clip,
-            args.color,
-            material,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
@@ -6182,6 +6459,55 @@ fn clipboard_punch_at_screen(
         voxel_edit::punch_clipboard_at_screen(file, vmap, &cam, w, h, sx, sy, &clip)?
     };
     commit_voxel_edits(&state, &app, deltas)
+}
+
+#[tauri::command]
+fn get_selection_as_stamp_entries(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<Vec<(i32, i32, i32, u32, String)>, String> {
+    let fg = state.current_file.lock();
+    let Some(file) = fg.as_ref() else {
+        return Ok(vec![]);
+    };
+    let vm = state.voxel_map.lock();
+    let Some(vmap) = vm.as_ref() else {
+        return Ok(vec![]);
+    };
+    let sel = state.selection_cells.lock();
+    let Some(clip) = voxel_edit::selection_to_clipboard(file, vmap, &sel) else {
+        return Ok(vec![]);
+    };
+    Ok(clip
+        .entries
+        .into_iter()
+        .map(|(x, y, z, c, m)| (x, y, z, c, m.as_str_id().to_string()))
+        .collect())
+}
+
+#[derive(serde::Deserialize)]
+struct StampBookLoadEntry {
+    dx: i32,
+    dy: i32,
+    dz: i32,
+    color: u32,
+    material: String,
+}
+
+#[tauri::command]
+fn stamp_book_load_entries(
+    state: State<'_, Arc<ViewerState>>,
+    entries: Vec<StampBookLoadEntry>,
+) -> Result<(), String> {
+    use voxelle::MaterialId;
+    if entries.is_empty() {
+        return Err("no entries".into());
+    }
+    let clip_entries: Vec<(i32, i32, i32, u32, MaterialId)> = entries
+        .into_iter()
+        .map(|e| (e.dx, e.dy, e.dz, e.color, MaterialId::from_str_id(&e.material)))
+        .collect();
+    *state.stamp_clipboard.lock() = Some(voxel_edit::StampClipboard { entries: clip_entries });
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
@@ -9300,6 +9626,24 @@ struct SyncPreviewInput {
     generator_roof_salt_skew: f32,
     #[serde(default)]
     generator_roof_hollow: bool,
+    #[serde(default = "default_rock_size")]
+    generator_ashlar_size: i32,
+    #[serde(default = "default_ashlar_roughness")]
+    generator_ashlar_roughness: f32,
+    #[serde(default = "default_ashlar_seed")]
+    generator_ashlar_seed: i32,
+    #[serde(default = "default_ashlar_thickness")]
+    generator_ashlar_thickness: i32,
+}
+
+fn default_ashlar_roughness() -> f32 {
+    0.3
+}
+fn default_ashlar_seed() -> i32 {
+    42
+}
+fn default_ashlar_thickness() -> i32 {
+    3
 }
 
 fn default_rock_roughness() -> f32 {
@@ -9391,6 +9735,10 @@ fn sync_preview_input(
         ph.generator_roof_parapet_height = args.generator_roof_parapet_height;
         ph.generator_roof_salt_skew = args.generator_roof_salt_skew;
         ph.generator_roof_hollow = args.generator_roof_hollow;
+        ph.generator_ashlar_size = args.generator_ashlar_size;
+        ph.generator_ashlar_roughness = args.generator_ashlar_roughness;
+        ph.generator_ashlar_seed = args.generator_ashlar_seed;
+        ph.generator_ashlar_thickness = args.generator_ashlar_thickness;
     }
     if args.nx < 0.0 {
         *state.preview_cursor.lock() = None;
@@ -9398,6 +9746,106 @@ fn sync_preview_input(
         *state.preview_cursor.lock() = Some((args.nx, args.ny));
     }
     Ok(())
+}
+
+fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
+    let sel = state.selection_cells.lock();
+    if sel.is_empty() {
+        drop(sel);
+        viewer.upload_gizmo_lines(&[]);
+        viewer.upload_gizmo_tris(&[]);
+        return;
+    }
+    let mut min_x = i32::MAX; let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX; let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX; let mut max_z = i32::MIN;
+    for &(x, y, z) in sel.iter() {
+        if x < min_x { min_x = x; } if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; } if y > max_y { max_y = y; }
+        if z < min_z { min_z = z; } if z > max_z { max_z = z; }
+    }
+    drop(sel);
+
+    let pivot = glam::Vec3::new(
+        (min_x + max_x) as f32 * 0.5,
+        (min_y + max_y) as f32 * 0.5,
+        (min_z + max_z) as f32 * 0.5,
+    );
+    let inv_view = cam.view_matrix().inverse();
+    let cam_eye = glam::Vec3::new(inv_view.w_axis.x, inv_view.w_axis.y, inv_view.w_axis.z);
+    let dist = (cam_eye - pivot).length().max(1.0);
+    let arm = (dist * 0.13_f32).clamp(1.5, 20.0);
+
+    // Axis colors in linear space (HDR target): X=red, Y=green, Z=blue
+    let cols: [[f32; 3]; 3] = [
+        [0.875, 0.280, 0.280],
+        [0.280, 0.722, 0.280],
+        [0.280, 0.420, 0.875],
+    ];
+    let dirs = [
+        glam::Vec3::X, -glam::Vec3::X,
+        glam::Vec3::Y, -glam::Vec3::Y,
+        glam::Vec3::Z, -glam::Vec3::Z,
+    ];
+    // Perpendicular basis vectors for each axis's arrowhead cone and ring
+    let perps: [(glam::Vec3, glam::Vec3); 3] = [
+        (glam::Vec3::Y, glam::Vec3::Z),
+        (glam::Vec3::X, glam::Vec3::Z),
+        (glam::Vec3::X, glam::Vec3::Y),
+    ];
+    let cone_h = arm * 0.12;
+    let cone_r = arm * 0.045;
+
+    let mut lv: Vec<f32> = Vec::with_capacity(108 * 6);
+    let mut tv: Vec<f32> = Vec::with_capacity(72 * 6);
+
+    let pv = |buf: &mut Vec<f32>, p: glam::Vec3, c: [f32; 3]| {
+        buf.extend_from_slice(&[p.x, p.y, p.z, c[0], c[1], c[2]]);
+    };
+
+    for (i, &dir) in dirs.iter().enumerate() {
+        let axis = i / 2;
+        let col = cols[axis];
+        let tip = pivot + dir * arm;
+        pv(&mut lv, pivot, col);
+        pv(&mut lv, tip, col);
+
+        // Pyramid arrowhead (4 triangles + 2-triangle base cap)
+        let (u, v_ax) = perps[axis];
+        let base_c = tip - dir * cone_h;
+        let base = [
+            base_c + u * cone_r,
+            base_c + v_ax * cone_r,
+            base_c - u * cone_r,
+            base_c - v_ax * cone_r,
+        ];
+        for j in 0..4usize {
+            pv(&mut tv, tip, col);
+            pv(&mut tv, base[j], col);
+            pv(&mut tv, base[(j + 1) % 4], col);
+        }
+        pv(&mut tv, base[0], col); pv(&mut tv, base[1], col); pv(&mut tv, base[2], col);
+        pv(&mut tv, base[0], col); pv(&mut tv, base[2], col); pv(&mut tv, base[3], col);
+    }
+
+    // Rotation rings (16-segment circles perpendicular to each axis)
+    const RING_N: usize = 16;
+    let ring_r = arm * 0.72;
+    for ring in 0..3usize {
+        let col = cols[ring];
+        let (u, v_ax) = perps[ring];
+        for i in 0..RING_N {
+            let a0 = i as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+            let a1 = (i + 1) as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+            let p0 = pivot + (u * a0.cos() + v_ax * a0.sin()) * ring_r;
+            let p1 = pivot + (u * a1.cos() + v_ax * a1.sin()) * ring_r;
+            pv(&mut lv, p0, col);
+            pv(&mut lv, p1, col);
+        }
+    }
+
+    viewer.upload_gizmo_lines(&lv);
+    viewer.upload_gizmo_tris(&tv);
 }
 
 fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
@@ -9962,6 +10410,31 @@ fn hash_generator_grass_hover(
     h.finish()
 }
 
+fn hash_generator_ashlar_hover(
+    sx: f32,
+    sy: f32,
+    size: i32,
+    roughness: f32,
+    seed: i32,
+    thickness: i32,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x61u8.hash(&mut h); // 'a' for ashlar
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    size.hash(&mut h);
+    roughness.to_bits().hash(&mut h);
+    seed.hash(&mut h);
+    thickness.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
 fn hash_generator_roof_hover(
     pins: &[[i32; 3]],
     style: &str,
@@ -10454,6 +10927,51 @@ fn prepare_preview_mesh(
                         };
                     }
                 }
+                "ashlar" => {
+                    let cells = crate::generators::preview_ashlar_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        ctx.generator_ashlar_seed,
+                        ctx.generator_ashlar_size,
+                        ctx.generator_ashlar_roughness,
+                        ctx.generator_ashlar_thickness,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_ashlar_hover(
+                            sx,
+                            sy,
+                            ctx.generator_ashlar_size,
+                            ctx.generator_ashlar_roughness,
+                            ctx.generator_ashlar_seed,
+                            ctx.generator_ashlar_thickness,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        let set: AHashSet<_> = cells.iter().copied().collect();
+                        let instanced = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &set,
+                            vmap,
+                            file,
+                            dbg,
+                            ctx.color,
+                            None,
+                        );
+                        return PreviewMeshPrepared::Upload {
+                            cache_key: key,
+                            instanced,
+                        };
+                    }
+                }
                 "roof" => {
                     if ctx.generator_roof_pins.len() >= 3 {
                         let cells = crate::generators::preview_roof_voxels(
@@ -10603,11 +11121,80 @@ fn prepare_preview_mesh(
         return PreviewMeshPrepared::Clear;
     }
 
+    if matches!(mode, PreviewMode::Stamp | PreviewMode::Punch) {
+        let clip = state.stamp_clipboard.lock().clone();
+        let Some(clip) = clip else {
+            return PreviewMeshPrepared::Clear;
+        };
+        if clip.entries.is_empty() {
+            return PreviewMeshPrepared::Clear;
+        }
+        let cam = state.camera.lock();
+        let anchor = if matches!(mode, PreviewMode::Stamp) {
+            // Stamp places at the empty cell in front of the first solid.
+            voxel_edit::preview_add_cell(file, vmap, &cam, w, h, sx, sy).map(|(c, _)| c)
+        } else {
+            // Punch removes starting at the hit solid cell.
+            voxel_edit::preview_remove_cell(file, vmap, &cam, w, h, sx, sy).map(|(c, _)| c)
+        };
+        let key = {
+            let mut hasher = AHasher::default();
+            mode.hash(&mut hasher);
+            anchor.hash(&mut hasher);
+            for &(dx, dy, dz, color, _mat) in &clip.entries {
+                dx.hash(&mut hasher);
+                dy.hash(&mut hasher);
+                dz.hash(&mut hasher);
+                color.hash(&mut hasher);
+            }
+            dbg.hash(&mut hasher);
+            hasher.finish()
+        };
+        if preview_overlay_cache_key_get(state) == Some(key) {
+            return PreviewMeshPrepared::Noop;
+        }
+        let Some((ax, ay, az)) = anchor else {
+            return PreviewMeshPrepared::Clear;
+        };
+        let tool = if matches!(mode, PreviewMode::Stamp) {
+            voxel_edit::EditTool::Add
+        } else {
+            voxel_edit::EditTool::Remove
+        };
+        // Build coord→color map for stamp so each ghost voxel shows its source color.
+        let color_map: AHashMap<greedy_mesh::VoxelCoord, u32> = clip
+            .entries
+            .iter()
+            .map(|&(dx, dy, dz, src_color, _)| ((ax + dx, ay + dy, az + dz), src_color))
+            .collect();
+        let cells: AHashSet<greedy_mesh::VoxelCoord> = color_map.keys().copied().collect();
+        let color_resolver = |x: i32, y: i32, z: i32| {
+            color_map.get(&(x, y, z)).copied().unwrap_or(ctx.color)
+        };
+        let instanced = stroke_preview_meshes_for_union(
+            tool,
+            &cells,
+            vmap,
+            file,
+            dbg,
+            ctx.color,
+            if matches!(mode, PreviewMode::Stamp) { Some(&color_resolver as &dyn Fn(i32, i32, i32) -> u32) } else { None },
+        );
+        if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
+            return PreviewMeshPrepared::Clear;
+        }
+        return PreviewMeshPrepared::Upload {
+            cache_key: key,
+            instanced,
+        };
+    }
+
     let tool = match mode {
         PreviewMode::Add => voxel_edit::EditTool::Add,
         PreviewMode::Remove => voxel_edit::EditTool::Remove,
         PreviewMode::Paint => voxel_edit::EditTool::Paint,
-        PreviewMode::Navigate | PreviewMode::Fly | PreviewMode::Select | PreviewMode::Squishy => {
+        PreviewMode::Navigate | PreviewMode::Fly | PreviewMode::Select | PreviewMode::Squishy
+        | PreviewMode::Stamp | PreviewMode::Punch => {
             unreachable!()
         }
     };
@@ -10890,8 +11477,7 @@ pub struct SelectionMenuState {
     pub match_material: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub viewport_cursor_debug: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub view_show_borders: tauri::menu::CheckMenuItem<tauri::Wry>,
-    /// Experimental: GPU viewport uses full swapchain; webview picks with window-normalized coords.
-    pub full_surface_viewport: tauri::menu::CheckMenuItem<tauri::Wry>,
+    pub view_hide_ui: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub render_greedy: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub render_marching: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub render_dual: tauri::menu::CheckMenuItem<tauri::Wry>,
@@ -11116,18 +11702,18 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
     let is_ortho = !app.state::<Arc<ViewerState>>().camera.lock().perspective;
     let ortho_view_item = CheckMenuItem::with_id(app, "menu_view_ortho", "Orthographic", true, is_ortho, None::<&str>)?;
     let sep_view_extras = PredefinedMenuItem::separator(app)?;
-    let view_full_surface_viewport = CheckMenuItem::with_id(
-        app,
-        "menu_view_full_surface_viewport",
-        "Full-window GPU viewport (experimental)",
-        true,
-        false,
-        None::<&str>,
-    )?;
     let view_show_borders = CheckMenuItem::with_id(
         app,
         "menu_view_show_borders",
         "Show borders",
+        true,
+        false,
+        None::<&str>,
+    )?;
+    let view_hide_ui = CheckMenuItem::with_id(
+        app,
+        "menu_view_hide_ui",
+        "Hide UI",
         true,
         false,
         None::<&str>,
@@ -11185,8 +11771,8 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
                 sub.append(&ortho_view_item)?;
                 sub.append(&view_render_ray)?;
                 sub.append(&sep_view_extras)?;
-                sub.append(&view_full_surface_viewport)?;
                 sub.append(&view_show_borders)?;
+                sub.append(&view_hide_ui)?;
                 sub.append(&sep_view_stamp)?;
                 sub.append(&view_stamp_book)?;
                 sub.append(&sep_before_chat)?;
@@ -11206,8 +11792,8 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
                 &ortho_view_item,
                 &view_render_ray,
                 &sep_view_extras,
-                &view_full_surface_viewport,
                 &view_show_borders,
+                &view_hide_ui,
                 &sep_view_stamp,
                 &view_stamp_book,
                 &sep_before_chat,
@@ -11477,7 +12063,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
             match_material: menu_sel_match_material.clone(),
             viewport_cursor_debug: debug_viewport_cursor.clone(),
             view_show_borders: view_show_borders.clone(),
-            full_surface_viewport: view_full_surface_viewport.clone(),
+            view_hide_ui: view_hide_ui.clone(),
             render_greedy: view_render_greedy.clone(),
             render_marching: view_render_marching.clone(),
             render_dual: view_render_dual.clone(),
@@ -12314,17 +12900,6 @@ pub fn run() {
                         wake_viewport_loop(&app);
                     }
                 }
-            } else if event.id() == "menu_view_full_surface_viewport" {
-                #[cfg(desktop)]
-                if let Some(sel) = app.try_state::<SelectionMenuState>() {
-                    if let Ok(enabled) = sel.full_surface_viewport.is_checked() {
-                        let _ = app.emit_to(
-                            EventTarget::webview_window("main"),
-                            "voxelle-full-surface-viewport",
-                            enabled,
-                        );
-                    }
-                }
             } else if event.id() == "menu_view_show_borders" {
                 #[cfg(desktop)]
                 if let Some(sel) = app.try_state::<SelectionMenuState>() {
@@ -12341,20 +12916,42 @@ pub fn run() {
                         wake_viewport_loop(&app);
                     }
                 }
+            } else if event.id() == "menu_view_hide_ui" {
+                #[cfg(desktop)]
+                if let Some(sel) = app.try_state::<SelectionMenuState>() {
+                    if let Ok(checked) = sel.view_hide_ui.is_checked() {
+                        let _ = app.emit_to(
+                            EventTarget::webview_window("main"),
+                            "voxelle-hide-ui",
+                            checked,
+                        );
+                    }
+                }
             } else if event.id() == "menu_view_stamp_book" {
                 let _ = app.emit_to(
                     EventTarget::webview_window("main"),
-                    "voxelle-menu-not-implemented",
-                    "Stamp book is not available in the desktop build yet.",
+                    "voxelle-menu-stamp-book",
+                    (),
+                );
+            } else if event.id() == "menu_voxel_mirror_x" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_mirror(state, app.clone(), 0);
+            } else if event.id() == "menu_voxel_mirror_y" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_mirror(state, app.clone(), 1);
+            } else if event.id() == "menu_voxel_mirror_z" {
+                let state: State<'_, Arc<ViewerState>> = app.state();
+                let _ = selection_mirror(state, app.clone(), 2);
+            } else if event.id() == "menu_voxel_rotate" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-menu-rotate-selection",
+                    (),
                 );
             } else if event.id() == "menu_voxel_hide_selected"
                 || event.id() == "menu_voxel_unhide_all"
                 || event.id() == "menu_voxel_hollow"
                 || event.id() == "menu_voxel_scale"
-                || event.id() == "menu_voxel_rotate"
-                || event.id() == "menu_voxel_mirror_x"
-                || event.id() == "menu_voxel_mirror_y"
-                || event.id() == "menu_voxel_mirror_z"
             {
                 let _ = app.emit_to(
                     EventTarget::webview_window("main"),
@@ -12566,9 +13163,10 @@ pub fn run() {
             set_orthographic,
             get_show_grid_borders,
             view_menu_sync_show_borders,
-            view_menu_sync_full_surface_viewport,
+            view_menu_sync_hide_ui,
             selection_menu_sync_match_material,
             debug_menu_sync_viewport_cursor_overlay,
+            set_emission_lighting,
             set_tone_mapping,
             set_mood_params,
             set_scene_lighting,
@@ -12580,6 +13178,10 @@ pub fn run() {
             sync_fly_input,
             camera_fly_look,
             selection_toggle_at_screen,
+            get_selection_gizmo_projected,
+            selection_translate,
+            selection_rotate,
+            selection_mirror,
             selection_clear,
             selection_delete_selected_voxels,
             selection_get_count,
@@ -12604,6 +13206,8 @@ pub fn run() {
             clipboard_copy_selection,
             clipboard_stamp_at_screen,
             clipboard_punch_at_screen,
+            get_selection_as_stamp_entries,
+            stamp_book_load_entries,
             voxel_sculpt_raise_at_screen,
             voxel_sculpt_stroke_at_screen,
             voxel_sculpt_stroke_preview_at_screen,
@@ -12722,6 +13326,7 @@ pub fn run() {
                     sync_collab_peer_lines(viewer, Arc::as_ref(&state));
                     sync_collab_peer_labels(viewer, Arc::as_ref(&state), &cam);
                     sync_ping_flash(viewer, Arc::as_ref(&state), &cam);
+                    sync_gizmo_gpu(viewer, Arc::as_ref(&state), &cam);
                     let transparent = state
                         .start_screen_logo_transparent
                         .load(Ordering::Relaxed);

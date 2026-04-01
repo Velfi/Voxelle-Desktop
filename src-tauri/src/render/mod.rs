@@ -16,6 +16,9 @@ mod gpu {
     pub mod post_blur {
         pub const WGSL: &str = include_str!("post_blur.wgsl");
     }
+    pub mod post_blit {
+        pub const WGSL: &str = include_str!("post_blit.wgsl");
+    }
     pub mod post_composite {
         pub const WGSL: &str = include_str!("post_composite.wgsl");
     }
@@ -56,9 +59,11 @@ use wgpu::util::DeviceExt;
 
 /// Bump when [`gpu::mesh_greedy::WGSL`] bind group layout changes.
 const MESH_GREEDY_PIPELINE_LAYOUT_VERSION: u32 = 2;
+/// Number of mip levels in the bloom downsample/upsample pyramid.
+const BLOOM_LEVELS: usize = 5;
 
-/// Opaque mesh vertex: `vec3 pos, vec3 n, vec3 color, mat_kind, ao` → 11×`f32`.
-const OPAQUE_VERTEX_STRIDE: u64 = 44;
+/// Opaque mesh vertex: `vec3 pos, vec3 n, vec3 color, mat_kind, ao, vec3 emission_tint` → 14×`f32`.
+const OPAQUE_VERTEX_STRIDE: u64 = 56;
 
 /// [`Maintain::Wait`] can starve other threads while the GPU drains; use a short [`Maintain::Poll`]
 /// loop with yields during heavy mesh rebuild so the app stays responsive.
@@ -308,6 +313,28 @@ struct PostBlurUniform {
     blur_dir: [f32; 4],
 }
 
+/// Matches `post_bloom_extract.wgsl` `BloomExtractU`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BloomExtractUniform {
+    exposure_ev: f32,
+    _pad: [f32; 3],
+}
+
+/// Matches `scene.wgsl` `SsrOpts` (inline SSR in `fs_trans`).
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SsrOpts {
+    /// Scales the final confidence → controls overall reflection intensity.
+    strength: f32,
+    /// Number of world-space ray-march steps (clamped 8..64 in the shader).
+    max_steps: f32,
+    /// Maximum distance between ray hit and scene surface before ignoring hit.
+    thickness: f32,
+    /// 1.0 = SSR enabled, 0.0 = disabled (shader early-outs).
+    enabled: f32,
+}
+
 /// sRGB hex (#rrggbb or rrggbb) → linear RGB (0–1).
 fn hex_to_linear_rgb(hex: &str) -> (f32, f32, f32) {
     let s = hex.trim_start_matches('#');
@@ -398,6 +425,14 @@ pub struct MoodParams {
     pub ss_weight: f32,
     #[serde(default = "default_ss_samples")]
     pub ss_samples: f32,
+    // screen-space reflections
+    #[serde(default)]
+    pub ssr_enabled: bool,
+    #[serde(default = "default_ssr_strength")]
+    pub ssr_strength: f32,
+    // bloom
+    #[serde(default = "default_bloom_strength")]
+    pub bloom_strength: f32,
 }
 
 fn default_true() -> bool { true }
@@ -421,6 +456,8 @@ fn default_ss_decay() -> f32 { 0.92 }
 fn default_ss_density() -> f32 { 0.8 }
 fn default_ss_weight() -> f32 { 0.6 }
 fn default_ss_samples() -> f32 { 32.0 }
+fn default_ssr_strength() -> f32 { 0.8 }
+fn default_bloom_strength() -> f32 { 0.1 }
 
 impl Default for MoodParams {
     fn default() -> Self {
@@ -460,6 +497,9 @@ impl Default for MoodParams {
             ss_density: default_ss_density(),
             ss_weight: default_ss_weight(),
             ss_samples: default_ss_samples(),
+            ssr_enabled: false,
+            ssr_strength: default_ssr_strength(),
+            bloom_strength: default_bloom_strength(),
         }
     }
 }
@@ -543,6 +583,11 @@ struct PostCompositeOpts {
     ss_samples: f32,
     ss_sun_uv_x: f32,
     ss_sun_uv_y: f32,
+    // --- Row 14: bloom ---
+    bloom_strength: f32,
+    _pad14a: f32,
+    _pad14b: f32,
+    _pad14c: f32,
 }
 
 pub struct WgpuViewer {
@@ -588,11 +633,20 @@ pub struct WgpuViewer {
     normal_view: wgpu::TextureView,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// Snapshot of the opaque depth, copied before the trans pass so fs_trans can
+    /// read depth for SSR without conflicting with the depth-stencil write attachment.
+    depth_snapshot_texture: wgpu::Texture,
+    depth_snapshot_view: wgpu::TextureView,
 
     bloom_a: wgpu::Texture,
     bloom_a_view: wgpu::TextureView,
     bloom_b: wgpu::Texture,
     bloom_b_view: wgpu::TextureView,
+    /// Pyramid mip levels for bloom: index 0 = 1/2 res, 1 = 1/4, …, 4 = 1/32.
+    bloom_pyramid_a: Vec<wgpu::Texture>,
+    bloom_pyramid_a_views: Vec<wgpu::TextureView>,
+    bloom_pyramid_b: Vec<wgpu::Texture>,
+    bloom_pyramid_b_views: Vec<wgpu::TextureView>,
 
     present_texture: wgpu::Texture,
     present_view: wgpu::TextureView,
@@ -610,9 +664,21 @@ pub struct WgpuViewer {
     bind_blur_h: wgpu::BindGroup,
     bind_blur_v: wgpu::BindGroup,
     bind_composite: wgpu::BindGroup,
+    /// Pyramid bloom bind groups — rebuilt on resize via rebuild_bind_groups.
+    bind_blit_down: Vec<wgpu::BindGroup>,
+    bind_blit_up: Vec<wgpu::BindGroup>,
+    /// Weighted upsample bind groups (use post_blur_layout + post_blit_weight_buf).
+    bind_blit_up_weighted: Vec<wgpu::BindGroup>,
+    bind_blit_final: wgpu::BindGroup,
+    bind_blur_pyr_h: Vec<wgpu::BindGroup>,
+    bind_blur_pyr_v: Vec<wgpu::BindGroup>,
     bind_trans: Option<wgpu::BindGroup>,
 
     post_blur_buf: wgpu::Buffer,
+    /// Feeds exposure_ev into the bloom extract shader for physical threshold scaling.
+    bloom_extract_buf: wgpu::Buffer,
+    /// Constant weight (0.75) for the weighted bloom upsample pyramid.
+    post_blit_weight_buf: wgpu::Buffer,
     post_composite_opts_buf: wgpu::Buffer,
     post_composite_opts: PostCompositeOpts,
 
@@ -635,15 +701,26 @@ pub struct WgpuViewer {
     pipeline_collab_frustum_tri_front: wgpu::RenderPipeline,
     /// Voxel grid borders: depth-tested only (no occluded ghost pass), semi-transparent.
     pipeline_grid_border_lines: wgpu::RenderPipeline,
+    /// Selection transform gizmo (move arrows + rotation rings).
+    pipeline_gizmo_lines_front: wgpu::RenderPipeline,
+    pipeline_gizmo_lines_occluded: wgpu::RenderPipeline,
+    pipeline_gizmo_tris_front: wgpu::RenderPipeline,
+    pipeline_gizmo_tris_occluded: wgpu::RenderPipeline,
     pipeline_sky: wgpu::RenderPipeline,
     pipeline_start_screen_bg: wgpu::RenderPipeline,
     pipeline_trans: wgpu::RenderPipeline,
     pipeline_shadow: wgpu::RenderPipeline,
     pipeline_bloom_extract: wgpu::RenderPipeline,
     pipeline_blur: wgpu::RenderPipeline,
+    pipeline_blit: wgpu::RenderPipeline,
+    /// Weighted additive blit for bloom upsample: multiplies by a scalar uniform before adding.
+    pipeline_blit_weighted_add: wgpu::RenderPipeline,
     pipeline_composite: wgpu::RenderPipeline,
     /// 1×1 average linear luminance (HDR, pre-exposure) for auto exposure.
     pipeline_meter: wgpu::RenderPipeline,
+    // ── Screen-space reflections (inline in fs_trans) ─────────────────────
+    ssr_opts_buf: wgpu::Buffer,
+    ssr_opts: SsrOpts,
     meter_texture: wgpu::Texture,
     meter_view: wgpu::TextureView,
     meter_staging: wgpu::Buffer,
@@ -709,6 +786,11 @@ pub struct WgpuViewer {
     selection_overlay_index_count: u32,
     selection_overlay_line_vertex_buffer: Option<wgpu::Buffer>,
     selection_overlay_line_vertex_count: u32,
+    /// Selection transform gizmo geometry (lines: shafts + rings; tris: arrowheads).
+    gizmo_line_vertex_buffer: Option<wgpu::Buffer>,
+    gizmo_line_vertex_count: u32,
+    gizmo_tri_vertex_buffer: Option<wgpu::Buffer>,
+    gizmo_tri_vertex_count: u32,
     /// Full-scene grid wireframe (View → Show borders); indexed line-list.
     grid_border_line_vertex_buffer: Option<wgpu::Buffer>,
     grid_border_line_index_buffer: Option<wgpu::Buffer>,
@@ -935,6 +1017,11 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
                 shader_location: 4,
                 format: wgpu::VertexFormat::Float32,
             },
+            wgpu::VertexAttribute {
+                offset: 44,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x3,
+            },
         ],
     }
 }
@@ -1079,6 +1166,27 @@ fn fullscreen_pipeline(
     })
 }
 
+
+/// Read-only depth snapshot for SSR in the trans pass (COPY_DST | TEXTURE_BINDING only).
+fn create_depth_snapshot(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth_snapshot"),
+        size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
 /// Tonemapped sRGB output at **viewport** resolution before [`copy_texture_to_texture`] into the swapchain.
 fn create_present_texture(
     device: &wgpu::Device,
@@ -1158,7 +1266,7 @@ fn create_screen_targets(
     let color_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
     let hdr_opaque_usage = color_usage | wgpu::TextureUsages::COPY_SRC;
     let hdr_final_usage = color_usage | wgpu::TextureUsages::COPY_DST;
-    let depth_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let depth_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC;
 
     let hdr_opaque_tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("hdr_opaque"),
@@ -1246,6 +1354,165 @@ fn create_screen_targets(
         bloom_b_tex,
         bloom_b_view,
     )
+}
+
+fn create_bloom_pyramid(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    hdr_fmt: wgpu::TextureFormat,
+) -> (
+    Vec<wgpu::Texture>,
+    Vec<wgpu::TextureView>,
+    Vec<wgpu::Texture>,
+    Vec<wgpu::TextureView>,
+) {
+    let color_usage =
+        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    let mut a_textures = Vec::with_capacity(BLOOM_LEVELS);
+    let mut a_views = Vec::with_capacity(BLOOM_LEVELS);
+    let mut b_textures = Vec::with_capacity(BLOOM_LEVELS);
+    let mut b_views = Vec::with_capacity(BLOOM_LEVELS);
+    for i in 0..BLOOM_LEVELS {
+        let w = (width >> (i + 1)).max(1);
+        let h = (height >> (i + 1)).max(1);
+        let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let a = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("bloom_pyr_a_{i}")),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: hdr_fmt,
+            usage: color_usage,
+            view_formats: &[],
+        });
+        let a_view = a.create_view(&wgpu::TextureViewDescriptor::default());
+        let b = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(&format!("bloom_pyr_b_{i}")),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: hdr_fmt,
+            usage: color_usage,
+            view_formats: &[],
+        });
+        let b_view = b.create_view(&wgpu::TextureViewDescriptor::default());
+        a_textures.push(a);
+        a_views.push(a_view);
+        b_textures.push(b);
+        b_views.push(b_view);
+    }
+    (a_textures, a_views, b_textures, b_views)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_bloom_pyramid_bind_groups(
+    device: &wgpu::Device,
+    post_bloom_layout: &wgpu::BindGroupLayout,
+    post_blur_layout: &wgpu::BindGroupLayout,
+    bloom_a_view: &wgpu::TextureView,
+    pyr_a_views: &[wgpu::TextureView],
+    pyr_b_views: &[wgpu::TextureView],
+    sampler_linear: &wgpu::Sampler,
+    post_blur_buf: &wgpu::Buffer,
+    post_blit_weight_buf: &wgpu::Buffer,
+) -> (
+    Vec<wgpu::BindGroup>,
+    Vec<wgpu::BindGroup>,
+    Vec<wgpu::BindGroup>,
+    wgpu::BindGroup,
+    Vec<wgpu::BindGroup>,
+    Vec<wgpu::BindGroup>,
+) {
+    let blit_bg = |label: &str, view: &wgpu::TextureView| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: post_bloom_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler_linear),
+                },
+            ],
+        })
+    };
+
+    // bind_blit_down[0] reads bloom_a (full-res extract); [i] reads pyr_a[i-1].
+    let bind_blit_down = (0..BLOOM_LEVELS)
+        .map(|i| {
+            let src = if i == 0 { bloom_a_view } else { &pyr_a_views[i - 1] };
+            blit_bg(&format!("blit_down_{i}"), src)
+        })
+        .collect();
+
+    // bind_blit_up[i] reads pyr_a[i+1] for additive upsample into pyr_a[i].
+    let bind_blit_up = (0..BLOOM_LEVELS - 1)
+        .map(|i| blit_bg(&format!("blit_up_{i}"), &pyr_a_views[i + 1]))
+        .collect();
+
+    // bind_blit_up_weighted[i]: same source textures as bind_blit_up but using post_blur_layout
+    // so fs_blit_weighted can read the per-level weight uniform before the additive blend.
+    let bind_blit_up_weighted: Vec<wgpu::BindGroup> = (0..BLOOM_LEVELS - 1)
+        .map(|i| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("blit_up_w_{i}")),
+                layout: post_blur_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&pyr_a_views[i + 1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler_linear),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: post_blit_weight_buf.as_entire_binding(),
+                    },
+                ],
+            })
+        })
+        .collect();
+
+    // Final replace-blit: pyr_a[0] → bloom_a.
+    let bind_blit_final = blit_bg("blit_final", &pyr_a_views[0]);
+
+    let blur_bg = |label: &str, view: &wgpu::TextureView| {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: post_blur_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: post_blur_buf.as_entire_binding(),
+                },
+            ],
+        })
+    };
+
+    let bind_blur_pyr_h = (0..BLOOM_LEVELS)
+        .map(|i| blur_bg(&format!("blur_pyr_h_{i}"), &pyr_a_views[i]))
+        .collect();
+    let bind_blur_pyr_v = (0..BLOOM_LEVELS)
+        .map(|i| blur_bg(&format!("blur_pyr_v_{i}"), &pyr_b_views[i]))
+        .collect();
+
+    (bind_blit_down, bind_blit_up, bind_blit_up_weighted, bind_blit_final, bind_blur_pyr_h, bind_blur_pyr_v)
 }
 
 impl WgpuViewer {
@@ -1368,6 +1635,35 @@ impl WgpuViewer {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // binding 2: depth_for_ssr — opaque scene depth for SSR ray marching
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                // binding 3: samp_depth — non-filtering sampler for depth
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                // binding 4: ssr_opts — SSR parameters uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
             ],
@@ -1523,6 +1819,7 @@ impl WgpuViewer {
                     },
                 ],
             });
+
 
         let shader_scene = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("scene"),
@@ -1967,6 +2264,133 @@ impl WgpuViewer {
                 cache: None,
             });
 
+        let pipeline_gizmo_lines_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gizmo_lines_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_gizmo_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState { constant: -2, slope_scale: -0.5, clamp: 0.0 },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gizmo_lines_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gizmo_lines_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_gizmo_occluded"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.0, clamp: 0.0 },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gizmo_tris_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gizmo_tris_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_gizmo_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState { constant: -4, slope_scale: -1.0, clamp: 0.0 },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gizmo_tris_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gizmo_tris_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_gizmo_occluded"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState { constant: 1, slope_scale: 1.0, clamp: 0.0 },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
         let pipeline_collab_frustum_occluded =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("collab_frustum_occluded"),
@@ -2252,7 +2676,7 @@ impl WgpuViewer {
 
         let pipeline_bloom_extract = fullscreen_pipeline(
             &device,
-            &pl_bloom,
+            &pl_blur,
             &shader_bloom_ex,
             "fs_bloom_extract",
             &[Some(wgpu::ColorTargetState {
@@ -2270,6 +2694,48 @@ impl WgpuViewer {
             &[Some(wgpu::ColorTargetState {
                 format: vf,
                 blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            None,
+        );
+        let shader_blit = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("blit"),
+            source: wgpu::ShaderSource::Wgsl(gpu::post_blit::WGSL.into()),
+        });
+        let pipeline_blit = fullscreen_pipeline(
+            &device,
+            &pl_bloom,
+            &shader_blit,
+            "fs_blit",
+            &[Some(wgpu::ColorTargetState {
+                format: vf,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            None,
+        );
+        let additive = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::One,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        // Weighted additive blit: uses post_blur_layout (texture + sampler + uniform) so the
+        // fragment shader can multiply each sample by a scalar weight before the additive blend.
+        let pipeline_blit_weighted_add = fullscreen_pipeline(
+            &device,
+            &pl_blur,
+            &shader_blit,
+            "fs_blit_weighted",
+            &[Some(wgpu::ColorTargetState {
+                format: vf,
+                blend: Some(additive),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             None,
@@ -2298,6 +2764,7 @@ impl WgpuViewer {
             })],
             None,
         );
+
 
         let meter_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("meter_lum"),
@@ -2349,6 +2816,18 @@ impl WgpuViewer {
                 blur_dir: [1.0, 0.0, 0.0, 0.0],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bloom_extract_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("bloom_extract_u"),
+            contents: bytemuck::bytes_of(&BloomExtractUniform { exposure_ev: 0.0, _pad: [0.0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        // Constant weight written once: each bloom pyramid level contributes 0.75× the next finer
+        // level, giving a geometric falloff instead of a flat equal-weight accumulation.
+        let post_blit_weight_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("blit_weight_u"),
+            contents: bytemuck::bytes_of(&BloomExtractUniform { exposure_ev: 0.75, _pad: [0.0; 3] }),
+            usage: wgpu::BufferUsages::UNIFORM,
         });
         let mut post_composite_opts: PostCompositeOpts = bytemuck::Zeroable::zeroed();
         post_composite_opts.tone_mode = 0;
@@ -2407,6 +2886,11 @@ impl WgpuViewer {
 
         let (present_texture, present_view) =
             create_present_texture(&device, size.0, size.1, format);
+        let (depth_snapshot_texture, depth_snapshot_view) =
+            create_depth_snapshot(&device, size.0, size.1);
+
+        let (bloom_pyramid_a, bloom_pyramid_a_views, bloom_pyramid_b, bloom_pyramid_b_views) =
+            create_bloom_pyramid(&device, size.0, size.1, vf);
 
         // placeholder bind groups — rebuilt in resize / upload
         let bind_scene_opaque = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2448,7 +2932,7 @@ impl WgpuViewer {
 
         let bind_bloom_extract = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_ex"),
-            layout: &post_bloom_layout,
+            layout: &post_blur_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -2457,6 +2941,10 @@ impl WgpuViewer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: bloom_extract_buf.as_entire_binding(),
                 },
             ],
         });
@@ -2510,6 +2998,18 @@ impl WgpuViewer {
                 },
             ],
         });
+        let (bind_blit_down, bind_blit_up, bind_blit_up_weighted, bind_blit_final, bind_blur_pyr_h, bind_blur_pyr_v) =
+            build_bloom_pyramid_bind_groups(
+                &device,
+                &post_bloom_layout,
+                &post_blur_layout,
+                &bloom_a_view,
+                &bloom_pyramid_a_views,
+                &bloom_pyramid_b_views,
+                &sampler_linear,
+                &post_blur_buf,
+                &post_blit_weight_buf,
+            );
         let bind_composite = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("comp"),
             layout: &post_composite_layout,
@@ -2545,6 +3045,19 @@ impl WgpuViewer {
             ],
         });
 
+        // ── SSR uniform buffer ──────────────────────────────────────────────
+        let ssr_opts: SsrOpts = SsrOpts {
+            strength: 0.8,
+            max_steps: 32.0,
+            thickness: 2.0,
+            enabled: 0.0,
+        };
+        let ssr_opts_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ssr_opts"),
+            contents: bytemuck::bytes_of(&ssr_opts),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
         let bind_trans = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("trans1"),
             layout: &scene_layout1,
@@ -2556,6 +3069,18 @@ impl WgpuViewer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&depth_snapshot_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&sampler_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: ssr_opts_buf.as_entire_binding(),
                 },
             ],
         }));
@@ -2615,10 +3140,16 @@ impl WgpuViewer {
             normal_view,
             depth_texture,
             depth_view,
+            depth_snapshot_texture,
+            depth_snapshot_view,
             bloom_a,
             bloom_a_view,
             bloom_b,
             bloom_b_view,
+            bloom_pyramid_a,
+            bloom_pyramid_a_views,
+            bloom_pyramid_b,
+            bloom_pyramid_b_views,
             present_texture,
             present_view,
             scene_layout0,
@@ -2635,7 +3166,15 @@ impl WgpuViewer {
             bind_blur_v,
             bind_composite,
             bind_trans,
+            bind_blit_down,
+            bind_blit_up,
+            bind_blit_up_weighted,
+            bind_blit_final,
+            bind_blur_pyr_h,
+            bind_blur_pyr_v,
             post_blur_buf,
+            bloom_extract_buf,
+            post_blit_weight_buf,
             post_composite_opts_buf,
             post_composite_opts,
             pipeline_opaque,
@@ -2652,17 +3191,25 @@ impl WgpuViewer {
             pipeline_collab_frustum_tri_occluded,
             pipeline_collab_frustum_tri_front,
             pipeline_grid_border_lines,
+            pipeline_gizmo_lines_front,
+            pipeline_gizmo_lines_occluded,
+            pipeline_gizmo_tris_front,
+            pipeline_gizmo_tris_occluded,
             pipeline_sky,
             pipeline_start_screen_bg,
             pipeline_trans,
             pipeline_shadow,
             pipeline_bloom_extract,
             pipeline_blur,
+            pipeline_blit,
+            pipeline_blit_weighted_add,
             pipeline_composite,
             pipeline_meter,
             meter_texture,
             meter_view,
             meter_staging,
+            ssr_opts_buf,
+            ssr_opts,
             exposure_user_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
             auto_exposure_enabled: default_lit.auto_exposure,
             auto_exposure_smoothed: 0.0,
@@ -2711,6 +3258,10 @@ impl WgpuViewer {
             selection_overlay_index_count: 0,
             selection_overlay_line_vertex_buffer: None,
             selection_overlay_line_vertex_count: 0,
+            gizmo_line_vertex_buffer: None,
+            gizmo_line_vertex_count: 0,
+            gizmo_tri_vertex_buffer: None,
+            gizmo_tri_vertex_count: 0,
             grid_border_line_vertex_buffer: None,
             grid_border_line_index_buffer: None,
             grid_border_line_index_count: 0,
@@ -2819,10 +3370,21 @@ impl WgpuViewer {
         self.bloom_b = bloom_b;
         self.bloom_b_view = bloom_b_view;
 
+        let (pyr_a, pyr_a_views, pyr_b, pyr_b_views) =
+            create_bloom_pyramid(&self.device, viewport_width, viewport_height, vf);
+        self.bloom_pyramid_a = pyr_a;
+        self.bloom_pyramid_a_views = pyr_a_views;
+        self.bloom_pyramid_b = pyr_b;
+        self.bloom_pyramid_b_views = pyr_b_views;
+
         let (present_texture, present_view) =
             create_present_texture(&self.device, viewport_width, viewport_height, self.format);
         self.present_texture = present_texture;
         self.present_view = present_view;
+        let (depth_snapshot_texture, depth_snapshot_view) =
+            create_depth_snapshot(&self.device, viewport_width, viewport_height);
+        self.depth_snapshot_texture = depth_snapshot_texture;
+        self.depth_snapshot_view = depth_snapshot_view;
 
         self.rebuild_bind_groups();
     }
@@ -2842,6 +3404,12 @@ impl WgpuViewer {
     }
 
     /// `mode`: 0 neutral … 5 reinhard (see `post_composite.wgsl` / Voxelle web tone mapping ids).
+    /// Drop the spatial mesh cache so the next remesh rebuilds all chunks from scratch.
+    /// Call this whenever a baking parameter (e.g. emission lighting) changes.
+    pub fn invalidate_spatial_mesh_cache(&mut self) {
+        self.spatial_mesh_cache = None;
+    }
+
     pub fn set_tone_mapping_mode(&mut self, mode: u32) {
         let mode = mode.min(5);
         self.post_composite_opts.tone_mode = mode;
@@ -2908,7 +3476,16 @@ impl WgpuViewer {
         o.ss_weight = p.ss_weight.clamp(0.0, 1.5);
         o.ss_samples = p.ss_samples.clamp(20.0, 56.0);
         // sun_uv computed per-frame from light direction
+        o.bloom_strength = p.bloom_strength.clamp(0.0, 3.0);
         self.flush_composite_opts();
+        // Screen-space reflections
+        self.ssr_opts.enabled = if p.ssr_enabled { 1.0 } else { 0.0 };
+        self.ssr_opts.strength = p.ssr_strength.clamp(0.0, 1.0);
+        self.queue.write_buffer(
+            &self.ssr_opts_buf,
+            0,
+            bytemuck::bytes_of(&self.ssr_opts),
+        );
     }
 
     /// Push current composite opts to GPU.
@@ -3032,7 +3609,7 @@ impl WgpuViewer {
         });
         self.bind_bloom_extract = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("bloom_ex"),
-            layout: &self.post_bloom_layout,
+            layout: &self.post_blur_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -3041,6 +3618,10 @@ impl WgpuViewer {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.bloom_extract_buf.as_entire_binding(),
                 },
             ],
         });
@@ -3140,13 +3721,44 @@ impl WgpuViewer {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.depth_snapshot_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_depth),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.ssr_opts_buf.as_entire_binding(),
+                },
             ],
         }));
+
+        let (bind_blit_down, bind_blit_up, bind_blit_up_weighted, bind_blit_final, bind_blur_pyr_h, bind_blur_pyr_v) =
+            build_bloom_pyramid_bind_groups(
+                &self.device,
+                &self.post_bloom_layout,
+                &self.post_blur_layout,
+                &self.bloom_a_view,
+                &self.bloom_pyramid_a_views,
+                &self.bloom_pyramid_b_views,
+                &self.sampler_linear,
+                &self.post_blur_buf,
+                &self.post_blit_weight_buf,
+            );
+        self.bind_blit_down = bind_blit_down;
+        self.bind_blit_up = bind_blit_up;
+        self.bind_blit_up_weighted = bind_blit_up_weighted;
+        self.bind_blit_final = bind_blit_final;
+        self.bind_blur_pyr_h = bind_blur_pyr_h;
+        self.bind_blur_pyr_v = bind_blur_pyr_v;
     }
 
     fn interleaved_from_mesh(mesh: &MeshBuffers) -> Vec<f32> {
         let n = mesh.positions.len() / 3;
-        let mut interleaved: Vec<f32> = Vec::with_capacity(n * 11);
+        let mut interleaved: Vec<f32> = Vec::with_capacity(n * 14);
         for i in 0..n {
             interleaved.push(mesh.positions[i * 3]);
             interleaved.push(mesh.positions[i * 3 + 1]);
@@ -3159,6 +3771,10 @@ impl WgpuViewer {
             interleaved.push(mesh.colors[i * 3 + 2]);
             interleaved.push(mesh.mat_kind[i]);
             interleaved.push(mesh.ao.get(i).copied().unwrap_or(1.0));
+            let ei = i * 3;
+            interleaved.push(mesh.emission_tint.get(ei).copied().unwrap_or(0.0));
+            interleaved.push(mesh.emission_tint.get(ei + 1).copied().unwrap_or(0.0));
+            interleaved.push(mesh.emission_tint.get(ei + 2).copied().unwrap_or(0.0));
         }
         interleaved
     }
@@ -4245,6 +4861,36 @@ impl WgpuViewer {
         self.selection_overlay_line_vertex_count = vertex_count;
     }
 
+    fn upload_buf(device: &wgpu::Device, queue: &wgpu::Queue, buf: &mut Option<wgpu::Buffer>, label: &str, data: &[f32]) -> u32 {
+        if data.is_empty() || data.len() % 6 != 0 {
+            *buf = None;
+            return 0;
+        }
+        let nbytes = (data.len() * std::mem::size_of::<f32>()) as u64;
+        if let Some(ref b) = buf {
+            if b.size() == nbytes {
+                queue.write_buffer(b, 0, bytemuck::cast_slice(data));
+                return (data.len() / 6) as u32;
+            }
+        }
+        *buf = Some(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(data),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        }));
+        (data.len() / 6) as u32
+    }
+
+    pub fn upload_gizmo_lines(&mut self, verts: &[f32]) {
+        self.gizmo_line_vertex_count =
+            Self::upload_buf(&self.device, &self.queue, &mut self.gizmo_line_vertex_buffer, "gizmo_lines_vtx", verts);
+    }
+
+    pub fn upload_gizmo_tris(&mut self, verts: &[f32]) {
+        self.gizmo_tri_vertex_count =
+            Self::upload_buf(&self.device, &self.queue, &mut self.gizmo_tri_vertex_buffer, "gizmo_tris_vtx", verts);
+    }
+
     pub fn upload_grid_border_lines(&mut self, verts: &[f32], indices: &[u32]) {
         if verts.is_empty() || verts.len() % 6 != 0 || indices.is_empty() {
             self.grid_border_line_vertex_buffer = None;
@@ -4847,6 +5493,28 @@ impl WgpuViewer {
         pass.draw_indexed(0..self.grid_border_line_index_count, 0, 0..1);
     }
 
+    fn draw_gizmo(&self, pass: &mut wgpu::RenderPass<'_>) {
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        if let Some(ref vb) = self.gizmo_line_vertex_buffer {
+            if self.gizmo_line_vertex_count >= 2 {
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_pipeline(&self.pipeline_gizmo_lines_occluded);
+                pass.draw(0..self.gizmo_line_vertex_count, 0..1);
+                pass.set_pipeline(&self.pipeline_gizmo_lines_front);
+                pass.draw(0..self.gizmo_line_vertex_count, 0..1);
+            }
+        }
+        if let Some(ref tb) = self.gizmo_tri_vertex_buffer {
+            if self.gizmo_tri_vertex_count >= 3 {
+                pass.set_vertex_buffer(0, tb.slice(..));
+                pass.set_pipeline(&self.pipeline_gizmo_tris_occluded);
+                pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
+                pass.set_pipeline(&self.pipeline_gizmo_tris_front);
+                pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
+            }
+        }
+    }
+
     fn draw_indexed_ping(&self, pass: &mut wgpu::RenderPass<'_>) {
         if let (Some(vb), Some(ib)) = (&self.ping_vertex_buffer, &self.ping_index_buffer) {
             if self.ping_index_count > 0 {
@@ -5012,6 +5680,7 @@ impl WgpuViewer {
             self.draw_collab_frustum_lines(&mut pass);
             self.draw_ping_wave_lines(&mut pass);
             self.draw_indexed_ping(&mut pass);
+            self.draw_gizmo(&mut pass);
         }
 
         let ext = wgpu::Extent3d {
@@ -5031,6 +5700,22 @@ impl WgpuViewer {
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
+            },
+            ext,
+        );
+        // Snapshot depth for SSR reads in the trans pass (avoids DEPTH_STENCIL_WRITE conflict).
+        encoder.copy_texture_to_texture(
+            wgpu::ImageCopyTexture {
+                texture: &self.depth_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
+            },
+            wgpu::ImageCopyTexture {
+                texture: &self.depth_snapshot_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::DepthOnly,
             },
             ext,
         );
@@ -5083,46 +5768,44 @@ impl WgpuViewer {
             pass.draw(0..3, 0..1);
         }
 
-        // 5 H+V iterations with a uniform step of 2px. Uniform step keeps the
-        // convolution Gaussian (circular), avoiding the concentric-rectangle artifact
-        // that stepped sizes produce. 5 × 8px = ~40px effective radius.
-        for _blur_iter in 0..5u32 {
-            let step = 2.0_f32;
-            let blur_h = PostBlurUniform {
-                blur_dir: [1.0, 0.0, step, 0.0],
-            };
-            self.queue
-                .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_h));
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("blur_h"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.bloom_b_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&self.pipeline_blur);
-                pass.set_bind_group(0, &self.bind_blur_h, &[]);
-                pass.draw(0..3, 0..1);
-            }
+        // Bloom mip pyramid — matches the web version's BloomNode / UnrealBloomPass approach:
+        //   1. Downsample bloom_a through 5 half-res levels (hardware bilinear blit).
+        //   2. H+V Gaussian blur at each level (step=1 at native mip res = natural wide radius).
+        //   3. Upsample additively from coarsest → finest to accumulate all scales.
+        //   4. Replace-blit pyr_a[0] back into bloom_a for the composite pass.
 
-            let blur_v = PostBlurUniform {
-                blur_dir: [0.0, 1.0, 2.0, 0.0],
-            };
+        // --- Downsample chain ---
+        for i in 0..BLOOM_LEVELS {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit_down"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_pyramid_a_views[i],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_blit);
+            pass.set_bind_group(0, &self.bind_blit_down[i], &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // --- Blur each pyramid level (H then V, step=1 at that mip's native res) ---
+        let blur_h_u = PostBlurUniform { blur_dir: [1.0, 0.0, 1.0, 0.0] };
+        let blur_v_u = PostBlurUniform { blur_dir: [0.0, 1.0, 1.0, 0.0] };
+        for i in 0..BLOOM_LEVELS {
             self.queue
-                .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_v));
+                .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_h_u));
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("blur_v"),
+                    label: Some("blur_pyr_h"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.bloom_a_view,
+                        view: &self.bloom_pyramid_b_views[i],
                         resolve_target: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -5134,9 +5817,75 @@ impl WgpuViewer {
                     timestamp_writes: None,
                 });
                 pass.set_pipeline(&self.pipeline_blur);
-                pass.set_bind_group(0, &self.bind_blur_v, &[]);
+                pass.set_bind_group(0, &self.bind_blur_pyr_h[i], &[]);
                 pass.draw(0..3, 0..1);
             }
+            self.queue
+                .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_v_u));
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("blur_pyr_v"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.bloom_pyramid_a_views[i],
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline_blur);
+                pass.set_bind_group(0, &self.bind_blur_pyr_v[i], &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // --- Upsample chain: weighted additive blend from coarser into finer levels ---
+        // Each coarser level is multiplied by 0.75 before addition, giving a geometric falloff
+        // (fine detail dominates, large-scale haze contributes progressively less) which better
+        // matches the 1/r² energy falloff of real optical bloom.
+        for i in (0..BLOOM_LEVELS - 1).rev() {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit_up"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_pyramid_a_views[i],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_blit_weighted_add);
+            pass.set_bind_group(0, &self.bind_blit_up_weighted[i], &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // --- Final blit: replace bloom_a with the combined pyramid result ---
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blit_final"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_a_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipeline_blit);
+            pass.set_bind_group(0, &self.bind_blit_final, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         if self.auto_exposure_enabled {
@@ -5195,6 +5944,15 @@ impl WgpuViewer {
             &self.post_composite_opts_buf,
             0,
             bytemuck::bytes_of(&self.post_composite_opts),
+        );
+        // Sync exposure into the bloom extract uniform so the threshold scales with EV.
+        self.queue.write_buffer(
+            &self.bloom_extract_buf,
+            0,
+            bytemuck::bytes_of(&BloomExtractUniform {
+                exposure_ev: self.post_composite_opts.exposure_ev,
+                _pad: [0.0; 3],
+            }),
         );
 
         {

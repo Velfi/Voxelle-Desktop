@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   APPEARANCE_THEME_OPTIONS,
@@ -13,6 +13,15 @@ import {
   type ToneMappingPreference,
   type VoxelleDesktopPreferences,
 } from "./preferences";
+
+const SECTIONS = [
+  { id: "prefs-general", label: "General" },
+  { id: "prefs-collab", label: "Collaboration" },
+  { id: "prefs-autosave", label: "Autosave" },
+  { id: "prefs-graphics", label: "Graphics" },
+] as const;
+
+type SectionId = (typeof SECTIONS)[number]["id"];
 
 type Props = {
   open: boolean;
@@ -38,6 +47,29 @@ export function PreferencesModal({
 }: Props) {
   const [prefs, setPrefs] =
     useState<VoxelleDesktopPreferences>(loadPreferences);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [activeSection, setActiveSection] = useState<SectionId>("prefs-general");
+
+  const scrollToSection = (id: SectionId) => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const el = container.querySelector<HTMLElement>(`#${id}`);
+    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const onPrefsScroll = () => {
+    const container = scrollRef.current;
+    if (!container) return;
+    const containerTop = container.getBoundingClientRect().top;
+    let active: SectionId = "prefs-general";
+    for (const section of SECTIONS) {
+      const el = container.querySelector<HTMLElement>(`#${section.id}`);
+      if (el && el.getBoundingClientRect().top - containerTop <= 20) {
+        active = section.id;
+      }
+    }
+    setActiveSection(active);
+  };
 
   useEffect(() => {
     if (open) setPrefs(loadPreferences());
@@ -133,6 +165,13 @@ export function PreferencesModal({
     onCollabHostPortChange?.(n);
   };
 
+  const onEmissionLighting = (checked: boolean) => {
+    const next = { ...prefs, enableEmissionLighting: checked };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_emission_lighting", { enabled: checked }).catch(() => {});
+  };
+
   const pushAutosaveToRust = (next: VoxelleDesktopPreferences) => {
     void invoke(
       "set_autosave_settings",
@@ -182,7 +221,21 @@ export function PreferencesModal({
         <h3 id="preferences-title" className="modal--preferences-title">
           Preferences
         </h3>
-        <div className="modal--preferences-scroll">
+        <div className="modal--preferences-body">
+          <nav className="prefs-toc" aria-label="Preferences sections">
+            {SECTIONS.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                className={`prefs-toc-item${activeSection === s.id ? " is-active" : ""}`}
+                onClick={() => scrollToSection(s.id)}
+              >
+                {s.label}
+              </button>
+            ))}
+          </nav>
+          <div className="modal--preferences-scroll" ref={scrollRef} onScroll={onPrefsScroll}>
+          <div id="prefs-general" className="prefs-section-anchor" />
           <label className="prefs-checkbox-label">
             <input
               type="checkbox"
@@ -234,7 +287,8 @@ export function PreferencesModal({
               Light uses an unbleached paper tone. Auto follows this device.
             </span>
           </label>
-          <h4 className="prefs-section-title">Collaboration</h4>
+          <hr className="prefs-section-divider" />
+          <h4 id="prefs-collab" className="prefs-section-title">Collaboration</h4>
           <label className="prefs-select-label">
             <span className="prefs-select-label-text">Display name</span>
             <input
@@ -292,7 +346,8 @@ export function PreferencesModal({
             />
             Internet guests (UPnP)
           </label>
-          <h4 className="prefs-section-title">Autosave</h4>
+          <hr className="prefs-section-divider" />
+          <h4 id="prefs-autosave" className="prefs-section-title">Autosave</h4>
           <p className="prefs-field-hint prefs-section-hint">
             Backups live in the app — your file on disk updates when you save.
           </p>
@@ -350,6 +405,23 @@ export function PreferencesModal({
               ))}
             </select>
           </label>
+          <hr className="prefs-section-divider" />
+          <h4 id="prefs-graphics" className="prefs-section-title">Graphics</h4>
+          <p className="prefs-field-hint prefs-section-hint">
+            Changing these settings rebuilds the scene mesh.
+          </p>
+          <label className="prefs-checkbox-label">
+            <input
+              type="checkbox"
+              checked={prefs.enableEmissionLighting}
+              onChange={(e) => onEmissionLighting(e.target.checked)}
+            />
+            Emission lighting
+          </label>
+          <p className="prefs-field-hint prefs-section-hint">
+            Glow voxels cast colored light onto nearby surfaces.
+          </p>
+          </div>
         </div>
         <div className="modal-buttons modal--preferences-footer">
           <button type="button" onClick={onClose}>

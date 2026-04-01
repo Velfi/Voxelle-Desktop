@@ -67,6 +67,26 @@ fn fs_collab_line_occluded(in: VertexOut) -> OpaqueOut {
     return out;
 }
 
+/// Selection transform gizmo — front pass: full-brightness axis colors.
+@fragment
+fn fs_gizmo_front(in: VertexOut) -> OpaqueOut {
+    var out: OpaqueOut;
+    let c = clamp(in.color, vec3<f32>(0.0), vec3<f32>(1.0));
+    out.color = vec4<f32>(c, 0.92);
+    out.gbuf_n = vec4<f32>(0.0);
+    return out;
+}
+
+/// Selection transform gizmo — occluded pass: dimmed, semi-transparent ghost.
+@fragment
+fn fs_gizmo_occluded(in: VertexOut) -> OpaqueOut {
+    var out: OpaqueOut;
+    let c = clamp(in.color, vec3<f32>(0.0), vec3<f32>(1.0));
+    out.color = vec4<f32>(c * 0.55, 0.28);
+    out.gbuf_n = vec4<f32>(0.0);
+    return out;
+}
+
 /// Voxel grid borders: darkening stroke; fades for moiré (screen), grazing view, and **camera distance**
 /// (far + zoomed out → coplanar z-fight with opaque mesh; fade before it reads as shimmer).
 @fragment

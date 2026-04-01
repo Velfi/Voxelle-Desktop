@@ -91,6 +91,11 @@ struct PostCompositeOpts {
     ss_samples: f32,
     ss_sun_uv_x: f32,
     ss_sun_uv_y: f32,
+    // Row 14: bloom
+    bloom_strength: f32,
+    _pad14a: f32,
+    _pad14b: f32,
+    _pad14c: f32,
 }
 
 @group(0) @binding(3)
@@ -331,8 +336,15 @@ fn apply_vignette(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 @fragment
 fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(t_hdr, samp_linear, i.uv).rgb;
-    let blo = textureSample(t_bloom, samp_linear, i.uv).rgb;
-    var rgb0 = (hdr + blo * 0.9) * exp2(po.exposure_ev);
+    // Chromatic aberration in bloom: sample R/G/B at slightly different radial offsets from center.
+    // Real lenses disperse wavelengths at different focal lengths, so each color blooms at a
+    // slightly different radius. Red spreads outward, blue inward, matching typical longitudinal CA.
+    let ca_dir = (i.uv - vec2<f32>(0.5)) * 0.004;
+    let blo_r = textureSample(t_bloom, samp_linear, i.uv + ca_dir).r;
+    let blo_g = textureSample(t_bloom, samp_linear, i.uv).g;
+    let blo_b = textureSample(t_bloom, samp_linear, i.uv - ca_dir).b;
+    let blo = vec3<f32>(blo_r, blo_g, blo_b);
+    var rgb0 = (hdr + blo * po.bloom_strength) * exp2(po.exposure_ev);
     let pre_energy = max(max(rgb0.r, rgb0.g), rgb0.b);
     var mapped = apply_tone(po.tone_mode, rgb0);
 

@@ -30,10 +30,10 @@ struct SliceHeader {
     bit_word_count: u32,
 }
 
-// Must match [`OPAQUE_VERTEX_STRIDE`] (44) / CPU interleaved layout: 3+3+3+1+1 floats.
+// Must match [`OPAQUE_VERTEX_STRIDE`] (56) / CPU interleaved layout: 3+3+3+1+1+3 floats.
 // WGSL `vec3` aligns to 16B in structs; do not use vec3 fields here or storage stride diverges from Rust.
 struct GpuVertex {
-    data: array<f32, 11>,
+    data: array<f32, 14>,
 }
 
 @group(0) @binding(0) var<uniform> mesh_params: MeshParams;
@@ -56,6 +56,10 @@ fn write_opaque_vertex(slot: u32, pos: vec3<f32>, n: vec3<f32>, col: vec3<f32>, 
     vtx_out[slot].data[8] = col.z;
     vtx_out[slot].data[9] = mk;
     vtx_out[slot].data[10] = ao;
+    // emission_tint: GPU mesh path doesn't compute glow irradiance; zero-fill to match CPU layout.
+    vtx_out[slot].data[11] = 0.0;
+    vtx_out[slot].data[12] = 0.0;
+    vtx_out[slot].data[13] = 0.0;
 }
 
 fn face_normal(axis: u32, sign: i32) -> vec3<f32> {

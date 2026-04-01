@@ -498,12 +498,14 @@ fn weld_vertices_to_mesh(
         colors[i * 3 + 2] = (acc_cb[i] / c).clamp(0.0, 1.0);
     }
 
+    let nv = positions.len() / 3;
     Some(MeshBuffers {
         positions,
         normals,
         colors,
         mat_kind,
         ao,
+        emission_tint: vec![0.0f32; nv * 3],
         indices,
     })
 }
@@ -943,6 +945,7 @@ fn dual_contour_bucket(
         colors,
         mat_kind: vec![mat_k; nv],
         ao: vec![1.0f32; nv],
+        emission_tint: vec![0.0f32; nv * 3],
         indices: raw_indices,
     })
 }
@@ -968,6 +971,7 @@ fn merge_mesh_buffers(parts: Vec<MeshBuffers>) -> MeshBuffers {
         out.colors.extend_from_slice(&p.colors);
         out.mat_kind.extend_from_slice(&p.mat_kind);
         out.ao.extend_from_slice(&p.ao);
+        out.emission_tint.extend_from_slice(&p.emission_tint);
         for &i in &p.indices {
             out.indices.push(base + i);
         }

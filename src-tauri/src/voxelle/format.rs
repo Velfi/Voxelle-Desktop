@@ -229,6 +229,14 @@ pub struct MoodSettings {
     pub ss_weight: f32,
     #[serde(default = "default_32")]
     pub ss_samples: f32,
+    // screen-space reflections
+    #[serde(default)]
+    pub ssr_enabled: bool,
+    #[serde(default = "default_08")]
+    pub ssr_strength: f32,
+    // bloom
+    #[serde(default = "default_09")]
+    pub bloom_strength: f32,
 }
 
 fn default_true() -> bool { true }
@@ -249,6 +257,7 @@ fn default_07() -> f32 { 0.7 }
 fn default_092() -> f32 { 0.92 }
 fn default_08() -> f32 { 0.8 }
 fn default_32() -> f32 { 32.0 }
+fn default_09() -> f32 { 0.1 }
 
 impl Default for MoodSettings {
     fn default() -> Self {
@@ -288,6 +297,9 @@ impl Default for MoodSettings {
             ss_density: 0.8,
             ss_weight: 0.6,
             ss_samples: 32.0,
+            ssr_enabled: false,
+            ssr_strength: 0.8,
+            bloom_strength: 0.1,
         }
     }
 }

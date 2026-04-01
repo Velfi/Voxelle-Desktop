@@ -37,6 +37,67 @@ var hdr_bg: texture_2d<f32>;
 @group(1) @binding(1)
 var samp_linear: sampler;
 
+/// Opaque scene depth — read-only in fs_trans for SSR ray marching.
+@group(1) @binding(2)
+var depth_for_ssr: texture_depth_2d;
+
+@group(1) @binding(3)
+var samp_depth: sampler;
+
+struct SsrOpts { strength: f32, max_steps: f32, thickness: f32, enabled: f32, }
+@group(1) @binding(4)
+var<uniform> ssr_opts: SsrOpts;
+
+/// Inline screen-space reflection. Returns vec4(rgb, confidence).
+/// Uses true glass-surface world_pos and normal from vertex interpolation —
+/// no depth-buffer ambiguity since glass fragments are discarded in the opaque pass.
+fn compute_ssr(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>) -> vec4<f32> {
+    if (ssr_opts.enabled < 0.5) { return vec4<f32>(0.0); }
+    // Incident direction (camera → surface) reflected off the surface normal.
+    let incident = -v;
+    let refl = normalize(reflect(incident, n));
+    // If the reflection goes behind the camera immediately we can't see it —
+    // but let the clip.w guard catch that; don't reject based on dot(refl,n)
+    // since normals may be inconsistent across back/front faces.
+    let max_dist = 48.0;
+    let steps = clamp(ssr_opts.max_steps, 8.0, 64.0);
+    let step_dist = max_dist / steps;
+    for (var i = 1; i <= i32(steps); i++) {
+        let t = f32(i) * step_dist;
+        let p = world_pos + refl * t;
+        let clip = g.view_proj * vec4<f32>(p, 1.0);
+        if (clip.w <= 0.0) { break; }
+        let ndc = clip.xyz / clip.w;
+        // Off-screen: continue (don't break) — ray may re-enter the frustum.
+        if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0) { continue; }
+        let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+        let scene_depth = textureSampleLevel(depth_for_ssr, samp_depth, uv, 0.0);
+        if (ndc.z > scene_depth) {
+            // Accept hit; use a generous thickness so reconstruction precision
+            // doesn't silently swallow valid hits.
+            let sv4 = g.inv_proj * vec4<f32>(ndc.xy, scene_depth, 1.0);
+            let sw4 = g.inv_view * vec4<f32>(sv4.xyz / sv4.w, 1.0);
+            let behind_dist = length(p - sw4.xyz / sw4.w);
+            if (behind_dist < ssr_opts.thickness) {
+                let ef = 1.0 - smoothstep(0.8, 1.0, max(abs(ndc.x), abs(ndc.y)));
+                let df = 1.0 - t / max_dist;
+                let col = textureSampleLevel(hdr_bg, samp_linear, uv, 0.0).rgb;
+                return vec4<f32>(col, ef * df * ssr_opts.strength);
+            }
+        }
+    }
+    // Sky fallback ─────────────────────────────────────────────────────────
+    // When the reflection ray climbs above the scene (typical for water viewed
+    // from above) it misses all opaque geometry.  For those directions the
+    // physical reflection is the sky, so blend in the background sky color.
+    // refl.y > 0 means the ray points above the horizon.
+    if (refl.y > 0.05) {
+        let sky_w = smoothstep(0.05, 0.6, refl.y) * ssr_opts.strength * 0.8;
+        return vec4<f32>(g.bg_color.rgb, sky_w);
+    }
+    return vec4<f32>(0.0);
+}
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
@@ -44,6 +105,8 @@ struct VertexInput {
     @location(3) mat_kind: f32,
     /// Baked Minecraft-style corner AO; multiplies ambient hemisphere only.
     @location(4) vertex_ao: f32,
+    /// Baked RGB irradiance from nearby glow voxels (point-light accumulation at mesh-gen time).
+    @location(5) emission_tint: vec3<f32>,
 }
 
 struct VertexOut {
@@ -54,6 +117,7 @@ struct VertexOut {
     @location(3) mat_kind: f32,
     @location(4) uv: vec2<f32>,
     @location(5) vertex_ao: f32,
+    @location(6) emission_tint: vec3<f32>,
 }
 
 fn unpack_mat(packed: u32) -> u32 {
@@ -155,6 +219,7 @@ fn vs_main(in: VertexInput) -> VertexOut {
     o.color = in.color;
     o.mat_kind = in.mat_kind;
     o.vertex_ao = in.vertex_ao;
+    o.emission_tint = in.emission_tint;
     let h = o.clip_pos.w;
     o.uv = vec2<f32>(0.5, 0.5) + vec2<f32>(0.5, -0.5) * (o.clip_pos.xy / vec2<f32>(h, h));
     return o;
@@ -191,6 +256,7 @@ fn vs_preview_instanced(proto: PreviewProtoVertex, inst: PreviewInstanceVertex) 
     o.color = inst.inst_color;
     o.mat_kind = inst.inst_mat_kind;
     o.vertex_ao = 1.0;
+    o.emission_tint = vec3<f32>(0.0);
     let h = o.clip_pos.w;
     o.uv = vec2<f32>(0.5, 0.5) + vec2<f32>(0.5, -0.5) * (o.clip_pos.xy / vec2<f32>(h, h));
     return o;
@@ -249,6 +315,11 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         // Plastic / rubber.
         let spec_blinn = pow(ndh, 32.0) * 0.12 * sh * sun;
         rgb = base * (hemi * 0.30 * ao_h * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
+    }
+
+    // Add baked emission irradiance from nearby glow voxels (non-emissive surfaces only).
+    if (!is_glow) {
+        rgb += base * in.emission_tint;
     }
 
     out.color = vec4<f32>(rgb, glow_mask);
@@ -358,7 +429,17 @@ fn fs_trans(in: VertexOut) -> @location(0) vec4<f32> {
     let v = normalize(g.cam_pos.xyz - in.world_pos);
     let is_water = in.mat_kind > 2.2;
     let bg = textureSample(hdr_bg, samp_linear, in.uv).rgb;
-    let rgb = transmission_shade(in.color, in.world_pos, n, v, is_water, bg, in.vertex_ao);
+    var rgb = transmission_shade(in.color, in.world_pos, n, v, is_water, bg, in.vertex_ao);
+
+    // ── Screen-space reflection blend ───────────────────────────────────────
+    // SSR strength (baked into ssr_sample.a) controls the blend directly.
+    // Fresnel is already used inside transmission_shade for the refraction;
+    // multiplying it here too would make reflections nearly invisible at
+    // typical viewing angles (water Fresnel is ~2% at 45°).
+    let ssr_sample = compute_ssr(in.world_pos, n, v);
+    rgb = mix(rgb, ssr_sample.rgb, saturate(ssr_sample.a));
+    // ────────────────────────────────────────────────────────────────────────
+
     let a = 0.94;
     return vec4<f32>(rgb * a, a);
 }

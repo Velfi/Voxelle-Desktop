@@ -15,7 +15,7 @@ mod squishy_gizmo;
 mod squishy_pick_rings;
 mod squishy_session;
 
-pub use ashlar_gen::generator_ashlar_at_screen;
+pub use ashlar_gen::{generator_ashlar_at_screen, preview_ashlar_at_screen};
 pub use cloth_gen::{generator_cloth_from_pins, preview_cloth_voxels, ClothSimOptions};
 pub use fauna_gen::generator_fauna_at_screen;
 pub use flora_gen::generator_flora_at_screen;

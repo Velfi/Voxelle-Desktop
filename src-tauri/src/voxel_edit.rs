@@ -4861,8 +4861,6 @@ pub fn stamp_clipboard_at_screen(
     sx: f32,
     sy: f32,
     clip: &StampClipboard,
-    color: u32,
-    material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
@@ -4882,7 +4880,7 @@ pub fn stamp_clipboard_at_screen(
     let grid_size = file.grid_size.max(1);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
-    for &(dx, dy, dz, _src_color, _src_mat) in &clip.entries {
+    for &(dx, dy, dz, src_color, src_mat) in &clip.entries {
         let x = ax + dx;
         let y = ay + dy;
         let z = az + dz;
@@ -4899,8 +4897,8 @@ pub fn stamp_clipboard_at_screen(
             x,
             y,
             z,
-            color,
-            material,
+            color: src_color,
+            material: src_mat,
             object_id: file.active_object_id,
         };
         let idx = file.voxels.len();
@@ -4993,6 +4991,279 @@ pub fn sculpt_raise_at_screen(
     file.voxels.push(nv);
     voxel_map.insert((x, y, z), idx);
     Ok(vec![VoxelEditDelta::Added(nv)])
+}
+
+// ── Selection transform ───────────────────────────────────────────────────────
+
+/// Quarter-turn rotation of `(rx, ry, rz)` around the given axis.
+/// `quarters` must be in `[1, 3]` (caller normalises with `rem_euclid(4)`).
+fn rotate_rel_quarter(rx: f32, ry: f32, rz: f32, axis: u8, quarters: i32) -> (f32, f32, f32) {
+    match (axis, quarters) {
+        (0, 1) => (rx, -rz,  ry),
+        (0, 2) => (rx, -ry, -rz),
+        (0, 3) => (rx,  rz, -ry),
+        (1, 1) => ( rz, ry, -rx),
+        (1, 2) => (-rx, ry, -rz),
+        (1, 3) => (-rz, ry,  rx),
+        (2, 1) => (-ry, rx,  rz),
+        (2, 2) => (-rx,-ry,  rz),
+        (2, 3) => ( ry,-rx,  rz),
+        _      => (rx, ry, rz),
+    }
+}
+
+/// Translate all solid voxels in `selection` by `(dx, dy, dz)`.
+/// Returns voxel-edit deltas (remove old + add new). Caller must update
+/// `selection_cells` to the shifted positions.
+pub fn translate_selected_voxels(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    selection: &AHashSet<VoxelCoord>,
+    dx: i32,
+    dy: i32,
+    dz: i32,
+) -> Vec<VoxelEditDelta> {
+    // Snapshot data before any mutation.
+    let to_move: Vec<(VoxelCoord, Voxel)> = selection
+        .iter()
+        .filter_map(|&c| voxel_map.get(&c).map(|&i| (c, file.voxels[i])))
+        .collect();
+    if to_move.is_empty() {
+        return Vec::new();
+    }
+
+    ensure_grid_fits_coords(file, to_move.iter().map(|&(c, _)| (c.0 + dx, c.1 + dy, c.2 + dz)));
+    let grid_size = file.grid_size.max(1);
+    let (lo, hi) = grid_valid_range(grid_size);
+
+    let mut deltas = Vec::new();
+
+    // Remove sources first.
+    for &(coord, _) in &to_move {
+        if let Some(d) = remove_voxel_at_coord(file, voxel_map, coord) {
+            deltas.push(d);
+        }
+    }
+
+    // Add at destinations.
+    let mut seen: HashSet<VoxelCoord> = HashSet::new();
+    for (src, mut voxel) in to_move {
+        let x = src.0 + dx;
+        let y = src.1 + dy;
+        let z = src.2 + dz;
+        if x < lo || x > hi || y < lo || y > hi || z < lo || z > hi {
+            continue;
+        }
+        if !seen.insert((x, y, z)) {
+            continue;
+        }
+        // Evict any non-selection voxel already at destination.
+        if voxel_map.contains_key(&(x, y, z)) {
+            if let Some(d) = remove_voxel_at_coord(file, voxel_map, (x, y, z)) {
+                deltas.push(d);
+            }
+        }
+        voxel.x = x;
+        voxel.y = y;
+        voxel.z = z;
+        push_voxel_known(file, voxel_map, voxel);
+        deltas.push(VoxelEditDelta::Added(voxel));
+    }
+
+    deltas
+}
+
+/// Rotate all solid voxels in `selection` by `quarters` quarter-turns around
+/// `axis` (0=X, 1=Y, 2=Z). Returns voxel-edit deltas. The caller is
+/// responsible for computing the new selection-cell set (use
+/// [`rotate_selection_coords`]) and updating `selection_cells`.
+pub fn rotate_selected_voxels(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    selection: &AHashSet<VoxelCoord>,
+    axis: u8,
+    quarters: i32,
+) -> Vec<VoxelEditDelta> {
+    let q = quarters.rem_euclid(4);
+    if q == 0 {
+        return Vec::new();
+    }
+
+    let pivot = selection_pivot(selection);
+
+    let to_move: Vec<(VoxelCoord, Voxel)> = selection
+        .iter()
+        .filter_map(|&c| voxel_map.get(&c).map(|&i| (c, file.voxels[i])))
+        .collect();
+    if to_move.is_empty() {
+        return Vec::new();
+    }
+
+    // Compute rotated destinations.
+    let rotated: Vec<(VoxelCoord, Voxel)> = to_move
+        .iter()
+        .map(|&(src, mut voxel)| {
+            let dest = rotate_coord(src, pivot, axis, q);
+            voxel.x = dest.0;
+            voxel.y = dest.1;
+            voxel.z = dest.2;
+            (dest, voxel)
+        })
+        .collect();
+
+    ensure_grid_fits_coords(file, rotated.iter().map(|&(c, _)| c));
+    let grid_size = file.grid_size.max(1);
+    let (lo, hi) = grid_valid_range(grid_size);
+
+    let mut deltas = Vec::new();
+
+    for &(coord, _) in &to_move {
+        if let Some(d) = remove_voxel_at_coord(file, voxel_map, coord) {
+            deltas.push(d);
+        }
+    }
+
+    let mut seen: HashSet<VoxelCoord> = HashSet::new();
+    for (dest, voxel) in rotated {
+        if dest.0 < lo || dest.0 > hi || dest.1 < lo || dest.1 > hi || dest.2 < lo || dest.2 > hi {
+            continue;
+        }
+        if !seen.insert(dest) {
+            continue;
+        }
+        if voxel_map.contains_key(&dest) {
+            if let Some(d) = remove_voxel_at_coord(file, voxel_map, dest) {
+                deltas.push(d);
+            }
+        }
+        push_voxel_known(file, voxel_map, voxel);
+        deltas.push(VoxelEditDelta::Added(voxel));
+    }
+
+    deltas
+}
+
+/// Compute the new selection-cell set after a quarter-turn rotation (no voxel
+/// data needed — purely coordinate arithmetic).
+pub fn rotate_selection_coords(
+    selection: &AHashSet<VoxelCoord>,
+    axis: u8,
+    quarters: i32,
+) -> AHashSet<VoxelCoord> {
+    let q = quarters.rem_euclid(4);
+    if q == 0 {
+        return selection.clone();
+    }
+    let pivot = selection_pivot(selection);
+    selection.iter().map(|&c| rotate_coord(c, pivot, axis, q)).collect()
+}
+
+fn selection_pivot(selection: &AHashSet<VoxelCoord>) -> (f32, f32, f32) {
+    let mut min_x = i32::MAX; let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX; let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX; let mut max_z = i32::MIN;
+    for &(x, y, z) in selection {
+        min_x = min_x.min(x); max_x = max_x.max(x);
+        min_y = min_y.min(y); max_y = max_y.max(y);
+        min_z = min_z.min(z); max_z = max_z.max(z);
+    }
+    (
+        (min_x + max_x) as f32 * 0.5,
+        (min_y + max_y) as f32 * 0.5,
+        (min_z + max_z) as f32 * 0.5,
+    )
+}
+
+fn rotate_coord(
+    coord: VoxelCoord,
+    pivot: (f32, f32, f32),
+    axis: u8,
+    quarters: i32,
+) -> VoxelCoord {
+    let rx = coord.0 as f32 - pivot.0;
+    let ry = coord.1 as f32 - pivot.1;
+    let rz = coord.2 as f32 - pivot.2;
+    let (nx, ny, nz) = rotate_rel_quarter(rx, ry, rz, axis, quarters);
+    (
+        (nx + pivot.0).round() as i32,
+        (ny + pivot.1).round() as i32,
+        (nz + pivot.2).round() as i32,
+    )
+}
+
+/// Mirror solid selected voxels through the plane perpendicular to `axis`
+/// that passes through the selection AABB center.
+/// `axis`: 0=X, 1=Y, 2=Z.
+pub fn mirror_selected_voxels(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    selection: &AHashSet<VoxelCoord>,
+    axis: u8,
+) -> Vec<VoxelEditDelta> {
+    let to_move: Vec<(VoxelCoord, Voxel)> = selection
+        .iter()
+        .filter_map(|&c| voxel_map.get(&c).map(|&i| (c, file.voxels[i])))
+        .collect();
+    if to_move.is_empty() {
+        return Vec::new();
+    }
+    let pivot = selection_pivot(selection);
+
+    let mirrored: Vec<(VoxelCoord, Voxel)> = to_move
+        .iter()
+        .map(|&(src, mut voxel)| {
+            let dest = mirror_coord(src, pivot, axis);
+            voxel.x = dest.0;
+            voxel.y = dest.1;
+            voxel.z = dest.2;
+            (dest, voxel)
+        })
+        .collect();
+
+    ensure_grid_fits_coords(file, mirrored.iter().map(|&(c, _)| c));
+    let grid_size = file.grid_size.max(1);
+    let (lo, hi) = grid_valid_range(grid_size);
+
+    let mut deltas = Vec::new();
+    for &(coord, _) in &to_move {
+        if let Some(d) = remove_voxel_at_coord(file, voxel_map, coord) {
+            deltas.push(d);
+        }
+    }
+    let mut seen: HashSet<VoxelCoord> = HashSet::new();
+    for (dest, voxel) in mirrored {
+        if dest.0 < lo || dest.0 > hi || dest.1 < lo || dest.1 > hi || dest.2 < lo || dest.2 > hi {
+            continue;
+        }
+        if !seen.insert(dest) {
+            continue;
+        }
+        if voxel_map.contains_key(&dest) {
+            if let Some(d) = remove_voxel_at_coord(file, voxel_map, dest) {
+                deltas.push(d);
+            }
+        }
+        push_voxel_known(file, voxel_map, voxel);
+        deltas.push(VoxelEditDelta::Added(voxel));
+    }
+    deltas
+}
+
+/// Compute the new selection-cell set after a mirror on `axis`.
+pub fn mirror_selection_coords(
+    selection: &AHashSet<VoxelCoord>,
+    axis: u8,
+) -> AHashSet<VoxelCoord> {
+    let pivot = selection_pivot(selection);
+    selection.iter().map(|&c| mirror_coord(c, pivot, axis)).collect()
+}
+
+fn mirror_coord(coord: VoxelCoord, pivot: (f32, f32, f32), axis: u8) -> VoxelCoord {
+    match axis {
+        0 => ((2.0 * pivot.0 - coord.0 as f32).round() as i32, coord.1, coord.2),
+        1 => (coord.0, (2.0 * pivot.1 - coord.1 as f32).round() as i32, coord.2),
+        _ => (coord.0, coord.1, (2.0 * pivot.2 - coord.2 as f32).round() as i32),
+    }
 }
 
 #[cfg(test)]

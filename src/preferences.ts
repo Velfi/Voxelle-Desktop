@@ -70,6 +70,8 @@ export type VoxelleDesktopPreferences = {
   appearanceTheme: AppearanceTheme;
   /** Automatically reopen the last project when the app starts. */
   reopenLastProject: boolean;
+  /** Bake irradiance from glow voxels onto nearby surfaces (re-runs on mesh rebuild). */
+  enableEmissionLighting: boolean;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -86,6 +88,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   autosaveKeepCount: 5,
   appearanceTheme: "auto",
   reopenLastProject: false,
+  enableEmissionLighting: true,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -264,6 +267,10 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         typeof o.reopenLastProject === "boolean"
           ? o.reopenLastProject
           : DEFAULTS.reopenLastProject,
+      enableEmissionLighting:
+        typeof o.enableEmissionLighting === "boolean"
+          ? o.enableEmissionLighting
+          : DEFAULTS.enableEmissionLighting,
     };
   } catch {
     return { ...DEFAULTS };
@@ -297,6 +304,7 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.autosaveKeepCount = prefs.autosaveKeepCount;
     merged.appearanceTheme = prefs.appearanceTheme;
     merged.reopenLastProject = prefs.reopenLastProject;
+    merged.enableEmissionLighting = prefs.enableEmissionLighting;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

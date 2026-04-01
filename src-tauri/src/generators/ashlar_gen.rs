@@ -24,21 +24,17 @@ fn seed_to_int(seed: i32, lo: i32, hi: i32) -> i32 {
     lo + ((h % ((hi - lo + 1) as u32)) as i32)
 }
 
-/// Generate an ashlar (dressed stone) block: axis-aligned box with rough edges and rounded corners.
-/// Placed in empty space in front of the clicked face, centered on the result.
-pub fn generate_ashlar_deltas(
-    file: &mut VoxelleFile,
-    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+/// Pure coordinate generator — returns world-space voxel positions for an ashlar block.
+/// Does not mutate any state.
+pub fn ashlar_world_coords(
     face_empty: VoxelCoord,
     solid: VoxelCoord,
     seed: i32,
     size: i32,
     roughness: f32,
-    color: u32,
-    material: MaterialId,
     thickness: Option<i32>,
     thickness_axis: Option<i32>,
-) -> Vec<VoxelEditDelta> {
+) -> Vec<VoxelCoord> {
     let s = size.max(1);
     let lo = (s / 2).max(3);
     let hi = (s + s / 2).min(20).max(lo);
@@ -46,7 +42,23 @@ pub fn generate_ashlar_deltas(
     let mut wy = seed_to_int(seed + 1, lo, hi).max(3);
     let mut wz = seed_to_int(seed + 2, lo, hi).max(3);
 
-    if let (Some(t), Some(axis)) = (thickness, thickness_axis) {
+    let fn_x = (face_empty.0 - solid.0).signum();
+    let fn_y = (face_empty.1 - solid.1).signum();
+    let fn_z = (face_empty.2 - solid.2).signum();
+
+    // Resolve thickness axis: use explicit value, or auto-detect from face normal.
+    let resolved_axis = thickness_axis.or_else(|| {
+        if fn_x != 0 {
+            Some(0)
+        } else if fn_y != 0 {
+            Some(1)
+        } else if fn_z != 0 {
+            Some(2)
+        } else {
+            None
+        }
+    });
+    if let (Some(t), Some(axis)) = (thickness, resolved_axis) {
         let t = t.max(1).min(20);
         match axis {
             0 => wx = t,
@@ -57,9 +69,6 @@ pub fn generate_ashlar_deltas(
 
     let rough = roughness.clamp(0.0, 1.0);
     let round_radius_sq = 1.4_f32 * 1.4;
-
-    // Collect local-space voxels
-    let mut local_cells: Vec<(i32, i32, i32)> = Vec::new();
 
     let corners: [(i32, i32, i32); 8] = [
         (0, 0, 0),
@@ -72,6 +81,7 @@ pub fn generate_ashlar_deltas(
         (wx - 1, wy - 1, wz - 1),
     ];
 
+    let mut local_cells: Vec<(i32, i32, i32)> = Vec::new();
     for x in 0..wx {
         for y in 0..wy {
             for z in 0..wz {
@@ -87,7 +97,6 @@ pub fn generate_ashlar_deltas(
                         continue;
                     }
                 }
-                // Rounded corners
                 let near_corner = corners.iter().any(|&(cx, cy, cz)| {
                     let dx = (x - cx) as f32;
                     let dy = (y - cy) as f32;
@@ -106,31 +115,53 @@ pub fn generate_ashlar_deltas(
         return Vec::new();
     }
 
-    // Center the block
+    // Center of the block in local space
     let cx = (wx - 1) as f32 / 2.0;
     let cy = (wy - 1) as f32 / 2.0;
     let cz = (wz - 1) as f32 / 2.0;
 
-    // Place centered at face_empty, offset along normal
-    let nx = (face_empty.0 - solid.0).signum();
-    let ny = (face_empty.1 - solid.1).signum();
-    let nz = (face_empty.2 - solid.2).signum();
-    let half = ((wx.max(wy).max(wz)) as f32 / 2.0) as i32 + 1;
-    let ox = face_empty.0 + nx * half;
-    let oy = face_empty.1 + ny * half;
-    let oz = face_empty.2 + nz * half;
+    // Offset along the face normal by half the normal-axis extent so the block
+    // sits adjacent to the clicked face (not floating with a large gap).
+    let normal_dim = if fn_x != 0 { wx } else if fn_y != 0 { wy } else { wz };
+    let half = ((normal_dim as f32) / 2.0).ceil() as i32;
+    let ox = face_empty.0 + fn_x * half;
+    let oy = face_empty.1 + fn_y * half;
+    let oz = face_empty.2 + fn_z * half;
 
+    // Use floor(offset + 0.5) to match JavaScript's Math.round behaviour:
+    // round(-0.5) = 0 (not -1), so even-dimension blocks have no gap at centre.
     let mut out = Vec::new();
     let mut seen: HashSet<VoxelCoord> = HashSet::new();
-
     for &(lx, ly, lz) in &local_cells {
-        let x = ox + (lx as f32 - cx).round() as i32;
-        let y = oy + (ly as f32 - cy).round() as i32;
-        let z = oz + (lz as f32 - cz).round() as i32;
-        ensure_grid_fits_coord(file, x, y, z);
-        if !seen.insert((x, y, z)) {
-            continue;
+        let x = ox + (lx as f32 - cx + 0.5).floor() as i32;
+        let y = oy + (ly as f32 - cy + 0.5).floor() as i32;
+        let z = oz + (lz as f32 - cz + 0.5).floor() as i32;
+        if seen.insert((x, y, z)) {
+            out.push((x, y, z));
         }
+    }
+    out
+}
+
+/// Generate an ashlar (dressed stone) block: axis-aligned box with rough edges and rounded corners.
+/// Placed in empty space in front of the clicked face, centered on the result.
+pub fn generate_ashlar_deltas(
+    file: &mut VoxelleFile,
+    voxel_map: &mut AHashMap<VoxelCoord, usize>,
+    face_empty: VoxelCoord,
+    solid: VoxelCoord,
+    seed: i32,
+    size: i32,
+    roughness: f32,
+    color: u32,
+    material: MaterialId,
+    thickness: Option<i32>,
+    thickness_axis: Option<i32>,
+) -> Vec<VoxelEditDelta> {
+    let coords = ashlar_world_coords(face_empty, solid, seed, size, roughness, thickness, thickness_axis);
+    let mut out = Vec::new();
+    for (x, y, z) in coords {
+        ensure_grid_fits_coord(file, x, y, z);
         if voxel_map.contains_key(&(x, y, z)) {
             continue;
         }
@@ -148,6 +179,34 @@ pub fn generate_ashlar_deltas(
         out.push(VoxelEditDelta::Added(nv));
     }
     out
+}
+
+/// Preview coords for the ashlar generator (no world mutation).
+pub fn preview_ashlar_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    size: i32,
+    roughness: f32,
+    thickness: i32,
+) -> Vec<VoxelCoord> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(face_empty) = prev else {
+        return Vec::new();
+    };
+    ashlar_world_coords(face_empty, solid, seed, size, roughness, Some(thickness), None)
+        .into_iter()
+        .filter(|c| !voxel_map.contains_key(c))
+        .collect()
 }
 
 /// Face-click ashlar generator (web parity).

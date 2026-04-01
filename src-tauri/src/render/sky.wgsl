@@ -76,8 +76,8 @@ fn day_sky_brightness(amb: f32, sun_lvl: f32) -> f32 {
 
 /// 1 only when both ambient and sunlight are effectively off (Total darkness preset).
 fn star_field_weight(amb: f32, sun_lvl: f32) -> f32 {
-    let a = 1.0 - smoothstep(0.0, 0.028, amb);
-    let b = 1.0 - smoothstep(0.0, 0.028, sun_lvl);
+    let a = 1.0 - smoothstep(0.20, 0.25, amb);
+    let b = 1.0 - smoothstep(0.20, 0.25, sun_lvl);
     return a * b;
 }
 
