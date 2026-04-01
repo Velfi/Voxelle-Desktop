@@ -1326,8 +1326,8 @@ fn viewer_resize(
     viewport_width: u32,
     viewport_height: u32,
 ) -> Result<(), String> {
-    let sw = surface_width.max(1);
-    let sh = surface_height.max(1);
+    let _sw = surface_width.max(1);
+    let _sh = surface_height.max(1);
 
     // On Windows the wgpu surface lives on a child HWND sized to the viewport,
     // so surface == viewport and offsets are zero.  Reposition the child window
@@ -4543,7 +4543,7 @@ fn collab_peer_labels(state: State<'_, Arc<ViewerState>>) -> Result<Vec<PeerLabe
 
 fn push_solo_undo_step(
     state: &Arc<ViewerState>,
-    app: &AppHandle,
+    _app: &AppHandle,
     deltas: Vec<voxel_edit::VoxelEditDelta>,
 ) -> Result<(), String> {
     if deltas.is_empty() {
@@ -4561,7 +4561,7 @@ fn push_solo_undo_step(
 
 fn push_solo_selection_undo_step(
     state: &Arc<ViewerState>,
-    app: &AppHandle,
+    _app: &AppHandle,
     before: AHashSet<greedy_mesh::VoxelCoord>,
 ) -> Result<(), String> {
     state
@@ -5937,7 +5937,7 @@ fn get_selection_gizmo_projected(
 /// selection sync, so we just apply the voxel changes without solo undo).
 fn push_selection_transform_undo(
     state: &Arc<ViewerState>,
-    app: &AppHandle,
+    _app: &AppHandle,
     before_sel: AHashSet<greedy_mesh::VoxelCoord>,
     deltas: Vec<voxel_edit::VoxelEditDelta>,
 ) {
@@ -12509,7 +12509,7 @@ fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadat
     // Public repo (matches updater endpoint in `tauri.conf.json`).
     const GITHUB_VD: &str = "https://github.com/Velfi/Voxelle-Desktop";
     let pkg = app.package_info();
-    let mut m = AboutMetadata {
+    let m = AboutMetadata {
         name: Some(pkg.name.clone()),
         version: Some(pkg.version.to_string()),
         website: Some(GITHUB_VD.into()),
@@ -12689,7 +12689,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
 
     let menu = Menu::default(app)?;
     let about_item = PredefinedMenuItem::about(app, None, Some(vd_about_metadata(app)?))?;
-    let app_menu_title = app.package_info().name.clone();
+    let _app_menu_title = app.package_info().name.clone();
     let new_item = MenuItem::with_id(app, "new_project", "New Project…", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open_voxelle", "Open…", true, Some("CommandOrCtrl+O"))?;
     let save_item = MenuItem::with_id(app, "menu_save", "Save", true, Some("CommandOrCtrl+S"))?;

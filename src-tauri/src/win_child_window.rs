@@ -59,9 +59,9 @@ impl ChildRenderWindow {
                 0,
                 1,
                 1,
-                parent,
+                Some(parent),
                 None,
-                hinstance,
+                Some(hinstance),
                 None,
             )
             .map_err(|e| format!("CreateWindowExW child: {e}"))?;
@@ -69,7 +69,7 @@ impl ChildRenderWindow {
             // Place behind all siblings (WebView2) in z-order.
             let _ = SetWindowPos(
                 hwnd,
-                HWND_BOTTOM,
+                Some(HWND_BOTTOM),
                 0,
                 0,
                 1,
@@ -88,7 +88,7 @@ impl ChildRenderWindow {
     /// within the parent window's client area.
     pub fn reposition(&self, x: i32, y: i32, w: i32, h: i32) {
         unsafe {
-            let _ = SetWindowPos(self.hwnd, HWND_BOTTOM, x, y, w, h, SWP_NOACTIVATE);
+            let _ = SetWindowPos(self.hwnd, Some(HWND_BOTTOM), x, y, w, h, SWP_NOACTIVATE);
         }
     }
 
