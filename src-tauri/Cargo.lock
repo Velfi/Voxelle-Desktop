@@ -6367,6 +6367,7 @@ dependencies = [
  "tokio-util",
  "uuid",
  "wgpu",
+ "windows 0.58.0",
 ]
 
 [[package]]

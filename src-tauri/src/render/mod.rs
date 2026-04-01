@@ -906,6 +906,9 @@ struct OpaqueChunkDraw {
     index_buffer: wgpu::Buffer,
     opaque_index_count: u32,
     transparent_index_count: u32,
+    /// When false (GPU mesh path), indices are not partitioned: both opaque and OIT
+    /// passes draw `0..total` and rely on shader-side `mat_kind` discard.
+    partitioned: bool,
 }
 
 /// Reused GPU buffers for greedy mesh compute (grow-only scratch).
@@ -1060,70 +1063,20 @@ fn create_rt_accum_tex(
     (tex, view)
 }
 
-/// Clamp a point so the shadow frustum center stays within (or near) the scene bounds.
-fn clamp_point_to_bounds(p: Vec3, bounds: &MeshBounds, margin: f32) -> Vec3 {
-    Vec3::new(
-        p.x.clamp(bounds.min.x - margin, bounds.max.x + margin),
-        p.y.clamp(bounds.min.y - margin, bounds.max.y + margin),
-        p.z.clamp(bounds.min.z - margin, bounds.max.z + margin),
-    )
-}
-
 /// Uses [`Mat4::orthographic_rh`], which glam documents as \([0,1]\) depth for WebGPU (do not apply an extra OpenGL→wgpu Z remap).
-///
-/// The shadow frustum is fitted to the camera's visible area so that close-up views
-/// get dramatically higher shadow texel density without changing the map resolution.
-fn light_view_proj(
-    bounds: &MeshBounds,
-    light_dir: Vec3,
-    camera: &OrbitCamera,
-    viewport_w: f32,
-    viewport_h: f32,
-) -> Mat4 {
-    let scene_r = bounds.radius().max(8.0);
-
-    // Visible radius at the camera target plane.
-    let cam_dist = camera.smooth_spherical.radius;
-    let aspect = (viewport_w / viewport_h.max(1.0)).max(1e-4);
-    let visible_r = if camera.perspective {
-        let v_half = cam_dist * (camera.fov_y * 0.5).tan();
-        let h_half = v_half * aspect;
-        (v_half * v_half + h_half * h_half).sqrt()
-    } else {
-        let hh = camera.ortho_half_height;
-        let hw = hh * aspect;
-        (hh * hh + hw * hw).sqrt()
-    };
-
-    // 1.5× padding keeps shadow casters just outside the view.
-    // Clamp to scene radius (no point covering more) and a minimum of 2 voxels.
-    let effective_r = (visible_r * 1.5).clamp(2.0, scene_r);
-
-    // Centre the shadow frustum on the camera target, clamped to the scene.
-    let shadow_center = clamp_point_to_bounds(camera.smooth_target, bounds, effective_r);
-
+fn light_view_proj(bounds: &MeshBounds, light_dir: Vec3) -> Mat4 {
+    let center = bounds.center();
+    let r = bounds.radius().max(8.0);
     let ld = light_dir.normalize();
     let up = if ld.cross(Vec3::Y).length() > 0.05 {
         Vec3::Y
     } else {
         Vec3::Z
     };
-    let eye = shadow_center + ld * (scene_r * 5.0);
-    let view = Mat4::look_at_rh(eye, shadow_center, up);
-
-    // Texel-snap the shadow centre in light-space so the sampling grid stays fixed
-    // when the camera pans — prevents shadow swimming / shimmer.
-    let he = effective_r * 1.8;
-    let texel_world = (he * 2.0) / SHADOW_MAP_SIZE as f32;
-    let ls = view.transform_point3(shadow_center);
-    let snap = Vec3::new(
-        (ls.x / texel_world).floor() * texel_world - ls.x,
-        (ls.y / texel_world).floor() * texel_world - ls.y,
-        0.0,
-    );
-    let view = Mat4::from_translation(snap) * view;
-
-    let proj = Mat4::orthographic_rh(-he, he, -he, he, 1.0, scene_r * 12.0);
+    let eye = center + ld * (r * 5.0);
+    let view = Mat4::look_at_rh(eye, center, up);
+    let he = r * 1.8;
+    let proj = Mat4::orthographic_rh(-he, he, -he, he, 1.0, r * 12.0);
     proj * view
 }
 
@@ -4467,6 +4420,7 @@ impl WgpuViewer {
             index_buffer,
             opaque_index_count: opaque_split,
             transparent_index_count: (mesh.indices.len() as u32).saturating_sub(opaque_split),
+            partitioned: true,
         }
     }
 
@@ -4494,6 +4448,7 @@ impl WgpuViewer {
                 .write_buffer(&draw.index_buffer, 0, bytemuck::cast_slice(&mesh.indices));
             draw.opaque_index_count = opaque_split;
             draw.transparent_index_count = (mesh.indices.len() as u32).saturating_sub(opaque_split);
+            draw.partitioned = true;
         } else {
             self.opaque_chunks
                 .insert(key, self.opaque_draw_from_mesh(mesh, opaque_split));
@@ -5170,7 +5125,8 @@ impl WgpuViewer {
             self.queue.submit(std::iter::once(enc.finish()));
             poll_device_yielding_until_queue_empty(&self.device);
             draw.opaque_index_count = i_total;
-            draw.transparent_index_count = 0;
+            draw.transparent_index_count = i_total;
+            draw.partitioned = false;
             return;
         }
 
@@ -5201,7 +5157,8 @@ impl WgpuViewer {
                 vertex_buffer: vb,
                 index_buffer: ib,
                 opaque_index_count: i_total,
-                transparent_index_count: 0,
+                transparent_index_count: i_total,
+                partitioned: false,
             },
         );
     }
@@ -5370,8 +5327,9 @@ impl WgpuViewer {
         self.vertex_buffer = Some(vb_final);
         self.index_buffer = Some(ib_final);
         self.index_count = i_total;
-        // GPU greedy path doesn't partition indices yet — treat all as opaque.
-        self.opaque_index_split = i_total;
+        // GPU greedy path doesn't partition indices yet — both passes draw 0..total
+        // and rely on shader-side mat_kind discard.
+        self.opaque_index_split = 0;
         self.last_mesh_route = "gpu_greedy".to_string();
         Ok(bounds)
     }
@@ -6072,7 +6030,7 @@ impl WgpuViewer {
         let vp = proj * view;
         let inv_v = view.inverse();
         let inv_p = proj.inverse();
-        let lvp = light_view_proj(&self.scene_bounds, self.light_dir, camera, w, h);
+        let lvp = light_view_proj(&self.scene_bounds, self.light_dir);
         let eye = camera.smooth_eye();
         let gs = GlobalState {
             view_proj: vp.to_cols_array_2d(),
@@ -6137,7 +6095,7 @@ impl WgpuViewer {
         }
     }
 
-    /// Draw only the opaque index range.
+    /// Draw only the opaque index range (or full range when un-partitioned — shader discards glass).
     fn draw_indexed_mesh(&self, pass: &mut wgpu::RenderPass<'_>) {
         if self.opaque_chunked {
             for ch in self.opaque_chunks.values() {
@@ -6151,15 +6109,18 @@ impl WgpuViewer {
             return;
         }
         if let (Some(vb), Some(ib)) = (&self.vertex_buffer, &self.index_buffer) {
-            if self.opaque_index_split > 0 {
+            // When un-partitioned (opaque_index_split == 0), draw all; shader discards glass.
+            let count = if self.opaque_index_split > 0 { self.opaque_index_split } else { self.index_count };
+            if count > 0 {
                 pass.set_vertex_buffer(0, vb.slice(..));
                 pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..self.opaque_index_split, 0, 0..1);
+                pass.draw_indexed(0..count, 0, 0..1);
             }
         }
     }
 
     /// Draw only the transparent index range for the OIT accumulation pass.
+    /// When un-partitioned (GPU path), draws full range — shader discards opaque.
     fn draw_indexed_oit_mesh(&self, pass: &mut wgpu::RenderPass<'_>) {
         if self.opaque_chunked {
             for ch in self.opaque_chunks.values() {
@@ -6168,8 +6129,9 @@ impl WgpuViewer {
                 }
                 pass.set_vertex_buffer(0, ch.vertex_buffer.slice(..));
                 pass.set_index_buffer(ch.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                let start = if ch.partitioned { ch.opaque_index_count } else { 0 };
                 pass.draw_indexed(
-                    ch.opaque_index_count..ch.opaque_index_count + ch.transparent_index_count,
+                    start..start + ch.transparent_index_count,
                     0,
                     0..1,
                 );

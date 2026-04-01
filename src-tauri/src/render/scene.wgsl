@@ -286,13 +286,20 @@ fn transmission_shade_oit(
     screen_pos: vec2<f32>,
     vertex_ao: f32,
 ) -> vec4<f32> {
-    let slab = march_slab_thickness(world, n);
+    let slab_raw = march_slab_thickness(world, n);
     let transmission = select(0.96, 0.998, is_water);
     let thickness = select(0.65, 0.9, is_water);
     let att_dist = select(2.5, 32.0, is_water);
     let ior = select(1.5, 1.333, is_water);
-    let absorb = exp(-(thickness * slab * 1.2) / max(att_dist, 1e-4));
-    let net_t = transmission * absorb;
+    // Full-depth absorption drives the voxel-color tint: deeper bodies show
+    // more of their color.
+    let full_absorb = exp(-(thickness * slab_raw * 1.2) / max(att_dist, 1e-4));
+    let full_net_t = transmission * full_absorb;
+    // Thin-slab absorption for alpha only: OIT compositing can dim the
+    // background but cannot tint it, so thick absorption would replace the
+    // scene behind with the material's own color instead of tinting through.
+    let thin_absorb = exp(-(thickness * min(slab_raw, 1.0) * 1.2) / max(att_dist, 1e-4));
+    let net_t = transmission * thin_absorb;
     let f0 = vec3<f32>(pow((ior - 1.0) / (ior + 1.0), 2.0));
     let fresnel = schlick_f0(n, v, f0);
     let l = normalize(g.light_dir.xyz);
@@ -301,8 +308,8 @@ fn transmission_shade_oit(
     let sun = g.light_params.y;
     let sc = g.sun_color.xyz;
     let ao_h = pow(max(vertex_ao, 0.001), VERTEX_AO_GAMMA);
-    // Absorption self-tint: light absorbed by the glass becomes visible color.
-    let self_tint = base * (1.0 - net_t) * 0.5;
+    // Self-tint from full depth so the voxel color is visible.
+    let self_tint = base * (1.0 - full_net_t) * 0.5;
     // Specular reflection from sun (Fresnel-weighted Blinn-Phong).
     let h_spec = normalize(l + v);
     let spec = fresnel * pow(max(dot(h_spec, n), 0.0), 96.0) * shadow_visibility(world, n, screen_pos) * sun * sc;
@@ -530,8 +537,11 @@ fn fs_trans(in: VertexOut) -> @location(0) vec4<f32> {
     if (in.mat_kind < 1.6) {
         discard;
     }
-    let n = normalize(in.normal);
     let v = normalize(g.cam_pos.xyz - in.world_pos);
+    let n_raw = normalize(in.normal);
+    // Flip back-facing normals toward the camera so the Fresnel term doesn't
+    // drive single-thickness glass panes to full opacity.
+    let n = select(-n_raw, n_raw, dot(n_raw, v) >= 0.0);
     let is_water = in.mat_kind > 2.2;
     // IOR-based refraction: offset the background sample UV by the angular
     // deviation of the refracted ray (Snell's law). Without this, glass and water
@@ -576,9 +586,19 @@ fn fs_oit_accum(in: VertexOut) -> OitOut {
     if (in.mat_kind < 1.6) {
         discard;
     }
-    let n = normalize(in.normal);
     let v = normalize(g.cam_pos.xyz - in.world_pos);
+    let n_raw = normalize(in.normal);
+    // Flip back-facing normals toward the camera so the Fresnel term doesn't
+    // drive single-thickness glass panes to full opacity.
+    let n = select(-n_raw, n_raw, dot(n_raw, v) >= 0.0);
     let is_water = in.mat_kind > 2.2;
+
+    // Discard back-facing water: the bottom face of a water body is coplanar
+    // with the opaque surface beneath it, causing z-fighting.  Glass keeps
+    // both faces (cull_mode is None) but water's underside is redundant.
+    if (is_water && dot(n, v) < 0.0) {
+        discard;
+    }
 
     let shade = transmission_shade_oit(in.color, in.world_pos, n, v, is_water, in.clip_pos.xy, in.vertex_ao);
     var rgb = shade.rgb;

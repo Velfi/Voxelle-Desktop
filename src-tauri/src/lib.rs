@@ -14,6 +14,8 @@ mod macos_titlebar;
 mod macos_undo;
 mod render;
 mod render_constants;
+#[cfg(target_os = "windows")]
+mod win_child_window;
 mod paint_color_distrib;
 mod voxel_edit;
 mod sculpt_mesh_smooth;
@@ -922,6 +924,9 @@ impl Default for FlyInputState {
 
 pub struct ViewerState {
     pub viewer: Mutex<Option<WgpuViewer>>,
+    /// Windows-only child HWND hosting the wgpu surface (keeps it behind WebView2).
+    #[cfg(target_os = "windows")]
+    pub render_child_window: Mutex<Option<win_child_window::ChildRenderWindow>>,
     pub camera: Mutex<OrbitCamera>,
     pub file_label: Mutex<String>,
     /// Latest loaded model for CPU-side edits (add/remove voxels).
@@ -945,6 +950,8 @@ pub struct ViewerState {
     pub load_generation: AtomicU64,
     /// Chunks built by background meshing thread, waiting for main-thread GPU upload.
     pub(crate) chunk_mesh_inbox: Mutex<VecDeque<(greedy_mesh::ChunkKey, greedy_mesh::MeshBuffers)>>,
+    /// Guest edit/undo/redo items waiting for main-thread processing (same pattern as `chunk_mesh_inbox`).
+    pub(crate) collab_edit_inbox: Mutex<VecDeque<collab::CollabInboxItem>>,
     /// SpatialMeshCache from background streaming load; moved to viewer after all chunks are uploaded.
     pub(crate) deferred_spatial_cache: Mutex<Option<greedy_mesh::SpatialMeshCache>>,
     /// Incremental [`greedy_mesh::voxel_aabb_min_int`] + single-object detection for chunked mesh path.
@@ -1309,8 +1316,32 @@ fn viewer_resize(
 ) -> Result<(), String> {
     let sw = surface_width.max(1);
     let sh = surface_height.max(1);
+
+    // On Windows the wgpu surface lives on a child HWND sized to the viewport,
+    // so surface == viewport and offsets are zero.  Reposition the child window
+    // to match the viewport location within the parent.
+    #[cfg(target_os = "windows")]
+    {
+        let vw = viewport_width.max(1);
+        let vh = viewport_height.max(1);
+        if let Some(child) = state.render_child_window.lock().as_ref() {
+            child.reposition(
+                viewport_x as i32,
+                viewport_y as i32,
+                vw as i32,
+                vh as i32,
+            );
+        }
+    }
+
     let mut g = state.viewer.lock();
     if let Some(v) = g.as_mut() {
+        #[cfg(target_os = "windows")]
+        let (sw, sh, viewport_x, viewport_y) = {
+            let vw = viewport_width.max(1);
+            let vh = viewport_height.max(1);
+            (vw, vh, 0u32, 0u32)
+        };
         v.resize(sw, sh, viewport_x, viewport_y, viewport_width, viewport_height);
         let (vw, vh) = v.viewport_size();
         let (sur_w, sur_h) = v.surface_pixel_size();
@@ -9027,6 +9058,23 @@ async fn voxel_edit_at_screen(
         (w as f32, h as f32)
     };
 
+    // Block edits if we are a guest without edit permission.
+    {
+        let c = state.collab.lock();
+        if c.is_client() {
+            let local = c.local_peer_id;
+            let can_edit = c
+                .roster
+                .iter()
+                .find(|r| r.peer_id == local)
+                .map(|r| r.can_edit)
+                .unwrap_or(false);
+            if !can_edit {
+                return Err("editing not allowed".into());
+            }
+        }
+    }
+
     let material = voxelle::MaterialId::from_str_id(&args.material);
 
     #[cfg(desktop)]
@@ -9323,14 +9371,43 @@ fn voxel_undo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool
             return Ok(true);
         }
         if c.is_host() {
-            let mesh = collab::host_undo_peer(&app, &state, &mut c, collab::HOST_PEER_ID)?;
-            let Some(d) = mesh else {
+            // Pop undo stack, then drop the lock before GPU work.
+            let original = c.host_undo.entry(collab::HOST_PEER_ID).or_default().pop();
+            drop(c);
+            let Some(original) = original else {
                 return Ok(false);
             };
-            c.next_seq += 1;
-            let seq = c.next_seq;
-            drop(c);
-            collab::host_emit_edit_batch(&cm, &app, seq, collab::HOST_PEER_ID, &d);
+            let mesh_refresh: Vec<voxel_edit::VoxelEditDelta> = {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let file = fg.as_mut().ok_or("no model loaded")?;
+                let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+                let mut mesh = Vec::with_capacity(original.len());
+                for d in original.iter().rev() {
+                    voxel_edit::apply_inverse_delta(file, vmap, d)?;
+                    mesh.push(voxel_edit::mesh_delta_after_inverse_of(d));
+                }
+                mesh
+            };
+            finish_voxel_edit_gpu_deltas(
+                &state,
+                &mesh_refresh,
+                0.0,
+                std::time::Instant::now(),
+                &app,
+                VoxelGpuRefreshReason::Undo,
+            )?;
+            // Re-acquire briefly for redo push + seq.
+            let seq = {
+                let mut c = cm.lock();
+                c.host_redo
+                    .entry(collab::HOST_PEER_ID)
+                    .or_default()
+                    .push(original);
+                c.next_seq += 1;
+                c.next_seq
+            };
+            collab::host_emit_edit_batch(&cm, &app, seq, collab::HOST_PEER_ID, &mesh_refresh);
             return Ok(true);
         }
     }
@@ -9356,14 +9433,40 @@ fn voxel_redo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool
             return Ok(true);
         }
         if c.is_host() {
-            let mesh = collab::host_redo_peer(&app, &state, &mut c, collab::HOST_PEER_ID)?;
-            let Some(d) = mesh else {
+            // Pop redo stack, then drop the lock before GPU work.
+            let forward = c.host_redo.entry(collab::HOST_PEER_ID).or_default().pop();
+            drop(c);
+            let Some(forward) = forward else {
                 return Ok(false);
             };
-            c.next_seq += 1;
-            let seq = c.next_seq;
-            drop(c);
-            collab::host_emit_edit_batch(&cm, &app, seq, collab::HOST_PEER_ID, &d);
+            {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let file = fg.as_mut().ok_or("no model loaded")?;
+                let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+                for d in &forward {
+                    voxel_edit::apply_forward_delta(file, vmap, d)?;
+                }
+            }
+            finish_voxel_edit_gpu_deltas(
+                &state,
+                &forward,
+                0.0,
+                std::time::Instant::now(),
+                &app,
+                VoxelGpuRefreshReason::Redo,
+            )?;
+            // Re-acquire briefly for undo push + seq.
+            let seq = {
+                let mut c = cm.lock();
+                c.host_undo
+                    .entry(collab::HOST_PEER_ID)
+                    .or_default()
+                    .push(forward.clone());
+                c.next_seq += 1;
+                c.next_seq
+            };
+            collab::host_emit_edit_batch(&cm, &app, seq, collab::HOST_PEER_ID, &forward);
             return Ok(true);
         }
     }
@@ -13078,6 +13181,8 @@ pub fn run() {
 
     let viewer_state = Arc::new(ViewerState {
         viewer: Mutex::new(None),
+        #[cfg(target_os = "windows")]
+        render_child_window: Mutex::new(None),
         camera: Mutex::new(OrbitCamera::new()),
         file_label: Mutex::new(String::new()),
         current_file: Mutex::new(None),
@@ -13096,6 +13201,7 @@ pub fn run() {
         mesh_refresh_generation: AtomicU64::new(0),
         load_generation: AtomicU64::new(0),
         chunk_mesh_inbox: Mutex::new(VecDeque::new()),
+        collab_edit_inbox: Mutex::new(VecDeque::new()),
         deferred_spatial_cache: Mutex::new(None),
         voxel_edit_stats_cache: Mutex::new(None),
         solo_undo: Mutex::new(Vec::new()),
@@ -13494,10 +13600,33 @@ pub fn run() {
             if headless_server_port.is_some() {
                 let _ = window.hide();
             }
-            let w = window.clone();
-            let viewer =
-                tauri::async_runtime::block_on(async move { WgpuViewer::new(w).await })
+            // On Windows, create a child HWND for the wgpu surface so it sits
+            // behind WebView2 in z-order (avoids viewport-on-top-of-UI on some
+            // GPU driver / Windows version combinations).
+            #[cfg(target_os = "windows")]
+            let viewer = {
+                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                let handle = window.window_handle().map_err(|e| format!("{e}"))?;
+                let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+                    return Err("expected Win32 window handle".into());
+                };
+                let parent_hwnd =
+                    windows::Win32::Foundation::HWND(win32.hwnd.get() as _);
+                let child = win_child_window::ChildRenderWindow::new(parent_hwnd)
                     .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+                let surface_handle = child.surface_handle();
+                *vs.render_child_window.lock() = Some(child);
+                tauri::async_runtime::block_on(async move {
+                    WgpuViewer::new(surface_handle).await
+                })
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+            };
+            #[cfg(not(target_os = "windows"))]
+            let viewer = {
+                let w = window.clone();
+                tauri::async_runtime::block_on(async move { WgpuViewer::new(w).await })
+                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+            };
             // Do not resize to `inner_size()` here: the 3D view matches the `.viewport` div (below
             // toolbar / beside sidebar), not the full window. Wrong dimensions break screen→world
             // raycasts until the frontend sends `viewer_resize`.
@@ -13728,6 +13857,15 @@ pub fn run() {
                         None => None,
                     }
                 };
+                // Drain collab edit inbox — apply queued guest edits/undo/redo
+                // on the main thread, before we hold the viewer lock for the frame.
+                {
+                    let items: Vec<collab::CollabInboxItem> =
+                        state.collab_edit_inbox.lock().drain(..).collect();
+                    for item in items {
+                        collab::process_inbox_item(app, &state, &state.collab, item);
+                    }
+                }
                 let mut v = state.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     let cam = state.camera.lock();
@@ -13850,6 +13988,8 @@ pub fn run() {
 pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
     Arc::new(ViewerState {
         viewer: Mutex::new(None),
+        #[cfg(target_os = "windows")]
+        render_child_window: Mutex::new(None),
         camera: Mutex::new(OrbitCamera::new()),
         file_label: Mutex::new(String::new()),
         current_file: Mutex::new(None),
@@ -13868,6 +14008,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         mesh_refresh_generation: AtomicU64::new(0),
         load_generation: AtomicU64::new(0),
         chunk_mesh_inbox: Mutex::new(VecDeque::new()),
+        collab_edit_inbox: Mutex::new(VecDeque::new()),
         deferred_spatial_cache: Mutex::new(None),
         voxel_edit_stats_cache: Mutex::new(None),
         solo_undo: Mutex::new(Vec::new()),

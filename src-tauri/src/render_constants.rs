@@ -21,7 +21,7 @@ pub const GLASS_SHADOW_SLAB_MIN_TRANSMITTANCE: f32 = 0.35;
 pub const GLASS_SHADOW_DEPTH_PUSH_MAX: f32 = 0.02;
 
 /// Web `sceneSetup` directional shadow map size.
-pub const SHADOW_MAP_SIZE: u32 = 4096;
+pub const SHADOW_MAP_SIZE: u32 = 8192;
 /// NDC depth subtracted in `textureSampleCompare` (base term; see `scene.wgsl` slope term).
 /// World-space shadow bias (voxel units). Converted to NDC in shader via `light_view_proj` Z gradient.
 pub const SHADOW_BIAS_WORLD_BASE: f32 = 0.04;

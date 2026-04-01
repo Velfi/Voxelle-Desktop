@@ -106,6 +106,32 @@ pub struct PingFlash {
     pub display_name: String,
 }
 
+/// An edit, undo, or redo request from a guest, queued for the host's main-thread
+/// render loop to process.  Pushed from tokio WebSocket handlers, drained each frame.
+pub enum CollabInboxItem {
+    Edit {
+        peer_id: u32,
+        deltas: Vec<voxel_edit::VoxelEditDelta>,
+    },
+    Undo {
+        peer_id: u32,
+    },
+    Redo {
+        peer_id: u32,
+    },
+}
+
+/// Brief permission check — does `peer_id` have `can_edit` in the roster?
+fn check_can_edit(collab_mtx: &Mutex<CollabRuntime>, peer_id: u32) -> bool {
+    collab_mtx
+        .lock()
+        .roster
+        .iter()
+        .find(|r| r.peer_id == peer_id)
+        .map(|r| r.can_edit)
+        .unwrap_or(false)
+}
+
 pub fn record_ping_flash_colored(
     state: &ViewerState,
     x: i32,
@@ -593,99 +619,6 @@ fn replace_file_on_main<R: Runtime>(
     }
 }
 
-pub fn host_apply_remote_edit<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &Arc<ViewerState>,
-    collab: &mut CollabRuntime,
-    peer_id: u32,
-    deltas: Vec<voxel_edit::VoxelEditDelta>,
-) -> Result<(), String> {
-    if deltas.is_empty() {
-        return Ok(());
-    }
-    apply_deltas_on_main(app, state, &deltas)?;
-    collab.next_seq += 1;
-    collab.host_undo.entry(peer_id).or_default().push(deltas);
-    collab.host_redo.remove(&peer_id);
-    Ok(())
-}
-
-pub fn host_undo_peer<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &Arc<ViewerState>,
-    collab: &mut CollabRuntime,
-    peer_id: u32,
-) -> Result<Option<Vec<voxel_edit::VoxelEditDelta>>, String> {
-    let original = collab.host_undo.entry(peer_id).or_default().pop();
-    let Some(original) = original else {
-        return Ok(None);
-    };
-    let mesh_refresh: Vec<voxel_edit::VoxelEditDelta> = {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
-        let Some(file) = fg.as_mut() else {
-            return Err("no model loaded".into());
-        };
-        let Some(vmap) = vm.as_mut() else {
-            return Err("voxel index not ready".into());
-        };
-        let mut mesh = Vec::with_capacity(original.len());
-        for d in original.iter().rev() {
-            voxel_edit::apply_inverse_delta(file, vmap, d)?;
-            mesh.push(voxel_edit::mesh_delta_after_inverse_of(d));
-        }
-        mesh
-    };
-    let t = std::time::Instant::now();
-    crate::finish_voxel_edit_gpu_deltas(
-        state,
-        &mesh_refresh,
-        0.0,
-        t,
-        app,
-        VoxelGpuRefreshReason::Undo,
-    )?;
-    collab.host_redo.entry(peer_id).or_default().push(original.clone());
-    Ok(Some(mesh_refresh))
-}
-
-pub fn host_redo_peer<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &Arc<ViewerState>,
-    collab: &mut CollabRuntime,
-    peer_id: u32,
-) -> Result<Option<Vec<voxel_edit::VoxelEditDelta>>, String> {
-    let forward = collab.host_redo.entry(peer_id).or_default().pop();
-    let Some(forward) = forward else {
-        return Ok(None);
-    };
-    {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
-        let Some(file) = fg.as_mut() else {
-            return Err("no model loaded".into());
-        };
-        let Some(vmap) = vm.as_mut() else {
-            return Err("voxel index not ready".into());
-        };
-        for d in &forward {
-            voxel_edit::apply_forward_delta(file, vmap, d)?;
-        }
-    }
-    let t = std::time::Instant::now();
-    crate::finish_voxel_edit_gpu_deltas(
-        state,
-        &forward,
-        0.0,
-        t,
-        app,
-        VoxelGpuRefreshReason::Redo,
-    )?;
-    let out = forward.clone();
-    collab.host_undo.entry(peer_id).or_default().push(forward);
-    Ok(Some(out))
-}
-
 fn emit_and_broadcast<R: Runtime>(
     collab: &Mutex<CollabRuntime>,
     _app: &AppHandle<R>,
@@ -712,6 +645,193 @@ pub fn host_emit_edit_batch<R: Runtime>(
     };
     if let Ok(json) = serde_json::to_string(&br) {
         emit_and_broadcast(collab_mtx, app, &json);
+    }
+}
+
+/// Process one queued guest edit/undo/redo on the main thread.
+///
+/// Called from the render-loop drain — `collab_mtx` is **not** held when this runs,
+/// and we only acquire it briefly for metadata after GPU work is finished.
+pub fn process_inbox_item<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<ViewerState>,
+    collab_mtx: &Arc<Mutex<CollabRuntime>>,
+    item: CollabInboxItem,
+) {
+    match item {
+        CollabInboxItem::Edit { peer_id, deltas } => {
+            // Apply voxel deltas to the file.
+            if !deltas.is_empty() {
+                let r: Result<(), String> = (|| {
+                    let mut fg = state.current_file.lock();
+                    let mut vm = state.voxel_map.lock();
+                    let file = fg.as_mut().ok_or("no model loaded")?;
+                    let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+                    for d in &deltas {
+                        voxel_edit::apply_forward_delta(file, vmap, d)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(e) = r {
+                    let _ = app.emit("collab-error", e);
+                    return;
+                }
+                let t = std::time::Instant::now();
+                if let Err(e) = crate::finish_voxel_edit_gpu_deltas(
+                    state,
+                    &deltas,
+                    0.0,
+                    t,
+                    app,
+                    VoxelGpuRefreshReason::CollabApply,
+                ) {
+                    let _ = app.emit("collab-error", e);
+                    return;
+                }
+            }
+            // Brief lock: update seq / undo / redo, then broadcast.
+            let seq = {
+                let mut c = collab_mtx.lock();
+                if !c.roster.iter().any(|r| r.peer_id == peer_id) {
+                    return; // peer left while queued
+                }
+                c.next_seq += 1;
+                c.host_undo
+                    .entry(peer_id)
+                    .or_default()
+                    .push(deltas.clone());
+                c.host_redo.remove(&peer_id);
+                c.next_seq
+            };
+            let br = HostToClient::Edit {
+                seq,
+                peer_id,
+                deltas,
+            };
+            if let Ok(json) = serde_json::to_string(&br) {
+                emit_and_broadcast(collab_mtx, app, &json);
+            }
+        }
+        CollabInboxItem::Undo { peer_id } => {
+            // Pop from the undo stack (brief lock).
+            let original = collab_mtx
+                .lock()
+                .host_undo
+                .entry(peer_id)
+                .or_default()
+                .pop();
+            let Some(original) = original else {
+                return;
+            };
+            // Apply inverse deltas + GPU (no collab lock held).
+            let mesh_result: Result<Vec<voxel_edit::VoxelEditDelta>, String> = (|| {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let file = fg.as_mut().ok_or("no model loaded")?;
+                let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+                let mut mesh = Vec::with_capacity(original.len());
+                for d in original.iter().rev() {
+                    voxel_edit::apply_inverse_delta(file, vmap, d)?;
+                    mesh.push(voxel_edit::mesh_delta_after_inverse_of(d));
+                }
+                Ok(mesh)
+            })();
+            let Ok(mesh_refresh) = mesh_result else {
+                return;
+            };
+            let t = std::time::Instant::now();
+            if crate::finish_voxel_edit_gpu_deltas(
+                state,
+                &mesh_refresh,
+                0.0,
+                t,
+                app,
+                VoxelGpuRefreshReason::Undo,
+            )
+            .is_err()
+            {
+                return;
+            }
+            // Brief lock: push to redo, broadcast.
+            let seq = {
+                let mut c = collab_mtx.lock();
+                if !c.roster.iter().any(|r| r.peer_id == peer_id) {
+                    return;
+                }
+                c.host_redo
+                    .entry(peer_id)
+                    .or_default()
+                    .push(original);
+                c.next_seq
+            };
+            let br = HostToClient::Edit {
+                seq,
+                peer_id,
+                deltas: mesh_refresh,
+            };
+            if let Ok(json) = serde_json::to_string(&br) {
+                emit_and_broadcast(collab_mtx, app, &json);
+            }
+        }
+        CollabInboxItem::Redo { peer_id } => {
+            // Pop from the redo stack (brief lock).
+            let forward = collab_mtx
+                .lock()
+                .host_redo
+                .entry(peer_id)
+                .or_default()
+                .pop();
+            let Some(forward) = forward else {
+                return;
+            };
+            // Apply forward deltas + GPU (no collab lock held).
+            let apply_result: Result<(), String> = (|| {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let file = fg.as_mut().ok_or("no model loaded")?;
+                let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+                for d in &forward {
+                    voxel_edit::apply_forward_delta(file, vmap, d)?;
+                }
+                Ok(())
+            })();
+            if apply_result.is_err() {
+                return;
+            }
+            let t = std::time::Instant::now();
+            if crate::finish_voxel_edit_gpu_deltas(
+                state,
+                &forward,
+                0.0,
+                t,
+                app,
+                VoxelGpuRefreshReason::Redo,
+            )
+            .is_err()
+            {
+                return;
+            }
+            // Brief lock: push to undo, broadcast.
+            let seq = {
+                let mut c = collab_mtx.lock();
+                if !c.roster.iter().any(|r| r.peer_id == peer_id) {
+                    return;
+                }
+                c.host_undo
+                    .entry(peer_id)
+                    .or_default()
+                    .push(forward.clone());
+                c.next_seq
+            };
+            let br = HostToClient::Edit {
+                seq,
+                peer_id,
+                deltas: forward,
+            };
+            if let Ok(json) = serde_json::to_string(&br) {
+                emit_and_broadcast(collab_mtx, app, &json);
+            }
+        }
     }
 }
 
@@ -974,14 +1094,7 @@ async fn handle_host_connection<R: Runtime>(
                 break;
             }
             ClientToHost::Edit { deltas } => {
-                let allowed = collab_mtx
-                    .lock()
-                    .roster
-                    .iter()
-                    .find(|r| r.peer_id == peer_id)
-                    .map(|r| r.can_edit)
-                    .unwrap_or(false);
-                if !allowed {
+                if !check_can_edit(&collab_mtx, peer_id) {
                     let _ = ws
                         .send(Message::Text(
                             serde_json::to_string(&HostToClient::Deny {
@@ -992,33 +1105,38 @@ async fn handle_host_connection<R: Runtime>(
                         .await;
                     continue;
                 }
-                let seq = {
-                    let mut c = collab_mtx.lock();
-                    if let Err(e) =
-                        host_apply_remote_edit(&app, &state, &mut c, peer_id, deltas.clone())
-                    {
-                        let _ = app.emit("collab-error", e);
-                        continue;
+                if deltas.is_empty() {
+                    // No GPU work needed — handle inline instead of
+                    // queueing for the render loop (also keeps tests
+                    // working under mock_app which has no event loop).
+                    let seq = {
+                        let mut c = collab_mtx.lock();
+                        c.next_seq += 1;
+                        c.host_undo
+                            .entry(peer_id)
+                            .or_default()
+                            .push(deltas.clone());
+                        c.host_redo.remove(&peer_id);
+                        c.next_seq
+                    };
+                    let br = HostToClient::Edit {
+                        seq,
+                        peer_id,
+                        deltas,
+                    };
+                    if let Ok(json) = serde_json::to_string(&br) {
+                        emit_and_broadcast(&collab_mtx, &app, &json);
                     }
-                    c.next_seq
-                };
-                let br = HostToClient::Edit {
-                    seq,
-                    peer_id,
-                    deltas,
-                };
-                let json = serde_json::to_string(&br).unwrap();
-                emit_and_broadcast(&collab_mtx, &app, &json);
+                } else {
+                    // Queue for the main-thread render loop — never block
+                    // the tokio task on GPU work or hold collab_mtx across it.
+                    state.collab_edit_inbox.lock().push_back(
+                        CollabInboxItem::Edit { peer_id, deltas },
+                    );
+                }
             }
             ClientToHost::Undo => {
-                let allowed = collab_mtx
-                    .lock()
-                    .roster
-                    .iter()
-                    .find(|r| r.peer_id == peer_id)
-                    .map(|r| r.can_edit)
-                    .unwrap_or(false);
-                if !allowed {
+                if !check_can_edit(&collab_mtx, peer_id) {
                     let _ = ws
                         .send(Message::Text(
                             serde_json::to_string(&HostToClient::Deny {
@@ -1029,31 +1147,12 @@ async fn handle_host_connection<R: Runtime>(
                         .await;
                     continue;
                 }
-                let mesh = {
-                    let mut c = collab_mtx.lock();
-                    host_undo_peer(&app, &state, &mut c, peer_id)
-                };
-                let Ok(Some(d)) = mesh else {
-                    continue;
-                };
-                let seq = collab_mtx.lock().next_seq;
-                let json = serde_json::to_string(&HostToClient::Edit {
-                    seq,
-                    peer_id,
-                    deltas: d,
-                })
-                .unwrap();
-                emit_and_broadcast(&collab_mtx, &app, &json);
+                state.collab_edit_inbox.lock().push_back(
+                    CollabInboxItem::Undo { peer_id },
+                );
             }
             ClientToHost::Redo => {
-                let allowed = collab_mtx
-                    .lock()
-                    .roster
-                    .iter()
-                    .find(|r| r.peer_id == peer_id)
-                    .map(|r| r.can_edit)
-                    .unwrap_or(false);
-                if !allowed {
+                if !check_can_edit(&collab_mtx, peer_id) {
                     let _ = ws
                         .send(Message::Text(
                             serde_json::to_string(&HostToClient::Deny {
@@ -1064,21 +1163,9 @@ async fn handle_host_connection<R: Runtime>(
                         .await;
                     continue;
                 }
-                let mesh = {
-                    let mut c = collab_mtx.lock();
-                    host_redo_peer(&app, &state, &mut c, peer_id)
-                };
-                let Ok(Some(d)) = mesh else {
-                    continue;
-                };
-                let seq = collab_mtx.lock().next_seq;
-                let json = serde_json::to_string(&HostToClient::Edit {
-                    seq,
-                    peer_id,
-                    deltas: d,
-                })
-                .unwrap();
-                emit_and_broadcast(&collab_mtx, &app, &json);
+                state.collab_edit_inbox.lock().push_back(
+                    CollabInboxItem::Redo { peer_id },
+                );
             }
             ClientToHost::Chat { text } => {
                 let name = roster
@@ -2044,6 +2131,415 @@ mod tests {
             let g = cm.lock();
             assert_eq!(g.roster.len(), 3);
         }
+        stop_host(&cm);
+    }
+
+    // ---------------------------------------------------------------
+    //  Helper: set up a hosting collab state with one peer in roster
+    // ---------------------------------------------------------------
+    fn setup_host_collab(state: &Arc<crate::ViewerState>, peer_id: u32) {
+        let mut c = state.collab.lock();
+        c.role = CollabRole::Hosting;
+        c.local_peer_id = HOST_PEER_ID;
+        c.leader_id = HOST_PEER_ID;
+        c.roster = vec![
+            RosterEntry {
+                peer_id: HOST_PEER_ID,
+                display_name: "Host".into(),
+                color_rgb: 0x00_ff_00,
+                is_leader: true,
+                can_edit: true,
+            },
+            RosterEntry {
+                peer_id,
+                display_name: "Guest".into(),
+                color_rgb: 0xff_00_ff,
+                is_leader: false,
+                can_edit: true,
+            },
+        ];
+        let (btx, _) = tokio::sync::broadcast::channel::<Message>(64);
+        c.host_broadcast = Some(btx);
+    }
+
+    fn dummy_voxel(x: i32, y: i32, z: i32) -> Voxel {
+        Voxel {
+            x,
+            y,
+            z,
+            color: 1,
+            material: MaterialId::Plastic,
+            object_id: 0,
+        }
+    }
+
+    /// Populate current_file + voxel_map so voxel edits can be applied.
+    fn seed_file(state: &Arc<crate::ViewerState>) {
+        use crate::voxelle::empty_collab_placeholder;
+        *state.current_file.lock() = Some(empty_collab_placeholder());
+        *state.voxel_map.lock() = Some(ahash::AHashMap::new());
+    }
+
+    // ---------------------------------------------------------------
+    //  process_inbox_item: Edit applies voxel to file
+    // ---------------------------------------------------------------
+    #[test]
+    fn inbox_edit_applies_voxel_to_file() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        setup_host_collab(&state, 2);
+        seed_file(&state);
+
+        let v = dummy_voxel(10, 20, 30);
+        process_inbox_item(
+            &handle,
+            &state,
+            &state.collab,
+            CollabInboxItem::Edit {
+                peer_id: 2,
+                deltas: vec![VoxelEditDelta::Added(v)],
+            },
+        );
+
+        // The voxel should be in the file even though GPU update fails.
+        let fg = state.current_file.lock();
+        let file = fg.as_ref().expect("file");
+        assert!(
+            file.voxels.iter().any(|vx| vx.x == 10 && vx.y == 20 && vx.z == 30),
+            "voxel should have been added to current_file"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    //  process_inbox_item: empty Edit updates collab state
+    // ---------------------------------------------------------------
+    #[test]
+    fn inbox_edit_empty_updates_collab_state() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        setup_host_collab(&state, 2);
+        seed_file(&state);
+
+        let prev_seq = state.collab.lock().next_seq;
+
+        process_inbox_item(
+            &handle,
+            &state,
+            &state.collab,
+            CollabInboxItem::Edit {
+                peer_id: 2,
+                deltas: vec![],
+            },
+        );
+
+        let c = state.collab.lock();
+        assert_eq!(c.next_seq, prev_seq + 1, "seq should have incremented");
+        let undo_stack = c.host_undo.get(&2).expect("undo stack for peer 2");
+        assert_eq!(undo_stack.len(), 1, "one undo entry should exist");
+        assert!(undo_stack[0].is_empty(), "undo entry should be empty deltas");
+    }
+
+    // ---------------------------------------------------------------
+    //  process_inbox_item: Undo applies inverse to file
+    // ---------------------------------------------------------------
+    #[test]
+    fn inbox_undo_applies_inverse_to_file() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        setup_host_collab(&state, 2);
+        seed_file(&state);
+
+        // Add a voxel to the file and undo stack.
+        let v = dummy_voxel(5, 6, 7);
+        {
+            let mut fg = state.current_file.lock();
+            let mut vm = state.voxel_map.lock();
+            let file = fg.as_mut().unwrap();
+            let vmap = vm.as_mut().unwrap();
+            crate::voxel_edit::apply_forward_delta(file, vmap, &VoxelEditDelta::Added(v))
+                .expect("seed add");
+        }
+        state
+            .collab
+            .lock()
+            .host_undo
+            .entry(2)
+            .or_default()
+            .push(vec![VoxelEditDelta::Added(v)]);
+
+        // Process Undo — should remove the voxel.
+        process_inbox_item(
+            &handle,
+            &state,
+            &state.collab,
+            CollabInboxItem::Undo { peer_id: 2 },
+        );
+
+        let fg = state.current_file.lock();
+        let file = fg.as_ref().expect("file");
+        assert!(
+            !file.voxels.iter().any(|vx| vx.x == 5 && vx.y == 6 && vx.z == 7),
+            "voxel should have been removed by undo"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    //  process_inbox_item: Redo applies forward to file
+    // ---------------------------------------------------------------
+    #[test]
+    fn inbox_redo_applies_forward_to_file() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        setup_host_collab(&state, 2);
+        seed_file(&state);
+
+        let v = dummy_voxel(8, 9, 10);
+        // Put a forward delta on the redo stack.
+        state
+            .collab
+            .lock()
+            .host_redo
+            .entry(2)
+            .or_default()
+            .push(vec![VoxelEditDelta::Added(v)]);
+
+        process_inbox_item(
+            &handle,
+            &state,
+            &state.collab,
+            CollabInboxItem::Redo { peer_id: 2 },
+        );
+
+        let fg = state.current_file.lock();
+        let file = fg.as_ref().expect("file");
+        assert!(
+            file.voxels.iter().any(|vx| vx.x == 8 && vx.y == 9 && vx.z == 10),
+            "voxel should have been added by redo"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    //  process_inbox_item: edit for removed peer is silently dropped
+    // ---------------------------------------------------------------
+    #[test]
+    fn inbox_edit_skips_removed_peer() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        setup_host_collab(&state, 2);
+        seed_file(&state);
+
+        let prev_seq = state.collab.lock().next_seq;
+
+        // Empty edit for peer 99 who is NOT in the roster.
+        process_inbox_item(
+            &handle,
+            &state,
+            &state.collab,
+            CollabInboxItem::Edit {
+                peer_id: 99,
+                deltas: vec![],
+            },
+        );
+
+        let c = state.collab.lock();
+        assert_eq!(c.next_seq, prev_seq, "seq should NOT have incremented for missing peer");
+        assert!(
+            !c.host_undo.contains_key(&99),
+            "no undo entry should exist for missing peer"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    //  Integration: guest undo reaches the inbox
+    // ---------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn guest_undo_pushes_to_inbox() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle.clone(),
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, _read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        // Grant edit permission.
+        {
+            let mut g = cm.lock();
+            if let Some(r) = g.roster.iter_mut().find(|r| r.peer_id == 2) {
+                r.can_edit = true;
+            }
+        }
+
+        let undo = serde_json::to_string(&ClientToHost::Undo).unwrap();
+        write.send(Message::Text(undo)).await.expect("send undo");
+        // Give the handler time to push to inbox.
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let inbox = state.collab_edit_inbox.lock();
+        assert!(
+            inbox.iter().any(|item| matches!(item, CollabInboxItem::Undo { peer_id: 2 })),
+            "inbox should contain an Undo for peer 2, got {:?} items",
+            inbox.len()
+        );
+        stop_host(&cm);
+    }
+
+    // ---------------------------------------------------------------
+    //  Integration: guest redo reaches the inbox
+    // ---------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn guest_redo_pushes_to_inbox() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle.clone(),
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, _read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        {
+            let mut g = cm.lock();
+            if let Some(r) = g.roster.iter_mut().find(|r| r.peer_id == 2) {
+                r.can_edit = true;
+            }
+        }
+
+        let redo = serde_json::to_string(&ClientToHost::Redo).unwrap();
+        write.send(Message::Text(redo)).await.expect("send redo");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let inbox = state.collab_edit_inbox.lock();
+        assert!(
+            inbox.iter().any(|item| matches!(item, CollabInboxItem::Redo { peer_id: 2 })),
+            "inbox should contain a Redo for peer 2, got {:?} items",
+            inbox.len()
+        );
+        stop_host(&cm);
+    }
+
+    // ---------------------------------------------------------------
+    //  Integration: denied edit does not reach inbox
+    // ---------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn edit_denied_does_not_reach_inbox() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle,
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, mut read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        // can_edit is false by default — do NOT grant permission.
+
+        let v = dummy_voxel(1, 2, 3);
+        let edit = serde_json::to_string(&ClientToHost::Edit {
+            deltas: vec![VoxelEditDelta::Added(v)],
+        })
+        .unwrap();
+        write.send(Message::Text(edit)).await.expect("send edit");
+
+        // Wait for Deny.
+        let mut got_deny = false;
+        for _ in 0..32 {
+            let next = read.next().await.expect("frame").expect("ws");
+            let Message::Text(t) = next else { continue };
+            if let Ok(HostToClient::Deny { .. }) = serde_json::from_str(&t) {
+                got_deny = true;
+                break;
+            }
+        }
+        assert!(got_deny, "should have received Deny");
+
+        // Inbox should be empty — the edit was denied before reaching it.
+        let inbox = state.collab_edit_inbox.lock();
+        assert!(inbox.is_empty(), "inbox should be empty after denied edit");
+        stop_host(&cm);
+    }
+
+    // ---------------------------------------------------------------
+    //  Integration: non-empty edit reaches inbox when allowed
+    // ---------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn edit_allowed_pushes_to_inbox() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle.clone(),
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let (mut write, _read, peer_id) = ws_join(port).await.expect("join");
+        assert_eq!(peer_id, 2);
+        {
+            let mut g = cm.lock();
+            if let Some(r) = g.roster.iter_mut().find(|r| r.peer_id == 2) {
+                r.can_edit = true;
+            }
+        }
+
+        let v = dummy_voxel(3, 4, 5);
+        let edit = serde_json::to_string(&ClientToHost::Edit {
+            deltas: vec![VoxelEditDelta::Added(v)],
+        })
+        .unwrap();
+        write.send(Message::Text(edit)).await.expect("send edit");
+        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+
+        let inbox = state.collab_edit_inbox.lock();
+        assert!(
+            inbox.iter().any(|item| matches!(item, CollabInboxItem::Edit { peer_id: 2, .. })),
+            "inbox should contain an Edit for peer 2, got {:?} items",
+            inbox.len()
+        );
         stop_host(&cm);
     }
 }

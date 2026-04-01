@@ -5408,6 +5408,7 @@ mod tests {
             DrawStrokeMode::Precise,
             PlaneAxis::Auto,
             &aux,
+            None,
         );
         let edit = collect_stroke_edit_targets(
             &file,
@@ -5428,6 +5429,7 @@ mod tests {
             DrawStrokeMode::Precise,
             PlaneAxis::Auto,
             &aux,
+            None,
         );
         assert_eq!(preview, edit);
         assert!(preview.is_empty());
@@ -5482,6 +5484,7 @@ mod tests {
             DrawStrokeMode::Precise,
             PlaneAxis::Auto,
             &aux,
+            None,
         );
         let edit = collect_stroke_edit_targets(
             &file,
@@ -5502,6 +5505,7 @@ mod tests {
             DrawStrokeMode::Precise,
             PlaneAxis::Auto,
             &aux,
+            None,
         );
         assert!(
             !preview.is_empty(),
