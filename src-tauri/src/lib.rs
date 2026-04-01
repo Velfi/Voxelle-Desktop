@@ -13,6 +13,7 @@ mod macos_titlebar;
 mod macos_undo;
 mod render;
 mod render_constants;
+mod paint_color_distrib;
 mod voxel_edit;
 mod sculpt_mesh_smooth;
 mod stroke_modes;
@@ -445,6 +446,60 @@ fn viewport_texels_from_norm(nx: f32, ny: f32, w: f32, h: f32) -> (f32, f32) {
     (sx, sy)
 }
 
+/// Resolve the spray constraint plane for the invisible hit plane trick (web parity).
+///
+/// On the first spray anchor of a stroke (no plane stored yet): does a normal voxel raycast,
+/// computes the plane through the hit using `constrain_to_plane_ref`, and stores it in state.
+/// On subsequent calls: returns the stored plane.
+/// Returns `None` when constrain_to_plane is not active or not in spray mode.
+fn resolve_spray_constraint_plane(
+    state: &ViewerState,
+    aux: &stroke_modes::StrokeAux,
+    stroke_mode: stroke_modes::DrawStrokeMode,
+    tool: voxel_edit::EditTool,
+    file: &voxelle::VoxelleFile,
+    vmap: &AHashMap<greedy_mesh::VoxelCoord, usize>,
+    cam: &camera::OrbitCamera,
+    w: f32,
+    h: f32,
+    sx: f32,
+    sy: f32,
+) -> Option<(glam::Vec3, glam::Vec3)> {
+    if stroke_mode != stroke_modes::DrawStrokeMode::Spray || !aux.constrain_to_plane {
+        return None;
+    }
+    let plane_ref = aux.constrain_to_plane_ref.as_deref().unwrap_or("auto");
+
+    // Return stored plane if already established this stroke.
+    {
+        let stored = state.spray_constraint_plane.lock();
+        if stored.is_some() {
+            return *stored;
+        }
+    }
+
+    // First anchor: raycast to find the hit position + face normal, then compute the plane.
+    let anchor = voxel_edit::anchor_for_stroke_edit(
+        tool,
+        aux.stroke_snap_to_surface,
+        file,
+        vmap,
+        cam,
+        w,
+        h,
+        sx,
+        sy,
+    )?;
+    let face_n = voxel_edit::pick_extrude_start(file, vmap, cam, w, h, sx, sy)
+        .and_then(|(_, n)| n);
+    let plane_normal = voxel_edit::constrain_plane_normal(plane_ref, cam, face_n)?;
+    let plane_point = glam::Vec3::new(anchor.0 as f32, anchor.1 as f32, anchor.2 as f32);
+
+    let plane = (plane_point, plane_normal);
+    *state.spray_constraint_plane.lock() = Some(plane);
+    Some(plane)
+}
+
 #[derive(serde::Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct VoxelEditAtScreen {
@@ -452,6 +507,15 @@ struct VoxelEditAtScreen {
     ny: f32,
     tool: voxel_edit::EditTool,
     color: u32,
+    /// Multi-color palette (when non-empty and len > 1, overrides `color`).
+    #[serde(default)]
+    palette: Vec<u32>,
+    /// Color distribution mode + params; used only when `palette.len() > 1`.
+    #[serde(default)]
+    paint_color_distrib: Option<paint_color_distrib::PaintColorDistrib>,
+    /// Deterministic seed for the current stroke (for randomSingle / preview consistency).
+    #[serde(default)]
+    stroke_seed: u32,
     material: String,
     brush_radius: u32,
     brush_shape: voxel_edit::BrushShape,
@@ -480,6 +544,28 @@ struct VoxelEditAtScreen {
     fill_select_diagonals: bool,
     #[serde(default = "default_fill_respects_color")]
     fill_respects_color: bool,
+}
+
+/// Build a per-voxel color resolver from the palette + distribution args.
+/// Falls back to `color_single` when palette has 0 or 1 entry.
+fn build_color_resolver(
+    color_single: u32,
+    palette: Vec<u32>,
+    distrib: Option<paint_color_distrib::PaintColorDistrib>,
+    stroke_seed: u32,
+) -> impl Fn(i32, i32, i32) -> u32 {
+    move |x, y, z| {
+        if palette.len() > 1 {
+            if let Some(ref d) = distrib {
+                d.resolve(&palette, stroke_seed, x, y, z)
+            } else {
+                let idx = paint_color_distrib::paint_color_index(x, y, z, palette.len());
+                palette[idx] & 0x00ff_ffff
+            }
+        } else {
+            color_single
+        }
+    }
 }
 
 fn default_terrain_strength_sculpt() -> i32 {
@@ -594,6 +680,8 @@ struct PreviewHoverContext {
     plane_axis: stroke_modes::PlaneAxis,
     stroke_aux: stroke_modes::StrokeAux,
     color: u32,
+    palette: Vec<u32>,
+    paint_color_distrib: Option<paint_color_distrib::PaintColorDistrib>,
     material: String,
     match_material: bool,
     /// When false (e.g. sculpt), hover uses the legacy single-cell preview.
@@ -614,9 +702,22 @@ struct PreviewHoverContext {
     generator_rock_size: i32,
     generator_rock_roughness: f32,
     generator_rock_seed: i32,
+    generator_rock_count: i32,
+    generator_rock_cluster_radius: i32,
+    generator_rock_sink_direction: i32,
+    generator_rock_sink_amount: i32,
     generator_grass_density: i32,
     generator_grass_max_height: i32,
     generator_grass_seed: i32,
+    generator_roof_pins: Vec<[i32; 3]>,
+    generator_roof_style: String,
+    generator_roof_height: i32,
+    generator_roof_thickness: i32,
+    generator_roof_break_ratio: f32,
+    generator_roof_wall_height: i32,
+    generator_roof_parapet_height: i32,
+    generator_roof_salt_skew: f32,
+    generator_roof_hollow: bool,
 }
 
 impl Default for PreviewHoverContext {
@@ -629,6 +730,8 @@ impl Default for PreviewHoverContext {
             plane_axis: stroke_modes::PlaneAxis::default(),
             stroke_aux: stroke_modes::StrokeAux::default(),
             color: 0,
+            palette: Vec::new(),
+            paint_color_distrib: None,
             material: String::new(),
             match_material: false,
             use_brush_preview: true,
@@ -645,11 +748,24 @@ impl Default for PreviewHoverContext {
             generator_cloth_iterations: 0,
             generator_cloth_constraint_passes: 2,
             generator_rock_size: 4,
-            generator_rock_roughness: 0.45,
+            generator_rock_roughness: 0.4,
             generator_rock_seed: 42,
+            generator_rock_count: 1,
+            generator_rock_cluster_radius: 1,
+            generator_rock_sink_direction: 0,
+            generator_rock_sink_amount: 0,
             generator_grass_density: 4,
             generator_grass_max_height: 3,
             generator_grass_seed: 42,
+            generator_roof_pins: Vec::new(),
+            generator_roof_style: "gable".into(),
+            generator_roof_height: 6,
+            generator_roof_thickness: 1,
+            generator_roof_break_ratio: 0.5,
+            generator_roof_wall_height: 3,
+            generator_roof_parapet_height: 2,
+            generator_roof_salt_skew: 0.0,
+            generator_roof_hollow: false,
         }
     }
 }
@@ -802,6 +918,8 @@ pub struct ViewerState {
     pub last_scene_bounds: Mutex<Option<greedy_mesh::MeshBounds>>,
     /// Bumps when a background opaque-mesh refresh is scheduled; stale applies are skipped.
     pub mesh_refresh_generation: AtomicU64,
+    /// Bumps each time a file/project load begins; stale loads bail out instead of overwriting a newer load.
+    pub load_generation: AtomicU64,
     /// Incremental [`greedy_mesh::voxel_aabb_min_int`] + single-object detection for chunked mesh path.
     voxel_edit_stats_cache: Mutex<Option<VoxelEditStatsCache>>,
     /// Solo undo stack: voxel batches and selection snapshots (interleaved).
@@ -872,6 +990,9 @@ pub struct ViewerState {
     preview_overlay_cache_key: Mutex<Option<u64>>,
     /// Set by [`voxel_fill_cancel`] during a long flood fill so BFS can exit cooperatively.
     pub fill_operation_cancel: Arc<AtomicBool>,
+    /// Invisible hit plane for spray constrain-to-plane: `(plane_point, plane_normal)`.
+    /// Set on the first spray anchor of a stroke when constrain_to_plane is active; cleared on stroke end.
+    pub spray_constraint_plane: Mutex<Option<(glam::Vec3, glam::Vec3)>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1661,10 +1782,21 @@ pub(crate) fn prepare_load_scene_cpu<R: Runtime>(
         );
         emit(LOAD_P_MESH_START, "Building surface mesh…");
         let t = Instant::now();
-        let mesh = match mode {
-            RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(voxels),
-            RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(voxels),
-            _ => unreachable!(),
+        let mesh = {
+            let on_bucket = |frac: f32, done: usize, total: usize| {
+                let g = LOAD_P_MESH_START + frac * mesh_span;
+                let pct = (frac * 100.0).min(100.0) as u32;
+                emit(g, &format!("Building surface mesh… ({done}/{total} buckets, {pct}%)"));
+            };
+            match mode {
+                RenderingMode::MarchingCubes => {
+                    smooth_mesh::build_marching_cubes_merged_with_progress(voxels, on_bucket)
+                }
+                RenderingMode::DualContour => {
+                    smooth_mesh::build_dual_contour_merged_with_progress(voxels, on_bucket)
+                }
+                _ => unreachable!(),
+            }
         };
         emit(LOAD_P_MESH_END, "Surface mesh ready…");
         log::info!(
@@ -1855,12 +1987,17 @@ fn start_shape_label(shape: StartShape) -> &'static str {
 fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, shape: StartShape) {
     let shape_l = start_shape_label(shape);
     let label = format!("New project ({grid_size}³, {shape_l})");
+    let load_gen = next_load_generation(&state);
     let app_spawn_err = app.clone();
     match std::thread::Builder::new()
         .name("voxelle-new-project".into())
         .spawn(move || {
             if let Err(e) = run_unload_on_main_thread(&state, &app) {
                 let _ = app.emit("voxelle-load-error", e);
+                return;
+            }
+            if is_load_stale(&state, load_gen) {
+                log::info!(target: "voxelle_load", "new project cancelled (stale after unload)");
                 return;
             }
             state
@@ -1913,7 +2050,7 @@ fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, sh
                             };
                         }
 
-                        run_v3_mesh_on_main(&state, &app, file, prepared, false)?;
+                        run_v3_mesh_on_main(&state, &app, file, prepared, false, load_gen)?;
                         Ok(())
                     })()
                 },
@@ -1982,7 +2119,11 @@ fn run_v3_mesh_on_main(
     file: voxelle::VoxelleFile,
     prepared: PreparedLoadScene,
     logo_splash: bool,
+    load_gen: u64,
 ) -> Result<(), String> {
+    if is_load_stale(state, load_gen) {
+        return Err("load cancelled".into());
+    }
     log::info!(
         target: "voxelle_load",
         "run_v3_mesh_on_main: dispatch upload to main thread (voxels={})",
@@ -1994,6 +2135,10 @@ fn run_v3_mesh_on_main(
     let state_c = Arc::clone(state);
     let t_main = Instant::now();
     let _ = app_c.run_on_main_thread(move || {
+        if is_load_stale(&state_c, load_gen) {
+            let _ = done_tx.send(Err("load cancelled".into()));
+            return;
+        }
         let res = apply_mesh_and_camera(&state_c, &app_mesh, file, prepared, logo_splash);
         let _ = done_tx.send(res);
     });
@@ -2010,6 +2155,17 @@ fn run_v3_mesh_on_main(
     Ok(())
 }
 
+/// Bump the load generation counter and return the new value.
+/// Every load entry point should call this so that older in-flight loads can detect they are stale.
+fn next_load_generation(state: &ViewerState) -> u64 {
+    state.load_generation.fetch_add(1, Ordering::SeqCst) + 1
+}
+
+/// Returns true when a newer load has started since `gen` was issued.
+fn is_load_stale(state: &ViewerState, gen: u64) -> bool {
+    state.load_generation.load(Ordering::SeqCst) != gen
+}
+
 fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: PathBuf) {
     let label = path.to_string_lossy().to_string();
     spawn_decode_and_mesh_with_label(state, app, path, label, false);
@@ -2022,12 +2178,17 @@ fn spawn_decode_and_mesh_with_label(
     file_label: String,
     start_screen_logo: bool,
 ) {
+    let load_gen = next_load_generation(&state);
     let app_spawn_err = app.clone();
     match std::thread::Builder::new()
         .name("voxelle-load".into())
         .spawn(move || {
             if let Err(e) = run_unload_on_main_thread(&state, &app) {
                 let _ = app.emit("voxelle-load-error", e);
+                return;
+            }
+            if is_load_stale(&state, load_gen) {
+                log::info!(target: "voxelle_load", "load cancelled (stale after unload)");
                 return;
             }
             let label = file_label;
@@ -2044,6 +2205,9 @@ fn spawn_decode_and_mesh_with_label(
                             bytes.len(),
                             t.elapsed()
                         );
+                        if is_load_stale(&state, load_gen) {
+                            return Err("load cancelled".into());
+                        }
                         emit_load_progress(&app, 0.12, "Reading file…");
                         let t = Instant::now();
                         let file = decode_payload(&bytes).map_err(|e| e.to_string())?;
@@ -2055,6 +2219,9 @@ fn spawn_decode_and_mesh_with_label(
                             file.voxels.len(),
                             t.elapsed()
                         );
+                        if is_load_stale(&state, load_gen) {
+                            return Err("load cancelled".into());
+                        }
                         emit_load_progress(&app, 0.18, "Preparing scene…");
                         let mode = *state
                             .rendering_mode
@@ -2067,8 +2234,12 @@ fn spawn_decode_and_mesh_with_label(
                             Some(&app),
                         )?;
 
+                        if is_load_stale(&state, load_gen) {
+                            return Err("load cancelled".into());
+                        }
+
                         if file.version == 3 && !file.voxels.is_empty() {
-                            run_v3_mesh_on_main(&state, &app, file, prepared, start_screen_logo)?;
+                            run_v3_mesh_on_main(&state, &app, file, prepared, start_screen_logo, load_gen)?;
                             return Ok(DecodeMeshOutcome::Done);
                         }
 
@@ -2080,10 +2251,22 @@ fn spawn_decode_and_mesh_with_label(
                 Err(payload) => Err(load_thread_panic_message(payload)),
             };
 
+            // Final stale check before applying to the scene.
+            if is_load_stale(&state, load_gen) {
+                log::info!(target: "voxelle_load", "load cancelled (stale before apply)");
+                return;
+            }
+
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let state_c = Arc::clone(&state);
             let app_emit = app.clone();
             if let Err(e) = app.run_on_main_thread(move || {
+                // Check once more on the main thread before touching the scene.
+                if is_load_stale(&state_c, load_gen) {
+                    log::info!(target: "voxelle_load", "load cancelled (stale on main thread)");
+                    let _ = done_tx.send(Err("load cancelled".into()));
+                    return;
+                }
                 let res: Result<(), String> = match mesh_result {
                     Ok(DecodeMeshOutcome::ApplyOnce { file, prepared }) => {
                         let t = Instant::now();
@@ -2127,7 +2310,10 @@ fn spawn_decode_and_mesh_with_label(
                     }
                 }
                 Ok(Err(e)) => {
-                    let _ = app.emit("voxelle-load-error", e);
+                    // Don't emit user-facing errors for intentional cancellation.
+                    if e != "load cancelled" {
+                        let _ = app.emit("voxelle-load-error", e);
+                    }
                 }
                 Err(_) => {
                     let _ = app.emit(
@@ -2439,14 +2625,40 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
             let voxels = file.voxels.clone();
             let rm_copy = rm;
             let token = state.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let app_thread = app.clone();
+            let show_work_thread = show_work;
             drop(fg);
             drop(v);
             let mesh_from_thread: greedy_mesh::MeshBuffers = std::thread::Builder::new()
                 .name("voxelle-smooth-mesh".into())
-                .spawn(move || match rm_copy {
-                    RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&voxels),
-                    RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&voxels),
-                    _ => greedy_mesh::MeshBuffers::default(),
+                .spawn(move || {
+                    use std::sync::atomic::{AtomicU32, Ordering};
+                    let last_permille = AtomicU32::new(0);
+                    let on_bucket = move |frac: f32, done: usize, total: usize| {
+                        if !show_work_thread {
+                            return;
+                        }
+                        let permille = (frac * 1000.0).min(1000.0) as u32;
+                        let prev = last_permille.load(Ordering::Relaxed);
+                        if permille.saturating_sub(prev) >= 40 || done == total {
+                            last_permille.store(permille, Ordering::Relaxed);
+                            let pct = (frac * 100.0).min(100.0) as u32;
+                            emit_work_progress(
+                                &app_thread,
+                                0.38 + 0.52 * frac,
+                                format!("Building surface mesh… ({done}/{total} buckets, {pct}%)"),
+                            );
+                        }
+                    };
+                    match rm_copy {
+                        RenderingMode::MarchingCubes => {
+                            smooth_mesh::build_marching_cubes_merged_with_progress(&voxels, on_bucket)
+                        }
+                        RenderingMode::DualContour => {
+                            smooth_mesh::build_dual_contour_merged_with_progress(&voxels, on_bucket)
+                        }
+                        _ => greedy_mesh::MeshBuffers::default(),
+                    }
                 })
                 .map_err(|e| e.to_string())?
                 .join()
@@ -2479,9 +2691,24 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
             let Some(viewer) = v.as_mut() else {
                 return Err("viewer not ready".into());
             };
+            let on_bucket = |frac: f32, done: usize, total: usize| {
+                if !show_work {
+                    return;
+                }
+                let pct = (frac * 100.0).min(100.0) as u32;
+                emit_work_progress(
+                    app,
+                    0.38 + 0.52 * frac,
+                    format!("Building surface mesh… ({done}/{total} buckets, {pct}%)"),
+                );
+            };
             let mesh = match rm {
-                RenderingMode::MarchingCubes => smooth_mesh::build_marching_cubes_merged(&file.voxels),
-                RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
+                RenderingMode::MarchingCubes => {
+                    smooth_mesh::build_marching_cubes_merged_with_progress(&file.voxels, on_bucket)
+                }
+                RenderingMode::DualContour => {
+                    smooth_mesh::build_dual_contour_merged_with_progress(&file.voxels, on_bucket)
+                }
                 _ => unreachable!(),
             };
             viewer.upload_mesh(&mesh);
@@ -2789,11 +3016,30 @@ fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHandle) {
             let work: Result<OpaqueRefreshWork, String> = if file.voxels.is_empty() {
                 Ok(OpaqueRefreshWork::Greedy(PreparedGreedyRebuild::NoVoxels))
             } else if rm.uses_smooth_surface() {
+                use std::sync::atomic::{AtomicU32, Ordering};
+                let last_permille = AtomicU32::new(0);
+                let app_pb = app.clone();
+                emit_work_progress(&app_pb, 0.08, "Rebuilding mesh…");
+                let on_bucket = move |frac: f32, done: usize, total: usize| {
+                    let permille = (frac * 1000.0).min(1000.0) as u32;
+                    let prev = last_permille.load(Ordering::Relaxed);
+                    if permille.saturating_sub(prev) >= 40 || done == total {
+                        last_permille.store(permille, Ordering::Relaxed);
+                        let pct = (frac * 100.0).min(100.0) as u32;
+                        emit_work_progress(
+                            &app_pb,
+                            0.1 + 0.85 * frac,
+                            format!("Building surface mesh… ({done}/{total} buckets, {pct}%)"),
+                        );
+                    }
+                };
                 let mesh = match rm {
                     RenderingMode::MarchingCubes => {
-                        smooth_mesh::build_marching_cubes_merged(&file.voxels)
+                        smooth_mesh::build_marching_cubes_merged_with_progress(&file.voxels, on_bucket)
                     }
-                    RenderingMode::DualContour => smooth_mesh::build_dual_contour_merged(&file.voxels),
+                    RenderingMode::DualContour => {
+                        smooth_mesh::build_dual_contour_merged_with_progress(&file.voxels, on_bucket)
+                    }
                     _ => {
                         log::warn!(target: "voxelle", "opaque refresh: unexpected smooth mode");
                         return;
@@ -3017,6 +3263,13 @@ fn apply_rendering_mode(
     mode: RenderingMode,
 ) -> Result<(), String> {
     *state.rendering_mode.lock() = mode;
+    if mode.uses_smooth_surface() {
+        // DC/MC mesh build can take many seconds; run it on a side thread so the
+        // main thread stays responsive.  `schedule_opaque_mesh_refresh` handles
+        // background compute + main-thread GPU upload with the stale-token guard.
+        schedule_opaque_mesh_refresh(state, app);
+        return Ok(());
+    }
     refresh_opaque_mesh(state, Some(app))
 }
 
@@ -3261,10 +3514,14 @@ fn get_focal_length_mm(state: State<'_, Arc<ViewerState>>) -> Result<f32, String
 }
 
 #[tauri::command]
-fn set_fly_mode(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+fn set_fly_mode(app: AppHandle, state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
     *state.fly_mode.lock() = enabled;
+    let mut cam = state.camera.lock();
+    cam.is_fly_mode = enabled;
     if enabled {
         *state.fly_last_physics.lock() = None;
+        drop(cam);
+        wake_viewport_loop(&app);
     }
     Ok(())
 }
@@ -3290,7 +3547,7 @@ struct SyncFlyInputArgs {
 
 /// WASD / shift state only. Translation integrates on the native event loop with real elapsed time.
 #[tauri::command]
-fn sync_fly_input(state: State<'_, Arc<ViewerState>>, args: SyncFlyInputArgs) -> Result<(), String> {
+fn sync_fly_input(app: AppHandle, state: State<'_, Arc<ViewerState>>, args: SyncFlyInputArgs) -> Result<(), String> {
     if !*state.fly_mode.lock() {
         return Ok(());
     }
@@ -3300,12 +3557,16 @@ fn sync_fly_input(state: State<'_, Arc<ViewerState>>, args: SyncFlyInputArgs) ->
     } else {
         1.0
     };
+    let has_movement = args.forward != 0.0 || args.right != 0.0 || args.up != 0.0;
     *state.fly_input.lock() = FlyInputState {
         forward: args.forward,
         right: args.right,
         up: args.up,
         speed_scale,
     };
+    if has_movement {
+        wake_viewport_loop(&app);
+    }
     Ok(())
 }
 
@@ -3753,6 +4014,8 @@ fn voxel_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(), String> 
         .sculpt_stroke_replay
         .lock()
         .clear();
+    // Clear spray constraint plane so it gets re-established on the first anchor of this stroke.
+    *state.spray_constraint_plane.lock() = None;
     Ok(())
 }
 
@@ -3829,7 +4092,8 @@ fn stroke_preview_meshes_for_union(
     file: &voxelle::VoxelleFile,
     debug_pick_highlight: bool,
     palette_rgb: u32,
-) -> (greedy_mesh::MeshBuffers, greedy_mesh::MeshBuffers) {
+    color_resolver: Option<&dyn Fn(i32, i32, i32) -> u32>,
+) -> greedy_mesh::PreviewInstancedResult {
     // Occupied cells: shell only (large solid previews stay cheap). Empty footprint cells: always
     // included (full brush volume in air). Stroke commit still uses the full union in
     // [`voxel_stroke_end`].
@@ -3846,32 +4110,47 @@ fn stroke_preview_meshes_for_union(
     let mut sorted: Vec<greedy_mesh::VoxelCoord> =
         shell_occ.into_iter().chain(empty_only.into_iter()).collect();
     if sorted.is_empty() {
-        return (
-            greedy_mesh::MeshBuffers::default(),
-            greedy_mesh::MeshBuffers::default(),
-        );
+        return greedy_mesh::PreviewInstancedResult::empty();
     }
     sorted.sort_unstable_by_key(|&c| {
         let ghost = !voxel_map.contains_key(&c);
         (ghost, c.0, c.1, c.2)
     });
-    let mut solid = greedy_mesh::MeshBuffers::default();
-    let mut wire = greedy_mesh::MeshBuffers::default();
     let (sr, sg, sb, wr, wg, wb, size, wem) =
         preview_tool_colors(tool, debug_pick_highlight, palette_rgb);
+    let use_per_voxel_color = color_resolver.is_some()
+        && matches!(tool, voxel_edit::EditTool::Add | voxel_edit::EditTool::Paint);
+    let n = sorted.len().min(STROKE_PREVIEW_MAX_CELLS);
+    let mut solid_instances: Vec<greedy_mesh::PreviewInstance> = Vec::with_capacity(n);
+    let mut wire_instances: Vec<greedy_mesh::PreviewInstance> = Vec::with_capacity(n);
     for (cx, cy, cz) in sorted.into_iter().take(STROKE_PREVIEW_MAX_CELLS) {
         let ghost = !voxel_map.contains_key(&(cx, cy, cz));
+        let (base_sr, base_sg, base_sb, base_wr, base_wg, base_wb) =
+            if use_per_voxel_color {
+                if let Some(resolver) = color_resolver {
+                    let rgb = resolver(cx, cy, cz);
+                    let [r, g, b] = voxelle::rgb24_u32_to_linear_rgb3(rgb);
+                    let wrc = (r * 0.22).max(0.02);
+                    let wgc = (g * 0.22).max(0.02);
+                    let wbc = (b * 0.22).max(0.02);
+                    (r, g, b, wrc, wgc, wbc)
+                } else {
+                    (sr, sg, sb, wr, wg, wb)
+                }
+            } else {
+                (sr, sg, sb, wr, wg, wb)
+            };
         let (srf, sgf, sbf, wrf, wgf, wbf) = if ghost {
             (
-                sr * PREVIEW_GHOST_FILL_MUL,
-                sg * PREVIEW_GHOST_FILL_MUL,
-                sb * PREVIEW_GHOST_FILL_MUL,
-                wr * PREVIEW_GHOST_WIRE_MUL,
-                wg * PREVIEW_GHOST_WIRE_MUL,
-                wb * PREVIEW_GHOST_WIRE_MUL,
+                base_sr * PREVIEW_GHOST_FILL_MUL,
+                base_sg * PREVIEW_GHOST_FILL_MUL,
+                base_sb * PREVIEW_GHOST_FILL_MUL,
+                base_wr * PREVIEW_GHOST_WIRE_MUL,
+                base_wg * PREVIEW_GHOST_WIRE_MUL,
+                base_wb * PREVIEW_GHOST_WIRE_MUL,
             )
         } else {
-            (sr, sg, sb, wr, wg, wb)
+            (base_sr, base_sg, base_sb, base_wr, base_wg, base_wb)
         };
         let ghost_pr = ghost
             && matches!(
@@ -3892,29 +4171,36 @@ fn stroke_preview_meshes_for_union(
             .get(&(cx, cy, cz))
             .map(|&vi| file.voxels[vi].object_id)
             .unwrap_or(file.active_object_id);
-        let mut s = greedy_mesh::preview_cube_mesh(
-            cx as f32,
-            cy as f32,
-            cz as f32,
-            size,
-            [srf, sgf, sbf],
-            fill_mat_k,
-        );
-        let mut w = greedy_mesh::preview_cube_wireframe_mesh(
-            cx as f32,
-            cy as f32,
-            cz as f32,
-            size,
-            [wrf, wgf, wbf],
-            wire_mat_k,
-        );
-        let m = object_world_matrix(&file.objects, oid);
-        greedy_mesh::transform_mesh_buffers(&mut s, m);
-        greedy_mesh::transform_mesh_buffers(&mut w, m);
-        greedy_mesh::append_mesh_buffers(&mut solid, s);
-        greedy_mesh::append_mesh_buffers(&mut wire, w);
+        let obj_m = object_world_matrix(&file.objects, oid);
+        let translate = glam::Mat4::from_translation(glam::Vec3::new(
+            cx as f32, cy as f32, cz as f32,
+        ));
+        let model = obj_m * translate;
+        let cols = model.to_cols_array_2d();
+        solid_instances.push(greedy_mesh::PreviewInstance {
+            model_c0: cols[0],
+            model_c1: cols[1],
+            model_c2: cols[2],
+            model_c3: cols[3],
+            color: [srf, sgf, sbf],
+            mat_kind: fill_mat_k,
+        });
+        wire_instances.push(greedy_mesh::PreviewInstance {
+            model_c0: cols[0],
+            model_c1: cols[1],
+            model_c2: cols[2],
+            model_c3: cols[3],
+            color: [wrf, wgf, wbf],
+            mat_kind: wire_mat_k,
+        });
     }
-    (solid, wire)
+    greedy_mesh::PreviewInstancedResult {
+        solid_instances,
+        wire_instances,
+        cube_half: size,
+        extra_solid: greedy_mesh::MeshBuffers::default(),
+        extra_wire: greedy_mesh::MeshBuffers::default(),
+    }
 }
 
 /// Saturated yellow corners for polygon / polygonHull placement (web `polygonPointsMaterial` parity).
@@ -4011,27 +4297,34 @@ fn preview_single_cell_world(
     wb: f32,
     size: f32,
     wem: f32,
-) -> (greedy_mesh::MeshBuffers, greedy_mesh::MeshBuffers) {
-    let mut solid = greedy_mesh::preview_cube_mesh(
-        lx,
-        ly,
-        lz,
-        size,
-        [sr, sg, sb],
-        1.0,
-    );
-    let mut wire = greedy_mesh::preview_cube_wireframe_mesh(
-        lx,
-        ly,
-        lz,
-        size,
-        [wr, wg, wb],
-        wem,
-    );
-    let m = object_world_matrix(&file.objects, object_id);
-    greedy_mesh::transform_mesh_buffers(&mut solid, m);
-    greedy_mesh::transform_mesh_buffers(&mut wire, m);
-    (solid, wire)
+) -> greedy_mesh::PreviewInstancedResult {
+    let obj_m = object_world_matrix(&file.objects, object_id);
+    let translate = glam::Mat4::from_translation(glam::Vec3::new(lx, ly, lz));
+    let model = obj_m * translate;
+    let cols = model.to_cols_array_2d();
+    let solid_inst = greedy_mesh::PreviewInstance {
+        model_c0: cols[0],
+        model_c1: cols[1],
+        model_c2: cols[2],
+        model_c3: cols[3],
+        color: [sr, sg, sb],
+        mat_kind: 1.0,
+    };
+    let wire_inst = greedy_mesh::PreviewInstance {
+        model_c0: cols[0],
+        model_c1: cols[1],
+        model_c2: cols[2],
+        model_c3: cols[3],
+        color: [wr, wg, wb],
+        mat_kind: wem,
+    };
+    greedy_mesh::PreviewInstancedResult {
+        solid_instances: vec![solid_inst],
+        wire_instances: vec![wire_inst],
+        cube_half: size,
+        extra_solid: greedy_mesh::MeshBuffers::default(),
+        extra_wire: greedy_mesh::MeshBuffers::default(),
+    }
 }
 
 /// Preview-only stroke update during drag (commit on [`voxel_stroke_end`]).
@@ -4081,6 +4374,10 @@ fn voxel_stroke_preview_at_screen(
             (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
             _ => None,
         };
+        let spray_cp = resolve_spray_constraint_plane(
+            &state, &args.stroke_aux, args.stroke_mode, args.tool,
+            file, vmap, &cam, w, h, sx, sy,
+        );
         let targets = voxel_edit::collect_stroke_preview_targets(
             file,
             vmap,
@@ -4100,6 +4397,7 @@ fn voxel_stroke_preview_at_screen(
             args.stroke_mode,
             args.plane_axis,
             &args.stroke_aux,
+            spray_cp,
         );
         targets
     };
@@ -4124,7 +4422,7 @@ fn voxel_stroke_preview_at_screen(
         .stroke_preview_last_args
         .lock() = Some(args.clone());
 
-    let (solid, wire) = {
+    let instanced = {
         let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
         let union = state.stroke_preview_union.lock();
@@ -4134,23 +4432,36 @@ fn voxel_stroke_preview_at_screen(
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        let (mut s, mut w) =
-            stroke_preview_meshes_for_union(args.tool, &union, vmap, file, false, args.color);
+        let preview_resolver_owned = if args.palette.len() > 1 {
+            Some(build_color_resolver(
+                args.color,
+                args.palette.clone(),
+                args.paint_color_distrib.clone(),
+                args.stroke_seed,
+            ))
+        } else {
+            None
+        };
+        let preview_resolver_ref: Option<&dyn Fn(i32, i32, i32) -> u32> =
+            preview_resolver_owned.as_ref().map(|f| f as &dyn Fn(i32, i32, i32) -> u32);
+        let mut result = stroke_preview_meshes_for_union(
+            args.tool, &union, vmap, file, false, args.color, preview_resolver_ref,
+        );
         if matches!(
             args.stroke_mode,
             stroke_modes::DrawStrokeMode::Polygon | stroke_modes::DrawStrokeMode::PolygonHull
         ) && !args.stroke_aux.polygon_vertices.is_empty()
         {
             append_polygon_vertex_marker_meshes(
-                &mut s,
-                &mut w,
+                &mut result.extra_solid,
+                &mut result.extra_wire,
                 &args.stroke_aux.polygon_vertices,
                 vmap,
                 file,
                 false,
             );
         }
-        (s, w)
+        result
     };
 
     {
@@ -4158,13 +4469,13 @@ fn voxel_stroke_preview_at_screen(
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
-        if solid.positions.is_empty() {
+        if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
                 .stroke_preview_suppresses_hover
                 .store(false, Ordering::Relaxed);
         } else {
-            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
             *state.preview_overlay_cache_key.lock() = None;
             state
@@ -4302,7 +4613,12 @@ fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Resul
                     file,
                     vmap,
                     args.tool,
-                    args.color,
+                    build_color_resolver(
+                        args.color,
+                        args.palette.clone(),
+                        args.paint_color_distrib.clone(),
+                        args.stroke_seed,
+                    ),
                     material,
                     &union,
                 )
@@ -4428,6 +4744,17 @@ fn apply_selection_stroke_sample(
                 *sel = before_set.iter().copied().filter(|c| accum_set.contains(c)).collect();
                 return Some(sel.len() as u32);
             }
+        }
+        // No active stroke — fall through to direct merge.
+    }
+
+    // Replace mode during a stroke: accumulate all samples so the selection
+    // grows as the brush moves rather than being reset to just the current sample.
+    if matches!(mode, SelectionCombineMode::Replace) {
+        if let Some(accum_set) = accum.as_mut() {
+            accum_set.extend(coords.iter().copied());
+            *sel = accum_set.iter().copied().collect();
+            return Some(sel.len() as u32);
         }
         // No active stroke — fall through to direct merge.
     }
@@ -4666,6 +4993,10 @@ async fn selection_stroke_at_screen(
                 (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
                 _ => None,
             };
+            let spray_cp = resolve_spray_constraint_plane(
+                &state, &args.stroke_aux, args.stroke_mode,
+                voxel_edit::EditTool::Add, file, vmap, &cam, w, h, sx, sy,
+            );
             let c = voxel_edit::selection_stroke_sample_empty_coords(
                 file,
                 vmap,
@@ -4682,6 +5013,7 @@ async fn selection_stroke_at_screen(
                 args.stroke_mode,
                 args.plane_axis,
                 &args.stroke_aux,
+                spray_cp,
             );
             voxel_edit::filter_coords_coplanar_empty_from_screen(
                 file, vmap, &cam, w, h, sx, sy, &c,
@@ -4705,6 +5037,10 @@ async fn selection_stroke_at_screen(
                 (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
                 _ => None,
             };
+            let spray_cp = resolve_spray_constraint_plane(
+                &state, &args.stroke_aux, args.stroke_mode,
+                voxel_edit::EditTool::Remove, file, vmap, &cam, w, h, sx, sy,
+            );
             let mut c = voxel_edit::selection_stroke_sample_coords(
                 file,
                 vmap,
@@ -4721,6 +5057,7 @@ async fn selection_stroke_at_screen(
                 args.stroke_mode,
                 args.plane_axis,
                 &args.stroke_aux,
+                spray_cp,
             );
             match interaction {
                 "selectByColor" => {
@@ -5378,6 +5715,7 @@ fn run_voxel_fill_paint_blocking(
             std::thread::yield_now();
         }
     };
+    let fill_color = args.color;
     let o = voxel_edit::flood_fill_paint_at_screen(
         file,
         vmap,
@@ -5386,7 +5724,7 @@ fn run_voxel_fill_paint_blocking(
         h,
         sx,
         sy,
-        args.color,
+        move |_, _, _| fill_color,
         material,
         args.match_material,
         false,
@@ -5491,7 +5829,12 @@ fn run_fill_deltas_blocking(
             h,
             sx,
             sy,
-            args.color,
+            build_color_resolver(
+                args.color,
+                args.palette.clone(),
+                args.paint_color_distrib.clone(),
+                args.stroke_seed,
+            ),
             material,
             args.match_material,
             args.fill_select_diagonals,
@@ -5526,7 +5869,12 @@ fn run_fill_deltas_blocking(
             sx,
             sy,
             args.fill_select_diagonals,
-            args.color,
+            build_color_resolver(
+                args.color,
+                args.palette.clone(),
+                args.paint_color_distrib.clone(),
+                args.stroke_seed,
+            ),
             material,
             args.stroke_aux.constrain_to_plane,
             args.plane_axis,
@@ -6250,7 +6598,7 @@ fn voxel_sculpt_stroke_preview_at_screen(
     }
 
     // Palette-colored preview for every sculpt mode (gouge/smooth used to use Remove red).
-    let (solid, wire) = {
+    let instanced = {
         let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
         let union = state.stroke_preview_union.lock();
@@ -6260,7 +6608,7 @@ fn voxel_sculpt_stroke_preview_at_screen(
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, args.color)
+        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, args.color, None)
     };
 
     {
@@ -6268,13 +6616,13 @@ fn voxel_sculpt_stroke_preview_at_screen(
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
-        if solid.positions.is_empty() {
+        if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
                 .stroke_preview_suppresses_hover
                 .store(false, Ordering::Relaxed);
         } else {
-            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
             *state.preview_overlay_cache_key.lock() = None;
             state
@@ -6465,24 +6813,24 @@ fn extrude_ray_preview(
     state.stroke_preview_suppresses_hover.store(true, Ordering::Relaxed);
 
     // Generate and upload preview mesh.
-    let (solid, wire) = {
+    let instanced = {
         let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
         let Some(file) = fg.as_ref() else { return Ok(()); };
         let Some(vmap) = vm.as_ref() else { return Ok(()); };
         let union = state.stroke_preview_union.lock();
         stroke_preview_meshes_for_union(
-            voxel_edit::EditTool::Add, &union, vmap, file, false, args.color,
+            voxel_edit::EditTool::Add, &union, vmap, file, false, args.color, None,
         )
     };
 
     {
         let mut v = state.viewer.lock();
         let Some(viewer) = v.as_mut() else { return Ok(()); };
-        if solid.positions.is_empty() {
+        if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
         } else {
-            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
             *state.preview_overlay_cache_key.lock() = None;
         }
@@ -6597,21 +6945,21 @@ fn extrude_recompute_preview(
         }
     }
 
-    let (solid, wire) = {
+    let instanced = {
         let fg = state.current_file.lock();
         let vm = state.voxel_map.lock();
         let Some(file) = fg.as_ref() else { return Ok(()); };
         let Some(vmap) = vm.as_ref() else { return Ok(()); };
-        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, color)
+        stroke_preview_meshes_for_union(voxel_edit::EditTool::Add, &union, vmap, file, false, color, None)
     };
 
     {
         let mut v = state.viewer.lock();
         let Some(viewer) = v.as_mut() else { return Ok(()); };
-        if solid.positions.is_empty() {
+        if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
         } else {
-            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
             *state.preview_overlay_cache_key.lock() = None;
         }
@@ -6634,6 +6982,14 @@ struct GeneratorRocksArgs {
     roughness: f32,
     color: u32,
     material: String,
+    #[serde(default = "default_rock_count")]
+    count: i32,
+    #[serde(default = "default_rock_cluster_radius")]
+    cluster_radius: i32,
+    #[serde(default)]
+    sink_direction: i32,
+    #[serde(default)]
+    sink_amount: i32,
 }
 
 fn default_rock_size() -> i32 {
@@ -6641,7 +6997,15 @@ fn default_rock_size() -> i32 {
 }
 
 fn default_roughness() -> f32 {
-    0.45
+    0.4
+}
+
+fn default_rock_count() -> i32 {
+    1
+}
+
+fn default_rock_cluster_radius() -> i32 {
+    1
 }
 
 #[tauri::command]
@@ -6683,6 +7047,10 @@ fn generator_rocks_at_screen(
             args.roughness,
             args.color,
             material,
+            args.count,
+            args.cluster_radius,
+            args.sink_direction,
+            args.sink_amount,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
@@ -8030,6 +8398,20 @@ async fn voxel_edit_at_screen(
                     (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
                     _ => None,
                 };
+            // Resolve spray constraint plane (invisible hit plane trick from web).
+            let spray_cp = resolve_spray_constraint_plane(
+                &state,
+                &args.stroke_aux,
+                args.stroke_mode,
+                args.tool,
+                file,
+                vmap,
+                &cam,
+                w,
+                h,
+                sx,
+                sy,
+            );
             voxel_edit::apply_edit(
                 file,
                 vmap,
@@ -8039,7 +8421,12 @@ async fn voxel_edit_at_screen(
                 sx,
                 sy,
                 args.tool,
-                args.color,
+                build_color_resolver(
+                    args.color,
+                    args.palette.clone(),
+                    args.paint_color_distrib.clone(),
+                    args.stroke_seed,
+                ),
                 material,
                 args.brush_radius,
                 args.brush_shape,
@@ -8049,6 +8436,7 @@ async fn voxel_edit_at_screen(
                 args.stroke_mode,
                 args.plane_axis,
                 &args.stroke_aux,
+                spray_cp,
             )?
         };
         let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
@@ -8841,6 +9229,10 @@ struct SyncPreviewInput {
     #[serde(default)]
     color: u32,
     #[serde(default)]
+    palette: Vec<u32>,
+    #[serde(default)]
+    paint_color_distrib: Option<paint_color_distrib::PaintColorDistrib>,
+    #[serde(default)]
     material: String,
     #[serde(default)]
     match_material: bool,
@@ -8876,16 +9268,42 @@ struct SyncPreviewInput {
     generator_rock_roughness: f32,
     #[serde(default = "default_rock_seed")]
     generator_rock_seed: i32,
+    #[serde(default = "default_rock_count")]
+    generator_rock_count: i32,
+    #[serde(default = "default_rock_cluster_radius")]
+    generator_rock_cluster_radius: i32,
+    #[serde(default)]
+    generator_rock_sink_direction: i32,
+    #[serde(default)]
+    generator_rock_sink_amount: i32,
     #[serde(default = "default_grass_density")]
     generator_grass_density: i32,
     #[serde(default = "default_grass_max_height")]
     generator_grass_max_height: i32,
     #[serde(default = "default_grass_seed")]
     generator_grass_seed: i32,
+    #[serde(default)]
+    generator_roof_pins: Vec<[i32; 3]>,
+    #[serde(default = "default_roof_style")]
+    generator_roof_style: String,
+    #[serde(default = "default_roof_height")]
+    generator_roof_height: i32,
+    #[serde(default = "default_one_i32")]
+    generator_roof_thickness: i32,
+    #[serde(default = "default_roof_break_ratio")]
+    generator_roof_break_ratio: f32,
+    #[serde(default = "default_roof_wall_height")]
+    generator_roof_wall_height: i32,
+    #[serde(default = "default_roof_parapet_height")]
+    generator_roof_parapet_height: i32,
+    #[serde(default)]
+    generator_roof_salt_skew: f32,
+    #[serde(default)]
+    generator_roof_hollow: bool,
 }
 
 fn default_rock_roughness() -> f32 {
-    0.45
+    0.4
 }
 fn default_rock_seed() -> i32 {
     42
@@ -8937,6 +9355,8 @@ fn sync_preview_input(
         ph.plane_axis = args.plane_axis;
         ph.stroke_aux = args.stroke_aux;
         ph.color = args.color;
+        ph.palette = args.palette.clone();
+        ph.paint_color_distrib = args.paint_color_distrib.clone();
         ph.material = args.material;
         ph.match_material = args.match_material;
         ph.use_brush_preview = args.use_brush_preview;
@@ -8955,9 +9375,22 @@ fn sync_preview_input(
         ph.generator_rock_size = args.generator_rock_size;
         ph.generator_rock_roughness = args.generator_rock_roughness;
         ph.generator_rock_seed = args.generator_rock_seed;
+        ph.generator_rock_count = args.generator_rock_count;
+        ph.generator_rock_cluster_radius = args.generator_rock_cluster_radius;
+        ph.generator_rock_sink_direction = args.generator_rock_sink_direction;
+        ph.generator_rock_sink_amount = args.generator_rock_sink_amount;
         ph.generator_grass_density = args.generator_grass_density;
         ph.generator_grass_max_height = args.generator_grass_max_height;
         ph.generator_grass_seed = args.generator_grass_seed;
+        ph.generator_roof_pins = args.generator_roof_pins.clone();
+        ph.generator_roof_style = args.generator_roof_style.clone();
+        ph.generator_roof_height = args.generator_roof_height;
+        ph.generator_roof_thickness = args.generator_roof_thickness;
+        ph.generator_roof_break_ratio = args.generator_roof_break_ratio;
+        ph.generator_roof_wall_height = args.generator_roof_wall_height;
+        ph.generator_roof_parapet_height = args.generator_roof_parapet_height;
+        ph.generator_roof_salt_skew = args.generator_roof_salt_skew;
+        ph.generator_roof_hollow = args.generator_roof_hollow;
     }
     if args.nx < 0.0 {
         *state.preview_cursor.lock() = None;
@@ -9256,7 +9689,7 @@ fn grid_border_overlay_cache_fingerprint(
 enum GridBorderPrepared {
     Clear,
     Unchanged,
-    Draw { fp: u64, verts: Vec<f32> },
+    Draw { fp: u64, verts: Vec<f32>, indices: Vec<u32> },
 }
 
 fn prepare_grid_border_overlay(state: &ViewerState) -> GridBorderPrepared {
@@ -9286,8 +9719,8 @@ fn prepare_grid_border_overlay(state: &ViewerState) -> GridBorderPrepared {
     {
         return GridBorderPrepared::Unchanged;
     }
-    let verts = greedy_mesh::voxel_surface_grid_line_vertices(&world);
-    GridBorderPrepared::Draw { fp, verts }
+    let (verts, indices) = greedy_mesh::voxel_surface_grid_line_vertices(&world);
+    GridBorderPrepared::Draw { fp, verts, indices }
 }
 
 fn apply_grid_border_overlay(viewer: &mut WgpuViewer, state: &ViewerState, prep: GridBorderPrepared) {
@@ -9297,11 +9730,11 @@ fn apply_grid_border_overlay(viewer: &mut WgpuViewer, state: &ViewerState, prep:
             *state.grid_overlay_cache_key.lock() = None;
         }
         GridBorderPrepared::Unchanged => {}
-        GridBorderPrepared::Draw { fp, verts } => {
+        GridBorderPrepared::Draw { fp, verts, indices } => {
             if viewer.grid_border_cache_key == Some(fp) {
                 return;
             }
-            viewer.upload_grid_border_lines(&verts);
+            viewer.upload_grid_border_lines(&verts, &indices);
             viewer.grid_border_cache_key = Some(fp);
             *state.grid_overlay_cache_key.lock() = Some(fp);
         }
@@ -9391,8 +9824,7 @@ enum PreviewMeshPrepared {
     Clear,
     Upload {
         cache_key: u64,
-        solid: greedy_mesh::MeshBuffers,
-        wire: greedy_mesh::MeshBuffers,
+        instanced: greedy_mesh::PreviewInstancedResult,
     },
 }
 
@@ -9485,6 +9917,10 @@ fn hash_generator_rock_hover(
     color: u32,
     dbg: bool,
     mesh_gen: u64,
+    count: i32,
+    cluster_radius: i32,
+    sink_direction: i32,
+    sink_amount: i32,
 ) -> u64 {
     let mut h = AHasher::default();
     0x72u8.hash(&mut h); // 'r' for rock
@@ -9496,6 +9932,10 @@ fn hash_generator_rock_hover(
     color.hash(&mut h);
     dbg.hash(&mut h);
     mesh_gen.hash(&mut h);
+    count.hash(&mut h);
+    cluster_radius.hash(&mut h);
+    sink_direction.hash(&mut h);
+    sink_amount.hash(&mut h);
     h.finish()
 }
 
@@ -9516,6 +9956,39 @@ fn hash_generator_grass_hover(
     density.hash(&mut h);
     max_height.hash(&mut h);
     seed.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+fn hash_generator_roof_hover(
+    pins: &[[i32; 3]],
+    style: &str,
+    height: i32,
+    thickness: i32,
+    break_ratio: f32,
+    wall_height: i32,
+    parapet_height: i32,
+    salt_skew: f32,
+    hollow: bool,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x52u8.hash(&mut h); // 'R' for roof
+    for p in pins {
+        p.hash(&mut h);
+    }
+    style.hash(&mut h);
+    height.hash(&mut h);
+    thickness.hash(&mut h);
+    break_ratio.to_bits().hash(&mut h);
+    wall_height.hash(&mut h);
+    parapet_height.hash(&mut h);
+    salt_skew.to_bits().hash(&mut h);
+    hollow.hash(&mut h);
     color.hash(&mut h);
     dbg.hash(&mut h);
     mesh_gen.hash(&mut h);
@@ -9544,6 +10017,111 @@ fn prepare_preview_mesh(
     };
 
     if matches!(mode, PreviewMode::Navigate | PreviewMode::Fly) {
+        return PreviewMeshPrepared::Clear;
+    }
+
+    // Pin-based generators (cloth, roof) don't need a cursor position — run
+    // them even when the mouse is outside the viewport so the preview persists.
+    if cursor.is_none() && matches!(mode, PreviewMode::Add) {
+        let file_guard = state.current_file.lock();
+        let map_guard = state.voxel_map.lock();
+        if let (Some(file), Some(vmap)) = (file_guard.as_ref(), map_guard.as_ref()) {
+            let hover = state.preview_hover.lock();
+            let ctx = &*hover;
+            let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
+            if let Some(ref gk) = ctx.generator_kind {
+                match gk.as_str() {
+                    "cloth" => {
+                        if ctx.generator_cloth_pins.len() >= 3 {
+                            let sim = crate::generators::ClothSimOptions {
+                                gravity_scale: ctx.generator_cloth_gravity_scale.max(0.0),
+                                stiffness_scale: ctx.generator_cloth_stiffness_scale.clamp(0.05, 2.0),
+                                iterations: if ctx.generator_cloth_iterations > 0 {
+                                    Some(ctx.generator_cloth_iterations.clamp(4, 96))
+                                } else {
+                                    None
+                                },
+                                constraint_passes: ctx.generator_cloth_constraint_passes.clamp(1, 6),
+                            };
+                            let cells = crate::generators::preview_cloth_voxels(
+                                &ctx.generator_cloth_pins,
+                                ctx.generator_cloth_tension,
+                                ctx.generator_cloth_gravity_direction.as_str(),
+                                ctx.brush_radius,
+                                ctx.brush_shape,
+                                &sim,
+                            );
+                            if !cells.is_empty() {
+                                let key = hash_generator_cloth_hover(
+                                    &ctx.generator_cloth_pins,
+                                    ctx.generator_cloth_tension,
+                                    ctx.generator_cloth_gravity_direction.as_str(),
+                                    ctx.generator_cloth_gravity_scale,
+                                    ctx.generator_cloth_stiffness_scale,
+                                    ctx.generator_cloth_iterations,
+                                    ctx.generator_cloth_constraint_passes,
+                                    ctx.brush_radius,
+                                    ctx.brush_shape,
+                                    ctx.color,
+                                    dbg,
+                                    mesh_gen,
+                                );
+                                if preview_overlay_cache_key_get(state) == Some(key) {
+                                    return PreviewMeshPrepared::Noop;
+                                }
+                                let set: AHashSet<_> = cells.iter().copied().collect();
+                                let instanced = stroke_preview_meshes_for_union(
+                                    voxel_edit::EditTool::Add, &set, vmap, file, dbg, ctx.color, None,
+                                );
+                                return PreviewMeshPrepared::Upload { cache_key: key, instanced };
+                            }
+                        }
+                    }
+                    "roof" => {
+                        if ctx.generator_roof_pins.len() >= 3 {
+                            let cells = crate::generators::preview_roof_voxels(
+                                &ctx.generator_roof_pins,
+                                &ctx.generator_roof_style,
+                                ctx.generator_roof_height,
+                                ctx.generator_roof_thickness,
+                                0,
+                                0,
+                                ctx.generator_roof_break_ratio,
+                                ctx.generator_roof_wall_height,
+                                ctx.generator_roof_parapet_height,
+                                ctx.generator_roof_salt_skew,
+                                ctx.generator_roof_hollow,
+                            );
+                            if !cells.is_empty() {
+                                let key = hash_generator_roof_hover(
+                                    &ctx.generator_roof_pins,
+                                    &ctx.generator_roof_style,
+                                    ctx.generator_roof_height,
+                                    ctx.generator_roof_thickness,
+                                    ctx.generator_roof_break_ratio,
+                                    ctx.generator_roof_wall_height,
+                                    ctx.generator_roof_parapet_height,
+                                    ctx.generator_roof_salt_skew,
+                                    ctx.generator_roof_hollow,
+                                    ctx.color,
+                                    dbg,
+                                    mesh_gen,
+                                );
+                                if preview_overlay_cache_key_get(state) == Some(key) {
+                                    return PreviewMeshPrepared::Noop;
+                                }
+                                let set: AHashSet<_> = cells.iter().copied().collect();
+                                let instanced = stroke_preview_meshes_for_union(
+                                    voxel_edit::EditTool::Add, &set, vmap, file, dbg, ctx.color, None,
+                                );
+                                return PreviewMeshPrepared::Upload { cache_key: key, instanced };
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
         return PreviewMeshPrepared::Clear;
     }
 
@@ -9634,22 +10212,23 @@ fn prepare_preview_mesh(
         }
 
         let set: AHashSet<_> = coords.iter().copied().collect();
-        let (solid, mut wire) = stroke_preview_meshes_for_union(
+        let mut instanced = stroke_preview_meshes_for_union(
             voxel_edit::EditTool::Add,
             &set,
             vmap,
             file,
             dbg,
             hover.color,
+            None,
         );
 
         if show_gizmo {
-            generators::append_squishy_gizmo_wire(&session_snap, cam, &mut wire);
+            generators::append_squishy_gizmo_wire(&session_snap, cam, &mut instanced.extra_wire);
         }
 
         if has_pick_chrome {
             generators::append_squishy_metaball_pick_rings(
-                &mut wire,
+                &mut instanced.extra_wire,
                 &session_snap,
                 add_anchor,
                 preview_radius_i as i32,
@@ -9659,8 +10238,7 @@ fn prepare_preview_mesh(
 
         return PreviewMeshPrepared::Upload {
             cache_key: key,
-            solid,
-            wire,
+            instanced,
         };
     }
 
@@ -9709,18 +10287,18 @@ fn prepare_preview_mesh(
                                 return PreviewMeshPrepared::Noop;
                             }
                             let set: AHashSet<_> = cells.iter().copied().collect();
-                            let (solid, wire) = stroke_preview_meshes_for_union(
+                            let instanced = stroke_preview_meshes_for_union(
                                 voxel_edit::EditTool::Add,
                                 &set,
                                 vmap,
                                 file,
                                 dbg,
                                 ctx.color,
+                                None,
                             );
                             return PreviewMeshPrepared::Upload {
                                 cache_key: key,
-                                solid,
-                                wire,
+                                instanced,
                             };
                         }
                     }
@@ -9766,18 +10344,18 @@ fn prepare_preview_mesh(
                                 return PreviewMeshPrepared::Noop;
                             }
                             let set: AHashSet<_> = cells.iter().copied().collect();
-                            let (solid, wire) = stroke_preview_meshes_for_union(
+                            let instanced = stroke_preview_meshes_for_union(
                                 voxel_edit::EditTool::Add,
                                 &set,
                                 vmap,
                                 file,
                                 dbg,
                                 ctx.color,
+                                None,
                             );
                             return PreviewMeshPrepared::Upload {
                                 cache_key: key,
-                                solid,
-                                wire,
+                                instanced,
                             };
                         }
                     }
@@ -9794,6 +10372,10 @@ fn prepare_preview_mesh(
                         ctx.generator_rock_seed,
                         ctx.generator_rock_size,
                         ctx.generator_rock_roughness,
+                        ctx.generator_rock_count,
+                        ctx.generator_rock_cluster_radius,
+                        ctx.generator_rock_sink_direction,
+                        ctx.generator_rock_sink_amount,
                     );
                     if !cells.is_empty() {
                         let key = hash_generator_rock_hover(
@@ -9805,23 +10387,27 @@ fn prepare_preview_mesh(
                             ctx.color,
                             dbg,
                             mesh_gen,
+                            ctx.generator_rock_count,
+                            ctx.generator_rock_cluster_radius,
+                            ctx.generator_rock_sink_direction,
+                            ctx.generator_rock_sink_amount,
                         );
                         if preview_overlay_cache_key_get(state) == Some(key) {
                             return PreviewMeshPrepared::Noop;
                         }
                         let set: AHashSet<_> = cells.iter().copied().collect();
-                        let (solid, wire) = stroke_preview_meshes_for_union(
+                        let instanced = stroke_preview_meshes_for_union(
                             voxel_edit::EditTool::Add,
                             &set,
                             vmap,
                             file,
                             dbg,
                             ctx.color,
+                            None,
                         );
                         return PreviewMeshPrepared::Upload {
                             cache_key: key,
-                            solid,
-                            wire,
+                            instanced,
                         };
                     }
                 }
@@ -9853,19 +10439,69 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         let set: AHashSet<_> = cells.iter().copied().collect();
-                        let (solid, wire) = stroke_preview_meshes_for_union(
+                        let instanced = stroke_preview_meshes_for_union(
                             voxel_edit::EditTool::Add,
                             &set,
                             vmap,
                             file,
                             dbg,
                             ctx.color,
+                            None,
                         );
                         return PreviewMeshPrepared::Upload {
                             cache_key: key,
-                            solid,
-                            wire,
+                            instanced,
                         };
+                    }
+                }
+                "roof" => {
+                    if ctx.generator_roof_pins.len() >= 3 {
+                        let cells = crate::generators::preview_roof_voxels(
+                            &ctx.generator_roof_pins,
+                            &ctx.generator_roof_style,
+                            ctx.generator_roof_height,
+                            ctx.generator_roof_thickness,
+                            0, // shed_edge_index
+                            0, // gable_orientation
+                            ctx.generator_roof_break_ratio,
+                            ctx.generator_roof_wall_height,
+                            ctx.generator_roof_parapet_height,
+                            ctx.generator_roof_salt_skew,
+                            ctx.generator_roof_hollow,
+                        );
+                        if !cells.is_empty() {
+                            let key = hash_generator_roof_hover(
+                                &ctx.generator_roof_pins,
+                                &ctx.generator_roof_style,
+                                ctx.generator_roof_height,
+                                ctx.generator_roof_thickness,
+                                ctx.generator_roof_break_ratio,
+                                ctx.generator_roof_wall_height,
+                                ctx.generator_roof_parapet_height,
+                                ctx.generator_roof_salt_skew,
+                                ctx.generator_roof_hollow,
+                                ctx.color,
+                                dbg,
+                                mesh_gen,
+                            );
+                            if preview_overlay_cache_key_get(state) == Some(key) {
+                                return PreviewMeshPrepared::Noop;
+                            }
+                            let set: AHashSet<_> = cells.iter().copied().collect();
+                            let instanced = stroke_preview_meshes_for_union(
+                                voxel_edit::EditTool::Add,
+                                &set,
+                                vmap,
+                                file,
+                                dbg,
+                                ctx.color,
+                                None,
+                            );
+                            return PreviewMeshPrepared::Upload {
+                                cache_key: key,
+                                instanced,
+                            };
+                        }
                     }
                 }
                 _ => {}
@@ -9881,6 +10517,7 @@ fn prepare_preview_mesh(
             && ctx.use_brush_preview;
         if poly_placing {
             let material = voxelle::MaterialId::from_str_id(&ctx.material);
+            let spray_cp = *state.spray_constraint_plane.lock();
             let targets = voxel_edit::collect_stroke_preview_targets(
                 file,
                 vmap,
@@ -9900,17 +10537,15 @@ fn prepare_preview_mesh(
                 ctx.stroke_mode,
                 ctx.plane_axis,
                 &ctx.stroke_aux,
+                spray_cp,
             );
             let key = hash_brush_hover_targets(mode, ctx, &targets, vmap, dbg);
             if preview_overlay_cache_key_get(state) == Some(key) {
                 return PreviewMeshPrepared::Noop;
             }
             let set: AHashSet<_> = targets.iter().copied().collect();
-            let (mut solid, mut wire) = if targets.is_empty() {
-                (
-                    greedy_mesh::MeshBuffers::default(),
-                    greedy_mesh::MeshBuffers::default(),
-                )
+            let mut instanced = if targets.is_empty() {
+                greedy_mesh::PreviewInstancedResult::empty()
             } else {
                 stroke_preview_meshes_for_union(
                     voxel_edit::EditTool::Remove,
@@ -9919,23 +10554,23 @@ fn prepare_preview_mesh(
                     file,
                     dbg,
                     ctx.color,
+                    None,
                 )
             };
             append_polygon_vertex_marker_meshes(
-                &mut solid,
-                &mut wire,
+                &mut instanced.extra_solid,
+                &mut instanced.extra_wire,
                 &ctx.stroke_aux.polygon_vertices,
                 vmap,
                 file,
                 dbg,
             );
-            if solid.positions.is_empty() {
+            if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
                 return PreviewMeshPrepared::Clear;
             }
             return PreviewMeshPrepared::Upload {
                 cache_key: key,
-                solid,
-                wire,
+                instanced,
             };
         }
         let key_cell = voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy);
@@ -9957,13 +10592,12 @@ fn prepare_preview_mesh(
             };
             // Grid-snap: render at integer cell center (same as brush preview)
             // instead of the face-hit float, so the highlight locks to the voxel.
-            let (solid, wire) = preview_single_cell_world(
+            let instanced = preview_single_cell_world(
                 file, cx as f32, cy as f32, cz as f32, oid, sr, sg, sb, wr, wg, wb, size, wem,
             );
             return PreviewMeshPrepared::Upload {
                 cache_key: key,
-                solid,
-                wire,
+                instanced,
             };
         }
         return PreviewMeshPrepared::Clear;
@@ -10006,13 +10640,12 @@ fn prepare_preview_mesh(
                 let (sr, sg, sb, wr, wg, wb, size, wem) =
                     preview_tool_colors(tool, dbg, ctx.color);
                 let p = local_cell_face_hit_for_preview(cam, w, h, sx, sy, cx, cy, cz, oid, &file.objects);
-                let (solid, wire) = preview_single_cell_world(
+                let instanced = preview_single_cell_world(
                     file, p.x, p.y, p.z, oid, sr, sg, sb, wr, wg, wb, size, wem,
                 );
                 return PreviewMeshPrepared::Upload {
                     cache_key: key,
-                    solid,
-                    wire,
+                    instanced,
                 };
             }
             None => return PreviewMeshPrepared::Clear,
@@ -10020,6 +10653,7 @@ fn prepare_preview_mesh(
     }
 
     let material = voxelle::MaterialId::from_str_id(&ctx.material);
+    let spray_cp = *state.spray_constraint_plane.lock();
     let targets = voxel_edit::collect_stroke_preview_targets(
         file,
         vmap,
@@ -10039,6 +10673,7 @@ fn prepare_preview_mesh(
         ctx.stroke_mode,
         ctx.plane_axis,
         &ctx.stroke_aux,
+        spray_cp,
     );
     let key = hash_brush_hover_targets(mode, ctx, &targets, vmap, dbg);
     if preview_overlay_cache_key_get(state) == Some(key) {
@@ -10052,31 +10687,39 @@ fn prepare_preview_mesh(
         return PreviewMeshPrepared::Clear;
     }
     let set: AHashSet<_> = targets.iter().copied().collect();
-    let (mut solid, mut wire) = if targets.is_empty() {
-        (
-            greedy_mesh::MeshBuffers::default(),
-            greedy_mesh::MeshBuffers::default(),
-        )
+    let hover_resolver_owned = if ctx.palette.len() > 1 {
+        Some(build_color_resolver(
+            ctx.color,
+            ctx.palette.clone(),
+            ctx.paint_color_distrib.clone(),
+            0, // fixed seed for consistent hover preview
+        ))
     } else {
-        stroke_preview_meshes_for_union(tool, &set, vmap, file, dbg, ctx.color)
+        None
+    };
+    let hover_resolver_ref: Option<&dyn Fn(i32, i32, i32) -> u32> =
+        hover_resolver_owned.as_ref().map(|f| f as &dyn Fn(i32, i32, i32) -> u32);
+    let mut instanced = if targets.is_empty() {
+        greedy_mesh::PreviewInstancedResult::empty()
+    } else {
+        stroke_preview_meshes_for_union(tool, &set, vmap, file, dbg, ctx.color, hover_resolver_ref)
     };
     if poly_corners {
         append_polygon_vertex_marker_meshes(
-            &mut solid,
-            &mut wire,
+            &mut instanced.extra_solid,
+            &mut instanced.extra_wire,
             &ctx.stroke_aux.polygon_vertices,
             vmap,
             file,
             dbg,
         );
     }
-    if solid.positions.is_empty() {
+    if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
         PreviewMeshPrepared::Clear
     } else {
         PreviewMeshPrepared::Upload {
             cache_key: key,
-            solid,
-            wire,
+            instanced,
         }
     }
 }
@@ -10094,10 +10737,9 @@ fn apply_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, prep: Previe
         }
         PreviewMeshPrepared::Upload {
             cache_key,
-            solid,
-            wire,
+            instanced,
         } => {
-            viewer.upload_preview_mesh(&solid, &wire);
+            viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = Some(cache_key);
             *state.preview_overlay_cache_key.lock() = Some(cache_key);
         }
@@ -10250,6 +10892,11 @@ pub struct SelectionMenuState {
     pub view_show_borders: tauri::menu::CheckMenuItem<tauri::Wry>,
     /// Experimental: GPU viewport uses full swapchain; webview picks with window-normalized coords.
     pub full_surface_viewport: tauri::menu::CheckMenuItem<tauri::Wry>,
+    pub render_greedy: tauri::menu::CheckMenuItem<tauri::Wry>,
+    pub render_marching: tauri::menu::CheckMenuItem<tauri::Wry>,
+    pub render_dual: tauri::menu::CheckMenuItem<tauri::Wry>,
+    pub render_ray: tauri::menu::CheckMenuItem<tauri::Wry>,
+    pub ortho_toggle: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub sel_all: tauri::menu::MenuItem<tauri::Wry>,
     pub sel_by_color: tauri::menu::MenuItem<tauri::Wry>,
     pub sel_connected: tauri::menu::MenuItem<tauri::Wry>,
@@ -10434,19 +11081,30 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
         &[&debug_viewport_cursor, &debug_copy_perf],
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let view_render_greedy = MenuItem::with_id(app, "view_render_greedy", "Blocky", true, None::<&str>)?;
-    let view_render_marching = MenuItem::with_id(
+    let current_mode = *app.state::<Arc<ViewerState>>().rendering_mode.lock();
+    let view_render_greedy = CheckMenuItem::with_id(app, "view_render_greedy", "Blocky", true, matches!(current_mode, RenderingMode::Greedy), None::<&str>)?;
+    let view_render_marching = CheckMenuItem::with_id(
         app,
         "view_render_marching",
         "Smooth",
         true,
+        matches!(current_mode, RenderingMode::MarchingCubes),
         None::<&str>,
     )?;
-    let view_render_dual = MenuItem::with_id(
+    let view_render_dual = CheckMenuItem::with_id(
         app,
         "view_render_dual",
         "Crisp",
         true,
+        matches!(current_mode, RenderingMode::DualContour),
+        None::<&str>,
+    )?;
+    let view_render_ray = CheckMenuItem::with_id(
+        app,
+        "menu_view_render_ray",
+        "Ray (WebGPU)",
+        true,
+        matches!(current_mode, RenderingMode::Ray),
         None::<&str>,
     )?;
     let rendering_submenu = Submenu::with_items(
@@ -10455,11 +11113,8 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
         true,
         &[&view_render_greedy, &view_render_marching, &view_render_dual],
     )?;
-    let view_perspective_item =
-        MenuItem::with_id(app, "menu_view_perspective", "Perspective", true, None::<&str>)?;
-    let ortho_view_item = MenuItem::with_id(app, "menu_view_ortho", "Orthographic", true, None::<&str>)?;
-    let view_render_ray =
-        MenuItem::with_id(app, "menu_view_render_ray", "Ray (WebGPU)", true, None::<&str>)?;
+    let is_ortho = !app.state::<Arc<ViewerState>>().camera.lock().perspective;
+    let ortho_view_item = CheckMenuItem::with_id(app, "menu_view_ortho", "Orthographic", true, is_ortho, None::<&str>)?;
     let sep_view_extras = PredefinedMenuItem::separator(app)?;
     let view_full_surface_viewport = CheckMenuItem::with_id(
         app,
@@ -10480,8 +11135,6 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
     let sep_view_stamp = PredefinedMenuItem::separator(app)?;
     let view_stamp_book =
         MenuItem::with_id(app, "menu_view_stamp_book", "Stamp book…", true, None::<&str>)?;
-    let view_project_stats =
-        MenuItem::with_id(app, "menu_view_project_stats", "Project stats…", true, None::<&str>)?;
     let sep_before_chat = PredefinedMenuItem::separator(app)?;
 
     let mut file_inserted = false;
@@ -10529,7 +11182,6 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
                 edit_inserted = true;
             } else if text == "View" {
                 sub.append(&rendering_submenu)?;
-                sub.append(&view_perspective_item)?;
                 sub.append(&ortho_view_item)?;
                 sub.append(&view_render_ray)?;
                 sub.append(&sep_view_extras)?;
@@ -10537,7 +11189,6 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
                 sub.append(&view_show_borders)?;
                 sub.append(&sep_view_stamp)?;
                 sub.append(&view_stamp_book)?;
-                sub.append(&view_project_stats)?;
                 sub.append(&sep_before_chat)?;
                 sub.append(&chat_panel_item)?;
                 view_inserted = true;
@@ -10552,7 +11203,6 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
             true,
             &[
                 &rendering_submenu,
-                &view_perspective_item,
                 &ortho_view_item,
                 &view_render_ray,
                 &sep_view_extras,
@@ -10560,7 +11210,6 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
                 &view_show_borders,
                 &sep_view_stamp,
                 &view_stamp_book,
-                &view_project_stats,
                 &sep_before_chat,
                 &chat_panel_item,
             ],
@@ -10829,6 +11478,11 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
             viewport_cursor_debug: debug_viewport_cursor.clone(),
             view_show_borders: view_show_borders.clone(),
             full_surface_viewport: view_full_surface_viewport.clone(),
+            render_greedy: view_render_greedy.clone(),
+            render_marching: view_render_marching.clone(),
+            render_dual: view_render_dual.clone(),
+            render_ray: view_render_ray.clone(),
+            ortho_toggle: ortho_view_item.clone(),
             sel_all: menu_sel_all.clone(),
             sel_by_color: menu_sel_by_color.clone(),
             sel_connected: menu_sel_connected.clone(),
@@ -11467,6 +12121,7 @@ pub fn run() {
         last_edit_perf: Mutex::new(None),
         last_scene_bounds: Mutex::new(None),
         mesh_refresh_generation: AtomicU64::new(0),
+        load_generation: AtomicU64::new(0),
         voxel_edit_stats_cache: Mutex::new(None),
         solo_undo: Mutex::new(Vec::new()),
         solo_redo: Mutex::new(Vec::new()),
@@ -11505,6 +12160,7 @@ pub fn run() {
         selection_overlay_cache_key: Mutex::new(None),
         preview_overlay_cache_key: Mutex::new(None),
         fill_operation_cancel: Arc::new(AtomicBool::new(false)),
+        spray_constraint_plane: Mutex::new(None),
     });
     let vs = viewer_state.clone();
 
@@ -11622,51 +12278,42 @@ pub fn run() {
                         );
                     }
                 }
-            } else if event.id() == "view_render_greedy" {
+            } else if event.id() == "view_render_greedy"
+                || event.id() == "view_render_marching"
+                || event.id() == "view_render_dual"
+                || event.id() == "menu_view_render_ray"
+            {
+                let (mode, label) = match event.id().0.as_ref() {
+                    "view_render_greedy" => (RenderingMode::Greedy, "greedy"),
+                    "view_render_marching" => (RenderingMode::MarchingCubes, "marchingCubes"),
+                    "view_render_dual" => (RenderingMode::DualContour, "dualContour"),
+                    _ => (RenderingMode::Ray, "ray"),
+                };
                 let state = app.state::<Arc<ViewerState>>();
-                let _ = apply_rendering_mode(&state, &app, RenderingMode::Greedy);
+                let _ = apply_rendering_mode(&state, &app, mode);
                 wake_viewport_loop(&app);
                 let _ = app.emit_to(
                     EventTarget::webview_window("main"),
                     "voxelle-rendering-mode-changed",
-                    "greedy",
+                    label,
                 );
-            } else if event.id() == "view_render_marching" {
-                let state = app.state::<Arc<ViewerState>>();
-                let _ = apply_rendering_mode(&state, &app, RenderingMode::MarchingCubes);
-                wake_viewport_loop(&app);
-                let _ = app.emit_to(
-                    EventTarget::webview_window("main"),
-                    "voxelle-rendering-mode-changed",
-                    "marchingCubes",
-                );
-            } else if event.id() == "view_render_dual" {
-                let state = app.state::<Arc<ViewerState>>();
-                let _ = apply_rendering_mode(&state, &app, RenderingMode::DualContour);
-                wake_viewport_loop(&app);
-                let _ = app.emit_to(
-                    EventTarget::webview_window("main"),
-                    "voxelle-rendering-mode-changed",
-                    "dualContour",
-                );
-            } else if event.id() == "menu_view_perspective" {
-                let state = app.state::<Arc<ViewerState>>();
-                let _ = apply_orthographic(state.inner(), false);
-                wake_viewport_loop(&app);
+                // Enforce radio-button style: exactly one checked at a time.
+                #[cfg(desktop)]
+                if let Some(sel) = app.try_state::<SelectionMenuState>() {
+                    let _ = sel.render_greedy.set_checked(matches!(mode, RenderingMode::Greedy));
+                    let _ = sel.render_marching.set_checked(matches!(mode, RenderingMode::MarchingCubes));
+                    let _ = sel.render_dual.set_checked(matches!(mode, RenderingMode::DualContour));
+                    let _ = sel.render_ray.set_checked(matches!(mode, RenderingMode::Ray));
+                }
             } else if event.id() == "menu_view_ortho" {
-                let state = app.state::<Arc<ViewerState>>();
-                let new_o = state.camera.lock().perspective;
-                let _ = apply_orthographic(&state, new_o);
-                wake_viewport_loop(&app);
-            } else if event.id() == "menu_view_render_ray" {
-                let state = app.state::<Arc<ViewerState>>();
-                let _ = apply_rendering_mode(&state, &app, RenderingMode::Ray);
-                wake_viewport_loop(&app);
-                let _ = app.emit_to(
-                    EventTarget::webview_window("main"),
-                    "voxelle-rendering-mode-changed",
-                    "ray",
-                );
+                #[cfg(desktop)]
+                if let Some(sel) = app.try_state::<SelectionMenuState>() {
+                    if let Ok(checked) = sel.ortho_toggle.is_checked() {
+                        let state = app.state::<Arc<ViewerState>>();
+                        let _ = apply_orthographic(&state, checked);
+                        wake_viewport_loop(&app);
+                    }
+                }
             } else if event.id() == "menu_view_full_surface_viewport" {
                 #[cfg(desktop)]
                 if let Some(sel) = app.try_state::<SelectionMenuState>() {
@@ -11699,12 +12346,6 @@ pub fn run() {
                     EventTarget::webview_window("main"),
                     "voxelle-menu-not-implemented",
                     "Stamp book is not available in the desktop build yet.",
-                );
-            } else if event.id() == "menu_view_project_stats" {
-                let _ = app.emit_to(
-                    EventTarget::webview_window("main"),
-                    "voxelle-open-project-stats",
-                    (),
                 );
             } else if event.id() == "menu_voxel_hide_selected"
                 || event.id() == "menu_voxel_unhide_all"
@@ -12149,7 +12790,13 @@ pub fn run() {
                 // may throttle RAF; fly movement uses native loop dt, not the webview clock.
                 // Keep spinning while fly is on so the viewport and FPS/status UI stay live.
                 let fly_on = *state.fly_mode.lock();
-                let needs_next = state.camera.lock().needs_redraw() || fly_on;
+                let has_fly_movement = if fly_on {
+                    let input = *state.fly_input.lock();
+                    input.forward != 0.0 || input.right != 0.0 || input.up != 0.0
+                } else {
+                    false
+                };
+                let needs_next = state.camera.lock().needs_redraw() || fly_on || has_fly_movement;
                 if needs_next {
                     tauri::async_runtime::spawn(async move {
                         let _ = app_wake.run_on_main_thread(|| {});
@@ -12179,6 +12826,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         last_edit_perf: Mutex::new(None),
         last_scene_bounds: Mutex::new(None),
         mesh_refresh_generation: AtomicU64::new(0),
+        load_generation: AtomicU64::new(0),
         voxel_edit_stats_cache: Mutex::new(None),
         solo_undo: Mutex::new(Vec::new()),
         solo_redo: Mutex::new(Vec::new()),
@@ -12217,6 +12865,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         selection_overlay_cache_key: Mutex::new(None),
         preview_overlay_cache_key: Mutex::new(None),
         fill_operation_cancel: Arc::new(AtomicBool::new(false)),
+        spray_constraint_plane: Mutex::new(None),
     })
 }
 

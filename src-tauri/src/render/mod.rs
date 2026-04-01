@@ -623,6 +623,10 @@ pub struct WgpuViewer {
     /// Same as [`pipeline_preview_front`] but **no** depth bias — wireframe edges use true depth
     /// so they are occluded by scene geometry when embedded in solids.
     pipeline_preview_front_wire: wgpu::RenderPipeline,
+    // GPU-instanced preview pipelines
+    pipeline_preview_inst_occluded: wgpu::RenderPipeline,
+    pipeline_preview_inst_front: wgpu::RenderPipeline,
+    pipeline_preview_inst_front_wire: wgpu::RenderPipeline,
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
     pipeline_collab_frustum_occluded: wgpu::RenderPipeline,
@@ -675,6 +679,17 @@ pub struct WgpuViewer {
     preview_wire_vertex_buffer: Option<wgpu::Buffer>,
     preview_wire_index_buffer: Option<wgpu::Buffer>,
     preview_wire_index_count: u32,
+    // GPU-instanced preview buffers
+    preview_solid_proto_vb: Option<wgpu::Buffer>,
+    preview_solid_proto_ib: Option<wgpu::Buffer>,
+    preview_solid_proto_idx_count: u32,
+    preview_wire_proto_vb: Option<wgpu::Buffer>,
+    preview_wire_proto_ib: Option<wgpu::Buffer>,
+    preview_wire_proto_idx_count: u32,
+    preview_solid_instance_buf: Option<wgpu::Buffer>,
+    preview_solid_instance_count: u32,
+    preview_wire_instance_buf: Option<wgpu::Buffer>,
+    preview_wire_instance_count: u32,
     collab_line_vertex_buffer: Option<wgpu::Buffer>,
     collab_line_vertex_count: u32,
     collab_frustum_vertex_buffer: Option<wgpu::Buffer>,
@@ -694,9 +709,10 @@ pub struct WgpuViewer {
     selection_overlay_index_count: u32,
     selection_overlay_line_vertex_buffer: Option<wgpu::Buffer>,
     selection_overlay_line_vertex_count: u32,
-    /// Full-scene grid AABB wireframe (View → Show borders); same format as selection overlay lines.
+    /// Full-scene grid wireframe (View → Show borders); indexed line-list.
     grid_border_line_vertex_buffer: Option<wgpu::Buffer>,
-    grid_border_line_vertex_count: u32,
+    grid_border_line_index_buffer: Option<wgpu::Buffer>,
+    grid_border_line_index_count: u32,
     /// Fingerprint of visible voxel set + mesh generation for grid overlay rebuilds.
     pub(crate) grid_border_cache_key: Option<u64>,
     /// Dedup CPU mesh rebuild when hover cell unchanged.
@@ -917,6 +933,72 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
             wgpu::VertexAttribute {
                 offset: 40,
                 shader_location: 4,
+                format: wgpu::VertexFormat::Float32,
+            },
+        ],
+    }
+}
+
+/// Prototype vertex for instanced preview: position (vec3) + normal (vec3) = 24 bytes.
+fn preview_proto_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: 24, // 2 × vec3<f32>
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+        ],
+    }
+}
+
+/// Per-instance data for instanced preview: model matrix (4×vec4) + color (vec3) + mat_kind (f32) = 80 bytes.
+fn preview_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: 80, // 4×16 + 12 + 4
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &[
+            // model_c0
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            // model_c1
+            wgpu::VertexAttribute {
+                offset: 16,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            // model_c2
+            wgpu::VertexAttribute {
+                offset: 32,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            // model_c3
+            wgpu::VertexAttribute {
+                offset: 48,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x4,
+            },
+            // inst_color
+            wgpu::VertexAttribute {
+                offset: 64,
+                shader_location: 6,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            // inst_mat_kind
+            wgpu::VertexAttribute {
+                offset: 76,
+                shader_location: 7,
                 format: wgpu::VertexFormat::Float32,
             },
         ],
@@ -1650,6 +1732,110 @@ impl WgpuViewer {
                     module: &shader_scene,
                     entry_point: Some("vs_main"),
                     buffers: &[vertex_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_front_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        // GPU-instanced preview pipelines (same fragment shaders, new vertex shader + buffer layout)
+        let inst_bufs = &[preview_proto_vertex_layout(), preview_instance_layout()];
+        let pipeline_preview_inst_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview_inst_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_preview_instanced"),
+                    buffers: inst_bufs,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_occluded_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_preview_inst_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview_inst_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_preview_instanced"),
+                    buffers: inst_bufs,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_front_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_preview_inst_front_wire =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("preview_inst_front_wire"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_preview_instanced"),
+                    buffers: inst_bufs,
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -2456,6 +2642,9 @@ impl WgpuViewer {
             pipeline_preview_occluded,
             pipeline_preview_front,
             pipeline_preview_front_wire,
+            pipeline_preview_inst_occluded,
+            pipeline_preview_inst_front,
+            pipeline_preview_inst_front_wire,
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
             pipeline_collab_frustum_occluded,
@@ -2493,6 +2682,16 @@ impl WgpuViewer {
             preview_wire_vertex_buffer: None,
             preview_wire_index_buffer: None,
             preview_wire_index_count: 0,
+            preview_solid_proto_vb: None,
+            preview_solid_proto_ib: None,
+            preview_solid_proto_idx_count: 0,
+            preview_wire_proto_vb: None,
+            preview_wire_proto_ib: None,
+            preview_wire_proto_idx_count: 0,
+            preview_solid_instance_buf: None,
+            preview_solid_instance_count: 0,
+            preview_wire_instance_buf: None,
+            preview_wire_instance_count: 0,
             collab_line_vertex_buffer: None,
             collab_line_vertex_count: 0,
             collab_frustum_vertex_buffer: None,
@@ -2513,7 +2712,8 @@ impl WgpuViewer {
             selection_overlay_line_vertex_buffer: None,
             selection_overlay_line_vertex_count: 0,
             grid_border_line_vertex_buffer: None,
-            grid_border_line_vertex_count: 0,
+            grid_border_line_index_buffer: None,
+            grid_border_line_index_count: 0,
             grid_border_cache_key: None,
             preview_cache_key: None,
             selection_overlay_cache_key: None,
@@ -3878,6 +4078,102 @@ impl WgpuViewer {
         self.preview_wire_index_count = wire.indices.len() as u32;
     }
 
+    /// Interleave a [`PreviewPrototype`] into a flat `[pos.x, pos.y, pos.z, nx, ny, nz, …]` buffer.
+    fn interleaved_from_prototype(proto: &greedy_mesh::PreviewPrototype) -> Vec<f32> {
+        let n = proto.positions.len() / 3;
+        let mut out = Vec::with_capacity(n * 6);
+        for i in 0..n {
+            out.push(proto.positions[i * 3]);
+            out.push(proto.positions[i * 3 + 1]);
+            out.push(proto.positions[i * 3 + 2]);
+            out.push(proto.normals[i * 3]);
+            out.push(proto.normals[i * 3 + 1]);
+            out.push(proto.normals[i * 3 + 2]);
+        }
+        out
+    }
+
+    pub fn upload_preview_mesh_instanced(&mut self, data: &greedy_mesh::PreviewInstancedResult) {
+        // Upload instanced data for bulk voxels
+        if !data.solid_instances.is_empty() {
+            let solid_proto = greedy_mesh::preview_cube_prototype(data.cube_half);
+            let solid_v = Self::interleaved_from_prototype(&solid_proto);
+            self.preview_solid_proto_vb = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("preview_inst_solid_proto_vb"),
+                    contents: bytemuck::cast_slice(&solid_v),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.preview_solid_proto_ib = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("preview_inst_solid_proto_ib"),
+                    contents: bytemuck::cast_slice(&solid_proto.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                },
+            ));
+            self.preview_solid_proto_idx_count = solid_proto.indices.len() as u32;
+
+            self.preview_solid_instance_buf = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("preview_inst_solid_instances"),
+                    contents: bytemuck::cast_slice(&data.solid_instances),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.preview_solid_instance_count = data.solid_instances.len() as u32;
+
+            let wire_proto = greedy_mesh::preview_wireframe_prototype(data.cube_half);
+            let wire_v = Self::interleaved_from_prototype(&wire_proto);
+            self.preview_wire_proto_vb = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("preview_inst_wire_proto_vb"),
+                    contents: bytemuck::cast_slice(&wire_v),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.preview_wire_proto_ib = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("preview_inst_wire_proto_ib"),
+                    contents: bytemuck::cast_slice(&wire_proto.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                },
+            ));
+            self.preview_wire_proto_idx_count = wire_proto.indices.len() as u32;
+
+            self.preview_wire_instance_buf = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("preview_inst_wire_instances"),
+                    contents: bytemuck::cast_slice(&data.wire_instances),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.preview_wire_instance_count = data.wire_instances.len() as u32;
+        } else {
+            self.preview_solid_proto_vb = None;
+            self.preview_solid_proto_ib = None;
+            self.preview_solid_proto_idx_count = 0;
+            self.preview_wire_proto_vb = None;
+            self.preview_wire_proto_ib = None;
+            self.preview_wire_proto_idx_count = 0;
+            self.preview_solid_instance_buf = None;
+            self.preview_solid_instance_count = 0;
+            self.preview_wire_instance_buf = None;
+            self.preview_wire_instance_count = 0;
+        }
+        // Upload non-instanced extras (gizmos, polygon markers)
+        if !data.extra_solid.positions.is_empty() || !data.extra_wire.positions.is_empty() {
+            self.upload_preview_mesh(&data.extra_solid, &data.extra_wire);
+        } else {
+            self.preview_vertex_buffer = None;
+            self.preview_index_buffer = None;
+            self.preview_index_count = 0;
+            self.preview_wire_vertex_buffer = None;
+            self.preview_wire_index_buffer = None;
+            self.preview_wire_index_count = 0;
+        }
+    }
+
     pub fn clear_preview_mesh(&mut self) {
         self.preview_vertex_buffer = None;
         self.preview_index_buffer = None;
@@ -3885,6 +4181,16 @@ impl WgpuViewer {
         self.preview_wire_vertex_buffer = None;
         self.preview_wire_index_buffer = None;
         self.preview_wire_index_count = 0;
+        self.preview_solid_proto_vb = None;
+        self.preview_solid_proto_ib = None;
+        self.preview_solid_proto_idx_count = 0;
+        self.preview_wire_proto_vb = None;
+        self.preview_wire_proto_ib = None;
+        self.preview_wire_proto_idx_count = 0;
+        self.preview_solid_instance_buf = None;
+        self.preview_solid_instance_count = 0;
+        self.preview_wire_instance_buf = None;
+        self.preview_wire_instance_count = 0;
         self.preview_cache_key = None;
     }
 
@@ -3939,35 +4245,66 @@ impl WgpuViewer {
         self.selection_overlay_line_vertex_count = vertex_count;
     }
 
-    pub fn upload_grid_border_lines(&mut self, verts: &[f32]) {
-        if verts.is_empty() || verts.len() % 6 != 0 {
+    pub fn upload_grid_border_lines(&mut self, verts: &[f32], indices: &[u32]) {
+        if verts.is_empty() || verts.len() % 6 != 0 || indices.is_empty() {
             self.grid_border_line_vertex_buffer = None;
-            self.grid_border_line_vertex_count = 0;
+            self.grid_border_line_index_buffer = None;
+            self.grid_border_line_index_count = 0;
             return;
         }
-        let n_floats = verts.len();
-        let vertex_count = (n_floats / 6) as u32;
-        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
+        // Vertex buffer
+        let vbytes = (verts.len() * std::mem::size_of::<f32>()) as u64;
         if let Some(ref buf) = self.grid_border_line_vertex_buffer {
-            if buf.size() == nbytes {
+            if buf.size() == vbytes {
                 self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
-                self.grid_border_line_vertex_count = vertex_count;
-                return;
+            } else {
+                self.grid_border_line_vertex_buffer = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("grid_border_lines_vtx"),
+                        contents: bytemuck::cast_slice(verts),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
             }
+        } else {
+            self.grid_border_line_vertex_buffer = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("grid_border_lines_vtx"),
+                    contents: bytemuck::cast_slice(verts),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
         }
-        self.grid_border_line_vertex_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("grid_border_lines_vtx"),
-                contents: bytemuck::cast_slice(verts),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-        self.grid_border_line_vertex_count = vertex_count;
+        // Index buffer
+        let ibytes = (indices.len() * std::mem::size_of::<u32>()) as u64;
+        if let Some(ref buf) = self.grid_border_line_index_buffer {
+            if buf.size() == ibytes {
+                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(indices));
+            } else {
+                self.grid_border_line_index_buffer = Some(self.device.create_buffer_init(
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("grid_border_lines_idx"),
+                        contents: bytemuck::cast_slice(indices),
+                        usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                    },
+                ));
+            }
+        } else {
+            self.grid_border_line_index_buffer = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("grid_border_lines_idx"),
+                    contents: bytemuck::cast_slice(indices),
+                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                },
+            ));
+        }
+        self.grid_border_line_index_count = indices.len() as u32;
     }
 
     pub fn clear_grid_border_lines(&mut self) {
         self.grid_border_line_vertex_buffer = None;
-        self.grid_border_line_vertex_count = 0;
+        self.grid_border_line_index_buffer = None;
+        self.grid_border_line_index_count = 0;
         self.grid_border_cache_key = None;
     }
 
@@ -4399,6 +4736,40 @@ impl WgpuViewer {
     }
 
     fn draw_indexed_preview(&self, pass: &mut wgpu::RenderPass<'_>) {
+        // GPU-instanced solid cubes
+        if let (Some(pvb), Some(pib), Some(ibuf)) = (
+            &self.preview_solid_proto_vb,
+            &self.preview_solid_proto_ib,
+            &self.preview_solid_instance_buf,
+        ) {
+            if self.preview_solid_instance_count > 0 && self.preview_solid_proto_idx_count > 0 {
+                pass.set_vertex_buffer(0, pvb.slice(..));
+                pass.set_vertex_buffer(1, ibuf.slice(..));
+                pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_preview_inst_occluded);
+                pass.draw_indexed(0..self.preview_solid_proto_idx_count, 0, 0..self.preview_solid_instance_count);
+                pass.set_pipeline(&self.pipeline_preview_inst_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw_indexed(0..self.preview_solid_proto_idx_count, 0, 0..self.preview_solid_instance_count);
+            }
+        }
+        // GPU-instanced wireframe
+        if let (Some(pvb), Some(pib), Some(ibuf)) = (
+            &self.preview_wire_proto_vb,
+            &self.preview_wire_proto_ib,
+            &self.preview_wire_instance_buf,
+        ) {
+            if self.preview_wire_instance_count > 0 && self.preview_wire_proto_idx_count > 0 {
+                pass.set_vertex_buffer(0, pvb.slice(..));
+                pass.set_vertex_buffer(1, ibuf.slice(..));
+                pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_preview_inst_front_wire);
+                pass.draw_indexed(0..self.preview_wire_proto_idx_count, 0, 0..self.preview_wire_instance_count);
+            }
+        }
+        // Non-instanced extras (gizmos, polygon markers)
         if let (Some(vb), Some(ib)) = (&self.preview_vertex_buffer, &self.preview_index_buffer) {
             if self.preview_index_count > 0 {
                 pass.set_vertex_buffer(0, vb.slice(..));
@@ -4419,9 +4790,6 @@ impl WgpuViewer {
                 pass.set_vertex_buffer(0, wvb.slice(..));
                 pass.set_index_buffer(wib.slice(..), wgpu::IndexFormat::Uint32);
                 pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-                // Wireframe: **front pass only** (`LessEqual`, no depth bias). Skip the occluded
-                // (`Greater`) pass so edges behind scene mesh are not drawn as x-ray; solid preview
-                // still uses both passes for the semi-transparent ghost fill.
                 pass.set_pipeline(&self.pipeline_preview_front_wire);
                 pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
             }
@@ -4466,13 +4834,17 @@ impl WgpuViewer {
         let Some(ref vb) = self.grid_border_line_vertex_buffer else {
             return;
         };
-        if self.grid_border_line_vertex_count < 2 {
+        let Some(ref ib) = self.grid_border_line_index_buffer else {
+            return;
+        };
+        if self.grid_border_line_index_count < 2 {
             return;
         }
         pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
         pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
         pass.set_pipeline(&self.pipeline_grid_border_lines);
-        pass.draw(0..self.grid_border_line_vertex_count, 0..1);
+        pass.draw_indexed(0..self.grid_border_line_index_count, 0, 0..1);
     }
 
     fn draw_indexed_ping(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -4711,54 +5083,60 @@ impl WgpuViewer {
             pass.draw(0..3, 0..1);
         }
 
-        let blur_h = PostBlurUniform {
-            blur_dir: [1.0, 0.0, 0.0, 0.0],
-        };
-        self.queue
-            .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_h));
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blur_h"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.bloom_b_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline_blur);
-            pass.set_bind_group(0, &self.bind_blur_h, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        // 5 H+V iterations with a uniform step of 2px. Uniform step keeps the
+        // convolution Gaussian (circular), avoiding the concentric-rectangle artifact
+        // that stepped sizes produce. 5 × 8px = ~40px effective radius.
+        for _blur_iter in 0..5u32 {
+            let step = 2.0_f32;
+            let blur_h = PostBlurUniform {
+                blur_dir: [1.0, 0.0, step, 0.0],
+            };
+            self.queue
+                .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_h));
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("blur_h"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.bloom_b_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline_blur);
+                pass.set_bind_group(0, &self.bind_blur_h, &[]);
+                pass.draw(0..3, 0..1);
+            }
 
-        let blur_v = PostBlurUniform {
-            blur_dir: [0.0, 1.0, 0.0, 0.0],
-        };
-        self.queue
-            .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_v));
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blur_v"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.bloom_a_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline_blur);
-            pass.set_bind_group(0, &self.bind_blur_v, &[]);
-            pass.draw(0..3, 0..1);
+            let blur_v = PostBlurUniform {
+                blur_dir: [0.0, 1.0, 2.0, 0.0],
+            };
+            self.queue
+                .write_buffer(&self.post_blur_buf, 0, bytemuck::bytes_of(&blur_v));
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("blur_v"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.bloom_a_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.pipeline_blur);
+                pass.set_bind_group(0, &self.bind_blur_v, &[]);
+                pass.draw(0..3, 0..1);
+            }
         }
 
         if self.auto_exposure_enabled {

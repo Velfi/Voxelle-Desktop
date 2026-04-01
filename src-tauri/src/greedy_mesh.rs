@@ -1586,6 +1586,136 @@ pub fn preview_cube_wireframe_mesh(
     }
 }
 
+// ---------------------------------------------------------------------------
+// GPU-instanced preview: prototype meshes (position + normal only, at origin)
+// ---------------------------------------------------------------------------
+
+/// Lightweight mesh with only positions and normals (no per-vertex color/material).
+/// Used as the shared prototype geometry for instanced preview drawing.
+pub struct PreviewPrototype {
+    /// Flat `[x,y,z, …]` positions.
+    pub positions: Vec<f32>,
+    /// Flat `[nx,ny,nz, …]` normals.
+    pub normals: Vec<f32>,
+    pub indices: Vec<u32>,
+}
+
+/// Per-instance data for GPU-instanced preview cubes.
+///
+/// Layout must match the vertex buffer attributes in `preview_instance_layout()`.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct PreviewInstance {
+    /// Column 0 of the model matrix (object_world * translate(cell)).
+    pub model_c0: [f32; 4],
+    pub model_c1: [f32; 4],
+    pub model_c2: [f32; 4],
+    pub model_c3: [f32; 4],
+    /// Vertex color for this instance (solid fill or wire tint).
+    pub color: [f32; 3],
+    /// Material-kind tag read by the fragment shader.
+    pub mat_kind: f32,
+}
+
+/// Result of [`crate::stroke_preview_meshes_for_union`] — instanced bulk voxels plus optional
+/// small non-instanced extras (gizmos, polygon markers, etc.).
+#[derive(Clone)]
+pub struct PreviewInstancedResult {
+    pub solid_instances: Vec<PreviewInstance>,
+    pub wire_instances: Vec<PreviewInstance>,
+    /// Cube half-extent used to build the prototypes (constant per call).
+    pub cube_half: f32,
+    /// Extra non-instanced solid geometry (gizmos, polygon markers, …).
+    pub extra_solid: MeshBuffers,
+    /// Extra non-instanced wire geometry.
+    pub extra_wire: MeshBuffers,
+}
+
+impl PreviewInstancedResult {
+    pub fn empty() -> Self {
+        Self {
+            solid_instances: Vec::new(),
+            wire_instances: Vec::new(),
+            cube_half: 0.53,
+            extra_solid: MeshBuffers::default(),
+            extra_wire: MeshBuffers::default(),
+        }
+    }
+}
+
+/// Unit solid cube prototype at the origin with the given half-extent.
+/// 24 vertices (4 per face × 6 faces), 36 indices.
+pub fn preview_cube_prototype(half: f32) -> PreviewPrototype {
+    let h = half;
+    let mut positions: Vec<f32> = Vec::with_capacity(24 * 3);
+    let mut normals: Vec<f32> = Vec::with_capacity(24 * 3);
+    let mut indices: Vec<u32> = Vec::with_capacity(36);
+
+    let mut face = |nx: f32, ny: f32, nz: f32, corners: [[f32; 3]; 4]| {
+        let base = (positions.len() / 3) as u32;
+        for p in corners {
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&[nx, ny, nz]);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    face(1.0, 0.0, 0.0, [[h, -h, -h], [h, h, -h], [h, h, h], [h, -h, h]]);
+    face(-1.0, 0.0, 0.0, [[-h, -h, h], [-h, h, h], [-h, h, -h], [-h, -h, -h]]);
+    face(0.0, 1.0, 0.0, [[-h, h, h], [h, h, h], [h, h, -h], [-h, h, -h]]);
+    face(0.0, -1.0, 0.0, [[-h, -h, -h], [h, -h, -h], [h, -h, h], [-h, -h, h]]);
+    face(0.0, 0.0, 1.0, [[-h, -h, h], [h, -h, h], [h, h, h], [-h, h, h]]);
+    face(0.0, 0.0, -1.0, [[-h, -h, -h], [-h, h, -h], [h, h, -h], [h, -h, -h]]);
+
+    PreviewPrototype { positions, normals, indices }
+}
+
+/// Unit wireframe prototype at the origin (12 edges as thin boxes, same winding as
+/// [`preview_cube_wireframe_mesh`]).
+pub fn preview_wireframe_prototype(half: f32) -> PreviewPrototype {
+    let h = half;
+    let t = (half * 0.048).clamp(0.014, 0.036);
+    let mut positions: Vec<f32> = Vec::with_capacity(72 * 6 * 3);
+    let mut normals: Vec<f32> = Vec::with_capacity(72 * 6 * 3);
+    let mut indices: Vec<u32> = Vec::with_capacity(72 * 6);
+
+    let mut face = |nx: f32, ny: f32, nz: f32, corners: [[f32; 3]; 4]| {
+        let base = (positions.len() / 3) as u32;
+        for p in corners {
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&[nx, ny, nz]);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+
+    let mut push_box = |xmin: f32, xmax: f32, ymin: f32, ymax: f32, zmin: f32, zmax: f32| {
+        face(1.0, 0.0, 0.0, [[xmax, ymin, zmin], [xmax, ymax, zmin], [xmax, ymax, zmax], [xmax, ymin, zmax]]);
+        face(-1.0, 0.0, 0.0, [[xmin, ymin, zmax], [xmin, ymax, zmax], [xmin, ymax, zmin], [xmin, ymin, zmin]]);
+        face(0.0, 1.0, 0.0, [[xmin, ymax, zmax], [xmax, ymax, zmax], [xmax, ymax, zmin], [xmin, ymax, zmin]]);
+        face(0.0, -1.0, 0.0, [[xmin, ymin, zmin], [xmax, ymin, zmin], [xmax, ymin, zmax], [xmin, ymin, zmax]]);
+        face(0.0, 0.0, 1.0, [[xmin, ymin, zmax], [xmax, ymin, zmax], [xmax, ymax, zmax], [xmin, ymax, zmax]]);
+        face(0.0, 0.0, -1.0, [[xmin, ymin, zmin], [xmin, ymax, zmin], [xmax, ymax, zmin], [xmax, ymin, zmin]]);
+    };
+
+    // Bottom face edges (z = -h)
+    push_box(-h, h, -h - t, -h + t, -h - t, -h + t);
+    push_box(h - t, h + t, -h, h, -h - t, -h + t);
+    push_box(-h, h, h - t, h + t, -h - t, -h + t);
+    push_box(-h - t, -h + t, -h, h, -h - t, -h + t);
+    // Top face edges (z = +h)
+    push_box(-h, h, -h - t, -h + t, h - t, h + t);
+    push_box(h - t, h + t, -h, h, h - t, h + t);
+    push_box(-h, h, h - t, h + t, h - t, h + t);
+    push_box(-h - t, -h + t, -h, h, h - t, h + t);
+    // Vertical edges
+    push_box(-h - t, -h + t, -h - t, -h + t, -h, h);
+    push_box(h - t, h + t, -h - t, -h + t, -h, h);
+    push_box(h - t, h + t, h - t, h + t, -h, h);
+    push_box(-h - t, -h + t, h - t, h + t, -h, h);
+
+    PreviewPrototype { positions, normals, indices }
+}
+
 /// Thin solid beam between two points (used for squishy metaball wire spheres).
 pub fn beam_segment_mesh(
     p0: [f32; 3],
@@ -2197,17 +2327,52 @@ const VOXEL_GRID_EDGE_NEIGHBORS: [[(i32, i32, i32); 2]; 12] = [
     [(0, 1, 0), (0, 0, 1)],
 ];
 
-/// Line-list vertices for per-voxel borders (web `gridLines.ts` / `buildGridPositions`); same tint as [`selection_aabb_line_vertices`].
-pub fn voxel_surface_grid_line_vertices(occupancy: &AHashMap<VoxelCoord, Voxel>) -> Vec<f32> {
+/// Indexed line-list for per-voxel surface borders.
+///
+/// Returns `(vertices, indices)` where vertices are `[x,y,z,r,g,b]` and indices
+/// form a line-list. Edges shared by adjacent surface voxels are emitted only
+/// once, and endpoint vertices are reused via the index buffer.
+pub fn voxel_surface_grid_line_vertices(occupancy: &AHashMap<VoxelCoord, Voxel>) -> (Vec<f32>, Vec<u32>) {
     if occupancy.is_empty() {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
     let has = |x: i32, y: i32, z: i32| occupancy.contains_key(&coord_key(x, y, z));
     let r = 0x9f as f32 / 255.0;
     let g = 0xd8 as f32 / 255.0;
     let b = 0xff as f32 / 255.0;
-    let cap = occupancy.len().saturating_mul(12).saturating_mul(12);
-    let mut out = Vec::with_capacity(cap);
+
+    // Vertex dedup: map quantised position → vertex index.
+    // Positions are on a half-integer grid offset by a tiny lift, so we quantise
+    // to 1/1024 units which is far below visual precision.
+    let mut vert_map: AHashMap<(i32, i32, i32), u32> = AHashMap::new();
+    let mut verts: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    // Edge dedup: canonical (min,max) endpoint pair.
+    let mut seen_edges: AHashSet<(u64, u64)> = AHashSet::new();
+
+    let quantise = |v: f32| -> i32 { (v * 1024.0).round() as i32 };
+    let pack_key = |x: i32, y: i32, z: i32| -> u64 {
+        // Shift into positive range before packing to avoid sign issues.
+        let xu = (x as i64 + 0x100000) as u64;
+        let yu = (y as i64 + 0x100000) as u64;
+        let zu = (z as i64 + 0x100000) as u64;
+        xu | (yu << 21) | (zu << 42)
+    };
+
+    let push_vert = |px: f32, py: f32, pz: f32,
+                          vert_map: &mut AHashMap<(i32, i32, i32), u32>,
+                          verts: &mut Vec<f32>| -> u32 {
+        let qk = (quantise(px), quantise(py), quantise(pz));
+        if let Some(&idx) = vert_map.get(&qk) {
+            return idx;
+        }
+        let idx = (verts.len() / 6) as u32;
+        verts.extend_from_slice(&[px, py, pz, r, g, b]);
+        vert_map.insert(qk, idx);
+        idx
+    };
+
     for &(x, y, z) in occupancy.keys() {
         for i in 0..12 {
             let [(dx1, dy1, dz1), (dx2, dy2, dz2)] = VOXEL_GRID_EDGE_NEIGHBORS[i];
@@ -2245,10 +2410,22 @@ pub fn voxel_surface_grid_line_vertices(occupancy: &AHashMap<VoxelCoord, Voxel>)
             let xb = x as f32 + edge[3] + ox;
             let yb = y as f32 + edge[4] + oy;
             let zb = z as f32 + edge[5] + oz;
-            out.extend_from_slice(&[xa, ya, za, r, g, b, xb, yb, zb, r, g, b]);
+
+            // Deduplicate: canonical edge key (smaller endpoint first).
+            let ka = pack_key(quantise(xa), quantise(ya), quantise(za));
+            let kb = pack_key(quantise(xb), quantise(yb), quantise(zb));
+            let edge_key = if ka <= kb { (ka, kb) } else { (kb, ka) };
+            if !seen_edges.insert(edge_key) {
+                continue;
+            }
+
+            let ia = push_vert(xa, ya, za, &mut vert_map, &mut verts);
+            let ib = push_vert(xb, yb, zb, &mut vert_map, &mut verts);
+            indices.push(ia);
+            indices.push(ib);
         }
     }
-    out
+    (verts, indices)
 }
 
 #[cfg(test)]
@@ -2323,8 +2500,12 @@ mod gpu_pack_tests {
         };
         let mut m = AHashMap::new();
         m.insert((0, 0, 0), v);
-        let verts = voxel_surface_grid_line_vertices(&m);
+        let (verts, indices) = voxel_surface_grid_line_vertices(&m);
+        // Single isolated cube: surface lift pushes each edge in a different
+        // direction, so no vertex sharing within one voxel.
+        // 12 edges × 2 endpoints = 24 unique vertices, 24 indices.
         assert_eq!(verts.len(), 12 * 2 * 6);
+        assert_eq!(indices.len(), 12 * 2);
     }
 
     /// 2×1 merged +Y top: voxel at `(-1,1,0)` occludes only the `(cu,cv)=(0,0)` corner’s outward samples (see `AO_NEIGHBORS`), not `(1,0)` / corner 1.

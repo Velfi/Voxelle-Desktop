@@ -457,8 +457,198 @@ fn roof_height_for_style(
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point
+// Public entry points
 // ---------------------------------------------------------------------------
+
+/// Preview variant: same logic as `generate_roof_from_pins` but returns raw
+/// voxel coordinates without mutating any file state.
+pub fn preview_roof_voxels(
+    pins: &[[i32; 3]],
+    style: &str,
+    height: i32,
+    thickness: i32,
+    shed_edge_index: i32,
+    gable_orientation: i32,
+    break_ratio: f32,
+    wall_height: i32,
+    parapet_height: i32,
+    salt_skew: f32,
+    hollow: bool,
+) -> Vec<(i32, i32, i32)> {
+    let raw: Vec<[i32; 3]> = pins
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| {
+            *i == 0
+                || pins[i - 1][0] != p[0]
+                || pins[i - 1][1] != p[1]
+                || pins[i - 1][2] != p[2]
+        })
+        .map(|(_, p)| *p)
+        .collect();
+
+    if raw.len() < 3 {
+        return Vec::new();
+    }
+
+    let o = [raw[0][0] as f64, raw[0][1] as f64, raw[0][2] as f64];
+    let e1 = v3_sub(
+        [raw[1][0] as f64, raw[1][1] as f64, raw[1][2] as f64],
+        o,
+    );
+    let mut nvec = v3_cross(
+        e1,
+        v3_sub(
+            [raw[2][0] as f64, raw[2][1] as f64, raw[2][2] as f64],
+            o,
+        ),
+    );
+    let mut k = 3usize;
+    while v3_len(nvec) < 1e-9 && k < raw.len() {
+        nvec = v3_cross(
+            e1,
+            v3_sub(
+                [raw[k][0] as f64, raw[k][1] as f64, raw[k][2] as f64],
+                o,
+            ),
+        );
+        k += 1;
+    }
+    if v3_len(nvec) < 1e-9 {
+        return Vec::new();
+    }
+
+    let nunit = v3_norm(nvec);
+    let mut uaxis = v3_norm(e1);
+    if v3_dot(uaxis, nunit).abs() > 0.99 {
+        uaxis = v3_norm(v3_cross(nunit, [1.0, 0.0, 0.0]));
+        if v3_len(uaxis) < 1e-6 {
+            uaxis = v3_norm(v3_cross(nunit, [0.0, 1.0, 0.0]));
+        }
+    }
+    let vaxis = v3_norm(v3_cross(nunit, uaxis));
+
+    let mut uv_poly: Vec<(f64, f64)> = Vec::with_capacity(raw.len());
+    for p in &raw {
+        let d = v3_sub([p[0] as f64, p[1] as f64, p[2] as f64], o);
+        uv_poly.push((v3_dot(d, uaxis), v3_dot(d, vaxis)));
+    }
+
+    let mut area2 = 0.0;
+    for i in 0..uv_poly.len() {
+        let p = uv_poly[i];
+        let q = uv_poly[(i + 1) % uv_poly.len()];
+        area2 += p.0 * q.1 - q.0 * p.1;
+    }
+    if area2 < 0.0 {
+        uv_poly.reverse();
+    }
+
+    let hull = convex_hull_2d(&uv_poly);
+
+    let mut u_min = f64::INFINITY;
+    let mut u_max = f64::NEG_INFINITY;
+    let mut v_min = f64::INFINITY;
+    let mut v_max = f64::NEG_INFINITY;
+    for &(pu, pv) in &uv_poly {
+        u_min = u_min.min(pu);
+        u_max = u_max.max(pu);
+        v_min = v_min.min(pv);
+        v_max = v_max.max(pv);
+    }
+
+    let centroid = {
+        let n = uv_poly.len() as f64;
+        let cu = uv_poly.iter().map(|p| p.0).sum::<f64>() / n;
+        let cv = uv_poly.iter().map(|p| p.1).sum::<f64>() / n;
+        (cu, cv)
+    };
+
+    let (obb_center, obb_half, obb_axes) = oriented_bounding_rect(&hull);
+    let max_boundary_dist = {
+        let d = signed_dist_to_polygon_boundary(centroid.0, centroid.1, &uv_poly);
+        d.max(1.0)
+    };
+
+    let iu_min = u_min.floor() as i32 - 1;
+    let iu_max = u_max.ceil() as i32 + 1;
+    let iv_min = v_min.floor() as i32 - 1;
+    let iv_max = v_max.ceil() as i32 + 1;
+
+    struct FootprintCell {
+        iu: i32,
+        iv: i32,
+        roof_h: i32,
+    }
+
+    let mut footprint: Vec<FootprintCell> = Vec::new();
+    for iv in iv_min..=iv_max {
+        for iu in iu_min..=iu_max {
+            let uf = iu as f64;
+            let vf = iv as f64;
+            if !point_in_polygon_2d(uf, vf, &uv_poly) {
+                let bd = signed_dist_to_polygon_boundary(uf, vf, &uv_poly);
+                if bd < -0.4 {
+                    continue;
+                }
+            }
+            let rh = roof_height_for_style(
+                uf, vf, style, height, thickness,
+                shed_edge_index, gable_orientation, break_ratio,
+                wall_height, parapet_height, salt_skew,
+                &uv_poly, &hull, centroid,
+                obb_center, obb_half, obb_axes, max_boundary_dist,
+            );
+            if rh > 0 {
+                footprint.push(FootprintCell { iu, iv, roof_h: rh });
+            }
+        }
+    }
+
+    if footprint.is_empty() {
+        return Vec::new();
+    }
+
+    let mut all_coords: Vec<(i32, i32, i32, i32)> = Vec::new();
+    let mut coord_set: HashSet<(i32, i32, i32)> = HashSet::new();
+
+    for cell in &footprint {
+        for layer in 0..cell.roof_h {
+            let wx = o[0] + cell.iu as f64 * uaxis[0] + cell.iv as f64 * vaxis[0] + layer as f64 * nunit[0];
+            let wy = o[1] + cell.iu as f64 * uaxis[1] + cell.iv as f64 * vaxis[1] + layer as f64 * nunit[1];
+            let wz = o[2] + cell.iu as f64 * uaxis[2] + cell.iv as f64 * vaxis[2] + layer as f64 * nunit[2];
+            let x = wx.round() as i32;
+            let y = wy.round() as i32;
+            let z = wz.round() as i32;
+            if coord_set.insert((x, y, z)) {
+                all_coords.push((x, y, z, layer));
+            }
+        }
+    }
+
+    if hollow {
+        let occupied: HashSet<(i32, i32, i32)> =
+            all_coords.iter().map(|&(x, y, z, _)| (x, y, z)).collect();
+        let neighbors: [(i32, i32, i32); 6] = [
+            (1, 0, 0), (-1, 0, 0),
+            (0, 1, 0), (0, -1, 0),
+            (0, 0, 1), (0, 0, -1),
+        ];
+        all_coords
+            .iter()
+            .filter(|&&(x, y, z, _)| {
+                neighbors.iter().any(|&(dx, dy, dz)| {
+                    !occupied.contains(&(x + dx, y + dy, z + dz))
+                })
+            })
+            .map(|&(x, y, z, _)| (x, y, z))
+            .collect()
+    } else {
+        all_coords.iter().map(|&(x, y, z, _)| (x, y, z)).collect()
+    }
+}
+
+
 
 /// Generate a roof from polygon pin points. Mirrors the web `getRoofFromPinsVoxels`.
 ///

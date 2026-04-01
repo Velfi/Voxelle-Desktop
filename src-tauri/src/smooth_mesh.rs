@@ -977,6 +977,14 @@ fn merge_mesh_buffers(parts: Vec<MeshBuffers>) -> MeshBuffers {
 
 /// Marching cubes per color|material bucket (matches web `computeMarchingCubes`).
 pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
+    build_marching_cubes_merged_with_progress(voxels, |_, _, _| {})
+}
+
+/// Like [`build_marching_cubes_merged`] but calls `on_progress(fraction, done, total)` after each bucket.
+pub fn build_marching_cubes_merged_with_progress<F>(voxels: &[Voxel], on_progress: F) -> MeshBuffers
+where
+    F: Fn(f32, usize, usize),
+{
     let t0 = Instant::now();
     let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
@@ -986,7 +994,7 @@ pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
     let n_buckets = buckets.len();
     log::info!(
         target: "voxelle_load",
-        "marching_cubes_merged: {} input voxels → {} color|material buckets (bucketing {:?}); processing each bucket once (sequential, not a loop)",
+        "marching_cubes_merged: {} input voxels → {} color|material buckets (bucketing {:?})",
         voxels.len(),
         n_buckets,
         t0.elapsed()
@@ -1012,6 +1020,7 @@ pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
                 );
             }
         }
+        on_progress(idx as f32 / n_buckets as f32, idx, n_buckets);
     }
     log::info!(
         target: "voxelle_load",
@@ -1023,17 +1032,56 @@ pub fn build_marching_cubes_merged(voxels: &[Voxel]) -> MeshBuffers {
 
 /// Dual contouring per bucket with full-scene occupancy (matches web `computeDualContour`).
 pub fn build_dual_contour_merged(voxels: &[Voxel]) -> MeshBuffers {
+    build_dual_contour_merged_with_progress(voxels, |_, _, _| {})
+}
+
+/// Like [`build_dual_contour_merged`] but calls `on_progress(fraction, done, total)` after each bucket.
+pub fn build_dual_contour_merged_with_progress<F>(voxels: &[Voxel], on_progress: F) -> MeshBuffers
+where
+    F: Fn(f32, usize, usize),
+{
+    let t0 = Instant::now();
     let full = crate::greedy_mesh::voxel_map(voxels);
     let mut buckets: AHashMap<(u32, u8), AHashMap<VoxelCoord, Voxel>> = AHashMap::new();
     for v in voxels {
         let k = bucket_key_parts(v);
         buckets.entry(k).or_default().insert(coord_key(v.x, v.y, v.z), *v);
     }
+    let n_buckets = buckets.len();
+    log::info!(
+        target: "voxelle_load",
+        "dual_contour_merged: {} input voxels → {} color|material buckets (bucketing {:?})",
+        voxels.len(),
+        n_buckets,
+        t0.elapsed()
+    );
     let mut parts = Vec::new();
-    for b in buckets.values() {
-        if let Some(m) = dual_contour_bucket(b, &full) {
-            parts.push(m);
+    for (i, b) in buckets.values().enumerate() {
+        let t_bucket = Instant::now();
+        let idx = i + 1;
+        match dual_contour_bucket(b, &full) {
+            Some(m) => {
+                log::info!(
+                    target: "voxelle_load",
+                    "dual_contour_merged: finished bucket {idx}/{n_buckets} in {:?}",
+                    t_bucket.elapsed()
+                );
+                parts.push(m);
+            }
+            None => {
+                log::info!(
+                    target: "voxelle_load",
+                    "dual_contour_merged: bucket {idx}/{n_buckets} empty mesh in {:?}",
+                    t_bucket.elapsed()
+                );
+            }
         }
+        on_progress(idx as f32 / n_buckets as f32, idx, n_buckets);
     }
+    log::info!(
+        target: "voxelle_load",
+        "dual_contour_merged: done {:?} total",
+        t0.elapsed()
+    );
     merge_mesh_buffers(parts)
 }

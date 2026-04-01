@@ -476,6 +476,55 @@ pub(crate) fn anchor_for_stroke_edit(
     anchor_for_edit(tool, file, voxel_map, camera, width, height, sx, sy)
 }
 
+/// Intersect a screen ray with an infinite plane defined by a point and normal.
+/// Returns the voxel coordinate at the intersection (floored to grid), or None if the ray is
+/// parallel / behind the camera.
+pub fn anchor_on_plane(
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    plane_point: Vec3,
+    plane_normal: Vec3,
+) -> Option<VoxelCoord> {
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let denom = plane_normal.dot(dir);
+    if denom.abs() < 1e-7 {
+        return None; // ray parallel to plane
+    }
+    let t = (plane_point - origin).dot(plane_normal) / denom;
+    if t < 0.0 {
+        return None; // behind camera
+    }
+    let hit = origin + dir * t;
+    Some((hit.x.round() as i32, hit.y.round() as i32, hit.z.round() as i32))
+}
+
+/// Compute the constraint plane normal from a `constrain_to_plane_ref` string and camera.
+/// Returns `None` if the reference is not recognized or "auto" with no face normal available.
+pub fn constrain_plane_normal(
+    plane_ref: &str,
+    camera: &OrbitCamera,
+    face_normal: Option<(i32, i32, i32)>,
+) -> Option<Vec3> {
+    match plane_ref {
+        "camera" => {
+            let view = camera.view_matrix();
+            // Camera forward is -Z in view space; extract from view matrix 3rd row.
+            Some(Vec3::new(-view.col(2).x, -view.col(2).y, -view.col(2).z).normalize())
+        }
+        "auto" => {
+            let (nx, ny, nz) = face_normal?;
+            Some(Vec3::new(nx as f32, ny as f32, nz as f32).normalize())
+        }
+        "x" => Some(Vec3::X),
+        "y" => Some(Vec3::Y),
+        "z" => Some(Vec3::Z),
+        _ => None,
+    }
+}
+
 /// Solid voxel the ray would remove, if any.
 /// Second tuple element is the hit voxel's **object id** (for world-space preview).
 pub fn preview_remove_cell(
@@ -771,6 +820,42 @@ fn spray_passes(cell: (i32, i32, i32), spray: f32) -> bool {
     u < spray.clamp(0.0, 1.0)
 }
 
+/// Deterministic scatter offset for a spray stamp center (web `expandPathWithBrushStamps` scatter).
+/// Returns a random offset in `[-scatter, scatter]` for the given axis (0/1/2).
+#[inline]
+fn spray_scatter_offset(center: (i32, i32, i32), scatter: u32, axis: u32) -> i32 {
+    if scatter == 0 {
+        return 0;
+    }
+    let h = center
+        .0
+        .wrapping_mul(73856093_i32.wrapping_add(axis as i32 * 17))
+        ^ center
+            .1
+            .wrapping_mul(19349663_i32.wrapping_add(axis as i32 * 31))
+        ^ center
+            .2
+            .wrapping_mul(83492791_i32.wrapping_add(axis as i32 * 47));
+    let u = h as u32 as f64 / u32::MAX as f64;
+    ((u * 2.0 - 1.0) * scatter as f64).round() as i32
+}
+
+/// Deterministic random radius for a spray stamp (web `sprayRadiusRange`).
+/// Returns a radius in `[min, max]`.
+#[inline]
+fn spray_random_radius(center: (i32, i32, i32), min: u32, max: u32) -> u32 {
+    if min >= max {
+        return min;
+    }
+    let h = center
+        .0
+        .wrapping_mul(73856093_i32.wrapping_add(7 * 17))
+        ^ center.1.wrapping_mul(19349663_i32.wrapping_add(7 * 31))
+        ^ center.2.wrapping_mul(83492791_i32.wrapping_add(7 * 47));
+    let u = h as u32 as f64 / u32::MAX as f64;
+    min + (u * (max - min + 1) as f64).floor().min((max - min) as f64) as u32
+}
+
 /// Voxel centers along a 3D line (inclusive endpoints).
 pub(crate) fn voxel_line_dda(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> {
     let dx = b.0 - a.0;
@@ -924,7 +1009,7 @@ pub fn flood_fill_empty_at_screen(
     sx: f32,
     sy: f32,
     fill_diagonals: bool,
-    color: u32,
+    color_resolver: impl Fn(i32, i32, i32) -> u32,
     material: MaterialId,
     fill_constrain_plane: bool,
     plane_axis: PlaneAxis,
@@ -1004,7 +1089,7 @@ pub fn flood_fill_empty_at_screen(
             x: c.0,
             y: c.1,
             z: c.2,
-            color,
+            color: color_resolver(c.0, c.1, c.2),
             material,
             object_id: file.active_object_id,
         };
@@ -1046,7 +1131,7 @@ pub fn flood_fill_paint_at_screen(
     height: f32,
     sx: f32,
     sy: f32,
-    new_color: u32,
+    color_resolver: impl Fn(i32, i32, i32) -> u32,
     new_material: MaterialId,
     match_material: bool,
     fill_diagonals: bool,
@@ -1093,11 +1178,12 @@ pub fn flood_fill_paint_at_screen(
             continue;
         };
         let before = file.voxels[idx];
-        if before.color == new_color && before.material == new_material {
+        let resolved_color = color_resolver(c.0, c.1, c.2);
+        if before.color == resolved_color && before.material == new_material {
             continue;
         }
         let after = Voxel {
-            color: new_color,
+            color: resolved_color,
             material: new_material,
             ..before
         };
@@ -1432,7 +1518,7 @@ pub fn apply_edit(
     sx: f32,
     sy: f32,
     tool: EditTool,
-    color: u32,
+    color_resolver: impl Fn(i32, i32, i32) -> u32,
     material: MaterialId,
     brush_radius: u32,
     brush_shape: BrushShape,
@@ -1442,6 +1528,7 @@ pub fn apply_edit(
     stroke_mode: DrawStrokeMode,
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
+    spray_constraint_plane: Option<(Vec3, Vec3)>,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
     let clip_half = brush_clip_half_normal_from_screen(
@@ -1454,7 +1541,15 @@ pub fn apply_edit(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
+    // Spray mode: use scatter-based stamps (web parity) instead of density thinning.
+    let is_spray_scatter = stroke_mode == DrawStrokeMode::Spray
+        && (stroke_aux.spray_scatter > 0 || stroke_aux.spray_size_range);
+    let effective_shape = if stroke_mode == DrawStrokeMode::Spray {
+        stroke_aux.spray_brush_shape.unwrap_or(brush_shape)
+    } else {
+        brush_shape
+    };
+    let offsets = brush_offset_cells(effective_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let centers = stroke_anchor_centers_with_mode(
         stroke_mode,
@@ -1471,11 +1566,12 @@ pub fn apply_edit(
         brush_radius,
         stroke_line_start,
         stroke_segment_prev,
+        spray_constraint_plane,
     );
     let centers = adjust_add_centers_for_surface_snap_brush(
         centers,
         tool,
-        brush_shape,
+        effective_shape,
         brush_radius,
         stroke_aux,
         file,
@@ -1496,17 +1592,44 @@ pub fn apply_edit(
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
 
+    // Helper: resolve brush offsets per center for scatter spray (variable radius + scatter offset).
+    let scatter = stroke_aux.spray_scatter;
+    let size_range = stroke_aux.spray_size_range;
+    let rmin = stroke_aux.spray_radius_min;
+    let rmax = stroke_aux.spray_radius_max;
+
     match tool {
         EditTool::Add => {
-            for (cx, cy, cz) in centers {
-                for (dx, dy, dz) in &offsets {
-                    let x = cx + dx;
-                    let y = cy + dy;
-                    let z = cz + dz;
+            for (cx, cy, cz) in &centers {
+                let (scx, scy, scz, cur_offsets);
+                if is_spray_scatter {
+                    let ox = spray_scatter_offset((*cx, *cy, *cz), scatter, 0);
+                    let oy = spray_scatter_offset((*cx, *cy, *cz), scatter, 1);
+                    let oz = spray_scatter_offset((*cx, *cy, *cz), scatter, 2);
+                    scx = cx + ox;
+                    scy = cy + oy;
+                    scz = cz + oz;
+                    if size_range && rmax > rmin {
+                        let r = spray_random_radius((*cx, *cy, *cz), rmin, rmax);
+                        cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+                    } else {
+                        cur_offsets = Vec::new();
+                    }
+                } else {
+                    scx = *cx;
+                    scy = *cy;
+                    scz = *cz;
+                    cur_offsets = Vec::new();
+                }
+                let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+                for (dx, dy, dz) in use_offsets {
+                    let x = scx + dx;
+                    let y = scy + dy;
+                    let z = scz + dz;
                     if !in_grid(x, y, z, grid_size) {
                         continue;
                     }
-                    if !spray_passes((x, y, z), spray) {
+                    if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                         continue;
                     }
                     if !seen.insert((x, y, z)) {
@@ -1519,7 +1642,7 @@ pub fn apply_edit(
                         x,
                         y,
                         z,
-                        color,
+                        color: color_resolver(x, y, z),
                         material,
                         object_id: file.active_object_id,
                     };
@@ -1531,12 +1654,33 @@ pub fn apply_edit(
             }
         }
         EditTool::Remove => {
-            for (hx, hy, hz) in centers {
-                for (dx, dy, dz) in &offsets {
-                    let x = hx + dx;
-                    let y = hy + dy;
-                    let z = hz + dz;
-                    if !spray_passes((x, y, z), spray) {
+            for (hx, hy, hz) in &centers {
+                let (scx, scy, scz, cur_offsets);
+                if is_spray_scatter {
+                    let ox = spray_scatter_offset((*hx, *hy, *hz), scatter, 0);
+                    let oy = spray_scatter_offset((*hx, *hy, *hz), scatter, 1);
+                    let oz = spray_scatter_offset((*hx, *hy, *hz), scatter, 2);
+                    scx = hx + ox;
+                    scy = hy + oy;
+                    scz = hz + oz;
+                    if size_range && rmax > rmin {
+                        let r = spray_random_radius((*hx, *hy, *hz), rmin, rmax);
+                        cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+                    } else {
+                        cur_offsets = Vec::new();
+                    }
+                } else {
+                    scx = *hx;
+                    scy = *hy;
+                    scz = *hz;
+                    cur_offsets = Vec::new();
+                }
+                let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+                for (dx, dy, dz) in use_offsets {
+                    let x = scx + dx;
+                    let y = scy + dy;
+                    let z = scz + dz;
+                    if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                         continue;
                     }
                     if !seen.insert((x, y, z)) {
@@ -1561,12 +1705,33 @@ pub fn apply_edit(
             }
         }
         EditTool::Paint => {
-            for (hx, hy, hz) in centers {
-                for (dx, dy, dz) in &offsets {
-                    let x = hx + dx;
-                    let y = hy + dy;
-                    let z = hz + dz;
-                    if !spray_passes((x, y, z), spray) {
+            for (hx, hy, hz) in &centers {
+                let (scx, scy, scz, cur_offsets);
+                if is_spray_scatter {
+                    let ox = spray_scatter_offset((*hx, *hy, *hz), scatter, 0);
+                    let oy = spray_scatter_offset((*hx, *hy, *hz), scatter, 1);
+                    let oz = spray_scatter_offset((*hx, *hy, *hz), scatter, 2);
+                    scx = hx + ox;
+                    scy = hy + oy;
+                    scz = hz + oz;
+                    if size_range && rmax > rmin {
+                        let r = spray_random_radius((*hx, *hy, *hz), rmin, rmax);
+                        cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+                    } else {
+                        cur_offsets = Vec::new();
+                    }
+                } else {
+                    scx = *hx;
+                    scy = *hy;
+                    scz = *hz;
+                    cur_offsets = Vec::new();
+                }
+                let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+                for (dx, dy, dz) in use_offsets {
+                    let x = scx + dx;
+                    let y = scy + dy;
+                    let z = scz + dz;
+                    if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                         continue;
                     }
                     if !seen.insert((x, y, z)) {
@@ -1576,11 +1741,12 @@ pub fn apply_edit(
                         continue;
                     };
                     let before = file.voxels[idx];
-                    if before.color == color && before.material == material {
+                    let resolved_color = color_resolver(x, y, z);
+                    if before.color == resolved_color && before.material == material {
                         continue;
                     }
                     let after = Voxel {
-                        color,
+                        color: resolved_color,
                         material,
                         ..before
                     };
@@ -1641,6 +1807,7 @@ pub fn collect_stroke_edit_targets(
     stroke_mode: DrawStrokeMode,
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
+    spray_constraint_plane: Option<(Vec3, Vec3)>,
 ) -> Vec<VoxelCoord> {
     let mut out = collect_stroke_preview_targets(
         file,
@@ -1661,6 +1828,7 @@ pub fn collect_stroke_edit_targets(
         stroke_mode,
         plane_axis,
         stroke_aux,
+        spray_constraint_plane,
     );
     if matches!(tool, EditTool::Remove) {
         out.retain(|c| voxel_map.contains_key(c));
@@ -1703,6 +1871,7 @@ pub fn collect_stroke_preview_targets(
     stroke_mode: DrawStrokeMode,
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
+    spray_constraint_plane: Option<(Vec3, Vec3)>,
 ) -> Vec<VoxelCoord> {
     // Fill commits a single seed voxel; brush footprint does not apply. `Fill` returns no centers
     // from `stroke_anchor_centers_with_mode`, so without this branch hover preview would be empty.
@@ -1752,7 +1921,14 @@ pub fn collect_stroke_preview_targets(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
+    let is_spray_scatter = stroke_mode == DrawStrokeMode::Spray
+        && (stroke_aux.spray_scatter > 0 || stroke_aux.spray_size_range);
+    let effective_shape = if stroke_mode == DrawStrokeMode::Spray {
+        stroke_aux.spray_brush_shape.unwrap_or(brush_shape)
+    } else {
+        brush_shape
+    };
+    let offsets = brush_offset_cells(effective_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let centers = stroke_anchor_centers_with_mode(
         stroke_mode,
@@ -1769,11 +1945,12 @@ pub fn collect_stroke_preview_targets(
         brush_radius,
         stroke_line_start,
         stroke_segment_prev,
+        spray_constraint_plane,
     );
     let centers = adjust_add_centers_for_surface_snap_brush(
         centers,
         tool,
-        brush_shape,
+        effective_shape,
         brush_radius,
         stroke_aux,
         file,
@@ -1788,20 +1965,45 @@ pub fn collect_stroke_preview_targets(
         return Vec::new();
     }
     let grid_size = stroke_clip_grid_size(file, &centers, &offsets);
+    let scatter = stroke_aux.spray_scatter;
+    let size_range = stroke_aux.spray_size_range;
+    let rmin = stroke_aux.spray_radius_min;
+    let rmax = stroke_aux.spray_radius_max;
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelCoord> = Vec::new();
 
     match tool {
         EditTool::Add => {
-            for (cx, cy, cz) in centers {
-                for (dx, dy, dz) in &offsets {
-                    let x = cx + dx;
-                    let y = cy + dy;
-                    let z = cz + dz;
+            for (cx, cy, cz) in &centers {
+                let (scx, scy, scz, cur_offsets);
+                if is_spray_scatter {
+                    let ox = spray_scatter_offset((*cx, *cy, *cz), scatter, 0);
+                    let oy = spray_scatter_offset((*cx, *cy, *cz), scatter, 1);
+                    let oz = spray_scatter_offset((*cx, *cy, *cz), scatter, 2);
+                    scx = cx + ox;
+                    scy = cy + oy;
+                    scz = cz + oz;
+                    if size_range && rmax > rmin {
+                        let r = spray_random_radius((*cx, *cy, *cz), rmin, rmax);
+                        cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+                    } else {
+                        cur_offsets = Vec::new();
+                    }
+                } else {
+                    scx = *cx;
+                    scy = *cy;
+                    scz = *cz;
+                    cur_offsets = Vec::new();
+                }
+                let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+                for (dx, dy, dz) in use_offsets {
+                    let x = scx + dx;
+                    let y = scy + dy;
+                    let z = scz + dz;
                     if !in_grid(x, y, z, grid_size) {
                         continue;
                     }
-                    if !spray_passes((x, y, z), spray) {
+                    if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                         continue;
                     }
                     if !seen.insert((x, y, z)) {
@@ -1815,15 +2017,36 @@ pub fn collect_stroke_preview_targets(
             }
         }
         EditTool::Remove | EditTool::Paint => {
-            for (hx, hy, hz) in centers {
-                for (dx, dy, dz) in &offsets {
-                    let x = hx + dx;
-                    let y = hy + dy;
-                    let z = hz + dz;
+            for (hx, hy, hz) in &centers {
+                let (scx, scy, scz, cur_offsets);
+                if is_spray_scatter {
+                    let ox = spray_scatter_offset((*hx, *hy, *hz), scatter, 0);
+                    let oy = spray_scatter_offset((*hx, *hy, *hz), scatter, 1);
+                    let oz = spray_scatter_offset((*hx, *hy, *hz), scatter, 2);
+                    scx = hx + ox;
+                    scy = hy + oy;
+                    scz = hz + oz;
+                    if size_range && rmax > rmin {
+                        let r = spray_random_radius((*hx, *hy, *hz), rmin, rmax);
+                        cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+                    } else {
+                        cur_offsets = Vec::new();
+                    }
+                } else {
+                    scx = *hx;
+                    scy = *hy;
+                    scz = *hz;
+                    cur_offsets = Vec::new();
+                }
+                let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+                for (dx, dy, dz) in use_offsets {
+                    let x = scx + dx;
+                    let y = scy + dy;
+                    let z = scz + dz;
                     if !in_grid(x, y, z, grid_size) {
                         continue;
                     }
-                    if !spray_passes((x, y, z), spray) {
+                    if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                         continue;
                     }
                     if !seen.insert((x, y, z)) {
@@ -1842,7 +2065,7 @@ pub fn apply_edits_to_coords(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
     tool: EditTool,
-    color: u32,
+    color_resolver: impl Fn(i32, i32, i32) -> u32,
     material: MaterialId,
     coords: &AHashSet<VoxelCoord>,
 ) -> Vec<VoxelEditDelta> {
@@ -1863,7 +2086,7 @@ pub fn apply_edits_to_coords(
                     x,
                     y,
                     z,
-                    color,
+                    color: color_resolver(x, y, z),
                     material,
                     object_id: file.active_object_id,
                 };
@@ -1898,11 +2121,12 @@ pub fn apply_edits_to_coords(
                     continue;
                 };
                 let before = file.voxels[idx];
-                if before.color == color && before.material == material {
+                let resolved_color = color_resolver(x, y, z);
+                if before.color == resolved_color && before.material == material {
                     continue;
                 }
                 let after = Voxel {
-                    color,
+                    color: resolved_color,
                     material,
                     ..before
                 };
@@ -1933,6 +2157,7 @@ pub fn selection_stroke_sample_coords(
     stroke_mode: DrawStrokeMode,
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
+    spray_constraint_plane: Option<(Vec3, Vec3)>,
 ) -> Vec<VoxelCoord> {
     let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
     let clip_half = brush_clip_half_normal_from_screen(
@@ -1945,7 +2170,14 @@ pub fn selection_stroke_sample_coords(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
+    let is_spray_scatter = stroke_mode == DrawStrokeMode::Spray
+        && (stroke_aux.spray_scatter > 0 || stroke_aux.spray_size_range);
+    let effective_shape = if stroke_mode == DrawStrokeMode::Spray {
+        stroke_aux.spray_brush_shape.unwrap_or(brush_shape)
+    } else {
+        brush_shape
+    };
+    let offsets = brush_offset_cells(effective_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let tool = EditTool::Remove;
     let centers = stroke_anchor_centers_with_mode(
@@ -1963,24 +2195,51 @@ pub fn selection_stroke_sample_coords(
         brush_radius,
         stroke_line_start,
         stroke_segment_prev,
+        spray_constraint_plane,
     );
     if centers.is_empty() {
         return Vec::new();
     }
     let grid_size = stroke_clip_grid_size(file, &centers, &offsets);
 
+    let scatter = stroke_aux.spray_scatter;
+    let size_range = stroke_aux.spray_size_range;
+    let rmin = stroke_aux.spray_radius_min;
+    let rmax = stroke_aux.spray_radius_max;
+
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelCoord> = Vec::new();
 
-    for (hx, hy, hz) in centers {
-        for (dx, dy, dz) in &offsets {
-            let x = hx + dx;
-            let y = hy + dy;
-            let z = hz + dz;
+    for (hx, hy, hz) in &centers {
+        let (scx, scy, scz, cur_offsets);
+        if is_spray_scatter {
+            let ox = spray_scatter_offset((*hx, *hy, *hz), scatter, 0);
+            let oy = spray_scatter_offset((*hx, *hy, *hz), scatter, 1);
+            let oz = spray_scatter_offset((*hx, *hy, *hz), scatter, 2);
+            scx = hx + ox;
+            scy = hy + oy;
+            scz = hz + oz;
+            if size_range && rmax > rmin {
+                let r = spray_random_radius((*hx, *hy, *hz), rmin, rmax);
+                cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+            } else {
+                cur_offsets = Vec::new();
+            }
+        } else {
+            scx = *hx;
+            scy = *hy;
+            scz = *hz;
+            cur_offsets = Vec::new();
+        }
+        let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+        for (dx, dy, dz) in use_offsets {
+            let x = scx + dx;
+            let y = scy + dy;
+            let z = scz + dz;
             if !in_grid(x, y, z, grid_size) {
                 continue;
             }
-            if !spray_passes((x, y, z), spray) {
+            if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                 continue;
             }
             if !seen.insert((x, y, z)) {
@@ -2012,6 +2271,7 @@ pub fn selection_stroke_sample_empty_coords(
     stroke_mode: DrawStrokeMode,
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
+    spray_constraint_plane: Option<(Vec3, Vec3)>,
 ) -> Vec<VoxelCoord> {
     let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
     let clip_half = brush_clip_half_normal_from_screen(
@@ -2024,7 +2284,14 @@ pub fn selection_stroke_sample_empty_coords(
         sx,
         sy,
     );
-    let offsets = brush_offset_cells(brush_shape, brush_radius, clip_half, None);
+    let is_spray_scatter = stroke_mode == DrawStrokeMode::Spray
+        && (stroke_aux.spray_scatter > 0 || stroke_aux.spray_size_range);
+    let effective_shape = if stroke_mode == DrawStrokeMode::Spray {
+        stroke_aux.spray_brush_shape.unwrap_or(brush_shape)
+    } else {
+        brush_shape
+    };
+    let offsets = brush_offset_cells(effective_shape, brush_radius, clip_half, None);
     let spray = spray_density.clamp(0.0, 1.0);
     let tool = EditTool::Add;
     let centers = stroke_anchor_centers_with_mode(
@@ -2042,24 +2309,51 @@ pub fn selection_stroke_sample_empty_coords(
         brush_radius,
         stroke_line_start,
         stroke_segment_prev,
+        spray_constraint_plane,
     );
     if centers.is_empty() {
         return Vec::new();
     }
     let grid_size = stroke_clip_grid_size(file, &centers, &offsets);
 
+    let scatter = stroke_aux.spray_scatter;
+    let size_range = stroke_aux.spray_size_range;
+    let rmin = stroke_aux.spray_radius_min;
+    let rmax = stroke_aux.spray_radius_max;
+
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelCoord> = Vec::new();
 
-    for (cx, cy, cz) in centers {
-        for (dx, dy, dz) in &offsets {
-            let x = cx + dx;
-            let y = cy + dy;
-            let z = cz + dz;
+    for (cx, cy, cz) in &centers {
+        let (scx, scy, scz, cur_offsets);
+        if is_spray_scatter {
+            let ox = spray_scatter_offset((*cx, *cy, *cz), scatter, 0);
+            let oy = spray_scatter_offset((*cx, *cy, *cz), scatter, 1);
+            let oz = spray_scatter_offset((*cx, *cy, *cz), scatter, 2);
+            scx = cx + ox;
+            scy = cy + oy;
+            scz = cz + oz;
+            if size_range && rmax > rmin {
+                let r = spray_random_radius((*cx, *cy, *cz), rmin, rmax);
+                cur_offsets = brush_offset_cells(effective_shape, r, clip_half, None);
+            } else {
+                cur_offsets = Vec::new();
+            }
+        } else {
+            scx = *cx;
+            scy = *cy;
+            scz = *cz;
+            cur_offsets = Vec::new();
+        }
+        let use_offsets = if !cur_offsets.is_empty() { &cur_offsets } else { &offsets };
+        for (dx, dy, dz) in use_offsets {
+            let x = scx + dx;
+            let y = scy + dy;
+            let z = scz + dz;
             if !in_grid(x, y, z, grid_size) {
                 continue;
             }
-            if !spray_passes((x, y, z), spray) {
+            if !is_spray_scatter && !spray_passes((x, y, z), spray) {
                 continue;
             }
             if !seen.insert((x, y, z)) {
@@ -2621,6 +2915,7 @@ fn stroke_anchor_centers_sculpt(
         0,
         stroke_line_start,
         stroke_segment_prev,
+        None,
     )
 }
 
@@ -5189,7 +5484,7 @@ mod tests {
             sx,
             sy,
             false,
-            0xabcdef,
+            |_, _, _| 0xabcdef,
             MaterialId::Plastic,
             false,
             PlaneAxis::Auto,

@@ -160,6 +160,42 @@ fn vs_main(in: VertexInput) -> VertexOut {
     return o;
 }
 
+// ---------------------------------------------------------------------------
+// GPU-instanced preview: prototype vertex (position + normal) + per-instance
+// model matrix, color, mat_kind.
+// ---------------------------------------------------------------------------
+
+struct PreviewProtoVertex {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+}
+
+struct PreviewInstanceVertex {
+    @location(2) model_c0: vec4<f32>,
+    @location(3) model_c1: vec4<f32>,
+    @location(4) model_c2: vec4<f32>,
+    @location(5) model_c3: vec4<f32>,
+    @location(6) inst_color: vec3<f32>,
+    @location(7) inst_mat_kind: f32,
+}
+
+@vertex
+fn vs_preview_instanced(proto: PreviewProtoVertex, inst: PreviewInstanceVertex) -> VertexOut {
+    let model = mat4x4<f32>(inst.model_c0, inst.model_c1, inst.model_c2, inst.model_c3);
+    let world = model * vec4<f32>(proto.position, 1.0);
+    var o: VertexOut;
+    o.clip_pos = g.view_proj * world;
+    o.world_pos = world.xyz;
+    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+    o.normal = normalize(normal_mat * proto.normal);
+    o.color = inst.inst_color;
+    o.mat_kind = inst.inst_mat_kind;
+    o.vertex_ao = 1.0;
+    let h = o.clip_pos.w;
+    o.uv = vec2<f32>(0.5, 0.5) + vec2<f32>(0.5, -0.5) * (o.clip_pos.xy / vec2<f32>(h, h));
+    return o;
+}
+
 struct OpaqueOut {
     @location(0) color: vec4<f32>,
     @location(1) gbuf_n: vec4<f32>,
@@ -204,7 +240,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         rgb = ambient_refl + direct + spec * sc;
     } else if (is_glow) {
         // Self-illuminated: emissive color + subtle ambient for shape readability.
-        let emissive = base * 2.8;
+        let emissive = base * 4.0;
         let shape = base * (hemi * 0.12 * ao_h * amb + 0.18 * ndl * sh * sun * sc);
         let spec_glow = pow(ndh, 24.0) * 0.06 * sh * sun;
         rgb = emissive + shape + sc * spec_glow;

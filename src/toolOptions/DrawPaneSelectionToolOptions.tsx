@@ -44,6 +44,21 @@ export type DrawPaneSelectionToolOptionsProps = {
   setSprayConstrainToPlane: (v: boolean) => void;
   spraySizeRange: boolean;
   setSpraySizeRange: (v: boolean) => void;
+  /** Scatter: random stamp offset in voxels (web `sprayScatter`). */
+  sprayScatter: number;
+  setSprayScatter: (n: number) => void;
+  sprayRadiusMin: number;
+  setSprayRadiusMin: (n: number) => void;
+  sprayRadiusMax: number;
+  setSprayRadiusMax: (n: number) => void;
+  /** Separate brush shape for spray mode. */
+  sprayBrushShape: BrushShape;
+  setSprayBrushShape: (s: BrushShape) => void;
+  /** Plane reference for constrain-to-plane. */
+  sprayConstrainToPlaneRef: "auto" | "camera" | "x" | "y" | "z";
+  setSprayConstrainToPlaneRef: (
+    v: "auto" | "camera" | "x" | "y" | "z",
+  ) => void;
   fillConstrainToPlane: boolean;
   setFillConstrainToPlane: (v: boolean) => void;
 };
@@ -704,10 +719,7 @@ export function DrawPaneSelectionToolOptions(
   }
 
   if (narrowSpray) {
-    const scatterDisplay =
-      Math.abs(p.sprayDensity - Math.round(p.sprayDensity)) < 1e-6
-        ? String(Math.round(p.sprayDensity))
-        : p.sprayDensity.toFixed(2);
+    const MAX_BRUSH_SIZE = 33;
     return (
       <>
         <div className="tool-options-section">
@@ -720,6 +732,38 @@ export function DrawPaneSelectionToolOptions(
             />
             <span>Constrain to plane</span>
           </label>
+          {p.sprayConstrainToPlane && (
+            <div
+              className="tool-options-shape-row"
+              role="group"
+              aria-label="Plane reference"
+              style={{ marginTop: "0.35rem" }}
+            >
+              {(
+                [
+                  ["auto", "Auto"],
+                  ["camera", "Camera"],
+                  ["x", "X"],
+                  ["y", "Y"],
+                  ["z", "Z"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  className={
+                    p.sprayConstrainToPlaneRef === id
+                      ? "tool-options-shape-btn is-active"
+                      : "tool-options-shape-btn"
+                  }
+                  disabled={p.loading || p.workBusy}
+                  onClick={() => p.setSprayConstrainToPlaneRef(id)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
         <hr
           style={{
@@ -733,7 +777,7 @@ export function DrawPaneSelectionToolOptions(
           <div
             className="tool-options-shape-row"
             role="group"
-            aria-label="Brush shape"
+            aria-label="Spray brush shape"
           >
             {(
               [
@@ -746,12 +790,12 @@ export function DrawPaneSelectionToolOptions(
                 key={id}
                 type="button"
                 className={
-                  p.brushShape === id
+                  p.sprayBrushShape === id
                     ? "tool-options-shape-btn is-active"
                     : "tool-options-shape-btn"
                 }
                 disabled={p.loading || p.workBusy}
-                onClick={() => p.setBrushShape(id)}
+                onClick={() => p.setSprayBrushShape(id)}
               >
                 {label}
               </button>
@@ -783,28 +827,83 @@ export function DrawPaneSelectionToolOptions(
             />
             <span>Size range</span>
           </label>
-          <div
-            className="tool-options-heading tool-options-heading-mixed"
-            style={{ marginTop: "0.5rem" }}
-          >
-            Diameter
-          </div>
-          <label className="tool-options-range-label tool-options-range-with-value">
-            <input
-              type="range"
-              min={1}
-              max={65}
-              step={2}
-              value={p.brushRadius * 2 + 1}
-              onChange={(ev) =>
-                p.setBrushRadius((Number(ev.target.value) - 1) / 2)
-              }
-              disabled={p.loading || p.workBusy}
-            />
-            <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius * 2 + 1}
-            </span>
-          </label>
+          {p.spraySizeRange ? (
+            <>
+              <div
+                className="tool-options-heading tool-options-heading-mixed"
+                style={{ marginTop: "0.5rem" }}
+              >
+                Min
+              </div>
+              <label className="tool-options-range-label tool-options-range-with-value">
+                <input
+                  type="range"
+                  min={0}
+                  max={MAX_BRUSH_SIZE - 1}
+                  step={1}
+                  value={p.sprayRadiusMin}
+                  onChange={(ev) => {
+                    const v = Number(ev.target.value);
+                    p.setSprayRadiusMin(v);
+                    if (v > p.sprayRadiusMax) p.setSprayRadiusMax(v);
+                  }}
+                  disabled={p.loading || p.workBusy}
+                />
+                <span className="tool-options-range-value" aria-live="polite">
+                  {p.sprayRadiusMin + 1}
+                </span>
+              </label>
+              <div
+                className="tool-options-heading tool-options-heading-mixed"
+                style={{ marginTop: "0.5rem" }}
+              >
+                Max
+              </div>
+              <label className="tool-options-range-label tool-options-range-with-value">
+                <input
+                  type="range"
+                  min={0}
+                  max={MAX_BRUSH_SIZE - 1}
+                  step={1}
+                  value={p.sprayRadiusMax}
+                  onChange={(ev) => {
+                    const v = Number(ev.target.value);
+                    p.setSprayRadiusMax(v);
+                    if (v < p.sprayRadiusMin) p.setSprayRadiusMin(v);
+                  }}
+                  disabled={p.loading || p.workBusy}
+                />
+                <span className="tool-options-range-value" aria-live="polite">
+                  {p.sprayRadiusMax + 1}
+                </span>
+              </label>
+            </>
+          ) : (
+            <>
+              <div
+                className="tool-options-heading tool-options-heading-mixed"
+                style={{ marginTop: "0.5rem" }}
+              >
+                Size
+              </div>
+              <label className="tool-options-range-label tool-options-range-with-value">
+                <input
+                  type="range"
+                  min={0}
+                  max={MAX_BRUSH_SIZE - 1}
+                  step={1}
+                  value={p.brushRadius}
+                  onChange={(ev) =>
+                    p.setBrushRadius(Number(ev.target.value))
+                  }
+                  disabled={p.loading || p.workBusy}
+                />
+                <span className="tool-options-range-value" aria-live="polite">
+                  {p.brushRadius + 1}
+                </span>
+              </label>
+            </>
+          )}
           <div
             className="tool-options-heading tool-options-heading-mixed"
             style={{ marginTop: "0.5rem" }}
@@ -815,14 +914,14 @@ export function DrawPaneSelectionToolOptions(
             <input
               type="range"
               min={0}
-              max={1}
-              step={0.02}
-              value={p.sprayDensity}
-              onChange={(ev) => p.setSprayDensity(Number(ev.target.value))}
+              max={MAX_BRUSH_SIZE - 1}
+              step={1}
+              value={p.sprayScatter}
+              onChange={(ev) => p.setSprayScatter(Number(ev.target.value))}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {scatterDisplay}
+              {p.sprayScatter}
             </span>
           </label>
           <label

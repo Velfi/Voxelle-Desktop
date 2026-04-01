@@ -332,7 +332,7 @@ fn apply_vignette(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     let hdr = textureSample(t_hdr, samp_linear, i.uv).rgb;
     let blo = textureSample(t_bloom, samp_linear, i.uv).rgb;
-    var rgb0 = (hdr + blo * 0.42) * exp2(po.exposure_ev);
+    var rgb0 = (hdr + blo * 0.9) * exp2(po.exposure_ev);
     let pre_energy = max(max(rgb0.r, rgb0.g), rgb0.b);
     var mapped = apply_tone(po.tone_mode, rgb0);
 

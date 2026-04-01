@@ -86,6 +86,22 @@ pub struct StrokeAux {
     /// Sphere / cube / pyramid brush: keep only the half-space in the face **outward** direction (from ray hit).
     #[serde(default)]
     pub brush_clip_bottom_half: bool,
+    /// Spray scatter: random offset of stamp centers (integer voxels, web `sprayScatter`).
+    #[serde(default)]
+    pub spray_scatter: u32,
+    /// Spray radius min (used when `spray_size_range` is true).
+    #[serde(default)]
+    pub spray_radius_min: u32,
+    /// Spray radius max (used when `spray_size_range` is true).
+    #[serde(default)]
+    pub spray_radius_max: u32,
+    /// Separate brush shape for spray mode (overrides top-level `brush_shape` when present).
+    #[serde(default)]
+    pub spray_brush_shape: Option<crate::voxel_edit::BrushShape>,
+    /// Plane reference for constrain-to-plane: `"auto"` | `"camera"` | `"x"` | `"y"` | `"z"`.
+    /// Only meaningful when `constrain_to_plane` is true.
+    #[serde(default)]
+    pub constrain_to_plane_ref: Option<String>,
 }
 
 impl Default for StrokeAux {
@@ -109,6 +125,11 @@ impl Default for StrokeAux {
             stroke_snap_to_surface: true,
             stroke_axis_align: false,
             brush_clip_bottom_half: false,
+            spray_scatter: 0,
+            spray_radius_min: 0,
+            spray_radius_max: 0,
+            spray_brush_shape: None,
+            constrain_to_plane_ref: None,
         }
     }
 }
@@ -1642,6 +1663,9 @@ fn flip_depth_anchor_if_needed(
 }
 
 /// Stroke anchor cells for draw/remove/paint (brush applied per center afterward).
+///
+/// `spray_constraint_plane`: when `Some((point, normal))`, spray mode raycasts against the invisible
+/// plane instead of voxels (web constrain-to-plane parity).
 #[allow(clippy::too_many_arguments)]
 pub fn stroke_anchor_centers_with_mode(
     mode: DrawStrokeMode,
@@ -1658,6 +1682,7 @@ pub fn stroke_anchor_centers_with_mode(
     brush_radius: u32,
     stroke_line_start: Option<(f32, f32)>,
     stroke_segment_prev: Option<(f32, f32)>,
+    spray_constraint_plane: Option<(Vec3, Vec3)>,
 ) -> Vec<VoxelCoord> {
     let snap = aux.stroke_snap_to_surface;
     match mode {
@@ -1666,20 +1691,21 @@ pub fn stroke_anchor_centers_with_mode(
             .into_iter()
             .collect(),
         DrawStrokeMode::Spray => {
+            // When constrain-to-plane is active, raycast against the invisible plane.
+            let anchor_fn = |sx_: f32, sy_: f32| -> Option<VoxelCoord> {
+                if let Some((pp, pn)) = spray_constraint_plane {
+                    crate::voxel_edit::anchor_on_plane(camera, width, height, sx_, sy_, pp, pn)
+                } else {
+                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx_, sy_)
+                }
+            };
             if let Some((px, py)) = stroke_segment_prev {
-                match (
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, px, py),
-                    anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy),
-                ) {
+                match (anchor_fn(px, py), anchor_fn(sx, sy)) {
                     (Some(a), Some(b)) => voxel_line_dda(a, b),
-                    _ => anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                        .into_iter()
-                        .collect(),
+                    _ => anchor_fn(sx, sy).into_iter().collect(),
                 }
             } else {
-                anchor_for_stroke_edit(tool, snap, file, voxel_map, camera, width, height, sx, sy)
-                    .into_iter()
-                    .collect()
+                anchor_fn(sx, sy).into_iter().collect()
             }
         }
         DrawStrokeMode::Line => {

@@ -29,6 +29,9 @@ var<uniform> post: PostU;
 @fragment
 fn fs_blur(i: FullscreenOut) -> @location(0) vec4<f32> {
     let dir = post.blur_dir.xy;
+    // blur_dir.z carries a per-iteration step multiplier (1, 2, 4 …) so successive
+    // passes cover exponentially wider radii without extra samples.
+    let step = max(post.blur_dir.z, 1.0);
     let dims = textureDimensions(t_blur_src);
     let texel = vec2<f32>(1.0 / max(f32(dims.x), 1.0), 1.0 / max(f32(dims.y), 1.0));
     var sum = vec3<f32>(0.0);
@@ -37,14 +40,14 @@ fn fs_blur(i: FullscreenOut) -> @location(0) vec4<f32> {
     let w2 = 0.1216216;
     let w3 = 0.054054;
     let w4 = 0.016216;
-    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * 0.0).rgb * w0;
-    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * 1.0).rgb * w1;
-    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * 2.0).rgb * w2;
-    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * 3.0).rgb * w3;
-    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * 4.0).rgb * w4;
-    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * 1.0).rgb * w1;
-    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * 2.0).rgb * w2;
-    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * 3.0).rgb * w3;
-    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * 4.0).rgb * w4;
+    sum += textureSample(t_blur_src, samp_linear, i.uv).rgb * w0;
+    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * step * 1.0).rgb * w1;
+    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * step * 2.0).rgb * w2;
+    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * step * 3.0).rgb * w3;
+    sum += textureSample(t_blur_src, samp_linear, i.uv + dir * texel * step * 4.0).rgb * w4;
+    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * step * 1.0).rgb * w1;
+    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * step * 2.0).rgb * w2;
+    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * step * 3.0).rgb * w3;
+    sum += textureSample(t_blur_src, samp_linear, i.uv - dir * texel * step * 4.0).rgb * w4;
     return vec4<f32>(sum, 1.0);
 }

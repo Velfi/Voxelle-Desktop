@@ -149,10 +149,81 @@ const LS_SIDEBAR_EXPANDED = "voxelleSidebarExpanded";
 const LS_RIGHT_SIDEBAR_EXPANDED = "voxelleRightSidebarExpanded";
 const LS_TOOLS_FLOATING = "voxelleToolsFloating";
 const LS_TOOLS_FLOAT_POS = "voxelleToolsFloatPos";
+const LS_PALETTE_FLOATING = "voxellePaletteFloating";
+const LS_PALETTE_FLOAT_POS = "voxellePaletteFloatPos";
 /** `localStorage` = `"1"`: show JS vs Rust viewport cursor overlay (see `get_viewport_cursor_debug`). */
 const LS_VIEWPORT_CURSOR_DEBUG = "voxelleDebugViewportCursor";
 /** `localStorage` = `"1"`: GPU uses full swapchain; picking uses client ÷ layout viewport (see `layoutViewportCssSize`). */
 const LS_FULL_SURFACE_VIEWPORT = "voxelleFullSurfaceViewport";
+const LS_PAINT_COLOR_DISTRIB = "voxellePaintColorDistrib";
+
+// ── Multi-color paint distribution ─────────────────────────────────────────
+
+type PaintColorMode = "whiteNoise" | "randomSingle" | "fbmNoise" | "gradient" | "dither";
+
+interface FbmParams {
+  octaves: number;
+  lacunarity: number;
+  persistence: number;
+  frequency: number;
+  noiseSeed: number;
+  quantized: boolean;
+}
+
+interface GradientParams {
+  kind: "linear" | "radial";
+  linearAxis: 0 | 1 | 2;
+  scale: number;
+  phase: number;
+  radialCenter: [number, number, number];
+  quantized: boolean;
+}
+
+interface DitherParams {
+  orderedSize: 2 | 4 | 8;
+  orderedStrength: number;
+  errorDiffusion: "none" | "floydSteinberg";
+}
+
+interface PaintColorDistrib {
+  mode: PaintColorMode;
+  fbm: FbmParams;
+  gradient: GradientParams;
+  dither: DitherParams;
+}
+
+const DEFAULT_PAINT_COLOR_DISTRIB: PaintColorDistrib = {
+  mode: "whiteNoise",
+  fbm: {
+    octaves: 4,
+    lacunarity: 2,
+    persistence: 0.5,
+    frequency: 0.15,
+    noiseSeed: 0x12345678,
+    quantized: false,
+  },
+  gradient: {
+    kind: "linear",
+    linearAxis: 1,
+    scale: 0.08,
+    phase: 0,
+    radialCenter: [0, 0, 0],
+    quantized: false,
+  },
+  dither: {
+    orderedSize: 4,
+    orderedStrength: 0.35,
+    errorDiffusion: "none",
+  },
+};
+
+function loadPaintColorDistrib(): PaintColorDistrib {
+  try {
+    const s = localStorage.getItem(LS_PAINT_COLOR_DISTRIB);
+    if (s) return { ...DEFAULT_PAINT_COLOR_DISTRIB, ...JSON.parse(s) };
+  } catch {}
+  return DEFAULT_PAINT_COLOR_DISTRIB;
+}
 
 /**
  * CSS layout viewport size for mapping `clientX`/`clientY` and layout fractions to the native surface.
@@ -451,11 +522,287 @@ const MATERIAL_OPTIONS: { id: string; label: string }[] = [
   { id: "glow", label: "Glow" },
 ];
 
+/** Multi-color paint distribution settings panel (shown when ≥2 palette colors selected). */
+function MultiColorPaintSection(props: {
+  distrib: PaintColorDistrib;
+  setDistrib: (d: PaintColorDistrib) => void;
+}) {
+  const { distrib, setDistrib } = props;
+  const patch = (part: Partial<PaintColorDistrib>) =>
+    setDistrib({ ...distrib, ...part });
+  const patchFbm = (part: Partial<FbmParams>) =>
+    patch({ fbm: { ...distrib.fbm, ...part } });
+  const patchGrad = (part: Partial<GradientParams>) =>
+    patch({ gradient: { ...distrib.gradient, ...part } });
+  const patchDither = (part: Partial<DitherParams>) =>
+    patch({ dither: { ...distrib.dither, ...part } });
+  return (
+    <div className="multi-color-section">
+      <div className="sidebar-section-label">
+        Color distribution
+        {distrib.mode !== "whiteNoise" && distrib.mode !== "randomSingle"
+          ? ` · ${distrib.mode === "fbmNoise" ? "FBM" : distrib.mode === "gradient" ? "Gradient" : "Dither"}`
+          : ""}
+      </div>
+      <div className="sidebar-row">
+        <label className="sidebar-label-sm">Mode</label>
+        <select
+          className="sidebar-select-sm"
+          value={distrib.mode}
+          onChange={(e) => patch({ mode: e.target.value as PaintColorMode })}
+        >
+          <option value="whiteNoise">White noise</option>
+          <option value="randomSingle">Single random per stroke</option>
+          <option value="fbmNoise">FBM noise</option>
+          <option value="gradient">Gradient</option>
+          <option value="dither">Dither</option>
+        </select>
+      </div>
+      {distrib.mode === "fbmNoise" && (
+        <>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Octaves {distrib.fbm.octaves}</label>
+            <input type="range" min={1} max={12} step={1} value={distrib.fbm.octaves}
+              onChange={(e) => patchFbm({ octaves: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Frequency {distrib.fbm.frequency.toFixed(2)}</label>
+            <input type="range" min={0.02} max={0.8} step={0.01} value={distrib.fbm.frequency}
+              onChange={(e) => patchFbm({ frequency: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Lacunarity {distrib.fbm.lacunarity.toFixed(2)}</label>
+            <input type="range" min={1.5} max={3.5} step={0.05} value={distrib.fbm.lacunarity}
+              onChange={(e) => patchFbm({ lacunarity: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Persistence {distrib.fbm.persistence.toFixed(2)}</label>
+            <input type="range" min={0.1} max={1} step={0.05} value={distrib.fbm.persistence}
+              onChange={(e) => patchFbm({ persistence: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">
+              <input type="checkbox" checked={distrib.fbm.quantized}
+                onChange={(e) => patchFbm({ quantized: e.target.checked })} />
+              {" "}Quantized (palette steps)
+            </label>
+          </div>
+        </>
+      )}
+      {distrib.mode === "gradient" && (
+        <>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Kind</label>
+            <select className="sidebar-select-sm" value={distrib.gradient.kind}
+              onChange={(e) => patchGrad({ kind: e.target.value as "linear" | "radial" })}>
+              <option value="linear">Linear</option>
+              <option value="radial">Radial</option>
+            </select>
+          </div>
+          {distrib.gradient.kind === "linear" && (
+            <div className="sidebar-row">
+              <label className="sidebar-label-sm">Axis</label>
+              <select className="sidebar-select-sm" value={distrib.gradient.linearAxis}
+                onChange={(e) => patchGrad({ linearAxis: Number(e.target.value) as 0 | 1 | 2 })}>
+                <option value={0}>X</option>
+                <option value={1}>Y</option>
+                <option value={2}>Z</option>
+              </select>
+            </div>
+          )}
+          {distrib.gradient.kind === "radial" && (
+            <div className="sidebar-row sidebar-row-inline">
+              <label className="sidebar-label-sm">Center</label>
+              {(["X", "Y", "Z"] as const).map((axis, i) => (
+                <label key={axis} className="sidebar-label-sm">
+                  {axis}
+                  <input type="number" className="sidebar-number-sm" style={{ width: "3.5rem" }}
+                    value={distrib.gradient.radialCenter[i]}
+                    onChange={(e) => {
+                      const c = [...distrib.gradient.radialCenter] as [number, number, number];
+                      c[i] = Number(e.target.value);
+                      patchGrad({ radialCenter: c });
+                    }} />
+                </label>
+              ))}
+            </div>
+          )}
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Scale {distrib.gradient.scale.toFixed(3)}</label>
+            <input type="range" min={0.01} max={0.5} step={0.005} value={distrib.gradient.scale}
+              onChange={(e) => patchGrad({ scale: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Phase {distrib.gradient.phase.toFixed(2)}</label>
+            <input type="range" min={-3.15} max={3.15} step={0.05} value={distrib.gradient.phase}
+              onChange={(e) => patchGrad({ phase: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">
+              <input type="checkbox" checked={distrib.gradient.quantized}
+                onChange={(e) => patchGrad({ quantized: e.target.checked })} />
+              {" "}Quantized (palette steps)
+            </label>
+          </div>
+        </>
+      )}
+      {distrib.mode === "dither" && (
+        <>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Bayer size</label>
+            <select className="sidebar-select-sm" value={distrib.dither.orderedSize}
+              onChange={(e) => patchDither({ orderedSize: Number(e.target.value) as 2 | 4 | 8 })}>
+              <option value={2}>2×2</option>
+              <option value={4}>4×4</option>
+              <option value={8}>8×8</option>
+            </select>
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Strength {distrib.dither.orderedStrength.toFixed(2)}</label>
+            <input type="range" min={0} max={1} step={0.05} value={distrib.dither.orderedStrength}
+              onChange={(e) => patchDither({ orderedStrength: Number(e.target.value) })} />
+          </div>
+          <div className="sidebar-row">
+            <label className="sidebar-label-sm">Error diffusion</label>
+            <select className="sidebar-select-sm" value={distrib.dither.errorDiffusion}
+              onChange={(e) => patchDither({ errorDiffusion: e.target.value as "none" | "floydSteinberg" })}>
+              <option value="none">None (ordered only)</option>
+              <option value="floydSteinberg">Floyd–Steinberg</option>
+            </select>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Palette swatch grid with multi-select support (click, shift+click, drag, shift+drag). */
+function PaletteSwatches(props: {
+  activeColor: number;
+  selectedColors: number[];
+  setActiveColor: (n: number) => void;
+  setSelectedColors: (c: number[]) => void;
+  disabled: boolean;
+  palette: readonly string[];
+}) {
+  const { activeColor, selectedColors, setActiveColor, setSelectedColors, disabled, palette } = props;
+  const dragStartIdxRef = useRef<number | null>(null);
+  const isDraggingRef = useRef(false);
+  const shiftHeldRef = useRef(false);
+
+  function getSwatchIndex(el: Element): number {
+    const idx = el.getAttribute("data-idx");
+    return idx !== null ? Number(idx) : -1;
+  }
+
+  function selectRange(lo: number, hi: number, baseColors?: number[]): number[] {
+    const [a, b] = lo <= hi ? [lo, hi] : [hi, lo];
+    const rangeRgbs = palette.slice(a, b + 1).map((hex) => Number.parseInt(hex.slice(1), 16));
+    if (baseColors) {
+      const merged = new Set([...baseColors, ...rangeRgbs]);
+      return Array.from(merged);
+    }
+    return rangeRgbs;
+  }
+
+  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
+    if (disabled) return;
+    const target = (e.target as HTMLElement).closest("[data-idx]");
+    if (!target) return;
+    const idx = getSwatchIndex(target);
+    if (idx < 0) return;
+    shiftHeldRef.current = e.shiftKey;
+    isDraggingRef.current = false;
+    dragStartIdxRef.current = idx;
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+  }
+
+  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
+    if (disabled || dragStartIdxRef.current === null) return;
+    const target = document.elementFromPoint(e.clientX, e.clientY);
+    if (!target) return;
+    const swatchEl = target.closest("[data-idx]");
+    if (!swatchEl) return;
+    const idx = getSwatchIndex(swatchEl);
+    if (idx < 0) return;
+    isDraggingRef.current = true;
+    const newRange = selectRange(
+      dragStartIdxRef.current,
+      idx,
+      shiftHeldRef.current ? selectedColors : undefined,
+    );
+    setSelectedColors(newRange);
+  }
+
+  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
+    if (disabled || dragStartIdxRef.current === null) return;
+    const startIdx = dragStartIdxRef.current;
+    dragStartIdxRef.current = null;
+    if (!isDraggingRef.current) {
+      // Single click
+      const rgb = Number.parseInt(palette[startIdx]!.slice(1), 16);
+      if (e.shiftKey) {
+        // Toggle in selected list
+        const alreadySelected = selectedColors.includes(rgb);
+        if (alreadySelected) {
+          const next = selectedColors.filter((c) => c !== rgb);
+          setSelectedColors(next);
+        } else {
+          setSelectedColors([...selectedColors, rgb]);
+        }
+      } else {
+        // Plain click: clear multi-select, set single color
+        setSelectedColors([]);
+        setActiveColor(rgb);
+      }
+    }
+    isDraggingRef.current = false;
+  }
+
+  const selectedSet = new Set(selectedColors);
+
+  return (
+    <div
+      className={`sidebar-palette-swatches${disabled ? " is-disabled" : ""}`}
+      role="group"
+      aria-label="Material color palette (shift+click or drag to multi-select)"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+    >
+      {palette.map((hex, idx) => {
+        const rgb = Number.parseInt(hex.slice(1), 16);
+        const isActive = selectedColors.length === 0 && (activeColor & 0xffffff) === rgb;
+        const isSelected = selectedSet.has(rgb);
+        let cls = "sidebar-palette-swatch";
+        if (isActive) cls += " is-active";
+        if (isSelected) cls += " is-selected";
+        return (
+          <div
+            key={hex}
+            data-idx={idx}
+            className={cls}
+            style={{ backgroundColor: hex }}
+            title={`${hex}${isSelected ? " (selected)" : ""}`}
+            role="button"
+            aria-pressed={isActive || isSelected}
+            aria-label={`Color ${hex}`}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
 function SymmetryColorSidebarSections(props: {
   loading: boolean;
   workBusy: boolean;
   activeColor: number;
   setActiveColor: (n: number) => void;
+  selectedColors: number[];
+  setSelectedColors: (c: number[]) => void;
+  paintColorDistrib: PaintColorDistrib;
+  setPaintColorDistrib: (d: PaintColorDistrib) => void;
   interactionMode: InteractionMode;
   setInteractionMode: (m: InteractionMode) => void;
 }) {
@@ -464,6 +811,10 @@ function SymmetryColorSidebarSections(props: {
     workBusy,
     activeColor,
     setActiveColor,
+    selectedColors,
+    setSelectedColors,
+    paintColorDistrib,
+    setPaintColorDistrib,
     interactionMode,
     setInteractionMode,
   } = props;
@@ -511,33 +862,34 @@ function SymmetryColorSidebarSections(props: {
             <span className="sidebar-mode-label">Eyedropper</span>
           </button>
         </div>
-        <div
-          className="sidebar-palette-swatches"
-          role="group"
-          aria-label="Material color palette"
-        >
-          {MATERIAL_BUILTIN_PALETTE_HEX.map((hex) => {
-            const rgb = Number.parseInt(hex.slice(1), 16);
-            const isActive = (activeColor & 0xffffff) === rgb;
-            return (
-              <button
-                key={hex}
-                type="button"
-                className={
-                  isActive
-                    ? "sidebar-palette-swatch is-active"
-                    : "sidebar-palette-swatch"
-                }
-                style={{ backgroundColor: hex }}
-                title={hex}
-                aria-label={`Select color ${hex}`}
-                aria-pressed={isActive}
-                disabled={loading || workBusy}
-                onClick={() => setActiveColor(rgb)}
-              />
-            );
-          })}
-        </div>
+        {selectedColors.length > 0 && (
+          <div className="multi-color-hint">
+            {selectedColors.length} colors selected
+            {selectedColors.length > 1 && ` · ${paintColorDistrib.mode === "whiteNoise" ? "white noise" : paintColorDistrib.mode === "randomSingle" ? "random single" : paintColorDistrib.mode === "fbmNoise" ? "FBM" : paintColorDistrib.mode === "gradient" ? "gradient" : "dither"}`}
+            <button
+              type="button"
+              className="multi-color-clear-btn"
+              onClick={() => setSelectedColors([])}
+              title="Clear multi-color selection"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        <PaletteSwatches
+          activeColor={activeColor}
+          selectedColors={selectedColors}
+          setActiveColor={setActiveColor}
+          setSelectedColors={setSelectedColors}
+          disabled={loading || workBusy}
+          palette={MATERIAL_BUILTIN_PALETTE_HEX}
+        />
+        {selectedColors.length > 1 && (
+          <MultiColorPaintSection
+            distrib={paintColorDistrib}
+            setDistrib={setPaintColorDistrib}
+          />
+        )}
       </div>
     </div>
   );
@@ -566,6 +918,10 @@ function App() {
     mode: "camera" | "voxel" | "squishyGizmo";
   } | null>(null);
   const probingRef = useRef(false);
+  /** Pointer-up event that arrived while a pick probe was in-flight; replayed after the probe resolves. */
+  const pendingPointerUpRef = useRef<React.PointerEvent | null>(null);
+  /** Stable ref to onPointerUp so it can be called from inside onPointerDown's async continuation. */
+  const onPointerUpRef = useRef<((e: React.PointerEvent) => void) | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
   /** Pointer id currently captured by the viewport element (or null when not captured). */
   const capturedPointerIdRef = useRef<number | null>(null);
@@ -639,6 +995,13 @@ function App() {
     useState(false);
   const matchMaterialSelectColorRef = useRef(false);
   const [activeColor, setActiveColor] = useState(0x8899aa);
+  /** Multi-color palette selection (empty = single-color mode). */
+  const [selectedColors, setSelectedColors] = useState<number[]>([]);
+  const selectedColorsRef = useRef<number[]>([]);
+  const [paintColorDistrib, setPaintColorDistrib] = useState<PaintColorDistrib>(loadPaintColorDistrib);
+  const paintColorDistribRef = useRef<PaintColorDistrib>(paintColorDistrib);
+  /** Deterministic seed for the current stroke (randomSingle / preview consistency). */
+  const currentStrokeSeedRef = useRef<number>(0);
   const [activeMaterial, setActiveMaterial] = useState("plastic");
   const [brushRadius, setBrushRadius] = useState(0);
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
@@ -684,6 +1047,21 @@ function App() {
   const sprayConstrainToPlaneRef = useRef(false);
   const [spraySizeRange, setSpraySizeRange] = useState(false);
   const spraySizeRangeRef = useRef(false);
+  /** Scatter: random stamp offset in voxels (web `sprayScatter`; 0 = no scatter). */
+  const [sprayScatter, setSprayScatter] = useState(0);
+  const sprayScatterRef = useRef(0);
+  const [sprayRadiusMin, setSprayRadiusMin] = useState(0);
+  const sprayRadiusMinRef = useRef(0);
+  const [sprayRadiusMax, setSprayRadiusMax] = useState(4);
+  const sprayRadiusMaxRef = useRef(4);
+  /** Separate brush shape for spray mode (web `sprayBrushShape`). */
+  const [sprayBrushShape, setSprayBrushShape] = useState<BrushShape>("sphere");
+  const sprayBrushShapeRef = useRef<BrushShape>("sphere");
+  /** Plane reference for constrain-to-plane: auto | camera | x | y | z. */
+  type ConstrainToPlaneRef = "auto" | "camera" | "x" | "y" | "z";
+  const [sprayConstrainToPlaneRef_, setSprayConstrainToPlaneRef_] =
+    useState<ConstrainToPlaneRef>("auto");
+  const sprayConstrainToPlaneRefRef = useRef<ConstrainToPlaneRef>("auto");
   const [fillConstrainToPlane, setFillConstrainToPlane] = useState(false);
   const fillConstrainToPlaneRef = useRef(false);
   const [squishyBallCount, setSquishyBallCount] = useState(0);
@@ -826,7 +1204,11 @@ function App() {
   const [clothSimStiffnessPct, setClothSimStiffnessPct] = useState(100);
   const [clothSimIterations, setClothSimIterations] = useState(0);
   const [clothSimConstraintPasses, setClothSimConstraintPasses] = useState(2);
-  const [rockRoughness, setRockRoughness] = useState(0.45);
+  const [rockRoughness, setRockRoughness] = useState(0.4);
+  const [rockCount, setRockCount] = useState(1);
+  const [rockClusterRadius, setRockClusterRadius] = useState(1);
+  const [rockSinkDirection, setRockSinkDirection] = useState<"none" | "under" | "over">("none");
+  const [rockSinkAmount, setRockSinkAmount] = useState(0);
   const [grassDensity, setGrassDensity] = useState(4);
   const [grassMaxHeight, setGrassMaxHeight] = useState(3);
   // Flora params
@@ -850,6 +1232,11 @@ function App() {
   const [roofHollow, setRoofHollow] = useState(false);
   const [roofPins, setRoofPins] = useState<[number, number, number][]>([]);
   const roofPinsRef = useRef<[number, number, number][]>([]);
+  const [roofAreaShape, setRoofAreaShape] = useState<"polygon" | "square" | "circle">("polygon");
+  const roofAreaShapeRef = useRef<"polygon" | "square" | "circle">("polygon");
+  // First click anchor for square/circle roof modes
+  const [roofFirstClick, setRoofFirstClick] = useState<[number, number, number] | null>(null);
+  const roofFirstClickRef = useRef<[number, number, number] | null>(null);
   const [sculptStrokeMode, setSculptStrokeMode] =
     useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] =
@@ -955,6 +1342,25 @@ function App() {
     }
     return { x: 16, y: 56 };
   });
+  const [colorPaletteFloating, setColorPaletteFloating] = useState(() => {
+    if (typeof localStorage === "undefined") return false;
+    return localStorage.getItem(LS_PALETTE_FLOATING) === "1";
+  });
+  const [colorPalettePos, setColorPalettePos] = useState(() => {
+    if (typeof localStorage === "undefined") return { x: 220, y: 56 };
+    try {
+      const s = localStorage.getItem(LS_PALETTE_FLOAT_POS);
+      if (s) {
+        const j = JSON.parse(s) as { x?: unknown; y?: unknown };
+        if (typeof j.x === "number" && typeof j.y === "number") {
+          return { x: j.x, y: j.y };
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return { x: 220, y: 56 };
+  });
   const toolPaneDragRef = useRef<{
     pid: number;
     startX: number;
@@ -964,6 +1370,13 @@ function App() {
   } | null>(null);
   const toolPanePosRef = useRef(toolPanePos);
   toolPanePosRef.current = toolPanePos;
+
+  const colorPalettePosRef = useRef(colorPalettePos);
+  colorPalettePosRef.current = colorPalettePos;
+
+  const [interactionModeMenuOpen, setInteractionModeMenuOpen] = useState(false);
+  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  const [activeTLT, setActiveTLT] = useState<ToolsPane | null>(null);
 
   const [joinModalOpen, setJoinModalOpen] = useState(false);
   const [collabJoinPending, setCollabJoinPending] = useState(false);
@@ -1557,11 +1970,6 @@ function App() {
           typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
         console.warn(msg);
       }),
-      listen("voxelle-open-project-stats", () => {
-        window.alert(
-          "Project stats: use the menu Debug → Copy performance info, then paste into a note or issue.",
-        );
-      }),
     ]).then((unlisteners) => {
       if (!active) {
         unlisteners.forEach((u) => u());
@@ -1591,6 +1999,8 @@ function App() {
     sidebarExpanded,
     rightSidebarExpanded,
     toolsPaneFloating,
+    colorPaletteFloating,
+    colorPalettePos,
     pathLabel,
     collabActive,
     loading,
@@ -1697,6 +2107,15 @@ function App() {
   useEffect(() => {
     activeColorRef.current = activeColor;
   }, [activeColor]);
+  useEffect(() => {
+    selectedColorsRef.current = selectedColors;
+  }, [selectedColors]);
+  useEffect(() => {
+    paintColorDistribRef.current = paintColorDistrib;
+    try {
+      localStorage.setItem(LS_PAINT_COLOR_DISTRIB, JSON.stringify(paintColorDistrib));
+    } catch {}
+  }, [paintColorDistrib]);
   useEffect(() => {
     activeMaterialRef.current = activeMaterial;
   }, [activeMaterial]);
@@ -1868,6 +2287,9 @@ function App() {
   useEffect(() => {
     clothPinsRef.current = clothPins;
   }, [clothPins]);
+  useEffect(() => {
+    roofAreaShapeRef.current = roofAreaShape;
+  }, [roofAreaShape]);
   const ropeFirstScreenRef = useRef<{ nx: number; ny: number } | null>(null);
   const ropeSagRef = useRef(ropeSag);
   const ropeTensionRef = useRef(ropeTension);
@@ -1880,10 +2302,17 @@ function App() {
   const clothSimIterationsRef = useRef(clothSimIterations);
   const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
   const rockRoughnessRef = useRef(rockRoughness);
+  const rockCountRef = useRef(rockCount);
+  const rockClusterRadiusRef = useRef(rockClusterRadius);
+  const rockSinkDirectionRef = useRef(rockSinkDirection);
+  const rockSinkAmountRef = useRef(rockSinkAmount);
   const grassDensityRef = useRef(grassDensity);
   const grassMaxHeightRef = useRef(grassMaxHeight);
   const rockPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
   const grassPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
+  const roofStyleRef = useRef(roofStyle);
+  const roofHeightRef = useRef(roofHeight);
+  const roofHollowRef = useRef(roofHollow);
   useEffect(() => {
     ropeFirstScreenRef.current = ropeFirstScreen;
   }, [ropeFirstScreen]);
@@ -1921,11 +2350,32 @@ function App() {
     rockRoughnessRef.current = rockRoughness;
   }, [rockRoughness]);
   useEffect(() => {
+    rockCountRef.current = rockCount;
+  }, [rockCount]);
+  useEffect(() => {
+    rockClusterRadiusRef.current = rockClusterRadius;
+  }, [rockClusterRadius]);
+  useEffect(() => {
+    rockSinkDirectionRef.current = rockSinkDirection;
+  }, [rockSinkDirection]);
+  useEffect(() => {
+    rockSinkAmountRef.current = rockSinkAmount;
+  }, [rockSinkAmount]);
+  useEffect(() => {
     grassDensityRef.current = grassDensity;
   }, [grassDensity]);
   useEffect(() => {
     grassMaxHeightRef.current = grassMaxHeight;
   }, [grassMaxHeight]);
+  useEffect(() => {
+    roofStyleRef.current = roofStyle;
+  }, [roofStyle]);
+  useEffect(() => {
+    roofHeightRef.current = roofHeight;
+  }, [roofHeight]);
+  useEffect(() => {
+    roofHollowRef.current = roofHollow;
+  }, [roofHollow]);
   useEffect(() => {
     squishyModeRef.current = squishyMode;
   }, [squishyMode]);
@@ -1959,6 +2409,11 @@ function App() {
       planeHollow: surfacePlaneHollowRef.current,
       constrainToPlane,
       spraySizeRange: spraySizeRangeRef.current,
+      sprayScatter: sprayScatterRef.current,
+      sprayRadiusMin: sprayRadiusMinRef.current,
+      sprayRadiusMax: sprayRadiusMaxRef.current,
+      sprayBrushShape: sm === "spray" ? sprayBrushShapeRef.current : undefined,
+      constrainToPlaneRef: constrainToPlane ? sprayConstrainToPlaneRefRef.current : undefined,
       strokeFamilyVariant: strokeFamilyVariantRef.current,
       strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
       strokeAxisAlign: selectionStrokeAxisAlignRef.current,
@@ -2152,6 +2607,12 @@ function App() {
       planeAxis: isSculpt ? "auto" : planeAxisRef.current,
       strokeAux: mergedStrokeAux({}),
       color: activeColorRef.current,
+      ...((() => {
+        const pal = selectedColorsRef.current;
+        return pal.length > 1
+          ? { palette: pal, paintColorDistrib: paintColorDistribRef.current }
+          : {};
+      })()),
       material: activeMaterialRef.current,
       matchMaterial: matchMaterialSelectColorRef.current,
       useBrushPreview: im !== "squishy" && !isGenerator,
@@ -2176,9 +2637,22 @@ function App() {
             generatorRockSize: Math.max(1, generatorSphereRadiusRef.current),
             generatorRockRoughness: rockRoughnessRef.current,
             generatorRockSeed: rockPreviewSeedRef.current,
+            generatorRockCount: rockCountRef.current,
+            generatorRockClusterRadius: rockClusterRadiusRef.current,
+            generatorRockSinkDirection: rockSinkDirectionRef.current === "under" ? -1 : rockSinkDirectionRef.current === "over" ? 1 : 0,
+            generatorRockSinkAmount: rockSinkAmountRef.current,
             generatorGrassDensity: grassDensityRef.current,
             generatorGrassMaxHeight: grassMaxHeightRef.current,
             generatorGrassSeed: grassPreviewSeedRef.current,
+            generatorRoofPins: roofPinsRef.current.map((p) => [p[0], p[1], p[2]]),
+            generatorRoofStyle: roofStyleRef.current,
+            generatorRoofHeight: roofHeightRef.current,
+            generatorRoofThickness: 1,
+            generatorRoofBreakRatio: 0.5,
+            generatorRoofWallHeight: 3,
+            generatorRoofParapetHeight: 2,
+            generatorRoofSaltSkew: 0,
+            generatorRoofHollow: roofHollowRef.current,
           }
         : {}),
     };
@@ -2229,11 +2703,20 @@ function App() {
         : {}),
     };
     if (dispatch.kind === "edit") {
+      const palette = selectedColorsRef.current;
+      const multiColor = palette.length > 1;
       return invoke("voxel_edit_at_screen", {
         args: {
           ...sharedArgs,
           tool: dispatch.tool,
           color: activeColorRef.current,
+          ...(multiColor
+            ? {
+                palette,
+                paintColorDistrib: paintColorDistribRef.current,
+                strokeSeed: currentStrokeSeedRef.current,
+              }
+            : {}),
           material: activeMaterialRef.current,
         },
       })
@@ -2428,6 +2911,21 @@ function App() {
     spraySizeRangeRef.current = spraySizeRange;
   }, [spraySizeRange]);
   useEffect(() => {
+    sprayScatterRef.current = sprayScatter;
+  }, [sprayScatter]);
+  useEffect(() => {
+    sprayRadiusMinRef.current = sprayRadiusMin;
+  }, [sprayRadiusMin]);
+  useEffect(() => {
+    sprayRadiusMaxRef.current = sprayRadiusMax;
+  }, [sprayRadiusMax]);
+  useEffect(() => {
+    sprayBrushShapeRef.current = sprayBrushShape;
+  }, [sprayBrushShape]);
+  useEffect(() => {
+    sprayConstrainToPlaneRefRef.current = sprayConstrainToPlaneRef_;
+  }, [sprayConstrainToPlaneRef_]);
+  useEffect(() => {
     fillConstrainToPlaneRef.current = fillConstrainToPlane;
   }, [fillConstrainToPlane]);
   useEffect(() => {
@@ -2619,6 +3117,14 @@ function App() {
       /* ignore */
     }
   }, [toolPanePos]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_PALETTE_FLOATING, colorPaletteFloating ? "1" : "0");
+  }, [colorPaletteFloating]);
+
+  useEffect(() => {
+    localStorage.setItem(LS_PALETTE_FLOAT_POS, JSON.stringify({ x: colorPalettePos.x, y: colorPalettePos.y }));
+  }, [colorPalettePos]);
 
   useEffect(() => {
     const p = loadPreferences();
@@ -2826,16 +3332,16 @@ function App() {
     flySkipNextFlyMoveRef.current = false;
     flyPendingLookDxRef.current = 0;
     flyPendingLookDyRef.current = 0;
-    const vp = viewportRef.current;
-    const pid = flyCapturedPointerIdRef.current;
     flyCapturedPointerIdRef.current = null;
-    if (vp != null && pid != null) {
+    // Release pointer lock if active
+    if (document.pointerLockElement) {
       try {
-        vp.releasePointerCapture(pid);
+        document.exitPointerLock();
       } catch {
-        /* not capturing or pointer already gone */
+        /* */
       }
     }
+    // Release Tauri-native cursor grab/visibility
     const w = getCurrentWindow();
     try {
       await w.setCursorGrab(false);
@@ -2849,37 +3355,41 @@ function App() {
     }
   }, []);
 
-  const activateFlyMouseLook = useCallback(async (pointerId: number) => {
+  const activateFlyMouseLook = useCallback(async (_pointerId: number) => {
     const el = viewportRef.current;
     if (!el) return;
     flySkipNextFlyMoveRef.current = false;
     flyPendingLookDxRef.current = 0;
     flyPendingLookDyRef.current = 0;
-    // Retargets this pointer to the viewport until pointerup (capture does not persist across the full click).
+    flyCapturedPointerIdRef.current = null;
+    // Request pointer lock FIRST — must be called synchronously from user gesture
+    // before any awaits, otherwise the browser drops the gesture context.
     try {
-      el.setPointerCapture(pointerId);
-      flyCapturedPointerIdRef.current = pointerId;
+      await el.requestPointerLock();
     } catch {
-      flyCapturedPointerIdRef.current = null;
+      /* pointer lock unavailable */
     }
     const r = el.getBoundingClientRect();
     const cx = r.left + r.width / 2;
     const cy = r.top + r.height / 2;
-    const w = getCurrentWindow();
-    try {
-      await w.setCursorPosition(new LogicalPosition(cx, cy));
-    } catch {
-      /* */
-    }
-    try {
-      await w.setCursorGrab(true);
-    } catch {
-      /* Linux: unsupported */
-    }
-    try {
-      await w.setCursorVisible(false);
-    } catch {
-      /* */
+    // Tauri-native fallback: grab + hide cursor if pointer lock didn't engage
+    if (document.pointerLockElement !== el) {
+      const w = getCurrentWindow();
+      try {
+        await w.setCursorPosition(new LogicalPosition(cx, cy));
+      } catch {
+        /* */
+      }
+      try {
+        await w.setCursorGrab(true);
+      } catch {
+        /* Linux: unsupported */
+      }
+      try {
+        await w.setCursorVisible(false);
+      } catch {
+        /* */
+      }
     }
     flyLastClientRef.current = { x: cx, y: cy };
     flyMouseLookActiveRef.current = true;
@@ -2978,8 +3488,16 @@ function App() {
     generatorSphereRadius,
     activeColor,
     rockRoughness,
+    rockCount,
+    rockClusterRadius,
+    rockSinkDirection,
+    rockSinkAmount,
     grassDensity,
     grassMaxHeight,
+    roofPins,
+    roofStyle,
+    roofHeight,
+    roofHollow,
   ]);
 
   useEffect(() => {
@@ -3051,13 +3569,24 @@ function App() {
       const vp = viewportRef.current;
       const s = dpr();
       if (!flyMouseLookActiveRef.current || !vp) return;
+
+      // When pointer lock is active, movementX/Y give raw deltas directly —
+      // no need to recenter or skip synthetic events.
+      if (document.pointerLockElement === vp) {
+        const dxCss = e.movementX;
+        const dyCss = e.movementY;
+        if (dxCss === 0 && dyCss === 0) return;
+        flyPendingLookDxRef.current += dxCss * s;
+        flyPendingLookDyRef.current += dyCss * s;
+        return;
+      }
+
+      // Fallback: manual recentering when pointer lock is unavailable
       if (flySkipNextFlyMoveRef.current) {
         flySkipNextFlyMoveRef.current = false;
         flyLastClientRef.current = { x: e.clientX, y: e.clientY };
         return;
       }
-      // True FPS deltas: prefer movementX/Y. Do NOT use (client - viewportCenter);
-      // that behaves like a joystick and keeps turning while the cursor stays off-center.
       let dxCss = e.movementX;
       let dyCss = e.movementY;
       if (dxCss === 0 && dyCss === 0) {
@@ -3114,6 +3643,22 @@ function App() {
       void invoke("sync_fly_input", {
         args: { forward, right, up, speedScale },
       }).catch(() => {});
+      // Recenter cursor each frame when using Tauri fallback (not pointer lock)
+      if (flyMouseLookActiveRef.current && !document.pointerLockElement) {
+        const vp = viewportRef.current;
+        if (vp) {
+          const r = vp.getBoundingClientRect();
+          const cx = r.left + r.width / 2;
+          const cy = r.top + r.height / 2;
+          void getCurrentWindow()
+            .setCursorPosition(new LogicalPosition(cx, cy))
+            .then(() => {
+              flySkipNextFlyMoveRef.current = true;
+              flyLastClientRef.current = { x: cx, y: cy };
+            })
+            .catch(() => {});
+        }
+      }
       flyRafRef.current = requestAnimationFrame(tick);
     };
     flyRafRef.current = requestAnimationFrame(tick);
@@ -3224,6 +3769,7 @@ function App() {
       activePointerIdRef.current = null;
       pointerStartRef.current = null;
       maxPointerMoveRef.current = 0;
+      pendingPointerUpRef.current = null;
     },
     [logPlaneStrokeDebug],
   );
@@ -3322,7 +3868,7 @@ function App() {
       (mode === "stamp" && e.button !== 0) ||
       (mode === "punch" && e.button !== 0) ||
       (mode === "sculpt" && e.button !== 0) ||
-      (mode === "generator" && e.button !== 0) ||
+      (mode === "generator" && e.button !== 0 && e.button !== 2) ||
       (mode === "squishy" && e.button !== 0);
 
     const logoSplashPointer =
@@ -3354,6 +3900,25 @@ function App() {
       }
     }
 
+    // Generator right-click: reseed preview (web parity)
+    if (
+      mode === "generator" &&
+      e.button === 2 &&
+      !loading &&
+      !workBusy
+    ) {
+      e.preventDefault();
+      rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
+      // Trigger a preview sync so the new seed is sent to Rust
+      const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
+      void invoke("sync_preview_input", {
+        args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(mode)),
+      }).catch(() => {});
+      probingRef.current = false;
+      resetPointerGesture("generator-reseed", e);
+      return;
+    }
+
     let hitSolid = false;
     const isDrawOrSelect =
       !logoSplashPointer &&
@@ -3375,16 +3940,12 @@ function App() {
         mode === "generator" ||
         mode === "squishy") &&
       e.button === 0;
-    // Fill and selection modes skip the async pick probe — they commit on
-    // pointer-up via a screen coordinate alone, so the Rust side handles
-    // misses gracefully.  Skipping the probe avoids a race where onPointerUp
-    // fires while the probe is still in-flight, causing the click to be
-    // silently discarded (the "click twice to fill/select" bug).
-    const skipProbe =
-      isDrawOrSelect &&
-      (drawStrokeModeRef.current === "fill" ||
-        getStrokeDispatch(mode)?.kind === "selection");
-    if (isDrawOrSelect && !skipProbe) {
+    // All draw/select modes run the async pick probe. Pointer-up events that
+    // arrive while probing are deferred and replayed after the probe resolves
+    // (see pendingPointerUpRef), which fixes both the "click twice" race and
+    // the "can't orbit on empty space" bug for all tools including fill and
+    // selection modes.
+    if (isDrawOrSelect) {
       try {
         hitSolid = await invoke<boolean>("voxel_pick_probe", {
           args: { nx, ny },
@@ -3392,9 +3953,6 @@ function App() {
       } catch {
         hitSolid = false;
       }
-    }
-    if (skipProbe) {
-      hitSolid = true;
     }
 
     probingRef.current = false;
@@ -3431,6 +3989,7 @@ function App() {
         dragDidEditRef.current = false;
         strokeViewportStartRef.current = { nx, ny };
         lastStrokeNormRef.current = { nx, ny };
+        currentStrokeSeedRef.current = Math.floor(Math.random() * 0xffffffff) >>> 0;
         if (dispatch?.kind === "selection") {
           selectionStrokeBegunRef.current = true;
           void invoke("selection_stroke_begin").catch(() => {});
@@ -3453,6 +4012,14 @@ function App() {
           shiftKey: e.shiftKey,
         },
       });
+    }
+
+    // If pointer-up arrived while the probe was in-flight, replay it now that
+    // the gesture is fully established.
+    const pendingUp = pendingPointerUpRef.current;
+    if (pendingUp && pendingUp.pointerId === pointerId) {
+      pendingPointerUpRef.current = null;
+      onPointerUpRef.current?.(pendingUp);
     }
   };
 
@@ -3820,12 +4387,21 @@ function App() {
                 ? lastStrokeNormRef.current
                 : null;
             if (dispatch.kind === "edit") {
+              const previewPalette = selectedColorsRef.current;
+              const previewMultiColor = previewPalette.length > 1;
               void invoke("voxel_stroke_preview_at_screen", {
                 args: {
                   nx: px,
                   ny: py,
                   tool: dispatch.tool,
                   color: activeColorRef.current,
+                  ...(previewMultiColor
+                    ? {
+                        palette: previewPalette,
+                        paintColorDistrib: paintColorDistribRef.current,
+                        strokeSeed: currentStrokeSeedRef.current,
+                      }
+                    : {}),
                   material: activeMaterialRef.current,
                   brushRadius: brushRadiusRef.current,
                   brushShape: brushShapeRef.current,
@@ -4002,8 +4578,9 @@ function App() {
       return;
     }
     if (probingRef.current && activePointerIdRef.current === e.pointerId) {
-      probingRef.current = false;
-      resetPointerGesture("probe-up", e);
+      // Probe is still in-flight — defer this up event so onPointerDown can
+      // replay it once the gesture is established (see pendingPointerUpRef).
+      pendingPointerUpRef.current = e;
       return;
     }
 
@@ -4060,17 +4637,24 @@ function App() {
         } else if (m === "generator") {
           const gk = generatorKindRef.current;
           if (gk === "rocks") {
+            const placeSeed = rockPreviewSeedRef.current;
             void invoke("generator_rocks_at_screen", {
               args: {
                 nx,
                 ny,
-                seed: (Math.random() * 1e9) | 0,
+                seed: placeSeed,
                 size: Math.max(1, generatorSphereRadiusRef.current),
                 roughness: rockRoughness,
                 color: activeColorRef.current,
                 material: activeMaterialRef.current,
+                count: rockCount,
+                clusterRadius: rockClusterRadius,
+                sinkDirection: rockSinkDirection === "under" ? -1 : rockSinkDirection === "over" ? 1 : 0,
+                sinkAmount: rockSinkAmount,
               },
             }).catch(() => {});
+            // Auto-reseed after placement so next preview shows a new shape
+            rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
           } else if (gk === "grass") {
             void invoke("generator_grass_at_screen", {
               args: {
@@ -4137,7 +4721,6 @@ function App() {
               },
             }).catch(() => {});
           } else if (gk === "roof") {
-            // Roof uses pin-based input like cloth
             void invoke<[number, number, number] | null>(
               "voxel_stroke_anchor_coord_at_screen",
               {
@@ -4151,11 +4734,60 @@ function App() {
             )
               .then((c) => {
                 if (!c) return;
-                setRoofPins((v) => {
-                  const next = [...v, c];
-                  roofPinsRef.current = next;
-                  return next;
-                });
+                const shape = roofAreaShapeRef.current;
+                if (shape === "polygon") {
+                  setRoofPins((v) => {
+                    const next = [...v, c];
+                    roofPinsRef.current = next;
+                    return next;
+                  });
+                } else if (shape === "square") {
+                  const first = roofFirstClickRef.current;
+                  if (!first) {
+                    roofFirstClickRef.current = c;
+                    setRoofFirstClick(c);
+                  } else {
+                    roofFirstClickRef.current = null;
+                    setRoofFirstClick(null);
+                    const [x1, y1, z1] = first;
+                    const [x2, , z2] = c;
+                    // Build 4 corners of a rectangle in the horizontal (XZ) plane.
+                    const pins: [number, number, number][] = [
+                      [x1, y1, z1],
+                      [x2, y1, z1],
+                      [x2, y1, z2],
+                      [x1, y1, z2],
+                    ];
+                    setRoofPins(pins);
+                    roofPinsRef.current = pins;
+                  }
+                } else if (shape === "circle") {
+                  const first = roofFirstClickRef.current;
+                  if (!first) {
+                    roofFirstClickRef.current = c;
+                    setRoofFirstClick(c);
+                  } else {
+                    roofFirstClickRef.current = null;
+                    setRoofFirstClick(null);
+                    const [cx, cy, cz] = first;
+                    const [ex, , ez] = c;
+                    const dx = ex - cx;
+                    const dz = ez - cz;
+                    const r = Math.sqrt(dx * dx + dz * dz);
+                    const N = 16;
+                    const pins: [number, number, number][] = [];
+                    for (let i = 0; i < N; i++) {
+                      const angle = (2 * Math.PI * i) / N;
+                      pins.push([
+                        Math.round(cx + r * Math.cos(angle)),
+                        cy,
+                        Math.round(cz + r * Math.sin(angle)),
+                      ]);
+                    }
+                    setRoofPins(pins);
+                    roofPinsRef.current = pins;
+                  }
+                }
               })
               .catch(() => {});
           } else if (gk === "piscina") {
@@ -4475,6 +5107,7 @@ function App() {
       }
     }
   };
+  onPointerUpRef.current = onPointerUp;
 
   const onPointerLeave = (e: React.PointerEvent) => {
     logPlaneStrokeDebug("leave", e);
@@ -4766,6 +5399,7 @@ function App() {
       ropePhase.active ||
       clothPhase.active ||
       (generatorKind === "cloth" && clothPins.length > 0) ||
+      (generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null)) ||
       showPolygonPhaseHud ||
       showWallSculptPolygonHud);
 
@@ -5227,6 +5861,10 @@ function App() {
                           setActiveColor={setActiveColor}
                           interactionMode={interactionMode}
                           setInteractionMode={setInteractionMode}
+                          selectedColors={selectedColors}
+                          setSelectedColors={setSelectedColors}
+                          paintColorDistrib={paintColorDistrib}
+                          setPaintColorDistrib={setPaintColorDistrib}
                         />
 
                         <div className="sidebar-section-label">Material</div>
@@ -5288,6 +5926,10 @@ function App() {
                           setActiveColor={setActiveColor}
                           interactionMode={interactionMode}
                           setInteractionMode={setInteractionMode}
+                          selectedColors={selectedColors}
+                          setSelectedColors={setSelectedColors}
+                          paintColorDistrib={paintColorDistrib}
+                          setPaintColorDistrib={setPaintColorDistrib}
                         />
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
                           Brush and terrain options are in the tool options
@@ -5360,6 +6002,10 @@ function App() {
                           setActiveColor={setActiveColor}
                           interactionMode={interactionMode}
                           setInteractionMode={setInteractionMode}
+                          selectedColors={selectedColors}
+                          setSelectedColors={setSelectedColors}
+                          paintColorDistrib={paintColorDistrib}
+                          setPaintColorDistrib={setPaintColorDistrib}
                         />
                         {generatorKind === "rope" &&
                         ropeFirstScreen &&
@@ -5434,6 +6080,10 @@ function App() {
                           setActiveColor={setActiveColor}
                           interactionMode={interactionMode}
                           setInteractionMode={setInteractionMode}
+                          selectedColors={selectedColors}
+                          setSelectedColors={setSelectedColors}
+                          paintColorDistrib={paintColorDistrib}
+                          setPaintColorDistrib={setPaintColorDistrib}
                         />
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
                           Add / pick / delete blobs in the viewport; commit in
@@ -5455,75 +6105,166 @@ function App() {
                   </div>
                 </>
               ) : (
-                <div
-                  className="sidebar-mode-group"
-                  role="group"
-                  aria-label="Interaction mode"
-                >
-                  <button
-                    type="button"
-                    className={
-                      interactionMode === "navigate"
-                        ? "sidebar-mode-btn is-active"
-                        : "sidebar-mode-btn"
-                    }
-                    disabled={loading || workBusy}
-                    onClick={() => setInteractionMode("navigate")}
-                    title="Navigate"
-                  >
-                    <span className="sidebar-mode-icon" aria-hidden>
-                      ✋
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className={
-                      interactionMode === "add"
-                        ? "sidebar-mode-btn is-active"
-                        : "sidebar-mode-btn"
-                    }
-                    disabled={loading || workBusy}
-                    onClick={() => setInteractionMode("add")}
-                    title="Add"
-                  >
-                    <span className="sidebar-mode-icon" aria-hidden>
-                      👇
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className={
-                      interactionMode === "sculpt"
-                        ? "sidebar-mode-btn is-active"
-                        : "sidebar-mode-btn"
-                    }
-                    disabled={loading || workBusy}
-                    onClick={() => setInteractionMode("sculpt")}
-                    title="Sculpt"
-                  >
-                    <span className="sidebar-mode-icon" aria-hidden>
-                      ∧
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    className={
-                      interactionMode === "fly"
-                        ? "sidebar-mode-btn is-active"
-                        : "sidebar-mode-btn"
-                    }
-                    disabled={loading || workBusy}
-                    onClick={() => setInteractionMode("fly")}
-                    title="Fly"
-                  >
-                    <span className="sidebar-mode-icon" aria-hidden>
-                      ✈
-                    </span>
-                  </button>
-                </div>
+                <>
+                  {/* Mode Buttons - Interaction + Selection */}
+                  <div className="sidebar-collapsed-section sidebar-mode-buttons">
+                    <button
+                      type="button"
+                      className="sidebar-interaction-mode-button"
+                      onClick={() => setInteractionModeMenuOpen(!interactionModeMenuOpen)}
+                      disabled={loading || workBusy}
+                      title="Interaction modes"
+                    >
+                      {interactionMode === "navigate" ? "✋" : interactionMode === "fly" ? "✈" : interactionMode === "sculpt" ? "∧" : (["add", "remove", "paint"].includes(interactionMode)) ? "⊕" : "◻️"}
+                    </button>
+                    {interactionModeMenuOpen && (
+                      <div className="sidebar-interaction-mode-menu">
+                        <button type="button" onClick={() => {setInteractionMode("navigate"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>✋</span><span>Navigate</span></button>
+                        <button type="button" onClick={() => {setInteractionMode("fly"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>✈</span><span>Fly</span></button>
+                        <button type="button" onClick={() => {setInteractionMode("sculpt"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>∧</span><span>Sculpt</span></button>
+                        <button type="button" onClick={() => {setInteractionMode("add"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>⊕</span><span>Add/Remove</span></button>
+                        <button type="button" onClick={() => {setInteractionMode("paint"); setInteractionModeMenuOpen(false);}} disabled={loading || workBusy}><span>🎨</span><span>Paint</span></button>
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="sidebar-selection-mode-button"
+                      onClick={() => setSelectionMenuOpen(!selectionMenuOpen)}
+                      disabled={loading || workBusy}
+                      title="Selection modes"
+                    >
+                      📋
+                    </button>
+                    {selectionMenuOpen && (
+                      <div className="sidebar-selection-menu">
+                        <button type="button" onClick={() => {setInteractionMode("select"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select</button>
+                        <button type="button" onClick={() => {setInteractionMode("selectByColor"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select by Color</button>
+                        <button type="button" onClick={() => {setInteractionMode("selectCoplanar"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select Coplanar</button>
+                        <button type="button" onClick={() => {setInteractionMode("selectCoplanarEmpty"); setSelectionMenuOpen(false);}} disabled={loading || workBusy}>Select Coplanar Empty</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* TLT Selector or Subtools */}
+                  <div className="sidebar-collapsed-section">
+                    {!activeTLT ? (
+                      <div className="sidebar-tlt-selector">
+                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "draw" ? "is-active" : ""}`} onClick={() => setActiveTLT("draw")} disabled={loading || workBusy} title="Draw tools">📝</button>
+                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "sculpt" ? "is-active" : ""}`} onClick={() => setActiveTLT("sculpt")} disabled={loading || workBusy} title="Sculpt tools">🔨</button>
+                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "generators" ? "is-active" : ""}`} onClick={() => setActiveTLT("generators")} disabled={loading || workBusy} title="Generators">⚙️</button>
+                        <button type="button" className={`sidebar-tlt-button ${activeTLT === "fly" ? "is-active" : ""}`} onClick={() => setActiveTLT("fly")} disabled={loading || workBusy} title="Fly mode">✈</button>
+                      </div>
+                    ) : (
+                      <div className="sidebar-subtools">
+                        {activeTLT === "draw" && (<><button type="button" className={`sidebar-subtool-button ${interactionMode === "add" ? "is-active" : ""}`} onClick={() => setInteractionMode("add")} disabled={loading || workBusy} title="Add">⊕</button><button type="button" className={`sidebar-subtool-button ${interactionMode === "remove" ? "is-active" : ""}`} onClick={() => setInteractionMode("remove")} disabled={loading || workBusy} title="Remove">⊖</button><button type="button" className={`sidebar-subtool-button ${interactionMode === "paint" ? "is-active" : ""}`} onClick={() => setInteractionMode("paint")} disabled={loading || workBusy} title="Paint">🎨</button></>)}
+                        {activeTLT === "sculpt" && <button type="button" className={`sidebar-subtool-button ${interactionMode === "sculpt" ? "is-active" : ""}`} onClick={() => setInteractionMode("sculpt")} disabled={loading || workBusy} title="Sculpt">🔨</button>}
+                        {activeTLT === "generators" && <button type="button" className={`sidebar-subtool-button ${interactionMode === "generator" ? "is-active" : ""}`} onClick={() => setInteractionMode("generator")} disabled={loading || workBusy} title="Generators">⚙️</button>}
+                        {activeTLT === "fly" && <button type="button" className={`sidebar-subtool-button ${interactionMode === "fly" ? "is-active" : ""}`} onClick={() => setInteractionMode("fly")} disabled={loading || workBusy} title="Fly">✈</button>}
+                        <button type="button" className="sidebar-back-button" onClick={() => setActiveTLT(null)} disabled={loading || workBusy} title="Back to tools">←</button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Palette Icon */}
+                  <div className="sidebar-collapsed-section">
+                    <button type="button" className="sidebar-palette-icon" onClick={() => setColorPaletteFloating(!colorPaletteFloating)} disabled={loading || workBusy} title="Toggle color palette" aria-label="Toggle color palette">🎨</button>
+                  </div>
+                </>
               )}
             </div>
           </aside>
+        ) : null}
+        {colorPaletteFloating && showEditorChrome ? (
+          <div
+            className="floating-palette-panel"
+            style={{ left: colorPalettePos.x, top: colorPalettePos.y }}
+            role="region"
+            aria-label="Floating color palette"
+          >
+            <div className="floating-palette-header">
+              <div
+                className="floating-palette-drag-handle"
+                onPointerDown={(e) => {
+                  const pid = e.pointerId;
+                  const startX = e.clientX;
+                  const startY = e.clientY;
+                  const origX = colorPalettePos.x;
+                  const origY = colorPalettePos.y;
+
+                  const handleMove = (moveE: PointerEvent) => {
+                    if (moveE.pointerId !== pid) return;
+                    const dx = moveE.clientX - startX;
+                    const dy = moveE.clientY - startY;
+                    setColorPalettePos({
+                      x: origX + dx,
+                      y: origY + dy,
+                    });
+                  };
+
+                  const handleUp = (upE: PointerEvent) => {
+                    if (upE.pointerId !== pid) return;
+                    document.removeEventListener("pointermove", handleMove as EventListener);
+                    document.removeEventListener("pointerup", handleUp as EventListener);
+                  };
+
+                  document.addEventListener("pointermove", handleMove as EventListener);
+                  document.addEventListener("pointerup", handleUp as EventListener);
+                }}
+                aria-label="Drag to move palette"
+              >
+                <span className="floating-palette-grip" aria-hidden>
+                  ⋮⋮
+                </span>
+              </div>
+              <div className="floating-palette-header-actions">
+                <button
+                  type="button"
+                  className="floating-palette-dock-btn"
+                  onClick={() => setColorPaletteFloating(false)}
+                  title="Dock palette"
+                >
+                  Dock
+                </button>
+              </div>
+            </div>
+            <div className="floating-palette-content">
+              <div className="sidebar-color-row">
+                <label className="sidebar-palette-row sidebar-color-swatch">
+                  <input
+                    type="color"
+                    value={`#${activeColor.toString(16).padStart(6, "0")}`}
+                    onChange={(ev) => {
+                      const h = ev.target.value.slice(1);
+                      const n = Number.parseInt(h, 16);
+                      if (!Number.isNaN(n)) setActiveColor(n);
+                    }}
+                    disabled={loading || workBusy}
+                    aria-label="Brush color"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={
+                    interactionMode === "eyedropper"
+                      ? "sidebar-mode-btn is-active"
+                      : "sidebar-mode-btn"
+                  }
+                  disabled={loading || workBusy}
+                  onClick={() => setInteractionMode("eyedropper")}
+                >
+                  <span className="sidebar-mode-label">Eyedropper</span>
+                </button>
+              </div>
+              <PaletteSwatches
+                activeColor={activeColor}
+                selectedColors={selectedColors}
+                setActiveColor={setActiveColor}
+                setSelectedColors={setSelectedColors}
+                disabled={loading || workBusy}
+                palette={MATERIAL_BUILTIN_PALETTE_HEX}
+              />
+            </div>
+          </div>
         ) : null}
         <div
           className={`viewport-wrap${showStartScreen ? " is-start-screen" : ""}${
@@ -5909,6 +6650,44 @@ function App() {
                       onClick={() => extrudePhase.commit()}
                     >
                       Done
+                    </button>
+                  </div>
+                ) : null}
+                {/* Roof placing phase: pin/anchor count + Cancel */}
+                {generatorKind === "roof" &&
+                (roofPins.length > 0 || roofFirstClick !== null) ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Roof placement"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>
+                      Roof
+                    </span>
+                    <span
+                      style={{
+                        fontSize: "0.78rem",
+                        color: "var(--app-text-muted)",
+                      }}
+                    >
+                      {roofFirstClick !== null
+                        ? roofAreaShape === "circle"
+                          ? "click edge"
+                          : "click opposite corner"
+                        : `${roofPins.length} pin${roofPins.length !== 1 ? "s" : ""}`}
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => {
+                        setRoofPins([]);
+                        roofPinsRef.current = [];
+                        roofFirstClickRef.current = null;
+                        setRoofFirstClick(null);
+                        void invoke("voxel_stroke_preview_reset").catch(() => {});
+                      }}
+                    >
+                      Cancel
                     </button>
                   </div>
                 ) : null}
@@ -6312,6 +7091,16 @@ function App() {
                     setSprayConstrainToPlane={setSprayConstrainToPlane}
                     spraySizeRange={spraySizeRange}
                     setSpraySizeRange={setSpraySizeRange}
+                    sprayScatter={sprayScatter}
+                    setSprayScatter={setSprayScatter}
+                    sprayRadiusMin={sprayRadiusMin}
+                    setSprayRadiusMin={setSprayRadiusMin}
+                    sprayRadiusMax={sprayRadiusMax}
+                    setSprayRadiusMax={setSprayRadiusMax}
+                    sprayBrushShape={sprayBrushShape}
+                    setSprayBrushShape={setSprayBrushShape}
+                    sprayConstrainToPlaneRef={sprayConstrainToPlaneRef_}
+                    setSprayConstrainToPlaneRef={setSprayConstrainToPlaneRef_}
                     fillConstrainToPlane={fillConstrainToPlane}
                     setFillConstrainToPlane={setFillConstrainToPlane}
                   />
@@ -7149,8 +7938,8 @@ function App() {
                         <input
                           type="range"
                           min={1}
-                          max={12}
-                          value={Math.min(12, generatorSphereRadius)}
+                          max={20}
+                          value={Math.min(20, generatorSphereRadius)}
                           onChange={(ev) =>
                             setGeneratorSphereRadius(Number(ev.target.value))
                           }
@@ -7171,6 +7960,66 @@ function App() {
                           disabled={loading || workBusy}
                         />
                       </label>
+                      <label className="tool-options-range-label">
+                        <span>Count</span>
+                        <input
+                          type="range"
+                          min={1}
+                          max={5}
+                          value={rockCount}
+                          onChange={(ev) =>
+                            setRockCount(Number(ev.target.value))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                      </label>
+                      {rockCount > 1 ? (
+                        <label className="tool-options-range-label">
+                          <span>Spread</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={3}
+                            value={rockClusterRadius}
+                            onChange={(ev) =>
+                              setRockClusterRadius(Number(ev.target.value))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                      ) : null}
+                      <div className="tool-options-range-label">
+                        <span>Sink</span>
+                        <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2 }}>
+                          {(["over", "none", "under"] as const).map((dir) => (
+                            <button
+                              key={dir}
+                              type="button"
+                              className={rockSinkDirection === dir ? "active" : ""}
+                              onClick={() => setRockSinkDirection(dir)}
+                              disabled={loading || workBusy}
+                              style={{ flex: 1, textTransform: "capitalize", fontSize: 11 }}
+                            >
+                              {dir}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                      {rockSinkDirection !== "none" ? (
+                        <label className="tool-options-range-label">
+                          <span>Layers</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={5}
+                            value={rockSinkAmount}
+                            onChange={(ev) =>
+                              setRockSinkAmount(Number(ev.target.value))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                      ) : null}
                     </>
                   ) : null}
                   {generatorKind === "grass" ? (
@@ -7564,9 +8413,32 @@ function App() {
                   ) : null}
                   {generatorKind === "roof" ? (
                     <>
+                      <div className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
+                        <span>Area</span>
+                        <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2 }}>
+                          {(["polygon", "square", "circle"] as const).map((shape) => (
+                            <button
+                              key={shape}
+                              type="button"
+                              className={roofAreaShape === shape ? "active" : ""}
+                              onClick={() => {
+                                setRoofAreaShape(shape);
+                                setRoofPins([]);
+                                roofPinsRef.current = [];
+                                roofFirstClickRef.current = null;
+                                setRoofFirstClick(null);
+                                void invoke("voxel_stroke_preview_reset").catch(() => {});
+                              }}
+                              disabled={loading || workBusy}
+                              style={{ flex: 1, textTransform: "capitalize", fontSize: 11 }}
+                            >
+                              {shape}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
                       <label
                         className="tool-options-range-label"
-                        style={{ marginTop: "0.35rem" }}
                       >
                         <span>Style</span>
                         <select
@@ -7615,7 +8487,15 @@ function App() {
                         className="sidebar-pane-hint"
                         style={{ marginTop: "0.25rem" }}
                       >
-                        Click surface to add pins ({roofPins.length} placed).
+                        {roofAreaShape === "polygon"
+                          ? `Click surface to add pins (${roofPins.length} placed).`
+                          : roofAreaShape === "square"
+                          ? roofFirstClick
+                            ? "Click opposite corner."
+                            : "Click first corner."
+                          : roofFirstClick
+                          ? "Click edge to set radius."
+                          : "Click center."}
                       </p>
                       <button
                         type="button"
@@ -7643,6 +8523,7 @@ function App() {
                             .then(() => {
                               setRoofPins([]);
                               roofPinsRef.current = [];
+                              void invoke("voxel_stroke_preview_reset").catch(() => {});
                             })
                             .catch(() => {});
                         }}
@@ -8592,18 +9473,50 @@ function App() {
           >
             {statusBarMessage}
           </div>
-          {hostWsUrl ? (
+          {collabActive ? (
+            <>
+              {hostWsUrl ? (
+                <button
+                  type="button"
+                  className="status-bar-hosting-btn"
+                  onClick={copyHostingJoinAddress}
+                  title={hostingCopied ? "Copied" : "Copy invite link"}
+                >
+                  {hostingCopied
+                    ? "Copied invite link"
+                    : `Hosting · ${roster.length} ${
+                        roster.length === 1 ? "person" : "people"
+                      }`}
+                </button>
+              ) : (
+                <span className="status-bar-hosting-btn is-guest">
+                  {`In session · ${roster.length} ${
+                    roster.length === 1 ? "person" : "people"
+                  }`}
+                </span>
+              )}
+              <button
+                type="button"
+                className="status-bar-hosting-btn is-leave"
+                onClick={() => {
+                  const msg = hostWsUrl
+                    ? "End the session for everyone?"
+                    : "Leave this session?";
+                  if (window.confirm(msg)) leaveSession();
+                }}
+                title={hostWsUrl ? "End session" : "Leave session"}
+              >
+                {hostWsUrl ? "End" : "Leave"}
+              </button>
+            </>
+          ) : !showStartScreen ? (
             <button
               type="button"
               className="status-bar-hosting-btn"
-              onClick={copyHostingJoinAddress}
-              title={hostingCopied ? "Copied" : "Copy invite link"}
+              onClick={startHost}
+              title="Start a new session"
             >
-              {hostingCopied
-                ? "Copied invite link"
-                : `Hosting · ${roster.length} ${
-                    roster.length === 1 ? "person" : "people"
-                  }`}
+              Start Session
             </button>
           ) : null}
         </div>

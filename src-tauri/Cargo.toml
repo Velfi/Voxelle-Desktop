@@ -68,3 +68,7 @@ criterion = "0.5"
 [[bench]]
 name = "greedy_mesh"
 harness = false
+
+[[bench]]
+name = "preview_generation"
+harness = false

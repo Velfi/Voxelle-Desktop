@@ -137,20 +137,17 @@ fn bench_load_chunk_meshes_fused_vs_sequential(c: &mut Criterion) {
 
 fn bench_dirty_chunk_remesh(c: &mut Criterion) {
     let voxels = solid_box((0, 0, 0), 32, 0x334455);
-    let map = greedy_mesh::voxel_map(&voxels);
     let cs = greedy_mesh::SPATIAL_CHUNK_SIZE;
-    let Some((origin, buckets)) = greedy_mesh::voxel_buckets_by_chunk(&voxels, cs) else {
-        panic!("buckets");
-    };
-    let center = greedy_mesh::chunk_key_from_world(16, 16, 16, origin, cs);
+    let cache = SpatialMeshCache::from_voxels(&voxels, cs).expect("cache");
+    let center = greedy_mesh::chunk_key_from_world(16, 16, 16, cache.origin, cs);
     let dirty: Vec<ChunkKey> = greedy_mesh::dirty_chunk_keys_3x3(center);
 
     c.bench_function("mesh_buffers_for_chunk_key ×27 (dirty 3³)", |b| {
         b.iter(|| {
             for key in &dirty {
                 let _ = greedy_mesh::mesh_buffers_for_chunk_key(
-                    black_box(&buckets),
-                    black_box(&map),
+                    black_box(&cache.buckets),
+                    black_box(&cache.occupancy),
                     *key,
                 );
             }
@@ -169,6 +166,44 @@ fn bench_mesh_bounds(c: &mut Criterion) {
     });
 }
 
+/// Build the `AHashMap<VoxelCoord, Voxel>` occupancy map that
+/// `voxel_surface_grid_line_vertices` expects (mirrors `prepare_grid_border_overlay`).
+fn occupancy_from_voxels(voxels: &[Voxel]) -> ahash::AHashMap<greedy_mesh::VoxelCoord, Voxel> {
+    let mut m = ahash::AHashMap::with_capacity(voxels.len());
+    for v in voxels {
+        m.insert((v.x, v.y, v.z), *v);
+    }
+    m
+}
+
+fn bench_grid_border_lines(c: &mut Criterion) {
+    let mut group = c.benchmark_group("grid_border_lines");
+
+    // 16³ = 4 096 voxels — small model
+    let v16 = solid_box((0, 0, 0), 16, 0x8899aa);
+    let occ16 = occupancy_from_voxels(&v16);
+    group.bench_function("solid 16³ (4k voxels)", |b| {
+        b.iter(|| greedy_mesh::voxel_surface_grid_line_vertices(black_box(&occ16)))
+    });
+
+    // 32³ = 32 768 voxels — medium model
+    let v32 = solid_box((0, 0, 0), 32, 0x8899aa);
+    let occ32 = occupancy_from_voxels(&v32);
+    group.bench_function("solid 32³ (32k voxels)", |b| {
+        b.iter(|| greedy_mesh::voxel_surface_grid_line_vertices(black_box(&occ32)))
+    });
+
+    // 64³ = 262 144 voxels — large model
+    let v64 = solid_box((0, 0, 0), 64, 0x8899aa);
+    let occ64 = occupancy_from_voxels(&v64);
+    group.sample_size(15);
+    group.bench_function("solid 64³ (262k voxels)", |b| {
+        b.iter(|| greedy_mesh::voxel_surface_grid_line_vertices(black_box(&occ64)))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_full_mesh,
@@ -178,5 +213,6 @@ criterion_group!(
     bench_load_chunk_meshes_fused_vs_sequential,
     bench_dirty_chunk_remesh,
     bench_mesh_bounds,
+    bench_grid_border_lines,
 );
 criterion_main!(benches);

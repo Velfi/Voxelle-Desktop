@@ -3,6 +3,8 @@
 use glam::{Mat4, Quat, Vec3};
 
 const DAMPING: f32 = 0.05;
+/// Damping for orbit/pan mode only; fly mode skips damping for responsive FPS feel.
+const FLY_MODE_DAMPING: f32 = 0.0;
 /// Logo splash: max deviation from rest for drag + hover (±75°).
 fn logo_splash_orbit_half_span_rad() -> f32 {
     75.0_f32.to_radians()
@@ -13,6 +15,8 @@ const LOGO_SPLASH_HOVER_MAX_RAD: f32 = 0.038;
 const ROTATE_SPEED: f32 = 1.0;
 /// Scales [`Self::fly_look_rotate_screen`] only (orbit drag uses unscaled `TAU/h`).
 const FLY_LOOK_SENSITIVITY: f32 = 1.0;
+/// FPS-style mouse look sensitivity (radians per physical pixel). Responsive and resolution-independent.
+const FLY_LOOK_PIXELS_PER_RADIAN: f32 = 200.0;
 const PAN_SPEED: f32 = 1.0;
 const ZOOM_SPEED: f32 = 1.0;
 
@@ -63,6 +67,8 @@ pub struct OrbitCamera {
     pub ortho_half_height: f32,
     pub near: f32,
     pub far: f32,
+    /// In FPS fly mode: disable damping for responsive feel.
+    pub is_fly_mode: bool,
 }
 
 impl OrbitCamera {
@@ -87,6 +93,7 @@ impl OrbitCamera {
             ortho_half_height: 10.0,
             near: 0.05,
             far: 5000.0,
+            is_fly_mode: false,
         }
     }
 
@@ -100,13 +107,14 @@ impl OrbitCamera {
 
     /// Call each frame.
     pub fn update_damping(&mut self) {
-        self.smooth_target = self.smooth_target.lerp(self.target, DAMPING);
+        let damping = if self.is_fly_mode { FLY_MODE_DAMPING } else { DAMPING };
+        self.smooth_target = self.smooth_target.lerp(self.target, damping);
         let sr = self.smooth_spherical.radius
-            + (self.spherical.radius - self.smooth_spherical.radius) * DAMPING;
+            + (self.spherical.radius - self.smooth_spherical.radius) * damping;
         let st = self.smooth_spherical.theta
-            + (self.spherical.theta - self.smooth_spherical.theta) * DAMPING;
+            + (self.spherical.theta - self.smooth_spherical.theta) * damping;
         let sp =
-            self.smooth_spherical.phi + (self.spherical.phi - self.smooth_spherical.phi) * DAMPING;
+            self.smooth_spherical.phi + (self.spherical.phi - self.smooth_spherical.phi) * damping;
         self.smooth_spherical = Spherical {
             radius: sr.clamp(self.min_radius, self.max_radius),
             theta: st,
@@ -211,13 +219,11 @@ impl OrbitCamera {
 
     /// FPS-style mouse look: yaw around world +Y, then pitch around camera right — pivot at **eye**,
     /// so you turn where you look instead of orbiting a fixed point in space (`rotate_screen`).
-    pub fn fly_look_rotate_screen(&mut self, dx: f32, dy: f32, viewport_height_px: f32) {
-        let h = viewport_height_px.max(1.0);
-        let k = std::f32::consts::TAU * ROTATE_SPEED * FLY_LOOK_SENSITIVITY / h;
-        // Horizontal matches orbit (`theta -= dx*k` → same sign as delta yaw here).
-        let yaw = -dx * k;
-        // Vertical: spherical `phi -= dy*k` vs pitch about camera-right; opposite sign so mouse-down looks down like orbit.
-        let pitch = dy * k;
+    pub fn fly_look_rotate_screen(&mut self, dx: f32, dy: f32, _viewport_height_px: f32) {
+        // Fixed FPS sensitivity: radians per pixel, resolution-independent.
+        let sensitivity = FLY_LOOK_SENSITIVITY / FLY_LOOK_PIXELS_PER_RADIAN;
+        let yaw = -dx * sensitivity;
+        let pitch = dy * sensitivity;
 
         let eye = self.target + self.spherical.to_offset();
         let r = self.spherical.radius.max(1e-4);
