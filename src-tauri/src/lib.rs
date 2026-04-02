@@ -7105,11 +7105,21 @@ fn clipboard_copy_selection(state: State<'_, Arc<ViewerState>>) -> Result<bool, 
     Ok(true)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StampPickAtScreen {
+    nx: f32,
+    ny: f32,
+    rot_x: f32,
+    rot_y: f32,
+    rot_z: f32,
+}
+
 #[tauri::command]
 fn clipboard_stamp_at_screen(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
-    args: PickAtScreen,
+    args: StampPickAtScreen,
 ) -> Result<bool, String> {
     let clip = state.stamp_clipboard.lock().clone();
     let Some(clip) = clip else {
@@ -7134,7 +7144,9 @@ fn clipboard_stamp_at_screen(
         };
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-        voxel_edit::stamp_clipboard_at_screen(file, vmap, &cam, w, h, sx, sy, &clip)?
+        voxel_edit::stamp_clipboard_at_screen(
+            file, vmap, &cam, w, h, sx, sy, &clip, args.rot_x, args.rot_y, args.rot_z,
+        )?
     };
     commit_voxel_edits(&state, &app, deltas)
 }
@@ -7143,7 +7155,7 @@ fn clipboard_stamp_at_screen(
 fn clipboard_punch_at_screen(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
-    args: PickAtScreen,
+    args: StampPickAtScreen,
 ) -> Result<bool, String> {
     let clip = state.stamp_clipboard.lock().clone();
     let Some(clip) = clip else {
@@ -7168,7 +7180,9 @@ fn clipboard_punch_at_screen(
         };
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-        voxel_edit::punch_clipboard_at_screen(file, vmap, &cam, w, h, sx, sy, &clip)?
+        voxel_edit::punch_clipboard_at_screen(
+            file, vmap, &cam, w, h, sx, sy, &clip, args.rot_x, args.rot_y, args.rot_z,
+        )?
     };
     commit_voxel_edits(&state, &app, deltas)
 }

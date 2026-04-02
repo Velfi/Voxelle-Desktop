@@ -4,7 +4,6 @@
   - piscina
   - Insecta
 - Fly mode jumps forward  when moving forward and moving the mouse
-- weird degenerate normals on flat surfaces with voxels scattered on top. It's not shadows or AO, I checked already
 - I want the ability to extrude a selected face
 - Terrain brush doesn't work
 - sculpt brushes shouldn't snap to surface, they should embed

@@ -4944,6 +4944,66 @@ pub fn selection_to_clipboard(
     Some(StampClipboard { entries })
 }
 
+fn rotate_x(x: f64, y: f64, z: f64, a: f64) -> (f64, f64, f64) {
+    let (s, c) = a.sin_cos();
+    (x, c * y - s * z, s * y + c * z)
+}
+
+fn rotate_y(x: f64, y: f64, z: f64, a: f64) -> (f64, f64, f64) {
+    let (s, c) = a.sin_cos();
+    (c * x + s * z, y, -s * x + c * z)
+}
+
+fn rotate_z(x: f64, y: f64, z: f64, a: f64) -> (f64, f64, f64) {
+    let (s, c) = a.sin_cos();
+    (c * x - s * y, s * x + c * y, z)
+}
+
+/// Rotate stamp entries around their bounding-box center by Euler XYZ angles (degrees).
+fn apply_stamp_rotation(
+    entries: &[(i32, i32, i32, u32, MaterialId)],
+    rot_x_deg: f32,
+    rot_y_deg: f32,
+    rot_z_deg: f32,
+) -> Vec<(i32, i32, i32, u32, MaterialId)> {
+    if rot_x_deg == 0.0 && rot_y_deg == 0.0 && rot_z_deg == 0.0 {
+        return entries.to_vec();
+    }
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX;
+    let mut max_z = i32::MIN;
+    for &(dx, dy, dz, _, _) in entries {
+        min_x = min_x.min(dx);
+        max_x = max_x.max(dx);
+        min_y = min_y.min(dy);
+        max_y = max_y.max(dy);
+        min_z = min_z.min(dz);
+        max_z = max_z.max(dz);
+    }
+    let cx = (min_x + max_x) as f64 / 2.0;
+    let cy = (min_y + max_y) as f64 / 2.0;
+    let cz = (min_z + max_z) as f64 / 2.0;
+    let rx = rot_x_deg as f64 * std::f64::consts::PI / 180.0;
+    let ry = rot_y_deg as f64 * std::f64::consts::PI / 180.0;
+    let rz = rot_z_deg as f64 * std::f64::consts::PI / 180.0;
+    entries
+        .iter()
+        .map(|&(dx, dy, dz, color, mat)| {
+            let (mut x, mut y, mut z) = (dx as f64 - cx, dy as f64 - cy, dz as f64 - cz);
+            (x, y, z) = rotate_x(x, y, z, rx);
+            (x, y, z) = rotate_y(x, y, z, ry);
+            (x, y, z) = rotate_z(x, y, z, rz);
+            let rdx = (x + cx).round() as i32;
+            let rdy = (y + cy).round() as i32;
+            let rdz = (z + cz).round() as i32;
+            (rdx, rdy, rdz, color, mat)
+        })
+        .collect()
+}
+
 /// Stamp pattern at the add-tool anchor (empty cell in front of first solid).
 pub fn stamp_clipboard_at_screen(
     file: &mut VoxelleFile,
@@ -4954,6 +5014,9 @@ pub fn stamp_clipboard_at_screen(
     sx: f32,
     sy: f32,
     clip: &StampClipboard,
+    rot_x: f32,
+    rot_y: f32,
+    rot_z: f32,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
@@ -4964,14 +5027,15 @@ pub fn stamp_clipboard_at_screen(
     let Some((ax, ay, az)) = prev else {
         return Ok(Vec::new());
     };
+    let rotated = apply_stamp_rotation(&clip.entries, rot_x, rot_y, rot_z);
     ensure_grid_fits_coords(
         file,
-        clip.entries.iter().map(|e| (ax + e.0, ay + e.1, az + e.2)),
+        rotated.iter().map(|e| (ax + e.0, ay + e.1, az + e.2)),
     );
     let grid_size = file.grid_size.max(1);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
-    for &(dx, dy, dz, src_color, src_mat) in &clip.entries {
+    for &(dx, dy, dz, src_color, src_mat) in &rotated {
         let x = ax + dx;
         let y = ay + dy;
         let z = az + dz;
@@ -5010,6 +5074,9 @@ pub fn punch_clipboard_at_screen(
     sx: f32,
     sy: f32,
     clip: &StampClipboard,
+    rot_x: f32,
+    rot_y: f32,
+    rot_z: f32,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
@@ -5018,9 +5085,10 @@ pub fn punch_clipboard_at_screen(
         return Ok(Vec::new());
     };
     let (hx, hy, hz) = hit;
+    let rotated = apply_stamp_rotation(&clip.entries, rot_x, rot_y, rot_z);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
-    for &(dx, dy, dz, _, _) in &clip.entries {
+    for &(dx, dy, dz, _, _) in &rotated {
         let x = hx + dx;
         let y = hy + dy;
         let z = hz + dz;

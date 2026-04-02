@@ -410,11 +410,12 @@ type InteractionMode =
   | "selectCoplanarEmpty"
   | "stamp"
   | "punch"
+  | "selectExtrude"
   | "sculpt"
   | "generator"
   | "squishy";
 
-type ToolsPane = "hand" | "draw" | "sculpt" | "generators" | "squishy" | "mood" | "fly" | "walk";
+type ToolsPane = "hand" | "draw" | "select" | "sculpt" | "generators" | "squishy" | "mood" | "fly" | "walk";
 
 /** Matches Rust `SculptStrokeMode` (JSON camelCase). */
 type SculptStrokeModeApi = "draw" | "smooth" | "gouge" | "wall" | "terrain" | "extrude";
@@ -1378,6 +1379,15 @@ function App() {
   const [stampBookOpen, setStampBookOpen] = useState(false);
   /** True when a stamp was loaded from the stamp book (not from the edit selection). */
   const [stampBookPatternActive, setStampBookPatternActive] = useState(false);
+  const [stampRotX, setStampRotX] = useState(0);
+  const [stampRotY, setStampRotY] = useState(0);
+  const [stampRotZ, setStampRotZ] = useState(0);
+  const stampRotXRef = useRef(0);
+  const stampRotYRef = useRef(0);
+  const stampRotZRef = useRef(0);
+  stampRotXRef.current = stampRotX;
+  stampRotYRef.current = stampRotY;
+  stampRotZRef.current = stampRotZ;
 
   const [joinModalOpen, setJoinModalOpen] = useState(false);
   const [collabJoinPending, setCollabJoinPending] = useState(false);
@@ -2505,7 +2515,11 @@ function App() {
 
   // Cancel extrude phase if interaction mode changes
   useEffect(() => {
-    if (extrudePhase.active && interactionMode !== "sculpt") {
+    if (
+      extrudePhase.active &&
+      interactionMode !== "sculpt" &&
+      interactionMode !== "selectExtrude"
+    ) {
       extrudePhase.cancel();
     }
   }, [extrudePhase.active, interactionMode]);
@@ -4537,29 +4551,43 @@ function App() {
           const dpr = window.devicePixelRatio || 1;
           const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
           const screenDy = (pointerStartRef.current.y - e.clientY) * dpr;
-          void invoke("extrude_ray_preview", {
-            args: {
-              startNx: startNorm.nx,
-              startNy: startNorm.ny,
-              screenDx,
-              screenDy,
-              directionRef: extrudeDirectionRefRef.current,
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-              brushRadius: sculptBrushRadiusRef.current,
-              brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
-              brushStrength: sculptBrushStrengthRef.current,
-              brushFalloff: sculptBrushFalloffRef.current,
-              strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
-              extrudeProfile: extrudeProfileRef.current,
-              extrudeEndCap: extrudeEndCapRef.current,
-              extrudeTaper: extrudeTaperRef.current,
-              extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
-              extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
-            },
-          }).catch((err) => {
-            console.error("[extrude_ray_preview re-drag]", err);
-          });
+          if (interactionModeRef.current === "selectExtrude") {
+            void invoke("selection_extrude_preview", {
+              args: {
+                screenDx,
+                screenDy,
+                directionRef: "camera",
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch((err) => {
+              console.error("[selection_extrude_preview re-drag]", err);
+            });
+          } else {
+            void invoke("extrude_ray_preview", {
+              args: {
+                startNx: startNorm.nx,
+                startNy: startNorm.ny,
+                screenDx,
+                screenDy,
+                directionRef: extrudeDirectionRefRef.current,
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+                brushRadius: sculptBrushRadiusRef.current,
+                brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+                brushStrength: sculptBrushStrengthRef.current,
+                brushFalloff: sculptBrushFalloffRef.current,
+                strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
+                extrudeProfile: extrudeProfileRef.current,
+                extrudeEndCap: extrudeEndCapRef.current,
+                extrudeTaper: extrudeTaperRef.current,
+                extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
+                extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
+              },
+            }).catch((err) => {
+              console.error("[extrude_ray_preview re-drag]", err);
+            });
+          }
         }
       }
       return;
@@ -4714,6 +4742,34 @@ function App() {
                 lastStrokeNormRef.current = { nx: px, ny: py };
               })
               .catch(() => {});
+          }
+        }
+      }
+      // selectExtrude drag: preview extruded selection along drag direction.
+      if (e.buttons && m === "selectExtrude" && pointerStartRef.current && !loading && !workBusy) {
+        const now = Date.now();
+        if (now - lastStrokeEditMsRef.current >= 24) {
+          lastStrokeEditMsRef.current = now;
+          dragDidEditRef.current = true;
+          const startNorm = extrudeStartNormRef.current ?? strokeViewportStartRef.current;
+          if (startNorm) {
+            if (!extrudeStartNormRef.current && strokeViewportStartRef.current) {
+              extrudeStartNormRef.current = { ...strokeViewportStartRef.current };
+            }
+            const dpr = window.devicePixelRatio || 1;
+            const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
+            const screenDy = (pointerStartRef.current.y - e.clientY) * dpr;
+            void invoke("selection_extrude_preview", {
+              args: {
+                screenDx,
+                screenDy,
+                directionRef: "camera",
+                color: activeColorRef.current,
+                material: activeMaterialRef.current,
+              },
+            }).catch((err) => {
+              console.error("[selection_extrude_preview]", err);
+            });
           }
         }
       }
@@ -4904,10 +4960,24 @@ function App() {
       if (moved < 5) {
         if (m === "stamp") {
           void invoke("clipboard_stamp_at_screen", {
-            args: { nx, ny },
+            args: {
+              nx,
+              ny,
+              rotX: stampRotXRef.current,
+              rotY: stampRotYRef.current,
+              rotZ: stampRotZRef.current,
+            },
           }).catch(() => {});
         } else if (m === "punch") {
-          void invoke("clipboard_punch_at_screen", { args: { nx, ny } }).catch(() => {});
+          void invoke("clipboard_punch_at_screen", {
+            args: {
+              nx,
+              ny,
+              rotX: stampRotXRef.current,
+              rotY: stampRotYRef.current,
+              rotZ: stampRotZRef.current,
+            },
+          }).catch(() => {});
         } else if (m === "generator") {
           const gk = generatorKindRef.current;
           if (gk === "rocks") {
@@ -5298,6 +5368,16 @@ function App() {
           void invoke("voxel_stroke_end").catch(() => {});
           lastStrokeNormRef.current = null;
         }
+      } else if (m === "selectExtrude") {
+        if (dragDidEditRef.current || moved >= 5) {
+          // Enter settings phase — preview union stays visible.
+          extrudePhase.enter("settings", {} as Record<string, never>);
+          lastStrokeNormRef.current = null;
+          // Do NOT call voxel_stroke_end — preview must stay.
+        } else {
+          void invoke("voxel_stroke_preview_reset").catch(() => {});
+          lastStrokeNormRef.current = null;
+        }
       } else if (m === "generator" && generatorKindRef.current === "roof") {
         // Roof square/circle drag complete: clear first-click anchor.
         // Pins are already set from the move handler during drag.
@@ -5357,6 +5437,7 @@ function App() {
       im !== "selectByColor" &&
       im !== "selectCoplanar" &&
       im !== "selectCoplanarEmpty" &&
+      im !== "selectExtrude" &&
       im !== "squishy" &&
       im !== "generator"
     ) {
@@ -5611,7 +5692,8 @@ function App() {
     interactionMode === "add" || interactionMode === "remove" || interactionMode === "paint";
 
   const showDrawPaneToolMatrix =
-    toolsPane === "draw" && (isDrawVoxelEditMode || isSelectionInteractionMode);
+    (toolsPane === "draw" || toolsPane === "select") &&
+    (isDrawVoxelEditMode || isSelectionInteractionMode);
 
   const showPolygonPhaseHud =
     showEditorChrome &&
@@ -5660,6 +5742,11 @@ function App() {
           interactionMode === "eyedropper" ||
           interactionMode === "stamp" ||
           interactionMode === "punch" ||
+          isSelectionInteractionMode)) ||
+      (toolsPane === "select" &&
+        (interactionMode === "stamp" ||
+          interactionMode === "punch" ||
+          interactionMode === "selectExtrude" ||
           isSelectionInteractionMode)));
 
   return (
@@ -5778,6 +5865,21 @@ function App() {
                       }}
                     >
                       Draw
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      className={
+                        toolsPane === "select" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
+                      }
+                      aria-selected={toolsPane === "select"}
+                      disabled={loading || workBusy}
+                      onClick={() => {
+                        setToolsPane("select");
+                        setInteractionMode("select");
+                      }}
+                    >
+                      Select
                     </button>
                     <button
                       type="button"
@@ -6098,6 +6200,170 @@ function App() {
                       </>
                     ) : null}
 
+                    {toolsPane === "select" ? (
+                      <>
+                        <div className="sidebar-section-label">Selection</div>
+                        <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
+                          <button
+                            type="button"
+                            className={
+                              interactionMode === "select"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => setInteractionMode("select")}
+                          >
+                            <span className="sidebar-mode-label">Select</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              interactionMode === "stamp"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={
+                              loading ||
+                              workBusy ||
+                              (selectionCount === 0 && !stampBookPatternActive)
+                            }
+                            onClick={() => setInteractionMode("stamp")}
+                          >
+                            <span className="sidebar-mode-label">Stamp</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              interactionMode === "punch"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy || selectionCount === 0}
+                            onClick={() => setInteractionMode("punch")}
+                          >
+                            <span className="sidebar-mode-label">Punch</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              interactionMode === "selectExtrude"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy || selectionCount === 0}
+                            onClick={() => setInteractionMode("selectExtrude")}
+                          >
+                            <span className="sidebar-mode-label">Extrude</span>
+                          </button>
+                        </div>
+
+                        <div className="sidebar-section-label">Selection method</div>
+                        <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "stroke"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("stroke");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Line from pointer down to cursor (web Stroke)"
+                          >
+                            <span className="sidebar-mode-label">Stroke</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "surface"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("surface");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Plane / circle / polygon in the face plane (web Surface)"
+                          >
+                            <span className="sidebar-mode-label">Surface</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "solid"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("solid");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Solid volume: cube/cylinder/polygon (web Solid)"
+                          >
+                            <span className="sidebar-mode-label">Solid</span>
+                          </button>
+                        </div>
+                        <div
+                          className="sidebar-mode-grid sidebar-mode-grid-2"
+                          style={{ marginTop: "0.35rem" }}
+                        >
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "spray"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("spray");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Spray density along brush path"
+                          >
+                            <span className="sidebar-mode-label">Spray</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={
+                              selectionMethod === "fill"
+                                ? "sidebar-mode-btn is-active"
+                                : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => {
+                              const s = selectionMethodToState("fill");
+                              setDrawStrokeMode(s.drawStrokeMode);
+                              setStrokeDrawStyle(s.strokeDrawStyle);
+                              setSprayDensity(s.sprayDensity);
+                              setStrokeFamilyVariant(s.strokeFamilyVariant);
+                            }}
+                            title="Fill connected region (selection)"
+                          >
+                            <span className="sidebar-mode-label">Fill</span>
+                          </button>
+                        </div>
+                      </>
+                    ) : null}
+
                     {toolsPane === "sculpt" ? (
                       <>
                         <div className="sidebar-section-label">Sculpt mode</div>
@@ -6280,6 +6546,7 @@ function App() {
                   {([
                     { pane: "hand", label: "Hand", mode: "navigate" },
                     { pane: "draw", label: "Draw", mode: "add" },
+                    { pane: "select", label: "Sel", mode: "select" },
                     { pane: "sculpt", label: "Sculpt", mode: "sculpt" },
                     { pane: "generators", label: "Gen", mode: "generator" },
                     { pane: "squishy", label: "Sqsh", mode: "squishy" },
@@ -6346,6 +6613,68 @@ function App() {
                         onClick={() => setInteractionMode("punch")}
                       >
                         Punch
+                      </button>
+                      <div className="sidebar-collapsed-section-label">Method</div>
+                      {(["stroke", "surface", "solid", "spray", "fill"] as const).map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          className={`sidebar-collapsed-sub-btn${selectionMethod === m ? " is-active" : ""}`}
+                          disabled={loading || workBusy}
+                          onClick={() => {
+                            const s = selectionMethodToState(m);
+                            setDrawStrokeMode(s.drawStrokeMode);
+                            setStrokeDrawStyle(s.strokeDrawStyle);
+                            setSprayDensity(s.sprayDensity);
+                            setStrokeFamilyVariant(s.strokeFamilyVariant);
+                          }}
+                        >
+                          {m[0].toUpperCase() + m.slice(1)}
+                        </button>
+                      ))}
+                    </>
+                  )}
+
+                  {/* ── Select sub-options ── */}
+                  {toolsPane === "select" && (
+                    <>
+                      <div className="sidebar-collapsed-tool-separator" />
+                      <div className="sidebar-collapsed-section-label">Selection</div>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "select" ? " is-active" : ""}`}
+                        disabled={loading || workBusy}
+                        onClick={() => setInteractionMode("select")}
+                      >
+                        Select
+                      </button>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "stamp" ? " is-active" : ""}`}
+                        disabled={
+                          loading ||
+                          workBusy ||
+                          (selectionCount === 0 && !stampBookPatternActive)
+                        }
+                        onClick={() => setInteractionMode("stamp")}
+                      >
+                        Stamp
+                      </button>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "punch" ? " is-active" : ""}`}
+                        disabled={loading || workBusy || selectionCount === 0}
+                        onClick={() => setInteractionMode("punch")}
+                      >
+                        Punch
+                      </button>
+                      <button
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${interactionMode === "selectExtrude" ? " is-active" : ""}`}
+                        disabled={loading || workBusy || selectionCount === 0}
+                        onClick={() => setInteractionMode("selectExtrude")}
+                      >
+                        Extrude
                       </button>
                       <div className="sidebar-collapsed-section-label">Method</div>
                       {(["stroke", "surface", "solid", "spray", "fill"] as const).map((m) => (
@@ -7260,7 +7589,7 @@ function App() {
                   </div>
                 </div>
               ) : null}
-              {toolsPane === "draw" &&
+              {(toolsPane === "draw" || toolsPane === "select") &&
               drawStrokeMode === "fill" &&
               (interactionMode === "add" ||
                 interactionMode === "remove" ||
@@ -7274,7 +7603,7 @@ function App() {
                   </p>
                 </div>
               ) : null}
-              {toolsPane === "draw" && isSelectionInteractionMode ? (
+              {(toolsPane === "draw" || toolsPane === "select") && isSelectionInteractionMode ? (
                 <div className="tool-options-section">
                   <div className="tool-options-heading">Combine</div>
                   <div
@@ -7363,7 +7692,7 @@ function App() {
                   />
                 </>
               ) : null}
-              {toolsPane === "draw" && isSelectionInteractionMode ? (
+              {(toolsPane === "draw" || toolsPane === "select") && isSelectionInteractionMode ? (
                 <>
                   {interactionMode === "selectByColor" ? (
                     <div className="tool-options-section">
