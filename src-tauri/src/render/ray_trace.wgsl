@@ -51,6 +51,61 @@ struct RtUniform {
 @group(1) @binding(1) var samp:       sampler;
 @group(1) @binding(2) var<uniform>   rt: RtUniform;
 
+// Atmosphere / fog params — mirrors PostCompositeOpts in mod.rs (14 vec4 rows = 224 bytes).
+// Only the atmosphere fields (rows 3–7) are used here; the rest exist for layout correctness.
+struct PostCompositeOpts {
+    // Row 0
+    tone_mode:        u32,
+    transparent_bg:   f32,
+    exposure_ev:      f32,
+    time_seconds:     f32,
+    // Row 1
+    vignette_strength: f32,
+    grain_enabled:    f32,
+    grain_strength:   f32,
+    grain_animated:   f32,
+    // Row 2
+    grain_speed:      f32,
+    grain_colorful:   f32,
+    _pad2a:           f32,
+    _pad2b:           f32,
+    // Row 3: atmosphere controls
+    atm_enabled:      f32,
+    atm_thickness:    f32,
+    atm_density:      f32,
+    atm_spatial_mode: f32,  // 0 = plane, 1 = aerial
+    // Row 4: atmosphere color + mode
+    atm_color_r:      f32,
+    atm_color_g:      f32,
+    atm_color_b:      f32,
+    atm_mode:         f32,  // 0 = slab, 1 = positiveSide (plane modes)
+    // Row 5: atmosphere plane
+    atm_plane_nx:     f32,
+    atm_plane_ny:     f32,
+    atm_plane_nz:     f32,
+    atm_plane_c:      f32,
+    // Row 6: atmosphere height + drift
+    atm_height_bias:   f32,
+    atm_height_falloff: f32,
+    atm_drift_enabled: f32,
+    atm_drift_amount:  f32,
+    // Row 7: drift continued
+    atm_drift_scale:  f32,
+    atm_drift_speed:  f32,
+    _pad7a:           f32,
+    _pad7b:           f32,
+    // Row 8–14: unused by ray tracer (distance tint, sun shafts, bloom)
+    _row8:  vec4<f32>,
+    _row9:  vec4<f32>,
+    _row10: vec4<f32>,
+    _row11: vec4<f32>,
+    _row12: vec4<f32>,
+    _row13: vec4<f32>,
+    _row14: vec4<f32>,
+}
+
+@group(1) @binding(3) var<uniform> fog: PostCompositeOpts;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Voxel access  (bit layout: occupied=31, mat=26:24, B=23:16, G=15:8, R=7:0)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -540,23 +595,128 @@ fn shade_transmissive(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
 fn shade(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
     let max_steps = select(2048, 1024, rt.fast_preview != 0u);
     let h = dda(origin, dir, 4096.0, false, max_steps);
-    if (!h.hit) { return sky_color(dir); }
 
-    let mat   = unpack_mat(h.packed);
-    let color = unpack_rgb(h.packed);
-    let wp    = origin + dir * h.t;
+    // t_hit for fog march: actual hit distance, or capped sky distance.
+    let t_hit = select(256.0, h.t, h.hit);
 
-    if (mat == MAT_GLOW) {
-        return color * 4.0;
+    var rgb: vec3<f32>;
+    if (!h.hit) {
+        rgb = sky_color(dir);
+    } else {
+        let mat   = unpack_mat(h.packed);
+        let color = unpack_rgb(h.packed);
+        let wp    = origin + dir * h.t;
+
+        if (mat == MAT_GLOW) {
+            rgb = color * 4.0;
+        } else if (mat == MAT_METAL) {
+            rgb = shade_metal(wp, h.normal, color, dir, seed);
+        } else if (is_transmissive(mat)) {
+            rgb = shade_transmissive(wp, h.normal, color, dir, mat, seed);
+        } else {
+            rgb = shade_diffuse(wp, h.normal, color, seed);
+        }
     }
-    if (mat == MAT_METAL) {
-        return shade_metal(wp, h.normal, color, dir, seed);
+
+    return apply_volumetric_fog(rgb, origin, dir, t_hit);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Volumetric fog
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-voxel extinction coefficient (sigma_t) at world point `p`.
+/// The spatial shape uses the same formulae as post_composite.wgsl atmosphere,
+/// but returns an extinction rate (1/voxel) rather than a cumulative lerp factor,
+/// so it can be integrated correctly along a ray via Beer-Lambert.
+fn fog_extinction_at(p: vec3<f32>) -> f32 {
+    let thickness = max(fog.atm_thickness, 0.1);
+    // Base extinction: at distance `thickness` total OD ≈ 1 → transmittance ≈ 1/e.
+    let sigma_base = fog.atm_density / thickness;
+
+    // Spatial shape factor in [0, ∞) — 1.0 for aerial (uniform), varied for plane modes.
+    var shape: f32 = 1.0;
+    if (fog.atm_spatial_mode < 0.5) {
+        let n  = vec3<f32>(fog.atm_plane_nx, fog.atm_plane_ny, fog.atm_plane_nz);
+        let sd = dot(n, p) + fog.atm_plane_c;
+        if (fog.atm_mode > 0.5) {
+            // Above-face: half-space with soft edge
+            let softness = thickness * 0.5;
+            shape = smoothstep(-softness, 0.0, sd) * exp(-max(0.0, sd) / thickness);
+        } else {
+            // Slab: Gaussian falloff around plane
+            shape = exp(-(sd * sd) / (thickness * thickness));
+        }
     }
-    if (is_transmissive(mat)) {
-        return shade_transmissive(wp, h.normal, color, dir, mat, seed);
+
+    // Height modulation
+    let falloff = max(fog.atm_height_falloff, 1.0);
+    shape *= 0.65 + 0.35 * exp(-abs(p.y - fog.atm_height_bias) / falloff);
+
+    // Drift (animated sine displacement)
+    if (fog.atm_drift_enabled > 0.5) {
+        let drift = sin((p.x + p.z) * fog.atm_drift_scale + fog.time_seconds * fog.atm_drift_speed)
+                  * fog.atm_drift_amount * 0.35;
+        shape = max(0.0, shape + drift);
     }
-    // Plastic / rubber
-    return shade_diffuse(wp, h.normal, color, seed);
+
+    return sigma_base * shape;
+}
+
+/// Light scattered into the fog from nearby glow voxels at world point `p`.
+/// Searches within GLOW_FOG_RADIUS voxels using the live brick grid.
+const GLOW_FOG_STRENGTH: f32 = 0.55;
+
+fn fog_glow_at(p: vec3<f32>) -> vec3<f32> {
+    let radius = select(5, 3, rt.fast_preview != 0u);
+    let r2     = radius * radius;
+    let cell   = vec3<i32>(i32(floor(p.x)), i32(floor(p.y)), i32(floor(p.z)));
+    var acc    = vec3<f32>(0.0);
+    for (var dx = -radius; dx <= radius; dx++) {
+        for (var dy = -radius; dy <= radius; dy++) {
+            for (var dz = -radius; dz <= radius; dz++) {
+                let d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 > r2) { continue; }
+                let pk = brick_fetch(cell + vec3<i32>(dx, dy, dz));
+                if (is_occupied(pk) && unpack_mat(pk) == MAT_GLOW) {
+                    let gc  = unpack_rgb(pk);
+                    let att = 1.0 / (f32(d2) + 1.0);
+                    acc    += gc * att * GLOW_FOG_STRENGTH;
+                }
+            }
+        }
+    }
+    return acc;
+}
+
+/// Apply volumetric fog along the ray [origin, origin + dir * t_hit].
+/// Uses Beer-Lambert transmittance + in-scattering accumulation.
+/// t_hit should be capped (e.g. 256 for sky) to limit the march range.
+fn apply_volumetric_fog(color: vec3<f32>, origin: vec3<f32>, dir: vec3<f32>, t_hit: f32) -> vec3<f32> {
+    if (fog.atm_enabled < 0.5) { return color; }
+
+    let N         = select(8, 4, rt.fast_preview != 0u);
+    let step_size = t_hit / f32(N);
+    var transmit  = 1.0;
+    var in_scatter = vec3<f32>(0.0);
+    let fog_color  = vec3<f32>(fog.atm_color_r, fog.atm_color_g, fog.atm_color_b);
+
+    for (var i = 0; i < N; i++) {
+        let t            = (f32(i) + 0.5) * step_size;
+        let p            = origin + dir * t;
+        let sigma        = fog_extinction_at(p);
+        let optical_depth = sigma * step_size;
+        if (optical_depth < 1e-6) { continue; }
+        let step_transmit = exp(-optical_depth);
+        // In-scatter: (1 - exp(-od)) is the fraction of light scattered into the ray this step.
+        let scatter_w    = 1.0 - step_transmit;
+        let glow_light   = fog_glow_at(p);
+        let scatter_color = fog_color + glow_light;
+        in_scatter += transmit * scatter_w * scatter_color;
+        transmit   *= step_transmit;
+    }
+
+    return color * transmit + in_scatter;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -81,6 +81,8 @@ export type VoxelleDesktopPreferences = {
   sunLocationLat: number;
   /** Longitude for real-time sun position (-180 to 180). */
   sunLocationLon: number;
+  /** Always draw the selection gizmo on top of scene geometry. */
+  gizmoOnTop: boolean;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -104,6 +106,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   hdr: false,
   sunLocationLat: 41.9,
   sunLocationLon: -87.6,
+  gizmoOnTop: true,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -279,6 +282,7 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         typeof o.sunLocationLon === "number" && Number.isFinite(o.sunLocationLon)
           ? Math.max(-180, Math.min(180, o.sunLocationLon as number))
           : DEFAULTS.sunLocationLon,
+      gizmoOnTop: typeof o.gizmoOnTop === "boolean" ? o.gizmoOnTop : DEFAULTS.gizmoOnTop,
     };
   } catch {
     return { ...DEFAULTS };
@@ -318,6 +322,7 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.hdr = prefs.hdr;
     merged.sunLocationLat = prefs.sunLocationLat;
     merged.sunLocationLon = prefs.sunLocationLon;
+    merged.gizmoOnTop = prefs.gizmoOnTop;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

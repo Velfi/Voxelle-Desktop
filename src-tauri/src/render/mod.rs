@@ -46,6 +46,9 @@ mod gpu {
     pub mod post_ssr {
         pub const WGSL: &str = include_str!("post_ssr.wgsl");
     }
+    pub mod mascot {
+        pub const WGSL: &str = include_str!("mascot.wgsl");
+    }
 }
 
 use crate::camera::OrbitCamera;
@@ -680,6 +683,36 @@ struct PostCompositeOpts {
     _pad14c: f32,
 }
 
+/// Matches `mascot.wgsl` `MascotUniforms`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MascotUniforms {
+    mvp: [[f32; 4]; 4],
+    light_dir: [f32; 4],
+    ambient: f32,
+    sun: f32,
+    _pad: [f32; 2],
+}
+
+/// Per-mascot GPU state for start-screen floating model views.
+pub struct MascotEntry {
+    pub id: u32,
+    pub vertex_buffer: Option<wgpu::Buffer>,
+    pub index_buffer: Option<wgpu::Buffer>,
+    pub index_count: u32,
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+    uniforms_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    /// Y-rotation in radians; incremented each frame.
+    pub rotation_y: f32,
+    /// Viewport-relative screen rect [x, y, w, h] in physical pixels.
+    pub screen_rect: [f32; 4],
+    pub visible: bool,
+    /// World-space AABB for auto-framing the mascot camera.
+    pub bounds: Option<MeshBounds>,
+}
+
 pub struct WgpuViewer {
     pub surface: wgpu::Surface<'static>,
     pub device: wgpu::Device,
@@ -799,6 +832,10 @@ pub struct WgpuViewer {
     pipeline_preview_inst_occluded: wgpu::RenderPipeline,
     pipeline_preview_inst_front: wgpu::RenderPipeline,
     pipeline_preview_inst_front_wire: wgpu::RenderPipeline,
+    // Lit generator preview pipelines (opaque, self-shadowing)
+    pipeline_gen_preview_inst_front: wgpu::RenderPipeline,
+    pipeline_gen_preview_inst_occluded: wgpu::RenderPipeline,
+    pipeline_gen_preview_inst_front_wire: wgpu::RenderPipeline,
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
     pipeline_collab_frustum_occluded: wgpu::RenderPipeline,
@@ -812,6 +849,11 @@ pub struct WgpuViewer {
     pipeline_gizmo_lines_occluded: wgpu::RenderPipeline,
     pipeline_gizmo_tris_front: wgpu::RenderPipeline,
     pipeline_gizmo_tris_occluded: wgpu::RenderPipeline,
+    /// Gizmo pipelines with depth-compare: Always — used when "always on top" is enabled.
+    pipeline_gizmo_lines_always: wgpu::RenderPipeline,
+    pipeline_gizmo_tris_always: wgpu::RenderPipeline,
+    /// When true, gizmo is drawn over all geometry regardless of depth.
+    pub gizmo_on_top: bool,
     pipeline_sky: wgpu::RenderPipeline,
     pipeline_start_screen_bg: wgpu::RenderPipeline,
     pipeline_oit_accum: wgpu::RenderPipeline,
@@ -922,6 +964,17 @@ pub struct WgpuViewer {
     preview_solid_instance_count: u32,
     preview_wire_instance_buf: Option<wgpu::Buffer>,
     preview_wire_instance_count: u32,
+    // Generator preview buffers (lit, opaque)
+    gen_preview_solid_proto_vb: Option<wgpu::Buffer>,
+    gen_preview_solid_proto_ib: Option<wgpu::Buffer>,
+    gen_preview_solid_proto_idx_count: u32,
+    gen_preview_wire_proto_vb: Option<wgpu::Buffer>,
+    gen_preview_wire_proto_ib: Option<wgpu::Buffer>,
+    gen_preview_wire_proto_idx_count: u32,
+    gen_preview_solid_instance_buf: Option<wgpu::Buffer>,
+    gen_preview_solid_instance_count: u32,
+    gen_preview_wire_instance_buf: Option<wgpu::Buffer>,
+    gen_preview_wire_instance_count: u32,
     collab_line_vertex_buffer: Option<wgpu::Buffer>,
     collab_line_vertex_count: u32,
     collab_frustum_vertex_buffer: Option<wgpu::Buffer>,
@@ -984,6 +1037,15 @@ pub struct WgpuViewer {
     peer_label_data: Vec<GpuPeerLabel>,
     /// Active ping label (at most one).
     ping_label_data: Option<GpuPeerLabel>,
+    /// Gizmo move-drag coordinate delta label (e.g. "+0, +3, +0"). None when no drag.
+    gizmo_delta_label: Option<GpuPeerLabel>,
+
+    // ── Mascot (start-screen floating model views) ────────────────────────────
+    pub mascots: Vec<MascotEntry>,
+    mascot_pipeline: wgpu::RenderPipeline,
+    pub mascot_bind_layout: wgpu::BindGroupLayout,
+    /// Wall-clock instant of the last frame that ran mascot animation.
+    mascot_last_tick: std::time::Instant,
 }
 
 /// Screen-space peer label for GPU text rendering.
@@ -2509,6 +2571,109 @@ impl WgpuViewer {
                 cache: None,
             });
 
+        // Lit generator preview pipelines (opaque, self-shadowing)
+        let pipeline_gen_preview_inst_occluded =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gen_preview_inst_occluded"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_preview_instanced"),
+                    buffers: inst_bufs,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_lit_occluded_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Greater,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: 1,
+                        slope_scale: 1.0,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gen_preview_inst_front =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gen_preview_inst_front"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_preview_instanced"),
+                    buffers: inst_bufs,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_lit_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: true,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState {
+                        constant: -2,
+                        slope_scale: -0.5,
+                        clamp: 0.0,
+                    },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gen_preview_inst_front_wire =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gen_preview_inst_front_wire"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_scene,
+                    entry_point: Some("vs_preview_instanced"),
+                    buffers: inst_bufs,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_scene,
+                    entry_point: Some("fs_preview_lit_mrt"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::LessEqual,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
         let pipeline_collab_lines_occluded =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("collab_lines_occluded"),
@@ -2755,6 +2920,70 @@ impl WgpuViewer {
                         slope_scale: 1.0,
                         clamp: 0.0,
                     },
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gizmo_lines_always =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gizmo_lines_always"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_gizmo_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+        let pipeline_gizmo_tris_always =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("gizmo_tris_always"),
+                layout: Some(&pl_opaque),
+                vertex: wgpu::VertexState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_layout_collab_lines()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_collab_lines,
+                    entry_point: Some("fs_gizmo_front"),
+                    targets: preview_targets,
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: false,
+                    depth_compare: wgpu::CompareFunction::Always,
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
                 }),
                 multisample: wgpu::MultisampleState::default(),
                 multiview: None,
@@ -3831,6 +4060,16 @@ impl WgpuViewer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -3898,6 +4137,10 @@ impl WgpuViewer {
                         binding: 2,
                         resource: rt_uniform_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: post_composite_opts_buf.as_entire_binding(),
+                    },
                 ],
             }),
             device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -3915,6 +4158,10 @@ impl WgpuViewer {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: rt_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: post_composite_opts_buf.as_entire_binding(),
                     },
                 ],
             }),
@@ -3986,6 +4233,67 @@ impl WgpuViewer {
             }),
         );
         // #endregion
+
+        // ── Mascot pipeline (start-screen floating model views) ──────────────
+        let mascot_bind_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("mascot_uniform"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let mascot_pl_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("mascot"),
+                bind_group_layouts: &[&mascot_bind_layout],
+                push_constant_ranges: &[],
+            });
+        let shader_mascot = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mascot"),
+            source: wgpu::ShaderSource::Wgsl(gpu::mascot::WGSL.into()),
+        });
+        let mascot_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mascot"),
+            layout: Some(&mascot_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_mascot,
+                entry_point: Some("vs_mascot"),
+                buffers: &[vertex_layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_mascot,
+                entry_point: Some("fs_mascot"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    // Mascots are blitted directly to the swapchain, which is always in sdr_format.
+                    format: sdr_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         Ok(Self {
             surface,
@@ -4075,6 +4383,9 @@ impl WgpuViewer {
             pipeline_preview_inst_occluded,
             pipeline_preview_inst_front,
             pipeline_preview_inst_front_wire,
+            pipeline_gen_preview_inst_front,
+            pipeline_gen_preview_inst_occluded,
+            pipeline_gen_preview_inst_front_wire,
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
             pipeline_collab_frustum_occluded,
@@ -4086,6 +4397,9 @@ impl WgpuViewer {
             pipeline_gizmo_lines_occluded,
             pipeline_gizmo_tris_front,
             pipeline_gizmo_tris_occluded,
+            pipeline_gizmo_lines_always,
+            pipeline_gizmo_tris_always,
+            gizmo_on_top: true,
             pipeline_sky,
             pipeline_start_screen_bg,
             pipeline_oit_accum,
@@ -4157,6 +4471,16 @@ impl WgpuViewer {
             preview_solid_instance_count: 0,
             preview_wire_instance_buf: None,
             preview_wire_instance_count: 0,
+            gen_preview_solid_proto_vb: None,
+            gen_preview_solid_proto_ib: None,
+            gen_preview_solid_proto_idx_count: 0,
+            gen_preview_wire_proto_vb: None,
+            gen_preview_wire_proto_ib: None,
+            gen_preview_wire_proto_idx_count: 0,
+            gen_preview_solid_instance_buf: None,
+            gen_preview_solid_instance_count: 0,
+            gen_preview_wire_instance_buf: None,
+            gen_preview_wire_instance_count: 0,
             collab_line_vertex_buffer: None,
             collab_line_vertex_count: 0,
             collab_frustum_vertex_buffer: None,
@@ -4206,6 +4530,12 @@ impl WgpuViewer {
             glyphon_viewport: glyphon_viewport,
             peer_label_data: Vec::new(),
             ping_label_data: None,
+            gizmo_delta_label: None,
+
+            mascots: Vec::new(),
+            mascot_pipeline,
+            mascot_bind_layout,
+            mascot_last_tick: std::time::Instant::now(),
         })
     }
 
@@ -4500,6 +4830,13 @@ impl WgpuViewer {
         self.ssr_opts.strength = p.ssr_strength.clamp(0.0, 1.0);
         self.queue
             .write_buffer(&self.ssr_opts_buf, 0, bytemuck::bytes_of(&self.ssr_opts));
+        // Mood changes invalidate the ray-trace accumulation buffer.
+        // Reset to sample_n=0 with fast_preview so the next frame shows a quick
+        // low-noise preview before the full progressive convergence resumes.
+        if self.raytrace_enabled {
+            self.rt_sample_n = 0;
+            self.rt_fast_preview = true;
+        }
     }
 
     /// Push current composite opts to GPU.
@@ -4977,6 +5314,10 @@ impl WgpuViewer {
                         binding: 2,
                         resource: self.rt_uniform_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.post_composite_opts_buf.as_entire_binding(),
+                    },
                 ],
             }),
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4994,6 +5335,10 @@ impl WgpuViewer {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: self.rt_uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.post_composite_opts_buf.as_entire_binding(),
                     },
                 ],
             }),
@@ -6109,6 +6454,78 @@ impl WgpuViewer {
         }
     }
 
+    pub fn upload_gen_preview_mesh_instanced(
+        &mut self,
+        data: &greedy_mesh::PreviewInstancedResult,
+    ) {
+        if !data.solid_instances.is_empty() {
+            let solid_proto = greedy_mesh::preview_cube_prototype(data.cube_half);
+            let solid_v = Self::interleaved_from_prototype(&solid_proto);
+            self.gen_preview_solid_proto_vb = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("gen_preview_inst_solid_proto_vb"),
+                    contents: bytemuck::cast_slice(&solid_v),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.gen_preview_solid_proto_ib = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("gen_preview_inst_solid_proto_ib"),
+                    contents: bytemuck::cast_slice(&solid_proto.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                },
+            ));
+            self.gen_preview_solid_proto_idx_count = solid_proto.indices.len() as u32;
+
+            self.gen_preview_solid_instance_buf = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("gen_preview_inst_solid_instances"),
+                    contents: bytemuck::cast_slice(&data.solid_instances),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.gen_preview_solid_instance_count = data.solid_instances.len() as u32;
+
+            let wire_proto = greedy_mesh::preview_wireframe_prototype(data.cube_half);
+            let wire_v = Self::interleaved_from_prototype(&wire_proto);
+            self.gen_preview_wire_proto_vb = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("gen_preview_inst_wire_proto_vb"),
+                    contents: bytemuck::cast_slice(&wire_v),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.gen_preview_wire_proto_ib = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("gen_preview_inst_wire_proto_ib"),
+                    contents: bytemuck::cast_slice(&wire_proto.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                },
+            ));
+            self.gen_preview_wire_proto_idx_count = wire_proto.indices.len() as u32;
+
+            self.gen_preview_wire_instance_buf = Some(self.device.create_buffer_init(
+                &wgpu::util::BufferInitDescriptor {
+                    label: Some("gen_preview_inst_wire_instances"),
+                    contents: bytemuck::cast_slice(&data.wire_instances),
+                    usage: wgpu::BufferUsages::VERTEX,
+                },
+            ));
+            self.gen_preview_wire_instance_count = data.wire_instances.len() as u32;
+        } else {
+            self.gen_preview_solid_proto_vb = None;
+            self.gen_preview_solid_proto_ib = None;
+            self.gen_preview_solid_proto_idx_count = 0;
+            self.gen_preview_wire_proto_vb = None;
+            self.gen_preview_wire_proto_ib = None;
+            self.gen_preview_wire_proto_idx_count = 0;
+            self.gen_preview_solid_instance_buf = None;
+            self.gen_preview_solid_instance_count = 0;
+            self.gen_preview_wire_instance_buf = None;
+            self.gen_preview_wire_instance_count = 0;
+        }
+    }
+
     pub fn clear_preview_mesh(&mut self) {
         self.preview_vertex_buffer = None;
         self.preview_index_buffer = None;
@@ -6126,6 +6543,16 @@ impl WgpuViewer {
         self.preview_solid_instance_count = 0;
         self.preview_wire_instance_buf = None;
         self.preview_wire_instance_count = 0;
+        self.gen_preview_solid_proto_vb = None;
+        self.gen_preview_solid_proto_ib = None;
+        self.gen_preview_solid_proto_idx_count = 0;
+        self.gen_preview_wire_proto_vb = None;
+        self.gen_preview_wire_proto_ib = None;
+        self.gen_preview_wire_proto_idx_count = 0;
+        self.gen_preview_solid_instance_buf = None;
+        self.gen_preview_solid_instance_count = 0;
+        self.gen_preview_wire_instance_buf = None;
+        self.gen_preview_wire_instance_count = 0;
         self.preview_cache_key = None;
     }
 
@@ -6348,6 +6775,14 @@ impl WgpuViewer {
 
     pub fn clear_ping_label(&mut self) {
         self.ping_label_data = None;
+    }
+
+    pub fn upload_gizmo_delta_label(&mut self, label: Option<GpuPeerLabel>) {
+        self.gizmo_delta_label = label;
+    }
+
+    pub fn set_gizmo_on_top(&mut self, v: bool) {
+        self.gizmo_on_top = v;
     }
 
     /// Frustum wireframe: each vertex is `[x,y,z, r,g,b, a]` (7 floats); line-list pairs.
@@ -6899,6 +7334,55 @@ impl WgpuViewer {
                 pass.draw_indexed(0..self.preview_wire_index_count, 0, 0..1);
             }
         }
+        // Lit generator preview solid cubes (opaque, self-shadowing)
+        if let (Some(pvb), Some(pib), Some(ibuf)) = (
+            &self.gen_preview_solid_proto_vb,
+            &self.gen_preview_solid_proto_ib,
+            &self.gen_preview_solid_instance_buf,
+        ) {
+            if self.gen_preview_solid_instance_count > 0
+                && self.gen_preview_solid_proto_idx_count > 0
+            {
+                pass.set_vertex_buffer(0, pvb.slice(..));
+                pass.set_vertex_buffer(1, ibuf.slice(..));
+                pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_gen_preview_inst_occluded);
+                pass.draw_indexed(
+                    0..self.gen_preview_solid_proto_idx_count,
+                    0,
+                    0..self.gen_preview_solid_instance_count,
+                );
+                pass.set_pipeline(&self.pipeline_gen_preview_inst_front);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.draw_indexed(
+                    0..self.gen_preview_solid_proto_idx_count,
+                    0,
+                    0..self.gen_preview_solid_instance_count,
+                );
+            }
+        }
+        // Lit generator preview wireframe
+        if let (Some(pvb), Some(pib), Some(ibuf)) = (
+            &self.gen_preview_wire_proto_vb,
+            &self.gen_preview_wire_proto_ib,
+            &self.gen_preview_wire_instance_buf,
+        ) {
+            if self.gen_preview_wire_instance_count > 0
+                && self.gen_preview_wire_proto_idx_count > 0
+            {
+                pass.set_vertex_buffer(0, pvb.slice(..));
+                pass.set_vertex_buffer(1, ibuf.slice(..));
+                pass.set_index_buffer(pib.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+                pass.set_pipeline(&self.pipeline_gen_preview_inst_front_wire);
+                pass.draw_indexed(
+                    0..self.gen_preview_wire_proto_idx_count,
+                    0,
+                    0..self.gen_preview_wire_instance_count,
+                );
+            }
+        }
     }
 
     fn draw_indexed_selection_overlay_solid(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -6957,19 +7441,29 @@ impl WgpuViewer {
         if let Some(ref vb) = self.gizmo_line_vertex_buffer {
             if self.gizmo_line_vertex_count >= 3 {
                 pass.set_vertex_buffer(0, vb.slice(..));
-                pass.set_pipeline(&self.pipeline_gizmo_lines_occluded);
-                pass.draw(0..self.gizmo_line_vertex_count, 0..1);
-                pass.set_pipeline(&self.pipeline_gizmo_lines_front);
-                pass.draw(0..self.gizmo_line_vertex_count, 0..1);
+                if self.gizmo_on_top {
+                    pass.set_pipeline(&self.pipeline_gizmo_lines_always);
+                    pass.draw(0..self.gizmo_line_vertex_count, 0..1);
+                } else {
+                    pass.set_pipeline(&self.pipeline_gizmo_lines_occluded);
+                    pass.draw(0..self.gizmo_line_vertex_count, 0..1);
+                    pass.set_pipeline(&self.pipeline_gizmo_lines_front);
+                    pass.draw(0..self.gizmo_line_vertex_count, 0..1);
+                }
             }
         }
         if let Some(ref tb) = self.gizmo_tri_vertex_buffer {
             if self.gizmo_tri_vertex_count >= 3 {
                 pass.set_vertex_buffer(0, tb.slice(..));
-                pass.set_pipeline(&self.pipeline_gizmo_tris_occluded);
-                pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
-                pass.set_pipeline(&self.pipeline_gizmo_tris_front);
-                pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
+                if self.gizmo_on_top {
+                    pass.set_pipeline(&self.pipeline_gizmo_tris_always);
+                    pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
+                } else {
+                    pass.set_pipeline(&self.pipeline_gizmo_tris_occluded);
+                    pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
+                    pass.set_pipeline(&self.pipeline_gizmo_tris_front);
+                    pass.draw(0..self.gizmo_tri_vertex_count, 0..1);
+                }
             }
         }
     }
@@ -7666,6 +8160,78 @@ impl WgpuViewer {
             pass.draw(0..3, 0..1);
         }
 
+        // ── Gizmo move-drag delta label (GPU text via glyphon) ──
+        if let Some(label) = &self.gizmo_delta_label {
+            let vw = self.viewport_width.max(1);
+            let vh = self.viewport_height.max(1);
+            self.glyphon_viewport.update(
+                &self.queue,
+                Resolution { width: vw, height: vh },
+            );
+            let font_size = 36.0_f32;
+            let line_height = 46.0_f32;
+            let mut buf = GlyphonBuffer::new(
+                &mut self.glyphon_font_system,
+                Metrics::new(font_size, line_height),
+            );
+            buf.set_size(&mut self.glyphon_font_system, Some(300.0), Some(line_height));
+            buf.set_text(
+                &mut self.glyphon_font_system,
+                &label.name,
+                Attrs::new()
+                    .family(Family::Monospace)
+                    .color(GlyphonColor::rgb(159, 216, 255)),
+                Shaping::Basic,
+            );
+            buf.shape_until_scroll(&mut self.glyphon_font_system, false);
+            let text_width = buf.layout_runs().next().map(|r| r.line_w).unwrap_or(0.0);
+            let areas = [TextArea {
+                buffer: &buf,
+                left: label.x - text_width * 0.5,
+                top: label.y - line_height - 6.0,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: 0,
+                    top: 0,
+                    right: vw as i32,
+                    bottom: vh as i32,
+                },
+                default_color: GlyphonColor::rgb(159, 216, 255),
+                custom_glyphs: &[],
+            }];
+            let _ = self.glyphon_text_renderer.prepare(
+                &self.device,
+                &self.queue,
+                &mut self.glyphon_font_system,
+                &mut self.glyphon_atlas,
+                &self.glyphon_viewport,
+                areas,
+                &mut self.glyphon_swash_cache,
+            );
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("gizmo_delta_label"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.present_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                let _ = self.glyphon_text_renderer.render(
+                    &self.glyphon_atlas,
+                    &self.glyphon_viewport,
+                    &mut pass,
+                );
+            }
+            self.glyphon_atlas.trim();
+        }
+
         // ── Peer + ping name labels (GPU text via glyphon) ──
         let has_text = !self.peer_label_data.is_empty() || self.ping_label_data.is_some();
         if has_text {
@@ -7805,6 +8371,11 @@ impl WgpuViewer {
             },
         );
 
+        // Mascots render directly on top of the swapchain (start-screen overlay).
+        if self.start_screen_transparent {
+            self.render_mascots(&mut encoder, &swap_view);
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         if self.auto_exposure_enabled {
             self.read_meter_luminance_and_update_auto_exposure();
@@ -7825,6 +8396,240 @@ impl WgpuViewer {
         }
         // #endregion
         Ok(())
+    }
+
+    // ── Mascot helpers ────────────────────────────────────────────────────────
+
+    fn make_mascot_depth(
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mascot_depth"),
+            size: wgpu::Extent3d {
+                width: w.max(1),
+                height: h.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
+    }
+
+    /// Load (or replace) the voxel mesh for mascot `id`.
+    /// Creates the slot if it does not yet exist.
+    pub fn load_mascot_mesh(&mut self, id: u32, mesh: &MeshBuffers, bounds: MeshBounds) {
+        let interleaved = Self::interleaved_from_mesh(mesh);
+        let vertex_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mascot_vtx"),
+                    contents: bytemuck::cast_slice(&interleaved),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+        let index_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mascot_idx"),
+                    contents: bytemuck::cast_slice(&mesh.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+        let index_count = mesh.indices.len() as u32;
+
+        if let Some(entry) = self.mascots.iter_mut().find(|m| m.id == id) {
+            entry.vertex_buffer = Some(vertex_buffer);
+            entry.index_buffer = Some(index_buffer);
+            entry.index_count = index_count;
+            entry.bounds = Some(bounds);
+        } else {
+            let default_side = 200u32;
+            let (depth_texture, depth_view) =
+                Self::make_mascot_depth(&self.device, default_side, default_side);
+            let uniforms_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mascot_uniforms"),
+                size: std::mem::size_of::<MascotUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mascot_bg"),
+                layout: &self.mascot_bind_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms_buffer.as_entire_binding(),
+                }],
+            });
+            self.mascots.push(MascotEntry {
+                id,
+                vertex_buffer: Some(vertex_buffer),
+                index_buffer: Some(index_buffer),
+                index_count,
+                depth_texture,
+                depth_view,
+                uniforms_buffer,
+                bind_group,
+                rotation_y: 0.0,
+                screen_rect: [0.0, 0.0, default_side as f32, default_side as f32],
+                visible: false,
+                bounds: Some(bounds),
+            });
+        }
+    }
+
+    /// Update the viewport-relative screen rect for mascot `id`.
+    /// Recreates the depth buffer if the dimensions change.
+    pub fn set_mascot_screen_rect(&mut self, id: u32, x: f32, y: f32, w: f32, h: f32) {
+        let Some(entry) = self.mascots.iter_mut().find(|m| m.id == id) else {
+            return;
+        };
+        let new_w = (w as u32).max(1);
+        let new_h = (h as u32).max(1);
+        let old_w = (entry.screen_rect[2] as u32).max(1);
+        let old_h = (entry.screen_rect[3] as u32).max(1);
+        entry.screen_rect = [x, y, w, h];
+        if new_w != old_w || new_h != old_h {
+            let (tex, view) = Self::make_mascot_depth(&self.device, new_w, new_h);
+            entry.depth_texture = tex;
+            entry.depth_view = view;
+        }
+    }
+
+    /// Show or hide a mascot.
+    pub fn set_mascot_visible(&mut self, id: u32, visible: bool) {
+        if let Some(entry) = self.mascots.iter_mut().find(|m| m.id == id) {
+            entry.visible = visible;
+        }
+    }
+
+    /// Returns true if any mascot is currently visible (used to keep the render loop alive).
+    pub fn any_mascot_visible(&self) -> bool {
+        self.mascots
+            .iter()
+            .any(|m| m.visible && m.vertex_buffer.is_some())
+    }
+
+    fn mascot_uniforms(&self, i: usize) -> MascotUniforms {
+        let m = &self.mascots[i];
+        let rw = m.screen_rect[2].max(1.0);
+        let rh = m.screen_rect[3].max(1.0);
+        let aspect = rw / rh;
+        if let Some(bounds) = &m.bounds {
+            let center = bounds.center();
+            let extent = (bounds.max - bounds.min).max_element().max(0.001);
+            let model = Mat4::from_scale(Vec3::splat(1.6 / extent))
+                * Mat4::from_rotation_y(m.rotation_y)
+                * Mat4::from_translation(-center);
+            let view = Mat4::look_at_rh(Vec3::new(0.0, 0.8, 3.0), Vec3::ZERO, Vec3::Y);
+            let proj = Mat4::perspective_rh(0.5, aspect, 0.1, 50.0);
+            MascotUniforms {
+                mvp: (proj * view * model).to_cols_array_2d(),
+                light_dir: [0.6, 0.8, 0.5, 0.0],
+                ambient: 0.55,
+                sun: 0.7,
+                _pad: [0.0; 2],
+            }
+        } else {
+            MascotUniforms {
+                mvp: Mat4::IDENTITY.to_cols_array_2d(),
+                light_dir: [0.6, 0.8, 0.5, 0.0],
+                ambient: 0.55,
+                sun: 0.7,
+                _pad: [0.0; 2],
+            }
+        }
+    }
+
+    fn render_mascots(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        swap_view: &wgpu::TextureView,
+    ) {
+        // Skip when the swapchain is in HDR mode — pipeline target is sdr_format only.
+        // TODO: recreate mascot_pipeline when config.format changes.
+        if self.config.format != self.sdr_format {
+            return;
+        }
+
+        let now = std::time::Instant::now();
+        let dt = now
+            .duration_since(self.mascot_last_tick)
+            .as_secs_f32()
+            .clamp(0.0, 0.1);
+        self.mascot_last_tick = now;
+
+        const ROT_SPEED: f32 = 0.6; // radians / second
+
+        // Update rotations.
+        for m in &mut self.mascots {
+            m.rotation_y = (m.rotation_y + dt * ROT_SPEED).rem_euclid(std::f32::consts::TAU);
+        }
+
+        // Upload uniforms, then issue render passes.
+        for i in 0..self.mascots.len() {
+            if !self.mascots[i].visible || self.mascots[i].vertex_buffer.is_none() {
+                continue;
+            }
+
+            let uniforms = self.mascot_uniforms(i);
+            self.queue.write_buffer(
+                &self.mascots[i].uniforms_buffer,
+                0,
+                bytemuck::bytes_of(&uniforms),
+            );
+
+            let rx = self.viewport_x as f32 + self.mascots[i].screen_rect[0];
+            let ry = self.viewport_y as f32 + self.mascots[i].screen_rect[1];
+            let rw = self.mascots[i].screen_rect[2].max(1.0);
+            let rh = self.mascots[i].screen_rect[3].max(1.0);
+            let index_count = self.mascots[i].index_count;
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("mascot"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: swap_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(
+                        wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.mascots[i].depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Discard,
+                            }),
+                            stencil_ops: None,
+                        },
+                    ),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+
+                pass.set_viewport(rx, ry, rw, rh, 0.0, 1.0);
+                pass.set_scissor_rect(rx as u32, ry as u32, rw as u32, rh as u32);
+                pass.set_pipeline(&self.mascot_pipeline);
+                pass.set_bind_group(0, &self.mascots[i].bind_group, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    self.mascots[i].vertex_buffer.as_ref().unwrap().slice(..),
+                );
+                pass.set_index_buffer(
+                    self.mascots[i].index_buffer.as_ref().unwrap().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..index_count, 0, 0..1);
+            }
+        }
     }
 }
 

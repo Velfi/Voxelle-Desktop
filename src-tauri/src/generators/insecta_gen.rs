@@ -1,96 +1,17 @@
+use super::common::{
+    v3_add, v3_normalize, v3_round, v3_scale, PlacementFrame, V3,
+};
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{
     effective_ray_grid_size, ensure_grid_fits_coord, ray_first_solid, screen_to_world_ray,
     VoxelEditDelta,
 };
-use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
+use crate::voxelle::{MaterialId, Scene, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
 
 const VOXEL_CAP: usize = 10_000;
-
-// ---------------------------------------------------------------------------
-// Vector helpers (f32 triples)
-// ---------------------------------------------------------------------------
-
-type V3 = (f32, f32, f32);
-
-fn v3_add(a: V3, b: V3) -> V3 {
-    (a.0 + b.0, a.1 + b.1, a.2 + b.2)
-}
-
-fn v3_scale(a: V3, s: f32) -> V3 {
-    (a.0 * s, a.1 * s, a.2 * s)
-}
-
-fn v3_dot(a: V3, b: V3) -> f32 {
-    a.0 * b.0 + a.1 * b.1 + a.2 * b.2
-}
-
-fn v3_cross(a: V3, b: V3) -> V3 {
-    (
-        a.1 * b.2 - a.2 * b.1,
-        a.2 * b.0 - a.0 * b.2,
-        a.0 * b.1 - a.1 * b.0,
-    )
-}
-
-fn v3_len(a: V3) -> f32 {
-    v3_dot(a, a).sqrt()
-}
-
-fn v3_normalize(a: V3) -> V3 {
-    let l = v3_len(a);
-    if l < 1e-9 {
-        (0.0, 0.0, 1.0)
-    } else {
-        v3_scale(a, 1.0 / l)
-    }
-}
-
-fn v3_round(a: V3) -> (i32, i32, i32) {
-    (a.0.round() as i32, a.1.round() as i32, a.2.round() as i32)
-}
-
-/// Rotate vector `v` around axis `axis` (must be unit) by `angle` radians.
-fn v3_rotate_around(v: V3, axis: V3, angle: f32) -> V3 {
-    let c = angle.cos();
-    let s = angle.sin();
-    let d = v3_dot(axis, v);
-    let cr = v3_cross(axis, v);
-    (
-        v.0 * c + cr.0 * s + axis.0 * d * (1.0 - c),
-        v.1 * c + cr.1 * s + axis.1 * d * (1.0 - c),
-        v.2 * c + cr.2 * s + axis.2 * d * (1.0 - c),
-    )
-}
-
-// ---------------------------------------------------------------------------
-// Orthonormal frame from face normal
-// ---------------------------------------------------------------------------
-
-/// Build a (forward, side, up) orthonormal frame from a face normal.
-/// `forward` = outward normal, `side` and `up` span the face plane.
-fn frame_from_normal(nx: i32, ny: i32, nz: i32) -> (V3, V3, V3) {
-    let forward = v3_normalize((nx as f32, ny as f32, nz as f32));
-    // Pick a non-parallel reference for cross product
-    let ref_vec = if forward.1.abs() < 0.9 {
-        (0.0, 1.0, 0.0)
-    } else {
-        (1.0, 0.0, 0.0)
-    };
-    let side = v3_normalize(v3_cross(forward, ref_vec));
-    let up = v3_cross(side, forward);
-    (forward, side, up)
-}
-
-/// Apply yaw rotation to the frame around `up`.
-fn apply_yaw(forward: V3, side: V3, up: V3, yaw: f32) -> (V3, V3, V3) {
-    let f2 = v3_rotate_around(forward, up, yaw);
-    let s2 = v3_rotate_around(side, up, yaw);
-    (f2, s2, up)
-}
 
 // ---------------------------------------------------------------------------
 // Body segment radii
@@ -487,7 +408,7 @@ fn emit_voxel(
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn generate_insecta_deltas(
+pub fn generate_insecta_deltas(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
     face_empty: VoxelCoord,
@@ -548,24 +469,19 @@ fn generate_insecta_deltas(
         return Vec::new();
     }
 
-    // Build body frame
-    let (fwd0, side0, up0) = frame_from_normal(nx, ny, nz);
-    let (forward, side, up) = apply_yaw(fwd0, side0, up0, body_yaw);
+    // Build body frame using common PlacementFrame
+    let frame = PlacementFrame::from_normal(
+        (face_empty.0, face_empty.1, face_empty.2),
+        nx, ny, nz,
+    )
+    .with_anchor_offset(anchor_offset_u as f32, anchor_offset_v as f32)
+    .with_yaw(body_yaw);
+    let forward = frame.forward;
+    let side = frame.side;
+    let up = frame.up;
 
-    // Anchor: face_empty shifted by (u, v) in face plane
-    let anchor = v3_add(
-        (
-            face_empty.0 as f32,
-            face_empty.1 as f32,
-            face_empty.2 as f32,
-        ),
-        v3_add(
-            v3_scale(side, anchor_offset_u as f32),
-            v3_scale(up, anchor_offset_v as f32),
-        ),
-    );
-    // Nose position = anchor (bug faces outward from click point)
-    let nose = anchor;
+    // Nose position = frame origin (bug faces outward from click point)
+    let nose = frame.origin;
 
     let mut out = Vec::new();
     let mut seen: HashSet<VoxelCoord> = HashSet::new();
@@ -675,7 +591,7 @@ fn generate_insecta_deltas(
                         if d > er {
                             continue;
                         }
-                        let p = v3_add(eye_center, (dx as f32, dy as f32, dz as f32));
+                        let p = v3_add(eye_center, [dx as f32, dy as f32, dz as f32]);
                         let (x, y, z) = v3_round(p);
                         if !emit_voxel(
                             file, voxel_map, &mut seen, &mut out, x, y, z, color, material,
@@ -982,4 +898,126 @@ pub fn generator_insecta_at_screen(
         color,
         material,
     ))
+}
+
+/// Preview-only: compute the set of voxel coords an insect would occupy,
+/// without mutating the real file. Used for hover preview.
+#[allow(clippy::too_many_arguments)]
+pub fn preview_insecta_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    species: &str,
+    total_length: i32,
+    head_ratio: f32,
+    thorax_ratio: f32,
+    abdomen_ratio: f32,
+    body_half_width: i32,
+    body_half_height: i32,
+    abdomen_taper: f32,
+    head_shape: i32,
+    anchor_offset_u: i32,
+    anchor_offset_v: i32,
+    body_yaw: f32,
+    body_arch: f32,
+    antenna_length: i32,
+    antenna_spread: f32,
+    antenna_pitch: f32,
+    antenna_root: i32,
+    mandible_length: i32,
+    mandible_spread: f32,
+    mandible_forward: i32,
+    wing_shape: i32,
+    show_wing_fore: bool,
+    wing_fore_length: i32,
+    wing_fore_width: i32,
+    wing_fore_spread: f32,
+    wing_fore_pitch: f32,
+    wing_fore_offset: i32,
+    wing_fore_forward_cant: f32,
+    show_wing_hind: bool,
+    wing_hind_length: i32,
+    wing_hind_width: i32,
+    wing_hind_spread: f32,
+    wing_hind_pitch: f32,
+    wing_hind_offset: i32,
+    color: u32,
+    material: MaterialId,
+) -> Vec<(VoxelCoord, u32)> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(face_empty) = prev else {
+        return Vec::new();
+    };
+    let mut stub_file = VoxelleFile {
+        version: 0,
+        grid_size: file.grid_size,
+        scene: Scene::default(),
+        scene_extra: None,
+        mood: None,
+        lighting: None,
+        voxels: Vec::new(),
+        objects: Vec::new(),
+        active_object_id: 0,
+    };
+    let mut stub_map: AHashMap<VoxelCoord, usize> = AHashMap::new();
+    generate_insecta_deltas(
+        &mut stub_file,
+        &mut stub_map,
+        face_empty,
+        solid,
+        species,
+        total_length,
+        head_ratio,
+        thorax_ratio,
+        abdomen_ratio,
+        body_half_width,
+        body_half_height,
+        abdomen_taper,
+        head_shape,
+        anchor_offset_u,
+        anchor_offset_v,
+        body_yaw,
+        body_arch,
+        antenna_length,
+        antenna_spread,
+        antenna_pitch,
+        antenna_root,
+        mandible_length,
+        mandible_spread,
+        mandible_forward,
+        wing_shape,
+        show_wing_fore,
+        wing_fore_length,
+        wing_fore_width,
+        wing_fore_spread,
+        wing_fore_pitch,
+        wing_fore_offset,
+        wing_fore_forward_cant,
+        show_wing_hind,
+        wing_hind_length,
+        wing_hind_width,
+        wing_hind_spread,
+        wing_hind_pitch,
+        wing_hind_offset,
+        color,
+        material,
+    )
+    .into_iter()
+    .filter_map(|d| {
+        if let VoxelEditDelta::Added(v) = d {
+            if !voxel_map.contains_key(&(v.x, v.y, v.z)) {
+                return Some(((v.x, v.y, v.z), v.color));
+            }
+        }
+        None
+    })
+    .collect()
 }

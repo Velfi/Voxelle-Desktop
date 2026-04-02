@@ -2955,6 +2955,8 @@ pub enum TerrainSculptOp {
     Raise,
     Lower,
     Smooth,
+    Flatten,
+    Erode,
 }
 
 /// Web `WallAreaShape` — circle/polygon need extra pointer flows; brush uses freehand spine.
@@ -3088,6 +3090,143 @@ fn column_max_y(
         }
     }
     None
+}
+
+/// Particle-based hydraulic erosion on the local heightfield patch.
+///
+/// Runs `strength * 4` particles. Each particle flows downhill, eroding material and depositing
+/// sediment. Results are written into `new_heights` for the inner `cols` only.
+fn apply_terrain_erode(
+    col_meta: &[(i32, i32, i32, i32, Voxel)],
+    cols: &[(i32, i32)],
+    spine: &[(i32, i32, i32)],
+    brush_r_vox: f32,
+    strength: i32,
+    stroke_seed: u32,
+    grid_size: i32,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    base_y: i32,
+    new_heights: &mut Vec<i32>,
+) {
+    const ERODE_K: f32 = 0.35;
+    const DEPOSIT_K: f32 = 0.25;
+    const MAX_STEPS: i32 = 32;
+
+    // Build working height buffer from col_meta
+    let mut heights: AHashMap<(i32, i32), f32> = AHashMap::with_capacity(col_meta.len() + 32);
+    let mut y_fills: AHashMap<(i32, i32), i32> = AHashMap::with_capacity(col_meta.len() + 32);
+    for meta in col_meta {
+        heights.insert((meta.0, meta.1), meta.3 as f32);
+        y_fills.insert((meta.0, meta.1), meta.2);
+    }
+
+    // Populate 1-cell margin neighbours as read-only gradient helpers
+    let col_set: AHashSet<(i32, i32)> = cols.iter().copied().collect();
+    for &(x, z) in cols {
+        for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let nx = x + dx;
+            let nz = z + dz;
+            if col_set.contains(&(nx, nz)) || !in_grid(nx, base_y, nz, grid_size) {
+                continue;
+            }
+            heights.entry((nx, nz)).or_insert_with(|| {
+                column_max_y(voxel_map, grid_size, nx, nz).unwrap_or(base_y - 1) as f32
+            });
+            y_fills.entry((nx, nz)).or_insert(base_y);
+        }
+    }
+
+    // Precompute brush falloff for inner columns
+    let mut falloffs: AHashMap<(i32, i32), f32> = AHashMap::with_capacity(cols.len());
+    for &(x, z) in cols {
+        falloffs.insert((x, z), terrain_brush_falloff(x, z, spine, brush_r_vox));
+    }
+
+    let n_particles = ((strength * 4) as u32).max(1).min(512);
+    let col_count = cols.len();
+    if col_count == 0 {
+        return;
+    }
+
+    for p in 0..n_particles {
+        // Inline Mulberry32 RNG, seeded deterministically per-particle
+        let mut rng_state = stroke_seed.wrapping_add(p.wrapping_mul(2_654_435_761));
+        let mut rng_next = || -> f32 {
+            rng_state = rng_state.wrapping_add(0x6D2B79F5);
+            let mut t = (rng_state as u64).wrapping_mul((rng_state ^ (rng_state >> 15)) as u64);
+            t = (t & 0xFFFF_FFFF) ^ (t >> 16);
+            (t as u32 as f32) / (u32::MAX as f32)
+        };
+
+        // Random start position within the brush footprint
+        let idx = (rng_next() * col_count as f32) as usize % col_count;
+        let (mut px, mut pz) = cols[idx];
+        let mut sediment: f32 = 0.0;
+
+        for _ in 0..MAX_STEPS {
+            let cur_h = *heights.get(&(px, pz)).unwrap_or(&(base_y as f32 - 1.0));
+            let cur_y_fill = *y_fills.get(&(px, pz)).unwrap_or(&base_y);
+            let falloff_t = *falloffs.get(&(px, pz)).unwrap_or(&0.0);
+
+            // Find steepest descent among 4 neighbours
+            let mut best_h = cur_h;
+            let mut best_next: Option<(i32, i32)> = None;
+            for (dx, dz) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let nx = px + dx;
+                let nz = pz + dz;
+                if let Some(&nh) = heights.get(&(nx, nz)) {
+                    if nh < best_h {
+                        best_h = nh;
+                        best_next = Some((nx, nz));
+                    }
+                }
+            }
+
+            let slope = (cur_h - best_h).max(0.0);
+
+            // Erode from current position
+            let e = (ERODE_K * slope * falloff_t)
+                .min(cur_h - (cur_y_fill as f32 - 1.0))
+                .max(0.0);
+            if let Some(h) = heights.get_mut(&(px, pz)) {
+                *h -= e;
+            }
+            sediment += e;
+
+            // Deposit some sediment here if slope is gentle
+            let deposit = (sediment * DEPOSIT_K * (1.0 - slope.min(1.0))).max(0.0);
+            if col_set.contains(&(px, pz)) {
+                if let Some(h) = heights.get_mut(&(px, pz)) {
+                    *h += deposit;
+                }
+                sediment -= deposit;
+            }
+
+            // Move downhill, or settle if no lower neighbour found
+            match best_next {
+                Some(np) => {
+                    px = np.0;
+                    pz = np.1;
+                }
+                None => break,
+            }
+        }
+
+        // Deposit all remaining sediment at final resting position
+        if col_set.contains(&(px, pz)) {
+            if let Some(h) = heights.get_mut(&(px, pz)) {
+                *h += sediment;
+            }
+        }
+    }
+
+    // Write results back — inner columns only
+    let (_, y_hi) = grid_valid_range(grid_size);
+    for (i, &(x, z)) in cols.iter().enumerate() {
+        let y_fill = col_meta[i].2;
+        let h = heights.get(&(x, z)).copied().unwrap_or(y_fill as f32 - 1.0);
+        new_heights[i] = (h.round() as i32).clamp(y_fill - 1, y_hi);
+    }
 }
 
 /// Heightfield terrain: columns listed in `cols` are rebuilt from `y_fill` through target height.
@@ -4400,6 +4539,9 @@ pub fn apply_sculpt_stroke(
     terrain_base_y: i32,
     terrain_strength: i32,
     terrain_smooth_radius: i32,
+    terrain_flatten_use_base_y: bool,
+    terrain_sub_voxel: bool,
+    terrain_accum: &mut AHashMap<(i32, i32), f32>,
     smooth_neighbor_passes: u32,
     brush_strength: u32,
     brush_falloff: u32,
@@ -4586,7 +4728,9 @@ pub fn apply_sculpt_stroke(
         SculptStrokeMode::Terrain => {
             let op = terrain_op.unwrap_or(TerrainSculptOp::Raise);
             let base_y = terrain_base_y;
-            let strength = terrain_strength.max(0).min(64);
+            // terrain_strength comes from sculptBrushStrength (0–100 percent).
+            // Map to a voxel delta range of 1–10 so that 100% ≈ 10 voxels/sample.
+            let strength = ((terrain_strength * 10 + 99) / 100).max(1).min(10);
             let smooth_r = terrain_smooth_radius.max(0).min(8);
 
             let mut xz_map: AHashMap<(i32, i32), (i32, i32)> = AHashMap::new();
@@ -4633,15 +4777,28 @@ pub fn apply_sculpt_stroke(
                 TerrainSculptOp::Raise | TerrainSculptOp::Lower => {
                     for (i, &(x, z)) in cols.iter().enumerate() {
                         let meta = &col_meta[i];
-                        let old_max = meta.3;
+                        let old_h = meta.3;
                         let y_fill = meta.2;
                         let t = terrain_brush_falloff(x, z, &spine, brush_r_vox);
-                        let delta = (strength as f32 * t).round() as i32;
-                        let old_h = old_max;
-                        let h = if matches!(op, TerrainSculptOp::Raise) {
-                            old_h + delta
+                        let h = if terrain_sub_voxel {
+                            // Accumulate fractional height changes; only commit whole voxels.
+                            let raw = strength as f32 * t;
+                            let acc = terrain_accum.entry((x, z)).or_insert(0.0);
+                            *acc += raw;
+                            let delta = (*acc).floor() as i32;
+                            *acc -= delta as f32;
+                            if matches!(op, TerrainSculptOp::Raise) {
+                                old_h + delta
+                            } else {
+                                (old_h - delta).max(y_fill - 1)
+                            }
                         } else {
-                            (old_h - delta).max(y_fill - 1)
+                            let delta = (strength as f32 * t).round() as i32;
+                            if matches!(op, TerrainSculptOp::Raise) {
+                                old_h + delta
+                            } else {
+                                (old_h - delta).max(y_fill - 1)
+                            }
                         };
                         new_heights[i] = h;
                     }
@@ -4675,6 +4832,48 @@ pub fn apply_sculpt_stroke(
                         let y_fill = meta.2;
                         new_heights[i] = avg.max(y_fill - 1);
                     }
+                }
+                TerrainSculptOp::Flatten => {
+                    // Target Y: mean surface of non-empty columns, or explicit base_y.
+                    let target_y: i32 = if terrain_flatten_use_base_y {
+                        base_y
+                    } else {
+                        let mut sum = 0i64;
+                        let mut cnt = 0i64;
+                        for meta in &col_meta {
+                            if meta.3 >= meta.2 {
+                                sum += meta.3 as i64;
+                                cnt += 1;
+                            }
+                        }
+                        if cnt > 0 {
+                            (sum / cnt) as i32
+                        } else {
+                            base_y
+                        }
+                    };
+                    for (i, &(x, z)) in cols.iter().enumerate() {
+                        let meta = &col_meta[i];
+                        let old_h = meta.3;
+                        let y_fill = meta.2;
+                        let t = terrain_brush_falloff(x, z, &spine, brush_r_vox);
+                        let new_h_f = old_h as f32 + (target_y - old_h) as f32 * t;
+                        new_heights[i] = (new_h_f.round() as i32).max(y_fill - 1);
+                    }
+                }
+                TerrainSculptOp::Erode => {
+                    apply_terrain_erode(
+                        &col_meta,
+                        &cols,
+                        &spine,
+                        brush_r_vox,
+                        strength,
+                        stroke_seed,
+                        grid_size,
+                        voxel_map,
+                        base_y,
+                        &mut new_heights,
+                    );
                 }
             }
 
@@ -5004,6 +5203,39 @@ fn apply_stamp_rotation(
         .collect()
 }
 
+/// Compute X/Z anchor offsets for stamp origin placement.
+/// `origin_x` / `origin_z`: 0 = min edge, 1 = center, 2 = max edge.
+/// Returns `(off_x, off_z)` to subtract from each entry's dx/dz before adding the anchor.
+pub fn stamp_origin_offsets_pub(
+    entries: &[(i32, i32, i32, u32, MaterialId)],
+    origin_x: i32,
+    origin_z: i32,
+) -> (i32, i32) {
+    stamp_origin_offsets(entries, origin_x, origin_z)
+}
+
+fn stamp_origin_offsets(
+    entries: &[(i32, i32, i32, u32, MaterialId)],
+    origin_x: i32,
+    origin_z: i32,
+) -> (i32, i32) {
+    let min_x = entries.iter().map(|e| e.0).min().unwrap_or(0);
+    let max_x = entries.iter().map(|e| e.0).max().unwrap_or(0);
+    let min_z = entries.iter().map(|e| e.2).min().unwrap_or(0);
+    let max_z = entries.iter().map(|e| e.2).max().unwrap_or(0);
+    let off_x = match origin_x {
+        1 => (min_x + max_x) / 2,
+        2 => max_x,
+        _ => min_x,
+    };
+    let off_z = match origin_z {
+        1 => (min_z + max_z) / 2,
+        2 => max_z,
+        _ => min_z,
+    };
+    (off_x, off_z)
+}
+
 /// Stamp pattern at the add-tool anchor (empty cell in front of first solid).
 pub fn stamp_clipboard_at_screen(
     file: &mut VoxelleFile,
@@ -5017,6 +5249,8 @@ pub fn stamp_clipboard_at_screen(
     rot_x: f32,
     rot_y: f32,
     rot_z: f32,
+    origin_x: i32,
+    origin_z: i32,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
@@ -5028,17 +5262,18 @@ pub fn stamp_clipboard_at_screen(
         return Ok(Vec::new());
     };
     let rotated = apply_stamp_rotation(&clip.entries, rot_x, rot_y, rot_z);
+    let (off_x, off_z) = stamp_origin_offsets(&rotated, origin_x, origin_z);
     ensure_grid_fits_coords(
         file,
-        rotated.iter().map(|e| (ax + e.0, ay + e.1, az + e.2)),
+        rotated.iter().map(|e| (ax + e.0 - off_x, ay + e.1, az + e.2 - off_z)),
     );
     let grid_size = file.grid_size.max(1);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
     for &(dx, dy, dz, src_color, src_mat) in &rotated {
-        let x = ax + dx;
+        let x = ax + dx - off_x;
         let y = ay + dy;
-        let z = az + dz;
+        let z = az + dz - off_z;
         if !in_grid(x, y, z, grid_size) {
             continue;
         }
@@ -5077,6 +5312,8 @@ pub fn punch_clipboard_at_screen(
     rot_x: f32,
     rot_y: f32,
     rot_z: f32,
+    origin_x: i32,
+    origin_z: i32,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
@@ -5086,12 +5323,13 @@ pub fn punch_clipboard_at_screen(
     };
     let (hx, hy, hz) = hit;
     let rotated = apply_stamp_rotation(&clip.entries, rot_x, rot_y, rot_z);
+    let (off_x, off_z) = stamp_origin_offsets(&rotated, origin_x, origin_z);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
     let mut out: Vec<VoxelEditDelta> = Vec::new();
     for &(dx, dy, dz, _, _) in &rotated {
-        let x = hx + dx;
+        let x = hx + dx - off_x;
         let y = hy + dy;
-        let z = hz + dz;
+        let z = hz + dz - off_z;
         if !seen.insert((x, y, z)) {
             continue;
         }

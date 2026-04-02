@@ -8,13 +8,15 @@ use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
 
-fn hash3(x: i32, y: i32, z: i32, seed: i32) -> f32 {
-    let h = (x.wrapping_mul(73856093) as i64)
-        ^ (y.wrapping_mul(19349663) as i64)
-        ^ (z.wrapping_mul(83492791) as i64)
-        ^ ((seed as i64) << 20);
-    let u = (h as u64).wrapping_mul(6364136223846793005);
-    (u as f32) / (u64::MAX as f32)
+fn hash3(seed: i32, x: i32, y: i32, z: i32) -> f32 {
+    let mut h = (seed as u32)
+        ^ (x.wrapping_mul(73856093) as u32)
+        ^ (y.wrapping_mul(19349663) as u32)
+        ^ (z.wrapping_mul(83492791) as u32);
+    h = (h ^ (h >> 16)).wrapping_mul(0x85ebca6b);
+    h = (h ^ (h >> 13)).wrapping_mul(0xc2b2ae35);
+    h = h ^ (h >> 16);
+    (h as f32) / (u32::MAX as f32)
 }
 
 fn seed_to_int(seed: i32, lo: i32, hi: i32) -> i32 {
