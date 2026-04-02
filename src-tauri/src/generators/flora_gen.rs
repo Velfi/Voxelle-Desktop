@@ -1,46 +1,19 @@
+use super::common::{Rng, GOLDEN_ANGLE_RAD};
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{
     effective_ray_grid_size, ensure_grid_fits_coord, ray_first_solid, screen_to_world_ray,
     VoxelEditDelta,
 };
-use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
+use crate::voxelle::{MaterialId, Scene, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
 
 const VOXEL_CAP: usize = 150_000;
-const GOLDEN_ANGLE_RAD: f64 = std::f64::consts::PI * (3.0 - 2.23606797749979); // PI * (3 - sqrt(5))
 
 // ---------------------------------------------------------------------------
-// Mulberry32 seeded RNG
-// ---------------------------------------------------------------------------
-
-struct Rng {
-    state: u32,
-}
-
-impl Rng {
-    fn new(seed: u32) -> Self {
-        Self { state: seed }
-    }
-
-    /// Returns a value in [0, 1).
-    fn next_f64(&mut self) -> f64 {
-        self.state = self.state.wrapping_add(0x6D2B79F5);
-        let mut t = (self.state as u64).wrapping_mul((self.state ^ (self.state >> 15)) as u64);
-        t = (t & 0xFFFFFFFF) ^ (t >> 16);
-        let t = t as u32;
-        (t as f64) / (u32::MAX as f64)
-    }
-
-    /// Returns a value in [-1, 1).
-    fn next_signed(&mut self) -> f64 {
-        self.next_f64() * 2.0 - 1.0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Vector helpers (f64 triples)
+// Vector helpers (f64 triples) — kept local because this generator uses f64
+// precision throughout its braid / wobble paths.
 // ---------------------------------------------------------------------------
 
 type V3 = (f64, f64, f64);
@@ -79,12 +52,11 @@ fn v3_round(a: V3) -> (i32, i32, i32) {
 }
 
 // ---------------------------------------------------------------------------
-// Tangent frame from face normal (same pattern as grass_gen)
+// Tangent frame from face normal
 // ---------------------------------------------------------------------------
 
 fn tangent_vectors(nx: i32, ny: i32, nz: i32) -> (V3, V3) {
     let n = (nx as f64, ny as f64, nz as f64);
-    // Choose an arbitrary non-parallel vector to cross with the normal
     let arbitrary = if nx.abs() > nz.abs() {
         (0.0, 0.0, 1.0)
     } else {
@@ -114,8 +86,8 @@ fn build_mean_backbone(
     for k in 0..height {
         let frac = k as f64;
         // Accumulate lateral wobble
-        drift_u += rng.next_signed() * wobble * 0.6;
-        drift_v += rng.next_signed() * wobble * 0.6;
+        drift_u += rng.next_signed_f64() * wobble * 0.6;
+        drift_v += rng.next_signed_f64() * wobble * 0.6;
         let along = v3_scale(normal, frac);
         let lateral = v3_add(v3_scale(t1, drift_u), v3_scale(t2, drift_v));
         spine.push(v3_add(base, v3_add(along, lateral)));
@@ -269,7 +241,7 @@ fn generate_branches(
         let spine_idx = spine_idx.min(total - 1);
 
         // Direction: outward in tangent plane using golden angle spiral
-        let angle = bi as f64 * GOLDEN_ANGLE_RAD;
+        let angle = bi as f64 * (GOLDEN_ANGLE_RAD as f64);
         let out_dir = v3_normalize(v3_add(v3_scale(t1, angle.cos()), v3_scale(t2, angle.sin())));
         // Mix in some upward (normal) bias
         let branch_dir = v3_normalize(v3_add(
@@ -587,4 +559,86 @@ pub fn generator_flora_at_screen(
         color,
         material,
     ))
+}
+
+/// Preview-only: compute the set of voxel coords flora would occupy,
+/// without mutating the real file. Used for hover preview.
+#[allow(clippy::too_many_arguments)]
+pub fn preview_flora_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    flora_height: i32,
+    girth: i32,
+    wobble: f32,
+    taper: f32,
+    stem_count: i32,
+    cluster_radius: i32,
+    branch_count: i32,
+    branch_depth: i32,
+    branch_start: f32,
+    branch_spread: f32,
+    braid_strands: i32,
+    braid_twist: f32,
+    canopy: f32,
+    color: u32,
+    material: MaterialId,
+) -> Vec<(VoxelCoord, u32)> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(face_empty) = prev else {
+        return Vec::new();
+    };
+    let mut stub_file = VoxelleFile {
+        version: 0,
+        grid_size: file.grid_size,
+        scene: Scene::default(),
+        scene_extra: None,
+        mood: None,
+        lighting: None,
+        voxels: Vec::new(),
+        objects: Vec::new(),
+        active_object_id: 0,
+    };
+    let mut stub_map: AHashMap<VoxelCoord, usize> = AHashMap::new();
+    generate_flora_deltas(
+        &mut stub_file,
+        &mut stub_map,
+        face_empty,
+        solid,
+        seed,
+        flora_height,
+        girth,
+        wobble,
+        taper,
+        stem_count,
+        cluster_radius,
+        branch_count,
+        branch_depth,
+        branch_start,
+        branch_spread,
+        braid_strands,
+        braid_twist,
+        canopy,
+        color,
+        material,
+    )
+    .into_iter()
+    .filter_map(|d| {
+        if let VoxelEditDelta::Added(v) = d {
+            if !voxel_map.contains_key(&(v.x, v.y, v.z)) {
+                return Some(((v.x, v.y, v.z), v.color));
+            }
+        }
+        None
+    })
+    .collect()
 }

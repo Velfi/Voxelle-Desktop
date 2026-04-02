@@ -430,8 +430,6 @@ body,
   overflow-y: auto;
 }
 
-
-
 .sidebar-section-label {
   margin: 0;
   font-size: 0.62rem;
@@ -1786,6 +1784,57 @@ body,
 
 .tool-options-panel.is-tools-floating {
   left: 1rem;
+}
+
+/* Wide generator panel — expands when a generator with many params is active */
+.tool-options-panel.is-generator-wide {
+  width: min(44rem, calc(100vw - 2.5rem));
+  max-width: min(44rem, calc(100vw - 2.5rem));
+  max-height: min(52vh, 28rem);
+}
+
+/* Card grid inside the wide panel */
+.gen-wide-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr));
+  gap: 0.5rem;
+  width: 100%;
+}
+
+.gen-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem 0.45rem;
+  border: 1px solid var(--app-control-border);
+  border-radius: 4px;
+  background: var(--app-bg);
+}
+
+.gen-card-full {
+  grid-column: 1 / -1;
+}
+
+.gen-card-title {
+  font-weight: 700;
+  font-size: 0.68rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--app-text-faint);
+  margin-bottom: 0.1rem;
+}
+
+/* Fin grid for piscina: 3 equal-width fin-group cards */
+.gen-fin-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.4rem;
+}
+
+@media (max-width: 900px) {
+  .gen-fin-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
 .tool-options-section {

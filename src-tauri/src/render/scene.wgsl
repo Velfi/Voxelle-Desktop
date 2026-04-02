@@ -532,6 +532,65 @@ fn fs_preview_occluded_mrt(in: VertexOut) -> OpaqueOut {
     return out;
 }
 
+/// Generator previews: fully lit (plastic path), opaque. Same shading as committed voxels.
+/// Edge wires (mat_kind > 1.5) use semi-transparent wire so the cage is visible.
+@fragment
+fn fs_preview_lit_mrt(in: VertexOut) -> OpaqueOut {
+    var out: OpaqueOut;
+    let is_edge = in.mat_kind > 1.5;
+    let n = normalize(in.normal);
+    let l = normalize(g.light_dir.xyz);
+    let v = normalize(g.cam_pos.xyz - in.world_pos);
+    let h = normalize(l + v);
+    let ndl = max(dot(n, l), 0.0);
+    let ndh = max(dot(n, h), 0.0);
+    let sh = shadow_visibility(in.world_pos, n, in.clip_pos.xy);
+    let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
+    let amb = g.light_params.x;
+    let sun = g.light_params.y;
+    let sc = g.sun_color.xyz;
+    let base = in.color;
+    if (is_edge) {
+        let rgb = preview_edge_rgb(base);
+        out.color = vec4<f32>(rgb, 0.88);
+    } else {
+        let spec = pow(ndh, 32.0) * 0.12 * sh * sun;
+        let rgb = base * (hemi * 0.30 * amb + 0.78 * ndl * sh * sun * sc) + sc * spec;
+        out.color = vec4<f32>(rgb, 1.0);
+    }
+    out.gbuf_n = vec4<f32>(n * 0.5 + 0.5, 0.0);
+    return out;
+}
+
+/// Generator previews x-ray pass: faint lit hint through scene geometry.
+@fragment
+fn fs_preview_lit_occluded_mrt(in: VertexOut) -> OpaqueOut {
+    var out: OpaqueOut;
+    let is_edge = in.mat_kind > 1.5;
+    let n = normalize(in.normal);
+    let l = normalize(g.light_dir.xyz);
+    let v = normalize(g.cam_pos.xyz - in.world_pos);
+    let h = normalize(l + v);
+    let ndl = max(dot(n, l), 0.0);
+    let ndh = max(dot(n, h), 0.0);
+    let sh = shadow_visibility(in.world_pos, n, in.clip_pos.xy);
+    let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
+    let amb = g.light_params.x;
+    let sun = g.light_params.y;
+    let sc = g.sun_color.xyz;
+    let base = in.color;
+    if (is_edge) {
+        let rgb = preview_edge_rgb(base * 0.5);
+        out.color = vec4<f32>(rgb, 0.20);
+    } else {
+        let spec = pow(ndh, 32.0) * 0.12 * sh * sun;
+        let rgb = base * (hemi * 0.30 * amb + 0.78 * ndl * sh * sun * sc) + sc * spec;
+        out.color = vec4<f32>(rgb * 0.4, 0.18);
+    }
+    out.gbuf_n = vec4<f32>(0.0);
+    return out;
+}
+
 @fragment
 fn fs_trans(in: VertexOut) -> @location(0) vec4<f32> {
     if (in.mat_kind < 1.6) {

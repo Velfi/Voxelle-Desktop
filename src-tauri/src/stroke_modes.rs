@@ -102,6 +102,19 @@ pub struct StrokeAux {
     /// Only meaningful when `constrain_to_plane` is true.
     #[serde(default)]
     pub constrain_to_plane_ref: Option<String>,
+    /// Frozen depth-phase geometry: anchor voxel `a` (world-space). When all five `cuboid_frozen_*`
+    /// fields are present, `cuboid_drag_plane_geometry` is bypassed so camera movement during the
+    /// depth phase cannot change the extrusion direction.
+    #[serde(default)]
+    pub cuboid_frozen_a: Option<[i32; 3]>,
+    #[serde(default)]
+    pub cuboid_frozen_b: Option<[i32; 3]>,
+    #[serde(default)]
+    pub cuboid_frozen_plane_ax: Option<u8>,
+    #[serde(default)]
+    pub cuboid_frozen_hit: Option<[i32; 3]>,
+    #[serde(default)]
+    pub cuboid_frozen_prev: Option<[i32; 3]>,
 }
 
 impl Default for StrokeAux {
@@ -130,6 +143,11 @@ impl Default for StrokeAux {
             spray_radius_max: 0,
             spray_brush_shape: None,
             constrain_to_plane_ref: None,
+            cuboid_frozen_a: None,
+            cuboid_frozen_b: None,
+            cuboid_frozen_plane_ax: None,
+            cuboid_frozen_hit: None,
+            cuboid_frozen_prev: None,
         }
     }
 }
@@ -1428,6 +1446,58 @@ pub fn axis_aligned_cylinder_from_plane(
     hollow_solid_to_shell(&positions, wall, &NEIGHBORS6)
 }
 
+/// Returns the frozen depth-phase geometry from `StrokeAux` when all five fields are present,
+/// bypassing the camera-dependent raycast so camera movement during depth phase cannot alter the
+/// extrusion direction.
+fn frozen_cuboid_geo(
+    aux: &StrokeAux,
+) -> Option<(
+    crate::greedy_mesh::VoxelCoord,
+    crate::greedy_mesh::VoxelCoord,
+    usize,
+    crate::greedy_mesh::VoxelCoord,
+    crate::greedy_mesh::VoxelCoord,
+)> {
+    let [ax, ay, az] = aux.cuboid_frozen_a?;
+    let [bx, by, bz] = aux.cuboid_frozen_b?;
+    let plane_ax = aux.cuboid_frozen_plane_ax? as usize;
+    let [hx, hy, hz] = aux.cuboid_frozen_hit?;
+    let [px, py, pz] = aux.cuboid_frozen_prev?;
+    Some(((ax, ay, az), (bx, by, bz), plane_ax, (hx, hy, hz), (px, py, pz)))
+}
+
+/// Public re-export of [`cuboid_drag_plane_geometry`] for use by `lib.rs`'s
+/// `query_cuboid_plane_geometry` command.
+pub fn cuboid_drag_plane_geometry_pub(
+    tool: EditTool,
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &crate::camera::OrbitCamera,
+    width: f32,
+    height: f32,
+    lsx: f32,
+    lsy: f32,
+    sx: f32,
+    sy: f32,
+    plane_axis: PlaneAxis,
+    snap_to_surface: bool,
+) -> Option<(VoxelCoord, VoxelCoord, usize, VoxelCoord, VoxelCoord)> {
+    cuboid_drag_plane_geometry(
+        tool,
+        file,
+        voxel_map,
+        camera,
+        width,
+        height,
+        lsx,
+        lsy,
+        sx,
+        sy,
+        plane_axis,
+        snap_to_surface,
+    )
+}
+
 /// `a`, `b`, `plane_ax`, solid hit, air cell before hit (for outward normal `prev - hit`).
 fn cuboid_drag_plane_geometry(
     tool: EditTool,
@@ -1462,7 +1532,37 @@ fn cuboid_drag_plane_geometry(
         lsy,
     )?;
     let b = drag_plane_end_voxel(a, plane_ax, camera, width, height, lsx, lsy, sx, sy)?;
-    Some((a, b, plane_ax, hit0, prev0))
+    // When plane_axis is fixed (X/Y/Z), override the extrusion direction to be
+    // perpendicular to the chosen plane, not along the clicked face's normal.
+    let (hit_out, prev_out) = match plane_axis {
+        PlaneAxis::Auto | PlaneAxis::Camera => (hit0, prev0),
+        _ => {
+            // Determine sign along plane_ax: prefer original face projection,
+            // fall back to camera-to-target direction.
+            let orig_delta = [prev0.0 - hit0.0, prev0.1 - hit0.1, prev0.2 - hit0.2];
+            let sign = {
+                let proj = orig_delta[plane_ax];
+                if proj != 0 {
+                    proj.signum()
+                } else {
+                    let eye = camera.eye();
+                    let cam = [
+                        camera.target.x - eye.x,
+                        camera.target.y - eye.y,
+                        camera.target.z - eye.z,
+                    ];
+                    if cam[plane_ax] < 0.0 { 1 } else { -1 }
+                }
+            };
+            let syn_prev = match plane_ax {
+                0 => (hit0.0 + sign, hit0.1, hit0.2),
+                1 => (hit0.0, hit0.1 + sign, hit0.2),
+                _ => (hit0.0, hit0.1, hit0.2 + sign),
+            };
+            (hit0, syn_prev)
+        }
+    };
+    Some((a, b, plane_ax, hit_out, prev_out))
 }
 
 /// Web Surface plane / Solid cuboid plane phase: rectangle (or hollow shell) from drag start to current in the face plane.
@@ -1807,10 +1907,13 @@ pub fn stroke_anchor_centers_with_mode(
             if let Some((lsx, lsy)) = stroke_line_start {
                 let wall = aux.cuboid_hollow_wall_thickness.unwrap_or(1);
                 if let Some(depth) = aux.cuboid_depth {
-                    if let Some((a, b, plane_ax, hit, prev)) = cuboid_drag_plane_geometry(
-                        tool, file, voxel_map, camera, width, height, lsx, lsy, sx, sy, plane_axis,
-                        snap,
-                    ) {
+                    let geo = frozen_cuboid_geo(aux).or_else(|| {
+                        cuboid_drag_plane_geometry(
+                            tool, file, voxel_map, camera, width, height, lsx, lsy, sx, sy,
+                            plane_axis, snap,
+                        )
+                    });
+                    if let Some((a, b, plane_ax, hit, prev)) = geo {
                         // Negative depth + Add: flip anchor & normal so the
                         // cuboid extrudes through the surface into empty space
                         // on the far side, letting users "grow down" as well
@@ -1864,10 +1967,13 @@ pub fn stroke_anchor_centers_with_mode(
             if let Some((lsx, lsy)) = stroke_line_start {
                 let wall = aux.cuboid_hollow_wall_thickness.unwrap_or(1);
                 if let Some(depth) = aux.cylinder_depth {
-                    if let Some((a, b, _plane_ax, hit, prev)) = cuboid_drag_plane_geometry(
-                        tool, file, voxel_map, camera, width, height, lsx, lsy, sx, sy, plane_axis,
-                        snap,
-                    ) {
+                    let geo = frozen_cuboid_geo(aux).or_else(|| {
+                        cuboid_drag_plane_geometry(
+                            tool, file, voxel_map, camera, width, height, lsx, lsy, sx, sy,
+                            plane_axis, snap,
+                        )
+                    });
+                    if let Some((a, b, _plane_ax, hit, prev)) = geo {
                         let taper = aux.cylinder_taper_pct.unwrap_or(0).clamp(0, 100);
                         let (fa, fb, fnx, fny, fnz, fd) =
                             flip_depth_anchor_if_needed(tool, depth, a, b, hit, prev);

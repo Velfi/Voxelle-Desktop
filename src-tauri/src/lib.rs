@@ -30,7 +30,7 @@ use render::{
     PreparedOpaqueUpload, WgpuViewer,
 };
 use std::any::Any;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -236,12 +236,22 @@ pub enum SelectionCombineMode {
 pub(crate) enum SoloUndoEntry {
     VoxelDeltas(Vec<voxel_edit::VoxelEditDelta>),
     SelectionBefore(AHashSet<greedy_mesh::VoxelCoord>),
+    /// Atomic selection-transform: voxel deltas + selection snapshot bundled together.
+    SelectionTransform {
+        before: AHashSet<greedy_mesh::VoxelCoord>,
+        deltas: Vec<voxel_edit::VoxelEditDelta>,
+    },
 }
 
 #[derive(Clone)]
 pub(crate) enum SoloRedoEntry {
     VoxelDeltas(Vec<voxel_edit::VoxelEditDelta>),
     SelectionAfter(AHashSet<greedy_mesh::VoxelCoord>),
+    /// Atomic selection-transform redo: voxel deltas + selection snapshot bundled together.
+    SelectionTransform {
+        after: AHashSet<greedy_mesh::VoxelCoord>,
+        deltas: Vec<voxel_edit::VoxelEditDelta>,
+    },
 }
 
 /// Millisecond timings for the last successful voxel add/remove (`voxel_edit_at_screen`).
@@ -642,6 +652,10 @@ struct SculptStrokeAtScreenArgs {
     terrain_strength: i32,
     #[serde(default)]
     terrain_smooth_radius: i32,
+    #[serde(default)]
+    terrain_flatten_use_base_y: bool,
+    #[serde(default)]
+    terrain_sub_voxel: bool,
     #[serde(default = "default_smooth_passes_sculpt")]
     smooth_neighbor_passes: u32,
     #[serde(default = "default_brush_strength_sculpt")]
@@ -740,6 +754,107 @@ struct PreviewHoverContext {
     generator_ashlar_roughness: f32,
     generator_ashlar_seed: i32,
     generator_ashlar_thickness: i32,
+    // Flora
+    generator_flora_seed: i32,
+    generator_flora_height: i32,
+    generator_flora_girth: i32,
+    generator_flora_wobble: f32,
+    generator_flora_taper: f32,
+    generator_flora_stem_count: i32,
+    generator_flora_cluster_radius: i32,
+    generator_flora_branch_count: i32,
+    generator_flora_branch_depth: i32,
+    generator_flora_branch_start: f32,
+    generator_flora_branch_spread: f32,
+    generator_flora_braid_strands: i32,
+    generator_flora_braid_twist: f32,
+    generator_flora_canopy: f32,
+    // Insecta
+    generator_insecta_species: String,
+    generator_insecta_total_length: i32,
+    generator_insecta_head_ratio: f32,
+    generator_insecta_thorax_ratio: f32,
+    generator_insecta_abdomen_ratio: f32,
+    generator_insecta_body_half_width: i32,
+    generator_insecta_body_half_height: i32,
+    generator_insecta_abdomen_taper: f32,
+    generator_insecta_head_shape: i32,
+    generator_insecta_anchor_offset_u: i32,
+    generator_insecta_anchor_offset_v: i32,
+    generator_insecta_body_yaw: f32,
+    generator_insecta_body_arch: f32,
+    generator_insecta_antenna_length: i32,
+    generator_insecta_antenna_spread: f32,
+    generator_insecta_antenna_pitch: f32,
+    generator_insecta_antenna_root: i32,
+    generator_insecta_mandible_length: i32,
+    generator_insecta_mandible_spread: f32,
+    generator_insecta_mandible_forward: i32,
+    generator_insecta_wing_shape: i32,
+    generator_insecta_show_wing_fore: bool,
+    generator_insecta_wing_fore_length: i32,
+    generator_insecta_wing_fore_width: i32,
+    generator_insecta_wing_fore_spread: f32,
+    generator_insecta_wing_fore_pitch: f32,
+    generator_insecta_wing_fore_offset: i32,
+    generator_insecta_wing_fore_forward_cant: f32,
+    generator_insecta_show_wing_hind: bool,
+    generator_insecta_wing_hind_length: i32,
+    generator_insecta_wing_hind_width: i32,
+    generator_insecta_wing_hind_spread: f32,
+    generator_insecta_wing_hind_pitch: f32,
+    generator_insecta_wing_hind_offset: i32,
+    // Fauna
+    generator_fauna_stance: String,
+    generator_fauna_archetype: String,
+    generator_fauna_anchor_offset_u: i32,
+    generator_fauna_anchor_offset_v: i32,
+    generator_fauna_body_yaw: f32,
+    generator_fauna_body_arch: f32,
+    generator_fauna_spine_segments: i32,
+    generator_fauna_body_length: i32,
+    generator_fauna_body_half_width: i32,
+    generator_fauna_body_half_height: i32,
+    generator_fauna_neck_length: i32,
+    generator_fauna_neck_half_width: i32,
+    generator_fauna_neck_half_height: i32,
+    generator_fauna_head_length: i32,
+    generator_fauna_head_half_width: i32,
+    generator_fauna_head_half_height: i32,
+    generator_fauna_tail_length: i32,
+    generator_fauna_shoulder_offset_forward: i32,
+    generator_fauna_hip_offset_forward: i32,
+    generator_fauna_front_upper_length: i32,
+    generator_fauna_front_lower_length: i32,
+    generator_fauna_hind_upper_length: i32,
+    generator_fauna_hind_lower_length: i32,
+    generator_fauna_auto_foot_placement: bool,
+    // Piscina
+    generator_piscina_seed: i32,
+    generator_piscina_species: String,
+    generator_piscina_length: i32,
+    generator_piscina_width: i32,
+    generator_piscina_thickness: i32,
+    generator_piscina_spine_bend: f32,
+    generator_piscina_spine_s_curve: f32,
+    generator_piscina_fin_dorsal: i32,
+    generator_piscina_fin_anal: i32,
+    generator_piscina_fin_caudal: i32,
+    generator_piscina_fin_pectoral: i32,
+    generator_piscina_fin_pelvic: i32,
+    generator_piscina_fin_adipose: i32,
+    generator_piscina_show_fin_dorsal: bool,
+    generator_piscina_show_fin_anal: bool,
+    generator_piscina_show_fin_caudal: bool,
+    generator_piscina_show_fin_pectoral: bool,
+    generator_piscina_show_fin_pelvic: bool,
+    generator_piscina_show_fin_adipose: bool,
+    generator_piscina_anchor_offset_u: i32,
+    generator_piscina_anchor_offset_v: i32,
+    /// Stamp placement origin X: 0 = min edge, 1 = center, 2 = max edge.
+    stamp_origin_x: i32,
+    /// Stamp placement origin Z: 0 = min edge, 1 = center, 2 = max edge.
+    stamp_origin_z: i32,
 }
 
 impl Default for PreviewHoverContext {
@@ -794,6 +909,105 @@ impl Default for PreviewHoverContext {
             generator_ashlar_roughness: 0.3,
             generator_ashlar_seed: 42,
             generator_ashlar_thickness: 3,
+            // Flora
+            generator_flora_seed: 42,
+            generator_flora_height: 10,
+            generator_flora_girth: 2,
+            generator_flora_wobble: 0.3,
+            generator_flora_taper: 0.5,
+            generator_flora_stem_count: 1,
+            generator_flora_cluster_radius: 0,
+            generator_flora_branch_count: 4,
+            generator_flora_branch_depth: 2,
+            generator_flora_branch_start: 0.3,
+            generator_flora_branch_spread: 0.5,
+            generator_flora_braid_strands: 0,
+            generator_flora_braid_twist: 0.5,
+            generator_flora_canopy: 2.0,
+            // Insecta
+            generator_insecta_species: "beetle".into(),
+            generator_insecta_total_length: 12,
+            generator_insecta_head_ratio: 1.0,
+            generator_insecta_thorax_ratio: 1.0,
+            generator_insecta_abdomen_ratio: 2.0,
+            generator_insecta_body_half_width: 2,
+            generator_insecta_body_half_height: 2,
+            generator_insecta_abdomen_taper: 0.5,
+            generator_insecta_head_shape: 0,
+            generator_insecta_anchor_offset_u: 0,
+            generator_insecta_anchor_offset_v: 0,
+            generator_insecta_body_yaw: 0.0,
+            generator_insecta_body_arch: 0.0,
+            generator_insecta_antenna_length: 4,
+            generator_insecta_antenna_spread: 0.4,
+            generator_insecta_antenna_pitch: 0.3,
+            generator_insecta_antenna_root: 1,
+            generator_insecta_mandible_length: 2,
+            generator_insecta_mandible_spread: 0.3,
+            generator_insecta_mandible_forward: 1,
+            generator_insecta_wing_shape: 0,
+            generator_insecta_show_wing_fore: true,
+            generator_insecta_wing_fore_length: 8,
+            generator_insecta_wing_fore_width: 4,
+            generator_insecta_wing_fore_spread: 0.5,
+            generator_insecta_wing_fore_pitch: 0.1,
+            generator_insecta_wing_fore_offset: 0,
+            generator_insecta_wing_fore_forward_cant: 0.0,
+            generator_insecta_show_wing_hind: true,
+            generator_insecta_wing_hind_length: 6,
+            generator_insecta_wing_hind_width: 4,
+            generator_insecta_wing_hind_spread: 0.6,
+            generator_insecta_wing_hind_pitch: 0.2,
+            generator_insecta_wing_hind_offset: 0,
+            // Fauna
+            generator_fauna_stance: "quadruped".into(),
+            generator_fauna_archetype: "mammal".into(),
+            generator_fauna_anchor_offset_u: 0,
+            generator_fauna_anchor_offset_v: 0,
+            generator_fauna_body_yaw: 0.0,
+            generator_fauna_body_arch: 0.0,
+            generator_fauna_spine_segments: 5,
+            generator_fauna_body_length: 10,
+            generator_fauna_body_half_width: 2,
+            generator_fauna_body_half_height: 2,
+            generator_fauna_neck_length: 3,
+            generator_fauna_neck_half_width: 1,
+            generator_fauna_neck_half_height: 1,
+            generator_fauna_head_length: 3,
+            generator_fauna_head_half_width: 2,
+            generator_fauna_head_half_height: 2,
+            generator_fauna_tail_length: 4,
+            generator_fauna_shoulder_offset_forward: 3,
+            generator_fauna_hip_offset_forward: -3,
+            generator_fauna_front_upper_length: 4,
+            generator_fauna_front_lower_length: 4,
+            generator_fauna_hind_upper_length: 4,
+            generator_fauna_hind_lower_length: 4,
+            generator_fauna_auto_foot_placement: true,
+            // Piscina
+            generator_piscina_seed: 42,
+            generator_piscina_species: "bass".into(),
+            generator_piscina_length: 14,
+            generator_piscina_width: 4,
+            generator_piscina_thickness: 3,
+            generator_piscina_spine_bend: 0.1,
+            generator_piscina_spine_s_curve: 0.0,
+            generator_piscina_fin_dorsal: 4,
+            generator_piscina_fin_anal: 4,
+            generator_piscina_fin_caudal: 4,
+            generator_piscina_fin_pectoral: 4,
+            generator_piscina_fin_pelvic: 4,
+            generator_piscina_fin_adipose: 4,
+            generator_piscina_show_fin_dorsal: true,
+            generator_piscina_show_fin_anal: true,
+            generator_piscina_show_fin_caudal: true,
+            generator_piscina_show_fin_pectoral: true,
+            generator_piscina_show_fin_pelvic: true,
+            generator_piscina_show_fin_adipose: false,
+            generator_piscina_anchor_offset_u: 0,
+            generator_piscina_anchor_offset_v: 0,
+            stamp_origin_x: 0,
+            stamp_origin_z: 0,
         }
     }
 }
@@ -1018,6 +1232,8 @@ pub struct ViewerState {
     pub squishy_session: Mutex<generators::SquishySession>,
     /// Pointer drag on squishy move/scale handles ([`generators::squishy_gizmo`]).
     pub squishy_gizmo_drag: Mutex<Option<generators::SquishyGizmoDrag>>,
+    /// Active pointer drag on the selection transform gizmo (move/rotate handles).
+    pub(crate) selection_gizmo_drag: Mutex<SelectionGizmoDrag>,
     /// When true, draw the start-screen gradient instead of the scene sky (default true; cleared when a real document loads).
     pub start_screen_logo_transparent: std::sync::atomic::AtomicBool,
     /// Cold-start gradient: light (paper) vs dark — synced from webview appearance preference.
@@ -1026,6 +1242,9 @@ pub struct ViewerState {
     pub viewport_cursor_debug_overlay: AtomicBool,
     /// **View → Show borders**: per-voxel cell wireframe (matches web `showGrid` / `gridLines.ts`).
     pub show_grid_borders: AtomicBool,
+    /// Gizmo axis (0=X, 1=Y, 2=Z) currently under the cursor; 255 = none.
+    /// Written by `gizmo_hit_test`; read by `sync_gizmo_gpu` to brighten the hovered axis.
+    pub hovered_gizmo_axis: AtomicU8,
     /// Mirrors overlay cache keys on [`WgpuViewer`] so prepare steps can run without the viewer mutex (see frame loop).
     grid_overlay_cache_key: Mutex<Option<u64>>,
     selection_overlay_cache_key: Mutex<Option<u64>>,
@@ -1040,6 +1259,9 @@ pub struct ViewerState {
     /// so the wall orientation doesn't flip as the cursor crosses different faces.
     /// Cleared on stroke begin/end. Ignored during hover (stroke_active = false).
     pub wall_stroke_face_snapped: Mutex<Option<Option<(i32, i32, i32)>>>,
+    /// Per-column fractional accumulation for terrain sub-voxel raise/lower precision.
+    /// Cleared on stroke begin/end; ignored when `terrain_sub_voxel` is false.
+    pub terrain_accum: Mutex<AHashMap<(i32, i32), f32>>,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -3849,6 +4071,14 @@ fn set_soft_shadows(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result
 }
 
 #[tauri::command]
+fn set_gizmo_on_top(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+    if let Some(viewer) = state.viewer.lock().as_mut() {
+        viewer.set_gizmo_on_top(enabled);
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn set_soft_sunshafts(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
     if let Some(viewer) = state.viewer.lock().as_mut() {
         viewer.set_soft_sunshafts(enabled);
@@ -4293,6 +4523,45 @@ fn voxel_stroke_anchor_coord_at_screen(
     Ok(c.map(|(x, y, z)| [x, y, z]))
 }
 
+/// Returns the surface Y (topmost voxel) at the given screen position, for the terrain hover display.
+#[tauri::command]
+fn terrain_surface_y_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    nx: f32,
+    ny: f32,
+) -> Result<Option<i32>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(None);
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let fg = state.current_file.lock();
+    let Some(file) = fg.as_ref() else {
+        return Ok(None);
+    };
+    let vm = state.voxel_map.lock();
+    let Some(vmap) = vm.as_ref() else {
+        return Ok(None);
+    };
+    let cam = state.camera.lock();
+    let (sx, sy) = viewport_texels_from_norm(nx, ny, w, h);
+    let c = voxel_edit::anchor_for_stroke_edit(
+        voxel_edit::EditTool::Remove,
+        true,
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        sx,
+        sy,
+    );
+    Ok(c.map(|(_, y, _)| y))
+}
+
 fn pick_cell_for_ping(
     mode: PreviewMode,
     file: &voxelle::VoxelleFile,
@@ -4613,6 +4882,7 @@ fn voxel_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(), String> 
     // Clear spray constraint plane so it gets re-established on the first anchor of this stroke.
     *state.spray_constraint_plane.lock() = None;
     *state.wall_stroke_face_snapped.lock() = None;
+    state.terrain_accum.lock().clear();
     Ok(())
 }
 
@@ -5086,11 +5356,75 @@ fn voxel_stroke_preview_at_screen(
     Ok(())
 }
 
+/// Result of resolving cuboid/cylinder drag-plane geometry at a point in time.
+/// Returned by [`query_cuboid_plane_geometry`] so the frontend can freeze this
+/// during the depth phase and pass it back through `StrokeAux`, preventing
+/// camera movement from altering the extrusion direction.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CuboidPlaneGeoResult {
+    a: [i32; 3],
+    b: [i32; 3],
+    plane_ax: u8,
+    hit: [i32; 3],
+    prev: [i32; 3],
+}
+
+/// Resolve the drag-plane geometry (anchor, far corner, face normal) for the
+/// current camera state.  Call this once when entering the cuboid/cylinder
+/// depth phase and pass the result back on every depth-preview call via the
+/// `cuboidFrozen*` fields of `strokeAux`.
+#[tauri::command]
+fn query_cuboid_plane_geometry(
+    state: State<'_, Arc<ViewerState>>,
+    args: VoxelEditAtScreen,
+) -> Option<CuboidPlaneGeoResult> {
+    let fg = state.current_file.lock();
+    let vm = state.voxel_map.lock();
+    let file = fg.as_ref()?;
+    let vmap = vm.as_ref()?;
+    let cam = state.camera.lock();
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let viewer = v.as_ref()?;
+        let (vw, vh) = viewer.viewport_size();
+        (vw as f32, vh as f32)
+    };
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let (lsx, lsy) = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
+        (Some(lnx), Some(lny)) => viewport_texels_from_norm(lnx, lny, w, h),
+        _ => return None,
+    };
+    let snap = args.stroke_aux.stroke_snap_to_surface;
+    let (a, b, plane_ax, hit, prev) = stroke_modes::cuboid_drag_plane_geometry_pub(
+        args.tool,
+        file,
+        vmap,
+        &cam,
+        w,
+        h,
+        lsx,
+        lsy,
+        sx,
+        sy,
+        args.plane_axis,
+        snap,
+    )?;
+    Some(CuboidPlaneGeoResult {
+        a: [a.0, a.1, a.2],
+        b: [b.0, b.1, b.2],
+        plane_ax: plane_ax as u8,
+        hit: [hit.0, hit.1, hit.2],
+        prev: [prev.0, prev.1, prev.2],
+    })
+}
+
 #[tauri::command]
 fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
     *state.stroke_active.lock() = false;
     *state.extrude_ray_spine.lock() = None;
     *state.wall_stroke_face_snapped.lock() = None;
+    state.terrain_accum.lock().clear();
     let had_stroke_preview = state
         .stroke_preview_suppresses_hover
         .swap(false, Ordering::Relaxed);
@@ -5799,10 +6133,72 @@ fn gizmo_proj_point(cam: &OrbitCamera, w: f32, h: f32, p: glam::Vec3, in_front: 
     GizmoProj { sx, sy, in_front }
 }
 
-#[tauri::command]
-fn get_selection_gizmo_projected(
-    state: State<'_, Arc<ViewerState>>,
-) -> Option<SelectionGizmoProjected> {
+/// Squared distance from point (px,py) to segment (ax,ay)→(bx,by) in screen space.
+fn dist_sq_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let dx = bx - ax;
+    let dy = by - ay;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq == 0.0 {
+        return (px - ax).powi(2) + (py - ay).powi(2);
+    }
+    let t = ((px - ax) * dx + (py - ay) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    (px - (ax + t * dx)).powi(2) + (py - (ay + t * dy)).powi(2)
+}
+
+// CSS-pixel constants for gizmo interaction (multiplied by dpr when comparing physical px).
+const GIZMO_MOVE_HIT_CSS: f32 = 16.0;
+const GIZMO_RING_HIT_CSS: f32 = 11.0;
+const GIZMO_PX_PER_MOVE_STEP_CSS: f32 = 26.0;
+const GIZMO_PX_PER_ROTATE_STEP_CSS: f32 = 65.0;
+const GIZMO_RING_SAMPLES: usize = 16;
+
+/// Active drag state for the selection transform gizmo.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum SelectionGizmoDrag {
+    #[default]
+    None,
+    Move {
+        /// Normalized screen-space direction (center→handle tip) at drag start.
+        axis_sx: f32,
+        axis_sy: f32,
+        /// World axis: 0=X, 1=Y, 2=Z
+        world_axis: u8,
+        /// true for +axis handles (indices 0,2,4), false for -axis (1,3,5)
+        positive: bool,
+        accum: f32,
+        /// GIZMO_PX_PER_MOVE_STEP_CSS * dpr, captured at drag start
+        step_threshold: f32,
+        /// Accumulated integer steps since drag start — applied as one translate on pointer-up.
+        /// The selection overlay is rebuilt at this offset each frame; voxel data is not touched
+        /// until the drag is committed.
+        pending_dx: i32,
+        pending_dy: i32,
+        pending_dz: i32,
+    },
+    Rotate {
+        ring: u8,
+        tangent_x: f32,
+        tangent_y: f32,
+        accum: f32,
+        /// GIZMO_PX_PER_ROTATE_STEP_CSS * dpr, captured at drag start
+        step_threshold: f32,
+    },
+}
+
+/// Returns the pending visual offset for the selection during a move drag, or `(0,0,0)`.
+fn pending_gizmo_translate(state: &ViewerState) -> (i32, i32, i32) {
+    match &*state.selection_gizmo_drag.lock() {
+        SelectionGizmoDrag::Move { pending_dx, pending_dy, pending_dz, .. } => {
+            (*pending_dx, *pending_dy, *pending_dz)
+        }
+        _ => (0, 0, 0),
+    }
+}
+
+/// Compute gizmo projected positions. Shared by `get_selection_gizmo_projected`,
+/// `gizmo_pointer_down`, and `gizmo_hit_test`.
+fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
     let sel = state.selection_cells.lock();
     if sel.is_empty() {
         return None;
@@ -5814,90 +6210,58 @@ fn get_selection_gizmo_projected(
     let mut min_z = i32::MAX;
     let mut max_z = i32::MIN;
     for &(x, y, z) in sel.iter() {
-        if x < min_x {
-            min_x = x;
-        }
-        if x > max_x {
-            max_x = x;
-        }
-        if y < min_y {
-            min_y = y;
-        }
-        if y > max_y {
-            max_y = y;
-        }
-        if z < min_z {
-            min_z = z;
-        }
-        if z > max_z {
-            max_z = z;
-        }
+        if x < min_x { min_x = x; }
+        if x > max_x { max_x = x; }
+        if y < min_y { min_y = y; }
+        if y > max_y { max_y = y; }
+        if z < min_z { min_z = z; }
+        if z > max_z { max_z = z; }
     }
     drop(sel);
-
     let cx = (min_x + max_x) as f32 * 0.5;
     let cy = (min_y + max_y) as f32 * 0.5;
     let cz = (min_z + max_z) as f32 * 0.5;
     let center = glam::Vec3::new(cx, cy, cz);
-
     let (vw, vh) = {
         let v = state.viewer.lock();
-        v.as_ref()
-            .map(|vw| vw.viewport_size())
-            .unwrap_or((512, 512))
+        v.as_ref().map(|vw| vw.viewport_size()).unwrap_or((512, 512))
     };
     let w = vw as f32;
     let h = vh as f32;
-
     let cam = state.camera.lock();
     let (center_sx, center_sy) = voxel_edit::world_to_viewport_pixels(&cam, w, h, cx, cy, cz)?;
-
     let inv_view = cam.view_matrix().inverse();
     let cam_eye = glam::Vec3::new(inv_view.w_axis.x, inv_view.w_axis.y, inv_view.w_axis.z);
     let dist = (cam_eye - center).length().max(1.0);
     let arm_world = (dist * 0.13).clamp(1.5, 20.0);
-
     let px_per_world = voxel_edit::world_to_viewport_pixels(&cam, w, h, cx + 1.0, cy, cz)
         .map(|(sx2, sy2)| (sx2 - center_sx).hypot(sy2 - center_sy).max(0.5))
         .unwrap_or(12.0);
-
     let in_front_dir = |dir: glam::Vec3| -> bool { (cam_eye - center).dot(dir) > 0.0 };
-
     let dirs = [
-        glam::Vec3::X,
-        -glam::Vec3::X,
-        glam::Vec3::Y,
-        -glam::Vec3::Y,
-        glam::Vec3::Z,
-        -glam::Vec3::Z,
+        glam::Vec3::X, -glam::Vec3::X,
+        glam::Vec3::Y, -glam::Vec3::Y,
+        glam::Vec3::Z, -glam::Vec3::Z,
     ];
-    let mut move_handles = [GizmoProj {
-        sx: 0.0,
-        sy: 0.0,
-        in_front: true,
-    }; 6];
+    let mut move_handles = [GizmoProj { sx: 0.0, sy: 0.0, in_front: true }; 6];
     for (i, &dir) in dirs.iter().enumerate() {
         move_handles[i] = gizmo_proj_point(&cam, w, h, center + dir * arm_world, in_front_dir(dir));
     }
-
-    const RING_N: usize = 16;
     let ring_radius = arm_world * 0.72;
-    // (ring_axis, u, v) — ring lies in the plane spanned by u and v, perpendicular to ring_axis
     let ring_defs = [
         (glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z),
         (glam::Vec3::Y, glam::Vec3::X, glam::Vec3::Z),
         (glam::Vec3::Z, glam::Vec3::X, glam::Vec3::Y),
     ];
-    let mut rotate_rings = Vec::with_capacity(3 * RING_N);
+    let mut rotate_rings = Vec::with_capacity(3 * GIZMO_RING_SAMPLES);
     for (_ring_axis, u, v) in &ring_defs {
-        for i in 0..RING_N {
-            let angle = i as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+        for i in 0..GIZMO_RING_SAMPLES {
+            let angle = i as f32 * 2.0 * std::f32::consts::PI / GIZMO_RING_SAMPLES as f32;
             let offset = (*u * angle.cos() + *v * angle.sin()) * ring_radius;
             let in_f = (cam_eye - center).dot(offset) > 0.0;
             rotate_rings.push(gizmo_proj_point(&cam, w, h, center + offset, in_f));
         }
     }
-
     Some(SelectionGizmoProjected {
         center_sx,
         center_sy,
@@ -5905,6 +6269,176 @@ fn get_selection_gizmo_projected(
         rotate_rings,
         px_per_world,
     })
+}
+
+/// Hit-test physical-pixel point (sx, sy) against the gizmo.
+/// Returns `Some(SelectionGizmoDrag)` (never `None`) on hit.
+fn gizmo_hit_test_inner(proj: &SelectionGizmoProjected, sx: f32, sy: f32, dpr: f32) -> Option<SelectionGizmoDrag> {
+    let move_hit_sq = (GIZMO_MOVE_HIT_CSS * dpr).powi(2);
+    let ring_hit_sq = (GIZMO_RING_HIT_CSS * dpr).powi(2);
+    // Move handles
+    for (i, h) in proj.move_handles.iter().enumerate() {
+        if (sx - h.sx).powi(2) + (sy - h.sy).powi(2) <= move_hit_sq {
+            let adx = h.sx - proj.center_sx;
+            let ady = h.sy - proj.center_sy;
+            let alen = adx.hypot(ady);
+            let (axis_sx, axis_sy) = if alen > 0.5 { (adx / alen, ady / alen) } else { (1.0, 0.0) };
+            return Some(SelectionGizmoDrag::Move {
+                axis_sx,
+                axis_sy,
+                world_axis: (i / 2) as u8,
+                positive: i % 2 == 0,
+                accum: 0.0,
+                step_threshold: GIZMO_PX_PER_MOVE_STEP_CSS * dpr,
+                pending_dx: 0,
+                pending_dy: 0,
+                pending_dz: 0,
+            });
+        }
+    }
+    // Rotation rings
+    for ring in 0..3u8 {
+        let start = ring as usize * GIZMO_RING_SAMPLES;
+        let mut best_sq = f32::INFINITY;
+        let mut best_tx = 1.0f32;
+        let mut best_ty = 0.0f32;
+        for i in 0..GIZMO_RING_SAMPLES {
+            let p = &proj.rotate_rings[start + i];
+            let next = &proj.rotate_rings[start + (i + 1) % GIZMO_RING_SAMPLES];
+            let sq = dist_sq_to_segment(sx, sy, p.sx, p.sy, next.sx, next.sy);
+            if sq < best_sq {
+                best_sq = sq;
+                let tdx = next.sx - p.sx;
+                let tdy = next.sy - p.sy;
+                let tlen = tdx.hypot(tdy);
+                if tlen > 0.5 {
+                    best_tx = tdx / tlen;
+                    best_ty = tdy / tlen;
+                }
+            }
+        }
+        if best_sq <= ring_hit_sq {
+            return Some(SelectionGizmoDrag::Rotate {
+                ring,
+                tangent_x: best_tx,
+                tangent_y: best_ty,
+                accum: 0.0,
+                step_threshold: GIZMO_PX_PER_ROTATE_STEP_CSS * dpr,
+            });
+        }
+    }
+    None
+}
+
+#[tauri::command]
+fn gizmo_pointer_down(
+    state: State<'_, Arc<ViewerState>>,
+    sx: f32,
+    sy: f32,
+    dpr: f32,
+) -> bool {
+    let Some(proj) = compute_gizmo_proj(&state) else { return false };
+    let Some(drag) = gizmo_hit_test_inner(&proj, sx, sy, dpr) else { return false };
+    *state.selection_gizmo_drag.lock() = drag;
+    true
+}
+
+#[tauri::command]
+fn gizmo_pointer_move(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    dcx: f32,
+    dcy: f32,
+) -> Result<(), String> {
+    let drag = state.selection_gizmo_drag.lock().clone();
+    match drag {
+        SelectionGizmoDrag::None => Ok(()),
+        SelectionGizmoDrag::Move {
+            axis_sx, axis_sy, world_axis, positive,
+            mut accum, step_threshold,
+            mut pending_dx, mut pending_dy, mut pending_dz,
+        } => {
+            accum += dcx * axis_sx + dcy * axis_sy;
+            let steps = (accum / step_threshold).trunc() as i32;
+            accum -= steps as f32 * step_threshold;
+            if steps != 0 {
+                let magnitude = if positive { steps } else { -steps };
+                if world_axis == 0 { pending_dx += magnitude; }
+                else if world_axis == 1 { pending_dy += magnitude; }
+                else { pending_dz += magnitude; }
+                // Invalidate overlay so render loop rebuilds it at the new preview position.
+                *state.selection_overlay_cache_key.lock() = None;
+            }
+            *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Move {
+                axis_sx, axis_sy, world_axis, positive, accum, step_threshold,
+                pending_dx, pending_dy, pending_dz,
+            };
+            Ok(())
+        }
+        SelectionGizmoDrag::Rotate { ring, tangent_x, tangent_y, mut accum, step_threshold } => {
+            accum += dcx * tangent_x + dcy * tangent_y;
+            let steps = (accum / step_threshold).trunc() as i32;
+            accum -= steps as f32 * step_threshold;
+            *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Rotate {
+                ring, tangent_x, tangent_y, accum, step_threshold,
+            };
+            if steps == 0 { return Ok(()); }
+            selection_rotate_inner(state.inner(), &app, ring, steps)?;
+            Ok(())
+        }
+    }
+}
+
+#[tauri::command]
+fn gizmo_pointer_up(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let drag = state.selection_gizmo_drag.lock().clone();
+    // Clear drag state before the translate so the overlay fingerprint (which reads pending)
+    // won't double-apply the offset after selection_cells is updated.
+    *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::None;
+    *state.selection_overlay_cache_key.lock() = None;
+    if let SelectionGizmoDrag::Move { pending_dx, pending_dy, pending_dz, .. } = drag {
+        if pending_dx != 0 || pending_dy != 0 || pending_dz != 0 {
+            selection_translate_inner(state.inner(), &app, pending_dx, pending_dy, pending_dz)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn gizmo_hit_test(
+    state: State<'_, Arc<ViewerState>>,
+    sx: f32,
+    sy: f32,
+    dpr: f32,
+) -> bool {
+    let Some(proj) = compute_gizmo_proj(&state) else {
+        state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+        return false;
+    };
+    match gizmo_hit_test_inner(&proj, sx, sy, dpr) {
+        Some(SelectionGizmoDrag::Move { world_axis, .. }) => {
+            state.hovered_gizmo_axis.store(world_axis, Ordering::Relaxed);
+            true
+        }
+        Some(SelectionGizmoDrag::Rotate { ring, .. }) => {
+            state.hovered_gizmo_axis.store(ring, Ordering::Relaxed);
+            true
+        }
+        Some(SelectionGizmoDrag::None) | None => {
+            state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+            false
+        }
+    }
+}
+
+#[tauri::command]
+fn get_selection_gizmo_projected(
+    state: State<'_, Arc<ViewerState>>,
+) -> Option<SelectionGizmoProjected> {
+    compute_gizmo_proj(&state)
 }
 
 // ── Selection transform commands ─────────────────────────────────────────────
@@ -5924,17 +6458,10 @@ fn push_selection_transform_undo(
         return;
     }
     drop(cb);
-    // Push SelectionBefore first so VoxelDeltas is on top (popped first on undo).
     state
         .solo_undo
         .lock()
-        .push(SoloUndoEntry::SelectionBefore(before_sel));
-    if !deltas.is_empty() {
-        state
-            .solo_undo
-            .lock()
-            .push(SoloUndoEntry::VoxelDeltas(deltas));
-    }
+        .push(SoloUndoEntry::SelectionTransform { before: before_sel, deltas });
     state.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::register_solo_edit_completed(app, state);
@@ -5979,10 +6506,9 @@ fn selection_mirror(
     Ok(true)
 }
 
-#[tauri::command]
-fn selection_translate(
-    state: State<'_, Arc<ViewerState>>,
-    app: AppHandle,
+fn selection_translate_inner(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
     dx: i32,
     dy: i32,
     dz: i32,
@@ -6006,7 +6532,6 @@ fn selection_translate(
         };
         voxel_edit::translate_selected_voxels(file, vmap, &before_sel, dx, dy, dz)
     };
-    // Update selection to shifted positions.
     {
         let new_sel: AHashSet<greedy_mesh::VoxelCoord> = before_sel
             .iter()
@@ -6016,23 +6541,33 @@ fn selection_translate(
     }
     if !deltas.is_empty() {
         finish_voxel_edit_gpu_deltas(
-            &state,
+            state,
             &deltas,
             0.0,
             t_total,
-            &app,
+            app,
             VoxelGpuRefreshReason::SoloEdit,
         )?;
     }
-    push_selection_transform_undo(state.inner(), &app, before_sel, deltas);
-    emit_selection_updated(&app, state.inner());
+    push_selection_transform_undo(state, app, before_sel, deltas);
+    emit_selection_updated(app, state);
     Ok(true)
 }
 
 #[tauri::command]
-fn selection_rotate(
+fn selection_translate(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
+    dx: i32,
+    dy: i32,
+    dz: i32,
+) -> Result<bool, String> {
+    selection_translate_inner(state.inner(), &app, dx, dy, dz)
+}
+
+fn selection_rotate_inner(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
     axis: u8,
     quarters: i32,
 ) -> Result<bool, String> {
@@ -6060,17 +6595,27 @@ fn selection_rotate(
     *state.selection_cells.lock() = new_sel;
     if !deltas.is_empty() {
         finish_voxel_edit_gpu_deltas(
-            &state,
+            state,
             &deltas,
             0.0,
             t_total,
-            &app,
+            app,
             VoxelGpuRefreshReason::SoloEdit,
         )?;
     }
-    push_selection_transform_undo(state.inner(), &app, before_sel, deltas);
-    emit_selection_updated(&app, state.inner());
+    push_selection_transform_undo(state, app, before_sel, deltas);
+    emit_selection_updated(app, state);
     Ok(true)
+}
+
+#[tauri::command]
+fn selection_rotate(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    axis: u8,
+    quarters: i32,
+) -> Result<bool, String> {
+    selection_rotate_inner(state.inner(), &app, axis, quarters)
 }
 
 #[tauri::command]
@@ -7090,6 +7635,10 @@ struct StampPickAtScreen {
     rot_x: f32,
     rot_y: f32,
     rot_z: f32,
+    #[serde(default)]
+    origin_x: i32,
+    #[serde(default)]
+    origin_z: i32,
 }
 
 #[tauri::command]
@@ -7122,7 +7671,9 @@ fn clipboard_stamp_at_screen(
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         voxel_edit::stamp_clipboard_at_screen(
-            file, vmap, &cam, w, h, sx, sy, &clip, args.rot_x, args.rot_y, args.rot_z,
+            file, vmap, &cam, w, h, sx, sy, &clip,
+            args.rot_x, args.rot_y, args.rot_z,
+            args.origin_x, args.origin_z,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
@@ -7158,10 +7709,42 @@ fn clipboard_punch_at_screen(
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         voxel_edit::punch_clipboard_at_screen(
-            file, vmap, &cam, w, h, sx, sy, &clip, args.rot_x, args.rot_y, args.rot_z,
+            file, vmap, &cam, w, h, sx, sy, &clip,
+            args.rot_x, args.rot_y, args.rot_z,
+            args.origin_x, args.origin_z,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
+}
+
+/// Return the dominant axis of the face normal at the given screen position for stamp rotation.
+/// Returns `[nx, ny, nz]` (one component ±1, rest 0) or `null` if no solid is hit.
+#[tauri::command]
+fn stamp_face_normal_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    args: PickAtScreen,
+) -> Result<Option<[i32; 3]>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(None);
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let fg = state.current_file.lock();
+    let Some(file) = fg.as_ref() else {
+        return Ok(None);
+    };
+    let vm = state.voxel_map.lock();
+    let Some(vmap) = vm.as_ref() else {
+        return Ok(None);
+    };
+    let cam = state.camera.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let normal =
+        voxel_edit::outward_face_normal_from_screen_ray(file, vmap, &cam, w, h, sx, sy);
+    Ok(normal.map(|(x, y, z)| [x, y, z]))
 }
 
 #[tauri::command]
@@ -7325,6 +7908,9 @@ fn voxel_sculpt_stroke_at_screen(
             args.terrain_base_y,
             args.terrain_strength,
             args.terrain_smooth_radius,
+            args.terrain_flatten_use_base_y,
+            args.terrain_sub_voxel,
+            &mut *state.terrain_accum.lock(),
             args.smooth_neighbor_passes,
             args.brush_strength,
             args.brush_falloff,
@@ -7401,6 +7987,8 @@ fn commit_sculpt_stroke_replay(
         return Ok(());
     }
     let mut all_deltas: Vec<voxel_edit::VoxelEditDelta> = Vec::new();
+    // Fresh accumulator for replay — produces identical results to the original stroke.
+    let mut replay_terrain_accum: AHashMap<(i32, i32), f32> = AHashMap::new();
     for args in replay {
         let material = voxelle::MaterialId::from_str_id(&args.material);
         let deltas = {
@@ -7457,6 +8045,9 @@ fn commit_sculpt_stroke_replay(
                 args.terrain_base_y,
                 args.terrain_strength,
                 args.terrain_smooth_radius,
+                args.terrain_flatten_use_base_y,
+                args.terrain_sub_voxel,
+                &mut replay_terrain_accum,
                 args.smooth_neighbor_passes,
                 args.brush_strength,
                 args.brush_falloff,
@@ -7818,6 +8409,8 @@ fn extrude_ray_preview(
                 terrain_base_y: 0,
                 terrain_strength: 50,
                 terrain_smooth_radius: 0,
+                terrain_flatten_use_base_y: false,
+                terrain_sub_voxel: false,
                 smooth_neighbor_passes: 1,
                 brush_strength: args.brush_strength,
                 brush_falloff: args.brush_falloff,
@@ -7994,6 +8587,8 @@ fn selection_extrude_preview(
                 terrain_base_y: 0,
                 terrain_strength: 50,
                 terrain_smooth_radius: 0,
+                terrain_flatten_use_base_y: false,
+                terrain_sub_voxel: false,
                 smooth_neighbor_passes: 1,
                 brush_strength: 100,
                 brush_falloff: 100,
@@ -8123,7 +8718,8 @@ fn extrude_recompute_preview(
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        let cam = state.camera.lock();
+        // Acquire viewer before camera to match the render loop's lock order
+        // (viewer → camera). Inverting this order deadlocks with the render tick.
         let (w, h) = {
             let v = state.viewer.lock();
             let Some(viewer) = v.as_ref() else {
@@ -8131,6 +8727,7 @@ fn extrude_recompute_preview(
             };
             viewer.viewport_size()
         };
+        let cam = state.camera.lock();
         let w = w as f32;
         let h = h as f32;
         for sample in &replay {
@@ -9952,6 +10549,44 @@ pub(crate) fn perform_solo_voxel_undo(
                 .push(SoloRedoEntry::SelectionAfter(cur));
             Ok(true)
         }
+        SoloUndoEntry::SelectionTransform { before, deltas } => {
+            let mesh_refresh: Vec<voxel_edit::VoxelEditDelta> = {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let Some(file) = fg.as_mut() else {
+                    return Err("no model loaded".into());
+                };
+                let Some(vmap) = vm.as_mut() else {
+                    return Err("voxel index not ready".into());
+                };
+                let mut mesh = Vec::with_capacity(deltas.len());
+                for d in deltas.iter().rev() {
+                    voxel_edit::apply_inverse_delta(file, vmap, d)?;
+                    mesh.push(voxel_edit::mesh_delta_after_inverse_of(d));
+                }
+                mesh
+            };
+            finish_voxel_edit_gpu_deltas(
+                state,
+                &mesh_refresh,
+                0.0,
+                t_total,
+                app,
+                VoxelGpuRefreshReason::Undo,
+            )?;
+            let after = {
+                let mut sel = state.selection_cells.lock();
+                let after = sel.clone();
+                *sel = before;
+                after
+            };
+            emit_selection_updated(app, state);
+            state
+                .solo_redo
+                .lock()
+                .push(SoloRedoEntry::SelectionTransform { after, deltas });
+            Ok(true)
+        }
     }
 }
 
@@ -10009,6 +10644,41 @@ pub(crate) fn perform_solo_voxel_redo(
                 .solo_undo
                 .lock()
                 .push(SoloUndoEntry::SelectionBefore(cur));
+            Ok(true)
+        }
+        SoloRedoEntry::SelectionTransform { after, deltas } => {
+            {
+                let mut fg = state.current_file.lock();
+                let mut vm = state.voxel_map.lock();
+                let Some(file) = fg.as_mut() else {
+                    return Err("no model loaded".into());
+                };
+                let Some(vmap) = vm.as_mut() else {
+                    return Err("voxel index not ready".into());
+                };
+                for d in &deltas {
+                    voxel_edit::apply_forward_delta(file, vmap, d)?;
+                }
+            }
+            finish_voxel_edit_gpu_deltas(
+                state,
+                &deltas,
+                0.0,
+                t_total,
+                app,
+                VoxelGpuRefreshReason::Redo,
+            )?;
+            let before = {
+                let mut sel = state.selection_cells.lock();
+                let before = sel.clone();
+                *sel = after;
+                before
+            };
+            emit_selection_updated(app, state);
+            state
+                .solo_undo
+                .lock()
+                .push(SoloUndoEntry::SelectionTransform { before, deltas });
             Ok(true)
         }
     }
@@ -10742,6 +11412,200 @@ struct SyncPreviewInput {
     generator_ashlar_seed: i32,
     #[serde(default = "default_ashlar_thickness")]
     generator_ashlar_thickness: i32,
+    // Flora
+    #[serde(default = "default_flora_seed")]
+    generator_flora_seed: i32,
+    #[serde(default = "default_flora_height")]
+    generator_flora_height: i32,
+    #[serde(default = "default_flora_girth")]
+    generator_flora_girth: i32,
+    #[serde(default = "default_flora_wobble")]
+    generator_flora_wobble: f32,
+    #[serde(default = "default_flora_taper")]
+    generator_flora_taper: f32,
+    #[serde(default = "default_one_i32")]
+    generator_flora_stem_count: i32,
+    #[serde(default)]
+    generator_flora_cluster_radius: i32,
+    #[serde(default = "default_flora_branch_count")]
+    generator_flora_branch_count: i32,
+    #[serde(default = "default_two_i32")]
+    generator_flora_branch_depth: i32,
+    #[serde(default = "default_flora_branch_start")]
+    generator_flora_branch_start: f32,
+    #[serde(default = "default_flora_branch_spread")]
+    generator_flora_branch_spread: f32,
+    #[serde(default)]
+    generator_flora_braid_strands: i32,
+    #[serde(default = "default_flora_braid_twist")]
+    generator_flora_braid_twist: f32,
+    #[serde(default = "default_flora_canopy")]
+    generator_flora_canopy: f32,
+    // Insecta
+    #[serde(default = "default_insecta_species")]
+    generator_insecta_species: String,
+    #[serde(default = "default_insecta_total_length")]
+    generator_insecta_total_length: i32,
+    #[serde(default = "default_one_f32")]
+    generator_insecta_head_ratio: f32,
+    #[serde(default = "default_one_f32")]
+    generator_insecta_thorax_ratio: f32,
+    #[serde(default = "default_insecta_abdomen_ratio")]
+    generator_insecta_abdomen_ratio: f32,
+    #[serde(default = "default_two_i32")]
+    generator_insecta_body_half_width: i32,
+    #[serde(default = "default_two_i32")]
+    generator_insecta_body_half_height: i32,
+    #[serde(default = "default_insecta_abdomen_taper")]
+    generator_insecta_abdomen_taper: f32,
+    #[serde(default)]
+    generator_insecta_head_shape: i32,
+    #[serde(default)]
+    generator_insecta_anchor_offset_u: i32,
+    #[serde(default)]
+    generator_insecta_anchor_offset_v: i32,
+    #[serde(default)]
+    generator_insecta_body_yaw: f32,
+    #[serde(default)]
+    generator_insecta_body_arch: f32,
+    #[serde(default = "default_insecta_antenna_length")]
+    generator_insecta_antenna_length: i32,
+    #[serde(default = "default_insecta_antenna_spread")]
+    generator_insecta_antenna_spread: f32,
+    #[serde(default = "default_insecta_antenna_pitch")]
+    generator_insecta_antenna_pitch: f32,
+    #[serde(default = "default_one_i32")]
+    generator_insecta_antenna_root: i32,
+    #[serde(default = "default_two_i32")]
+    generator_insecta_mandible_length: i32,
+    #[serde(default = "default_insecta_mandible_spread")]
+    generator_insecta_mandible_spread: f32,
+    #[serde(default = "default_one_i32")]
+    generator_insecta_mandible_forward: i32,
+    #[serde(default)]
+    generator_insecta_wing_shape: i32,
+    #[serde(default = "default_true")]
+    generator_insecta_show_wing_fore: bool,
+    #[serde(default = "default_insecta_wing_fore_length")]
+    generator_insecta_wing_fore_length: i32,
+    #[serde(default = "default_four_i32")]
+    generator_insecta_wing_fore_width: i32,
+    #[serde(default = "default_insecta_wing_fore_spread")]
+    generator_insecta_wing_fore_spread: f32,
+    #[serde(default = "default_insecta_wing_fore_pitch")]
+    generator_insecta_wing_fore_pitch: f32,
+    #[serde(default)]
+    generator_insecta_wing_fore_offset: i32,
+    #[serde(default)]
+    generator_insecta_wing_fore_forward_cant: f32,
+    #[serde(default = "default_true")]
+    generator_insecta_show_wing_hind: bool,
+    #[serde(default = "default_insecta_wing_hind_length")]
+    generator_insecta_wing_hind_length: i32,
+    #[serde(default = "default_four_i32")]
+    generator_insecta_wing_hind_width: i32,
+    #[serde(default = "default_insecta_wing_hind_spread")]
+    generator_insecta_wing_hind_spread: f32,
+    #[serde(default = "default_insecta_wing_hind_pitch")]
+    generator_insecta_wing_hind_pitch: f32,
+    #[serde(default)]
+    generator_insecta_wing_hind_offset: i32,
+    // Fauna
+    #[serde(default = "default_fauna_stance")]
+    generator_fauna_stance: String,
+    #[serde(default = "default_fauna_archetype")]
+    generator_fauna_archetype: String,
+    #[serde(default)]
+    generator_fauna_anchor_offset_u: i32,
+    #[serde(default)]
+    generator_fauna_anchor_offset_v: i32,
+    #[serde(default)]
+    generator_fauna_body_yaw: f32,
+    #[serde(default)]
+    generator_fauna_body_arch: f32,
+    #[serde(default = "default_fauna_spine_segments")]
+    generator_fauna_spine_segments: i32,
+    #[serde(default = "default_fauna_body_length")]
+    generator_fauna_body_length: i32,
+    #[serde(default = "default_two_i32")]
+    generator_fauna_body_half_width: i32,
+    #[serde(default = "default_two_i32")]
+    generator_fauna_body_half_height: i32,
+    #[serde(default = "default_three_i32")]
+    generator_fauna_neck_length: i32,
+    #[serde(default = "default_one_i32")]
+    generator_fauna_neck_half_width: i32,
+    #[serde(default = "default_one_i32")]
+    generator_fauna_neck_half_height: i32,
+    #[serde(default = "default_three_i32")]
+    generator_fauna_head_length: i32,
+    #[serde(default = "default_two_i32")]
+    generator_fauna_head_half_width: i32,
+    #[serde(default = "default_two_i32")]
+    generator_fauna_head_half_height: i32,
+    #[serde(default = "default_four_i32")]
+    generator_fauna_tail_length: i32,
+    #[serde(default = "default_three_i32")]
+    generator_fauna_shoulder_offset_forward: i32,
+    #[serde(default = "default_fauna_hip_offset_forward")]
+    generator_fauna_hip_offset_forward: i32,
+    #[serde(default = "default_four_i32")]
+    generator_fauna_front_upper_length: i32,
+    #[serde(default = "default_four_i32")]
+    generator_fauna_front_lower_length: i32,
+    #[serde(default = "default_four_i32")]
+    generator_fauna_hind_upper_length: i32,
+    #[serde(default = "default_four_i32")]
+    generator_fauna_hind_lower_length: i32,
+    #[serde(default = "default_true")]
+    generator_fauna_auto_foot_placement: bool,
+    // Piscina
+    #[serde(default = "default_piscina_seed")]
+    generator_piscina_seed: i32,
+    #[serde(default = "default_piscina_species")]
+    generator_piscina_species: String,
+    #[serde(default = "default_piscina_length")]
+    generator_piscina_length: i32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_width: i32,
+    #[serde(default = "default_three_i32")]
+    generator_piscina_thickness: i32,
+    #[serde(default = "default_piscina_spine_bend")]
+    generator_piscina_spine_bend: f32,
+    #[serde(default)]
+    generator_piscina_spine_s_curve: f32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_fin_dorsal: i32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_fin_anal: i32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_fin_caudal: i32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_fin_pectoral: i32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_fin_pelvic: i32,
+    #[serde(default = "default_four_i32")]
+    generator_piscina_fin_adipose: i32,
+    #[serde(default = "default_true")]
+    generator_piscina_show_fin_dorsal: bool,
+    #[serde(default = "default_true")]
+    generator_piscina_show_fin_anal: bool,
+    #[serde(default = "default_true")]
+    generator_piscina_show_fin_caudal: bool,
+    #[serde(default = "default_true")]
+    generator_piscina_show_fin_pectoral: bool,
+    #[serde(default = "default_true")]
+    generator_piscina_show_fin_pelvic: bool,
+    #[serde(default)]
+    generator_piscina_show_fin_adipose: bool,
+    #[serde(default)]
+    generator_piscina_anchor_offset_u: i32,
+    #[serde(default)]
+    generator_piscina_anchor_offset_v: i32,
+    #[serde(default)]
+    stamp_origin_x: i32,
+    #[serde(default)]
+    stamp_origin_z: i32,
 }
 
 fn default_ashlar_roughness() -> f32 {
@@ -10765,6 +11629,59 @@ fn default_grass_max_height() -> i32 {
 }
 fn default_grass_seed() -> i32 {
     42
+}
+
+// New defaults for bio-generator preview fields (SyncPreviewInput)
+fn default_flora_seed() -> i32 {
+    42
+}
+fn default_flora_girth() -> i32 {
+    2
+}
+fn default_flora_branch_count() -> i32 {
+    4
+}
+fn default_flora_branch_spread() -> f32 {
+    0.5
+}
+fn default_flora_canopy() -> f32 {
+    2.0
+}
+fn default_insecta_total_length() -> i32 {
+    12
+}
+fn default_insecta_mandible_spread() -> f32 {
+    0.3
+}
+fn default_insecta_wing_fore_spread() -> f32 {
+    0.5
+}
+fn default_insecta_wing_fore_pitch() -> f32 {
+    0.1
+}
+fn default_insecta_wing_hind_spread() -> f32 {
+    0.6
+}
+fn default_insecta_wing_hind_pitch() -> f32 {
+    0.2
+}
+fn default_fauna_hip_offset_forward() -> i32 {
+    -3
+}
+fn default_piscina_seed() -> i32 {
+    42
+}
+fn default_piscina_spine_bend() -> f32 {
+    0.1
+}
+fn default_two_i32() -> i32 {
+    2
+}
+fn default_three_i32() -> i32 {
+    3
+}
+fn default_four_i32() -> i32 {
+    4
 }
 
 fn default_cloth_tension_preview() -> f32 {
@@ -10850,6 +11767,105 @@ fn sync_preview_input(
         ph.generator_ashlar_roughness = args.generator_ashlar_roughness;
         ph.generator_ashlar_seed = args.generator_ashlar_seed;
         ph.generator_ashlar_thickness = args.generator_ashlar_thickness;
+        // Flora
+        ph.generator_flora_seed = args.generator_flora_seed;
+        ph.generator_flora_height = args.generator_flora_height;
+        ph.generator_flora_girth = args.generator_flora_girth;
+        ph.generator_flora_wobble = args.generator_flora_wobble;
+        ph.generator_flora_taper = args.generator_flora_taper;
+        ph.generator_flora_stem_count = args.generator_flora_stem_count;
+        ph.generator_flora_cluster_radius = args.generator_flora_cluster_radius;
+        ph.generator_flora_branch_count = args.generator_flora_branch_count;
+        ph.generator_flora_branch_depth = args.generator_flora_branch_depth;
+        ph.generator_flora_branch_start = args.generator_flora_branch_start;
+        ph.generator_flora_branch_spread = args.generator_flora_branch_spread;
+        ph.generator_flora_braid_strands = args.generator_flora_braid_strands;
+        ph.generator_flora_braid_twist = args.generator_flora_braid_twist;
+        ph.generator_flora_canopy = args.generator_flora_canopy;
+        // Insecta
+        ph.generator_insecta_species = args.generator_insecta_species.clone();
+        ph.generator_insecta_total_length = args.generator_insecta_total_length;
+        ph.generator_insecta_head_ratio = args.generator_insecta_head_ratio;
+        ph.generator_insecta_thorax_ratio = args.generator_insecta_thorax_ratio;
+        ph.generator_insecta_abdomen_ratio = args.generator_insecta_abdomen_ratio;
+        ph.generator_insecta_body_half_width = args.generator_insecta_body_half_width;
+        ph.generator_insecta_body_half_height = args.generator_insecta_body_half_height;
+        ph.generator_insecta_abdomen_taper = args.generator_insecta_abdomen_taper;
+        ph.generator_insecta_head_shape = args.generator_insecta_head_shape;
+        ph.generator_insecta_anchor_offset_u = args.generator_insecta_anchor_offset_u;
+        ph.generator_insecta_anchor_offset_v = args.generator_insecta_anchor_offset_v;
+        ph.generator_insecta_body_yaw = args.generator_insecta_body_yaw;
+        ph.generator_insecta_body_arch = args.generator_insecta_body_arch;
+        ph.generator_insecta_antenna_length = args.generator_insecta_antenna_length;
+        ph.generator_insecta_antenna_spread = args.generator_insecta_antenna_spread;
+        ph.generator_insecta_antenna_pitch = args.generator_insecta_antenna_pitch;
+        ph.generator_insecta_antenna_root = args.generator_insecta_antenna_root;
+        ph.generator_insecta_mandible_length = args.generator_insecta_mandible_length;
+        ph.generator_insecta_mandible_spread = args.generator_insecta_mandible_spread;
+        ph.generator_insecta_mandible_forward = args.generator_insecta_mandible_forward;
+        ph.generator_insecta_wing_shape = args.generator_insecta_wing_shape;
+        ph.generator_insecta_show_wing_fore = args.generator_insecta_show_wing_fore;
+        ph.generator_insecta_wing_fore_length = args.generator_insecta_wing_fore_length;
+        ph.generator_insecta_wing_fore_width = args.generator_insecta_wing_fore_width;
+        ph.generator_insecta_wing_fore_spread = args.generator_insecta_wing_fore_spread;
+        ph.generator_insecta_wing_fore_pitch = args.generator_insecta_wing_fore_pitch;
+        ph.generator_insecta_wing_fore_offset = args.generator_insecta_wing_fore_offset;
+        ph.generator_insecta_wing_fore_forward_cant = args.generator_insecta_wing_fore_forward_cant;
+        ph.generator_insecta_show_wing_hind = args.generator_insecta_show_wing_hind;
+        ph.generator_insecta_wing_hind_length = args.generator_insecta_wing_hind_length;
+        ph.generator_insecta_wing_hind_width = args.generator_insecta_wing_hind_width;
+        ph.generator_insecta_wing_hind_spread = args.generator_insecta_wing_hind_spread;
+        ph.generator_insecta_wing_hind_pitch = args.generator_insecta_wing_hind_pitch;
+        ph.generator_insecta_wing_hind_offset = args.generator_insecta_wing_hind_offset;
+        // Fauna
+        ph.generator_fauna_stance = args.generator_fauna_stance.clone();
+        ph.generator_fauna_archetype = args.generator_fauna_archetype.clone();
+        ph.generator_fauna_anchor_offset_u = args.generator_fauna_anchor_offset_u;
+        ph.generator_fauna_anchor_offset_v = args.generator_fauna_anchor_offset_v;
+        ph.generator_fauna_body_yaw = args.generator_fauna_body_yaw;
+        ph.generator_fauna_body_arch = args.generator_fauna_body_arch;
+        ph.generator_fauna_spine_segments = args.generator_fauna_spine_segments;
+        ph.generator_fauna_body_length = args.generator_fauna_body_length;
+        ph.generator_fauna_body_half_width = args.generator_fauna_body_half_width;
+        ph.generator_fauna_body_half_height = args.generator_fauna_body_half_height;
+        ph.generator_fauna_neck_length = args.generator_fauna_neck_length;
+        ph.generator_fauna_neck_half_width = args.generator_fauna_neck_half_width;
+        ph.generator_fauna_neck_half_height = args.generator_fauna_neck_half_height;
+        ph.generator_fauna_head_length = args.generator_fauna_head_length;
+        ph.generator_fauna_head_half_width = args.generator_fauna_head_half_width;
+        ph.generator_fauna_head_half_height = args.generator_fauna_head_half_height;
+        ph.generator_fauna_tail_length = args.generator_fauna_tail_length;
+        ph.generator_fauna_shoulder_offset_forward = args.generator_fauna_shoulder_offset_forward;
+        ph.generator_fauna_hip_offset_forward = args.generator_fauna_hip_offset_forward;
+        ph.generator_fauna_front_upper_length = args.generator_fauna_front_upper_length;
+        ph.generator_fauna_front_lower_length = args.generator_fauna_front_lower_length;
+        ph.generator_fauna_hind_upper_length = args.generator_fauna_hind_upper_length;
+        ph.generator_fauna_hind_lower_length = args.generator_fauna_hind_lower_length;
+        ph.generator_fauna_auto_foot_placement = args.generator_fauna_auto_foot_placement;
+        // Piscina
+        ph.generator_piscina_seed = args.generator_piscina_seed;
+        ph.generator_piscina_species = args.generator_piscina_species.clone();
+        ph.generator_piscina_length = args.generator_piscina_length;
+        ph.generator_piscina_width = args.generator_piscina_width;
+        ph.generator_piscina_thickness = args.generator_piscina_thickness;
+        ph.generator_piscina_spine_bend = args.generator_piscina_spine_bend;
+        ph.generator_piscina_spine_s_curve = args.generator_piscina_spine_s_curve;
+        ph.generator_piscina_fin_dorsal = args.generator_piscina_fin_dorsal;
+        ph.generator_piscina_fin_anal = args.generator_piscina_fin_anal;
+        ph.generator_piscina_fin_caudal = args.generator_piscina_fin_caudal;
+        ph.generator_piscina_fin_pectoral = args.generator_piscina_fin_pectoral;
+        ph.generator_piscina_fin_pelvic = args.generator_piscina_fin_pelvic;
+        ph.generator_piscina_fin_adipose = args.generator_piscina_fin_adipose;
+        ph.generator_piscina_show_fin_dorsal = args.generator_piscina_show_fin_dorsal;
+        ph.generator_piscina_show_fin_anal = args.generator_piscina_show_fin_anal;
+        ph.generator_piscina_show_fin_caudal = args.generator_piscina_show_fin_caudal;
+        ph.generator_piscina_show_fin_pectoral = args.generator_piscina_show_fin_pectoral;
+        ph.generator_piscina_show_fin_pelvic = args.generator_piscina_show_fin_pelvic;
+        ph.generator_piscina_show_fin_adipose = args.generator_piscina_show_fin_adipose;
+        ph.generator_piscina_anchor_offset_u = args.generator_piscina_anchor_offset_u;
+        ph.generator_piscina_anchor_offset_v = args.generator_piscina_anchor_offset_v;
+        ph.stamp_origin_x = args.stamp_origin_x;
+        ph.stamp_origin_z = args.stamp_origin_z;
     }
     if args.nx < 0.0 {
         *state.preview_cursor.lock() = None;
@@ -10859,12 +11875,24 @@ fn sync_preview_input(
     Ok(())
 }
 
+/// Returns the axis index (0=X, 1=Y, 2=Z) to highlight, or 255 for none.
+/// During an active drag the dragged axis stays highlighted; otherwise falls back to hover state.
+fn gizmo_highlighted_axis(state: &ViewerState) -> u8 {
+    match &*state.selection_gizmo_drag.lock() {
+        SelectionGizmoDrag::Move { world_axis, .. } => *world_axis,
+        SelectionGizmoDrag::Rotate { ring, .. } => *ring,
+        SelectionGizmoDrag::None => state.hovered_gizmo_axis.load(Ordering::Relaxed),
+    }
+}
+
 fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
+    let mode = *state.preview_mode.lock();
     let sel = state.selection_cells.lock();
-    if sel.is_empty() {
+    if sel.is_empty() || matches!(mode, PreviewMode::Stamp | PreviewMode::Punch) {
         drop(sel);
         viewer.upload_gizmo_lines(&[]);
         viewer.upload_gizmo_tris(&[]);
+        viewer.upload_gizmo_delta_label(None);
         return;
     }
     let mut min_x = i32::MAX;
@@ -10895,10 +11923,11 @@ fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamer
     }
     drop(sel);
 
+    let pending = pending_gizmo_translate(state);
     let pivot = glam::Vec3::new(
-        (min_x + max_x) as f32 * 0.5,
-        (min_y + max_y) as f32 * 0.5,
-        (min_z + max_z) as f32 * 0.5,
+        (min_x + max_x) as f32 * 0.5 + pending.0 as f32,
+        (min_y + max_y) as f32 * 0.5 + pending.1 as f32,
+        (min_z + max_z) as f32 * 0.5 + pending.2 as f32,
     );
     let inv_view = cam.view_matrix().inverse();
     let cam_eye = glam::Vec3::new(inv_view.w_axis.x, inv_view.w_axis.y, inv_view.w_axis.z);
@@ -10906,7 +11935,14 @@ fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamer
     let arm = (dist * 0.13_f32).clamp(1.5, 20.0);
 
     // Axis colors in linear space (HDR target): X=red, Y=green, Z=blue
-    let cols: [[f32; 3]; 3] = [[1.00, 0.22, 0.22], [0.18, 0.88, 0.18], [0.22, 0.45, 1.00]];
+    let highlight_axis = gizmo_highlighted_axis(state);
+    let mut cols: [[f32; 3]; 3] = [[1.00, 0.22, 0.22], [0.18, 0.88, 0.18], [0.22, 0.45, 1.00]];
+    if highlight_axis < 3 {
+        let c = &mut cols[highlight_axis as usize];
+        c[0] *= 1.6;
+        c[1] *= 1.6;
+        c[2] *= 1.6;
+    }
     let dirs = [
         glam::Vec3::X,
         -glam::Vec3::X,
@@ -11026,6 +12062,18 @@ fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamer
 
     viewer.upload_gizmo_lines(&lv);
     viewer.upload_gizmo_tris(&tv);
+
+    if pending != (0, 0, 0) {
+        let text = format!("{:+}, {:+}, {:+}", pending.0, pending.1, pending.2);
+        let (vw, vh) = viewer.viewport_size();
+        if let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(cam, vw as f32, vh as f32, pivot.x, pivot.y, pivot.z) {
+            viewer.upload_gizmo_delta_label(Some(GpuPeerLabel { name: text, color_rgb: 0x9FD8FF, x: sx, y: sy }));
+        } else {
+            viewer.upload_gizmo_delta_label(None);
+        }
+    } else {
+        viewer.upload_gizmo_delta_label(None);
+    }
 }
 
 fn sync_ping_flash(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
@@ -11299,6 +12347,7 @@ fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
 fn selection_overlay_cache_fingerprint(
     sel: &AHashSet<greedy_mesh::VoxelCoord>,
     mesh_gen: u64,
+    pending_offset: (i32, i32, i32),
 ) -> u64 {
     let mut h = AHasher::default();
     sel.len().hash(&mut h);
@@ -11308,6 +12357,7 @@ fn selection_overlay_cache_fingerprint(
         c.hash(&mut h);
     }
     mesh_gen.hash(&mut h);
+    pending_offset.hash(&mut h);
     h.finish()
 }
 
@@ -11406,10 +12456,19 @@ fn prepare_selection_overlay(state: &ViewerState) -> SelectionOverlayPrepared {
         return SelectionOverlayPrepared::Clear;
     }
     let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
-    let fp = selection_overlay_cache_fingerprint(&sel, mesh_gen);
+    let pending = pending_gizmo_translate(state);
+    let fp = selection_overlay_cache_fingerprint(&sel, mesh_gen, pending);
     if *state.selection_overlay_cache_key.lock() == Some(fp) {
         return SelectionOverlayPrepared::Unchanged;
     }
+    // Apply the pending drag offset to cell positions for preview rendering.
+    let effective_sel: AHashSet<greedy_mesh::VoxelCoord> = if pending != (0, 0, 0) {
+        sel.iter()
+            .map(|&(x, y, z)| (x + pending.0, y + pending.1, z + pending.2))
+            .collect()
+    } else {
+        sel
+    };
     let file_guard = state.current_file.lock();
     let map_guard = state.voxel_map.lock();
     let Some(file) = file_guard.as_ref() else {
@@ -11423,9 +12482,9 @@ fn prepare_selection_overlay(state: &ViewerState) -> SelectionOverlayPrepared {
     for (coord, &idx) in vmap.iter() {
         world.insert(*coord, file.voxels[idx]);
     }
-    let solid = greedy_mesh::mesh_buffers_selection_overlay_solid(&sel, &world);
+    let solid = greedy_mesh::mesh_buffers_selection_overlay_solid(&effective_sel, &world);
     let line_verts = if let Some((min_x, min_y, min_z, max_x, max_y, max_z)) =
-        greedy_mesh::selection_bounds(&sel)
+        greedy_mesh::selection_bounds(&effective_sel)
     {
         greedy_mesh::selection_aabb_line_vertices(min_x, min_y, min_z, max_x, max_y, max_z)
     } else {
@@ -11470,6 +12529,11 @@ enum PreviewMeshPrepared {
     Noop,
     Clear,
     Upload {
+        cache_key: u64,
+        instanced: greedy_mesh::PreviewInstancedResult,
+    },
+    /// Generator preview: lit, opaque, self-shadowing. Uses gen_preview GPU buffers.
+    GenUpload {
         cache_key: u64,
         instanced: greedy_mesh::PreviewInstancedResult,
     },
@@ -11630,6 +12694,264 @@ fn hash_generator_ashlar_hover(
     roughness.to_bits().hash(&mut h);
     seed.hash(&mut h);
     thickness.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hash_generator_flora_hover(
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    height: i32,
+    girth: i32,
+    wobble: f32,
+    taper: f32,
+    stem_count: i32,
+    cluster_radius: i32,
+    branch_count: i32,
+    branch_depth: i32,
+    branch_start: f32,
+    branch_spread: f32,
+    braid_strands: i32,
+    braid_twist: f32,
+    canopy: f32,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x46u8.hash(&mut h); // 'F' for flora
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    seed.hash(&mut h);
+    height.hash(&mut h);
+    girth.hash(&mut h);
+    wobble.to_bits().hash(&mut h);
+    taper.to_bits().hash(&mut h);
+    stem_count.hash(&mut h);
+    cluster_radius.hash(&mut h);
+    branch_count.hash(&mut h);
+    branch_depth.hash(&mut h);
+    branch_start.to_bits().hash(&mut h);
+    branch_spread.to_bits().hash(&mut h);
+    braid_strands.hash(&mut h);
+    braid_twist.to_bits().hash(&mut h);
+    canopy.to_bits().hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hash_generator_insecta_hover(
+    sx: f32,
+    sy: f32,
+    species: &str,
+    total_length: i32,
+    head_ratio: f32,
+    thorax_ratio: f32,
+    abdomen_ratio: f32,
+    body_half_width: i32,
+    body_half_height: i32,
+    abdomen_taper: f32,
+    head_shape: i32,
+    anchor_offset_u: i32,
+    anchor_offset_v: i32,
+    body_yaw: f32,
+    body_arch: f32,
+    antenna_length: i32,
+    antenna_spread: f32,
+    antenna_pitch: f32,
+    antenna_root: i32,
+    mandible_length: i32,
+    mandible_spread: f32,
+    mandible_forward: i32,
+    wing_shape: i32,
+    show_wing_fore: bool,
+    wing_fore_length: i32,
+    wing_fore_width: i32,
+    wing_fore_spread: f32,
+    wing_fore_pitch: f32,
+    wing_fore_offset: i32,
+    wing_fore_forward_cant: f32,
+    show_wing_hind: bool,
+    wing_hind_length: i32,
+    wing_hind_width: i32,
+    wing_hind_spread: f32,
+    wing_hind_pitch: f32,
+    wing_hind_offset: i32,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x49u8.hash(&mut h); // 'I' for insecta
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    species.hash(&mut h);
+    total_length.hash(&mut h);
+    head_ratio.to_bits().hash(&mut h);
+    thorax_ratio.to_bits().hash(&mut h);
+    abdomen_ratio.to_bits().hash(&mut h);
+    body_half_width.hash(&mut h);
+    body_half_height.hash(&mut h);
+    abdomen_taper.to_bits().hash(&mut h);
+    head_shape.hash(&mut h);
+    anchor_offset_u.hash(&mut h);
+    anchor_offset_v.hash(&mut h);
+    body_yaw.to_bits().hash(&mut h);
+    body_arch.to_bits().hash(&mut h);
+    antenna_length.hash(&mut h);
+    antenna_spread.to_bits().hash(&mut h);
+    antenna_pitch.to_bits().hash(&mut h);
+    antenna_root.hash(&mut h);
+    mandible_length.hash(&mut h);
+    mandible_spread.to_bits().hash(&mut h);
+    mandible_forward.hash(&mut h);
+    wing_shape.hash(&mut h);
+    show_wing_fore.hash(&mut h);
+    wing_fore_length.hash(&mut h);
+    wing_fore_width.hash(&mut h);
+    wing_fore_spread.to_bits().hash(&mut h);
+    wing_fore_pitch.to_bits().hash(&mut h);
+    wing_fore_offset.hash(&mut h);
+    wing_fore_forward_cant.to_bits().hash(&mut h);
+    show_wing_hind.hash(&mut h);
+    wing_hind_length.hash(&mut h);
+    wing_hind_width.hash(&mut h);
+    wing_hind_spread.to_bits().hash(&mut h);
+    wing_hind_pitch.to_bits().hash(&mut h);
+    wing_hind_offset.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hash_generator_fauna_hover(
+    sx: f32,
+    sy: f32,
+    stance: &str,
+    archetype: &str,
+    anchor_offset_u: i32,
+    anchor_offset_v: i32,
+    body_yaw: f32,
+    body_arch: f32,
+    spine_segments: i32,
+    body_length: i32,
+    body_half_width: i32,
+    body_half_height: i32,
+    neck_length: i32,
+    neck_half_width: i32,
+    neck_half_height: i32,
+    head_length: i32,
+    head_half_width: i32,
+    head_half_height: i32,
+    tail_length: i32,
+    shoulder_offset_forward: i32,
+    hip_offset_forward: i32,
+    front_upper_length: i32,
+    front_lower_length: i32,
+    hind_upper_length: i32,
+    hind_lower_length: i32,
+    auto_foot_placement: bool,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x41u8.hash(&mut h); // 'A' for fAuna
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    stance.hash(&mut h);
+    archetype.hash(&mut h);
+    anchor_offset_u.hash(&mut h);
+    anchor_offset_v.hash(&mut h);
+    body_yaw.to_bits().hash(&mut h);
+    body_arch.to_bits().hash(&mut h);
+    spine_segments.hash(&mut h);
+    body_length.hash(&mut h);
+    body_half_width.hash(&mut h);
+    body_half_height.hash(&mut h);
+    neck_length.hash(&mut h);
+    neck_half_width.hash(&mut h);
+    neck_half_height.hash(&mut h);
+    head_length.hash(&mut h);
+    head_half_width.hash(&mut h);
+    head_half_height.hash(&mut h);
+    tail_length.hash(&mut h);
+    shoulder_offset_forward.hash(&mut h);
+    hip_offset_forward.hash(&mut h);
+    front_upper_length.hash(&mut h);
+    front_lower_length.hash(&mut h);
+    hind_upper_length.hash(&mut h);
+    hind_lower_length.hash(&mut h);
+    auto_foot_placement.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    h.finish()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hash_generator_piscina_hover(
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    species: &str,
+    length: i32,
+    width_param: i32,
+    thickness: i32,
+    spine_bend: f32,
+    spine_s_curve: f32,
+    fin_dorsal: i32,
+    fin_anal: i32,
+    fin_caudal: i32,
+    fin_pectoral: i32,
+    fin_pelvic: i32,
+    fin_adipose: i32,
+    show_fin_dorsal: bool,
+    show_fin_anal: bool,
+    show_fin_caudal: bool,
+    show_fin_pectoral: bool,
+    show_fin_pelvic: bool,
+    show_fin_adipose: bool,
+    anchor_offset_u: i32,
+    anchor_offset_v: i32,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x50u8.hash(&mut h); // 'P' for piscina
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    seed.hash(&mut h);
+    species.hash(&mut h);
+    length.hash(&mut h);
+    width_param.hash(&mut h);
+    thickness.hash(&mut h);
+    spine_bend.to_bits().hash(&mut h);
+    spine_s_curve.to_bits().hash(&mut h);
+    fin_dorsal.hash(&mut h);
+    fin_anal.hash(&mut h);
+    fin_caudal.hash(&mut h);
+    fin_pectoral.hash(&mut h);
+    fin_pelvic.hash(&mut h);
+    fin_adipose.hash(&mut h);
+    show_fin_dorsal.hash(&mut h);
+    show_fin_anal.hash(&mut h);
+    show_fin_caudal.hash(&mut h);
+    show_fin_pectoral.hash(&mut h);
+    show_fin_pelvic.hash(&mut h);
+    show_fin_adipose.hash(&mut h);
+    anchor_offset_u.hash(&mut h);
+    anchor_offset_v.hash(&mut h);
     color.hash(&mut h);
     dbg.hash(&mut h);
     mesh_gen.hash(&mut h);
@@ -12102,17 +13424,29 @@ fn prepare_preview_mesh(
                         if preview_overlay_cache_key_get(state) == Some(key) {
                             return PreviewMeshPrepared::Noop;
                         }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
                         let set: AHashSet<_> = cells.iter().copied().collect();
+                        let visible: AHashSet<_> = set
+                            .iter()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !set.contains(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
                         let instanced = stroke_preview_meshes_for_union(
                             voxel_edit::EditTool::Add,
-                            &set,
+                            &visible,
                             vmap,
                             file,
                             dbg,
                             ctx.color,
                             None,
                         );
-                        return PreviewMeshPrepared::Upload {
+                        return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
                             instanced,
                         };
@@ -12147,17 +13481,29 @@ fn prepare_preview_mesh(
                         if preview_overlay_cache_key_get(state) == Some(key) {
                             return PreviewMeshPrepared::Noop;
                         }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
                         let set: AHashSet<_> = cells.iter().copied().collect();
+                        let visible: AHashSet<_> = set
+                            .iter()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !set.contains(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
                         let instanced = stroke_preview_meshes_for_union(
                             voxel_edit::EditTool::Add,
-                            &set,
+                            &visible,
                             vmap,
                             file,
                             dbg,
                             ctx.color,
                             None,
                         );
-                        return PreviewMeshPrepared::Upload {
+                        return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
                             instanced,
                         };
@@ -12192,17 +13538,439 @@ fn prepare_preview_mesh(
                         if preview_overlay_cache_key_get(state) == Some(key) {
                             return PreviewMeshPrepared::Noop;
                         }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
                         let set: AHashSet<_> = cells.iter().copied().collect();
+                        let visible: AHashSet<_> = set
+                            .iter()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !set.contains(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
                         let instanced = stroke_preview_meshes_for_union(
                             voxel_edit::EditTool::Add,
-                            &set,
+                            &visible,
                             vmap,
                             file,
                             dbg,
                             ctx.color,
                             None,
                         );
-                        return PreviewMeshPrepared::Upload {
+                        return PreviewMeshPrepared::GenUpload {
+                            cache_key: key,
+                            instanced,
+                        };
+                    }
+                }
+                "flora" => {
+                    let material = voxelle::MaterialId::from_str_id(&ctx.material);
+                    let cells = crate::generators::preview_flora_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        ctx.generator_flora_seed,
+                        ctx.generator_flora_height,
+                        ctx.generator_flora_girth,
+                        ctx.generator_flora_wobble,
+                        ctx.generator_flora_taper,
+                        ctx.generator_flora_stem_count,
+                        ctx.generator_flora_cluster_radius,
+                        ctx.generator_flora_branch_count,
+                        ctx.generator_flora_branch_depth,
+                        ctx.generator_flora_branch_start,
+                        ctx.generator_flora_branch_spread,
+                        ctx.generator_flora_braid_strands,
+                        ctx.generator_flora_braid_twist,
+                        ctx.generator_flora_canopy,
+                        ctx.color,
+                        material,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_flora_hover(
+                            sx,
+                            sy,
+                            ctx.generator_flora_seed,
+                            ctx.generator_flora_height,
+                            ctx.generator_flora_girth,
+                            ctx.generator_flora_wobble,
+                            ctx.generator_flora_taper,
+                            ctx.generator_flora_stem_count,
+                            ctx.generator_flora_cluster_radius,
+                            ctx.generator_flora_branch_count,
+                            ctx.generator_flora_branch_depth,
+                            ctx.generator_flora_branch_start,
+                            ctx.generator_flora_branch_spread,
+                            ctx.generator_flora_braid_strands,
+                            ctx.generator_flora_braid_twist,
+                            ctx.generator_flora_canopy,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
+                        let color_map: AHashMap<(i32, i32, i32), u32> =
+                            cells.iter().cloned().collect();
+                        let visible: AHashSet<_> = color_map
+                            .keys()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !color_map.contains_key(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
+                        let fallback = ctx.color;
+                        let instanced = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &visible,
+                            vmap,
+                            file,
+                            dbg,
+                            fallback,
+                            Some(&|x, y, z| {
+                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
+                            }),
+                        );
+                        return PreviewMeshPrepared::GenUpload {
+                            cache_key: key,
+                            instanced,
+                        };
+                    }
+                }
+                "insecta" => {
+                    let material = voxelle::MaterialId::from_str_id(&ctx.material);
+                    let cells = crate::generators::preview_insecta_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        &ctx.generator_insecta_species,
+                        ctx.generator_insecta_total_length,
+                        ctx.generator_insecta_head_ratio,
+                        ctx.generator_insecta_thorax_ratio,
+                        ctx.generator_insecta_abdomen_ratio,
+                        ctx.generator_insecta_body_half_width,
+                        ctx.generator_insecta_body_half_height,
+                        ctx.generator_insecta_abdomen_taper,
+                        ctx.generator_insecta_head_shape,
+                        ctx.generator_insecta_anchor_offset_u,
+                        ctx.generator_insecta_anchor_offset_v,
+                        ctx.generator_insecta_body_yaw,
+                        ctx.generator_insecta_body_arch,
+                        ctx.generator_insecta_antenna_length,
+                        ctx.generator_insecta_antenna_spread,
+                        ctx.generator_insecta_antenna_pitch,
+                        ctx.generator_insecta_antenna_root,
+                        ctx.generator_insecta_mandible_length,
+                        ctx.generator_insecta_mandible_spread,
+                        ctx.generator_insecta_mandible_forward,
+                        ctx.generator_insecta_wing_shape,
+                        ctx.generator_insecta_show_wing_fore,
+                        ctx.generator_insecta_wing_fore_length,
+                        ctx.generator_insecta_wing_fore_width,
+                        ctx.generator_insecta_wing_fore_spread,
+                        ctx.generator_insecta_wing_fore_pitch,
+                        ctx.generator_insecta_wing_fore_offset,
+                        ctx.generator_insecta_wing_fore_forward_cant,
+                        ctx.generator_insecta_show_wing_hind,
+                        ctx.generator_insecta_wing_hind_length,
+                        ctx.generator_insecta_wing_hind_width,
+                        ctx.generator_insecta_wing_hind_spread,
+                        ctx.generator_insecta_wing_hind_pitch,
+                        ctx.generator_insecta_wing_hind_offset,
+                        ctx.color,
+                        material,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_insecta_hover(
+                            sx,
+                            sy,
+                            &ctx.generator_insecta_species,
+                            ctx.generator_insecta_total_length,
+                            ctx.generator_insecta_head_ratio,
+                            ctx.generator_insecta_thorax_ratio,
+                            ctx.generator_insecta_abdomen_ratio,
+                            ctx.generator_insecta_body_half_width,
+                            ctx.generator_insecta_body_half_height,
+                            ctx.generator_insecta_abdomen_taper,
+                            ctx.generator_insecta_head_shape,
+                            ctx.generator_insecta_anchor_offset_u,
+                            ctx.generator_insecta_anchor_offset_v,
+                            ctx.generator_insecta_body_yaw,
+                            ctx.generator_insecta_body_arch,
+                            ctx.generator_insecta_antenna_length,
+                            ctx.generator_insecta_antenna_spread,
+                            ctx.generator_insecta_antenna_pitch,
+                            ctx.generator_insecta_antenna_root,
+                            ctx.generator_insecta_mandible_length,
+                            ctx.generator_insecta_mandible_spread,
+                            ctx.generator_insecta_mandible_forward,
+                            ctx.generator_insecta_wing_shape,
+                            ctx.generator_insecta_show_wing_fore,
+                            ctx.generator_insecta_wing_fore_length,
+                            ctx.generator_insecta_wing_fore_width,
+                            ctx.generator_insecta_wing_fore_spread,
+                            ctx.generator_insecta_wing_fore_pitch,
+                            ctx.generator_insecta_wing_fore_offset,
+                            ctx.generator_insecta_wing_fore_forward_cant,
+                            ctx.generator_insecta_show_wing_hind,
+                            ctx.generator_insecta_wing_hind_length,
+                            ctx.generator_insecta_wing_hind_width,
+                            ctx.generator_insecta_wing_hind_spread,
+                            ctx.generator_insecta_wing_hind_pitch,
+                            ctx.generator_insecta_wing_hind_offset,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
+                        let color_map: AHashMap<(i32, i32, i32), u32> =
+                            cells.iter().cloned().collect();
+                        let visible: AHashSet<_> = color_map
+                            .keys()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !color_map.contains_key(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
+                        let fallback = ctx.color;
+                        let instanced = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &visible,
+                            vmap,
+                            file,
+                            dbg,
+                            fallback,
+                            Some(&|x, y, z| {
+                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
+                            }),
+                        );
+                        return PreviewMeshPrepared::GenUpload {
+                            cache_key: key,
+                            instanced,
+                        };
+                    }
+                }
+                "fauna" => {
+                    let material = voxelle::MaterialId::from_str_id(&ctx.material);
+                    let cells = crate::generators::preview_fauna_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        &ctx.generator_fauna_stance,
+                        &ctx.generator_fauna_archetype,
+                        ctx.generator_fauna_anchor_offset_u,
+                        ctx.generator_fauna_anchor_offset_v,
+                        ctx.generator_fauna_body_yaw,
+                        ctx.generator_fauna_body_arch,
+                        ctx.generator_fauna_spine_segments,
+                        ctx.generator_fauna_body_length,
+                        ctx.generator_fauna_body_half_width,
+                        ctx.generator_fauna_body_half_height,
+                        ctx.generator_fauna_neck_length,
+                        ctx.generator_fauna_neck_half_width,
+                        ctx.generator_fauna_neck_half_height,
+                        ctx.generator_fauna_head_length,
+                        ctx.generator_fauna_head_half_width,
+                        ctx.generator_fauna_head_half_height,
+                        ctx.generator_fauna_tail_length,
+                        ctx.generator_fauna_shoulder_offset_forward,
+                        ctx.generator_fauna_hip_offset_forward,
+                        ctx.generator_fauna_front_upper_length,
+                        ctx.generator_fauna_front_lower_length,
+                        ctx.generator_fauna_hind_upper_length,
+                        ctx.generator_fauna_hind_lower_length,
+                        ctx.generator_fauna_auto_foot_placement,
+                        ctx.color,
+                        material,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_fauna_hover(
+                            sx,
+                            sy,
+                            &ctx.generator_fauna_stance,
+                            &ctx.generator_fauna_archetype,
+                            ctx.generator_fauna_anchor_offset_u,
+                            ctx.generator_fauna_anchor_offset_v,
+                            ctx.generator_fauna_body_yaw,
+                            ctx.generator_fauna_body_arch,
+                            ctx.generator_fauna_spine_segments,
+                            ctx.generator_fauna_body_length,
+                            ctx.generator_fauna_body_half_width,
+                            ctx.generator_fauna_body_half_height,
+                            ctx.generator_fauna_neck_length,
+                            ctx.generator_fauna_neck_half_width,
+                            ctx.generator_fauna_neck_half_height,
+                            ctx.generator_fauna_head_length,
+                            ctx.generator_fauna_head_half_width,
+                            ctx.generator_fauna_head_half_height,
+                            ctx.generator_fauna_tail_length,
+                            ctx.generator_fauna_shoulder_offset_forward,
+                            ctx.generator_fauna_hip_offset_forward,
+                            ctx.generator_fauna_front_upper_length,
+                            ctx.generator_fauna_front_lower_length,
+                            ctx.generator_fauna_hind_upper_length,
+                            ctx.generator_fauna_hind_lower_length,
+                            ctx.generator_fauna_auto_foot_placement,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
+                        let color_map: AHashMap<(i32, i32, i32), u32> =
+                            cells.iter().cloned().collect();
+                        let visible: AHashSet<_> = color_map
+                            .keys()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !color_map.contains_key(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
+                        let fallback = ctx.color;
+                        let instanced = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &visible,
+                            vmap,
+                            file,
+                            dbg,
+                            fallback,
+                            Some(&|x, y, z| {
+                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
+                            }),
+                        );
+                        return PreviewMeshPrepared::GenUpload {
+                            cache_key: key,
+                            instanced,
+                        };
+                    }
+                }
+                "piscina" => {
+                    let material = voxelle::MaterialId::from_str_id(&ctx.material);
+                    let cells = crate::generators::preview_piscina_at_screen(
+                        file,
+                        vmap,
+                        cam,
+                        w,
+                        h,
+                        sx,
+                        sy,
+                        ctx.generator_piscina_seed,
+                        &ctx.generator_piscina_species,
+                        ctx.generator_piscina_length,
+                        ctx.generator_piscina_width,
+                        ctx.generator_piscina_thickness,
+                        ctx.generator_piscina_spine_bend,
+                        ctx.generator_piscina_spine_s_curve,
+                        ctx.generator_piscina_fin_dorsal,
+                        ctx.generator_piscina_fin_anal,
+                        ctx.generator_piscina_fin_caudal,
+                        ctx.generator_piscina_fin_pectoral,
+                        ctx.generator_piscina_fin_pelvic,
+                        ctx.generator_piscina_fin_adipose,
+                        ctx.generator_piscina_show_fin_dorsal,
+                        ctx.generator_piscina_show_fin_anal,
+                        ctx.generator_piscina_show_fin_caudal,
+                        ctx.generator_piscina_show_fin_pectoral,
+                        ctx.generator_piscina_show_fin_pelvic,
+                        ctx.generator_piscina_show_fin_adipose,
+                        ctx.generator_piscina_anchor_offset_u,
+                        ctx.generator_piscina_anchor_offset_v,
+                        ctx.color,
+                        material,
+                    );
+                    if !cells.is_empty() {
+                        let key = hash_generator_piscina_hover(
+                            sx,
+                            sy,
+                            ctx.generator_piscina_seed,
+                            &ctx.generator_piscina_species,
+                            ctx.generator_piscina_length,
+                            ctx.generator_piscina_width,
+                            ctx.generator_piscina_thickness,
+                            ctx.generator_piscina_spine_bend,
+                            ctx.generator_piscina_spine_s_curve,
+                            ctx.generator_piscina_fin_dorsal,
+                            ctx.generator_piscina_fin_anal,
+                            ctx.generator_piscina_fin_caudal,
+                            ctx.generator_piscina_fin_pectoral,
+                            ctx.generator_piscina_fin_pelvic,
+                            ctx.generator_piscina_fin_adipose,
+                            ctx.generator_piscina_show_fin_dorsal,
+                            ctx.generator_piscina_show_fin_anal,
+                            ctx.generator_piscina_show_fin_caudal,
+                            ctx.generator_piscina_show_fin_pectoral,
+                            ctx.generator_piscina_show_fin_pelvic,
+                            ctx.generator_piscina_show_fin_adipose,
+                            ctx.generator_piscina_anchor_offset_u,
+                            ctx.generator_piscina_anchor_offset_v,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                        ];
+                        let color_map: AHashMap<(i32, i32, i32), u32> =
+                            cells.iter().cloned().collect();
+                        let visible: AHashSet<_> = color_map
+                            .keys()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter().any(|&(dx, dy, dz)| {
+                                    !color_map.contains_key(&(x + dx, y + dy, z + dz))
+                                })
+                            })
+                            .copied()
+                            .collect();
+                        let fallback = ctx.color;
+                        let instanced = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &visible,
+                            vmap,
+                            file,
+                            dbg,
+                            fallback,
+                            Some(&|x, y, z| {
+                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
+                            }),
+                        );
+                        return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
                             instanced,
                         };
@@ -12380,14 +14148,15 @@ fn prepare_preview_mesh(
         if clip.entries.is_empty() {
             return PreviewMeshPrepared::Clear;
         }
-        let cam = state.camera.lock();
         let anchor = if matches!(mode, PreviewMode::Stamp) {
             // Stamp places at the empty cell in front of the first solid.
-            voxel_edit::preview_add_cell(file, vmap, &cam, w, h, sx, sy).map(|(c, _)| c)
+            voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
         } else {
             // Punch removes starting at the hit solid cell.
-            voxel_edit::preview_remove_cell(file, vmap, &cam, w, h, sx, sy).map(|(c, _)| c)
+            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
         };
+        let (origin_x, origin_z) = (ctx.stamp_origin_x, ctx.stamp_origin_z);
+        let (off_x, off_z) = voxel_edit::stamp_origin_offsets_pub(&clip.entries, origin_x, origin_z);
         let key = {
             let mut hasher = AHasher::default();
             mode.hash(&mut hasher);
@@ -12398,6 +14167,8 @@ fn prepare_preview_mesh(
                 dz.hash(&mut hasher);
                 color.hash(&mut hasher);
             }
+            origin_x.hash(&mut hasher);
+            origin_z.hash(&mut hasher);
             dbg.hash(&mut hasher);
             hasher.finish()
         };
@@ -12416,7 +14187,7 @@ fn prepare_preview_mesh(
         let color_map: AHashMap<greedy_mesh::VoxelCoord, u32> = clip
             .entries
             .iter()
-            .map(|&(dx, dy, dz, src_color, _)| ((ax + dx, ay + dy, az + dz), src_color))
+            .map(|&(dx, dy, dz, src_color, _)| ((ax + dx - off_x, ay + dy, az + dz - off_z), src_color))
             .collect();
         let cells: AHashSet<greedy_mesh::VoxelCoord> = color_map.keys().copied().collect();
         let color_resolver =
@@ -12586,6 +14357,14 @@ fn apply_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, prep: Previe
             instanced,
         } => {
             viewer.upload_preview_mesh_instanced(&instanced);
+            viewer.preview_cache_key = Some(cache_key);
+            *state.preview_overlay_cache_key.lock() = Some(cache_key);
+        }
+        PreviewMeshPrepared::GenUpload {
+            cache_key,
+            instanced,
+        } => {
+            viewer.upload_gen_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = Some(cache_key);
             *state.preview_overlay_cache_key.lock() = Some(cache_key);
         }
@@ -13547,6 +15326,9 @@ fn open_voxelle_dialog(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Re
 /// The start-screen logo, embedded at compile time.
 static START_SCREEN_LOGO: &[u8] = include_bytes!("../Logo.voxelle");
 
+/// Bundled mascot models.  Key strings are used in the `mascot_load_embedded` command.
+static MASCOT_SEAGULL: &[u8] = include_bytes!("../mascots/Seagull.voxelle");
+
 /// Loads bundled `Logo.voxelle` for the cold-start screen (no `voxelle-load-start`, empty `file_label`).
 #[tauri::command]
 fn load_start_screen_logo(
@@ -13555,6 +15337,123 @@ fn load_start_screen_logo(
 ) -> Result<(), String> {
     *state.file_label.lock() = String::new();
     spawn_decode_and_mesh_from_bytes(Arc::clone(&*state), app, START_SCREEN_LOGO, String::new(), true);
+    Ok(())
+}
+
+// ── Mascot commands (start-screen floating voxel models) ─────────────────────
+
+/// Load a `.voxelle` file as a mascot model.
+/// `path` should be a full filesystem path (the frontend resolves bundled assets
+/// via Tauri's resource path API). `id` is a caller-chosen integer key (0–3).
+#[tauri::command]
+fn mascot_load(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    id: u32,
+    path: String,
+) -> Result<(), String> {
+    let state = Arc::clone(&*state);
+    let app_err = app.clone();
+    std::thread::Builder::new()
+        .name("mascot-load".into())
+        .spawn(move || {
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let _ = app_err.emit("mascot-load-error", format!("id={id}: {e}"));
+                    return;
+                }
+            };
+            let file = match decode_payload(&bytes) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = app_err.emit("mascot-load-error", format!("id={id}: {e}"));
+                    return;
+                }
+            };
+            let (mesh, bounds) =
+                greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let state_up = Arc::clone(&state);
+            let _ = app_err.run_on_main_thread(move || {
+                let mut v = state_up.viewer.lock();
+                if let Some(viewer) = v.as_mut() {
+                    viewer.load_mascot_mesh(id, &mesh, bounds);
+                }
+            });
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Set the viewport-relative screen rect for a mascot (physical pixels).
+#[tauri::command]
+fn mascot_set_screen_rect(
+    state: State<'_, Arc<ViewerState>>,
+    id: u32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    if let Some(viewer) = v.as_mut() {
+        viewer.set_mascot_screen_rect(id, x, y, w, h);
+    }
+    Ok(())
+}
+
+/// Load a bundled (compile-time embedded) mascot by name.
+/// Supported names: "seagull"
+#[tauri::command]
+fn mascot_load_embedded(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    id: u32,
+    name: String,
+) -> Result<(), String> {
+    let bytes: &'static [u8] = match name.as_str() {
+        "seagull" => MASCOT_SEAGULL,
+        other => return Err(format!("unknown mascot: {other}")),
+    };
+    let state = Arc::clone(&*state);
+    let app_err = app.clone();
+    std::thread::Builder::new()
+        .name("mascot-load-embedded".into())
+        .spawn(move || {
+            let file = match decode_payload(bytes) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _ = app_err.emit("mascot-load-error", format!("id={id}: {e}"));
+                    return;
+                }
+            };
+            let (mesh, bounds) =
+                greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let app_main = app_err.clone();
+            let _ = app_err.run_on_main_thread(move || {
+                let mut v = state.viewer.lock();
+                if let Some(viewer) = v.as_mut() {
+                    viewer.load_mascot_mesh(id, &mesh, bounds);
+                }
+                // Signal the frontend that the mesh is on the GPU and ready to show.
+                let _ = app_main.emit("mascot-loaded", id);
+            });
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Show or hide a mascot.
+#[tauri::command]
+fn mascot_set_visible(
+    state: State<'_, Arc<ViewerState>>,
+    id: u32,
+    visible: bool,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    if let Some(viewer) = v.as_mut() {
+        viewer.set_mascot_visible(id, visible);
+    }
     Ok(())
 }
 
@@ -14029,16 +15928,19 @@ pub fn run() {
         stamp_clipboard: Mutex::new(None),
         squishy_session: Mutex::new(generators::SquishySession::new()),
         squishy_gizmo_drag: Mutex::new(None),
+        selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
         start_screen_logo_transparent: std::sync::atomic::AtomicBool::new(true),
         start_screen_light: std::sync::atomic::AtomicBool::new(false),
         viewport_cursor_debug_overlay: AtomicBool::new(false),
         show_grid_borders: AtomicBool::new(false),
+        hovered_gizmo_axis: AtomicU8::new(255),
         grid_overlay_cache_key: Mutex::new(None),
         selection_overlay_cache_key: Mutex::new(None),
         preview_overlay_cache_key: Mutex::new(None),
         fill_operation_cancel: Arc::new(AtomicBool::new(false)),
         spray_constraint_plane: Mutex::new(None),
         wall_stroke_face_snapped: Mutex::new(None),
+        terrain_accum: Mutex::new(AHashMap::new()),
     });
     let vs = viewer_state.clone();
 
@@ -14087,8 +15989,9 @@ pub fn run() {
                 let _ = voxel_redo(state, app.clone());
             } else if event.id() == "menu_save" {
                 let state: State<'_, Arc<ViewerState>> = app.state();
-                if let Err(e) = save_voxelle(app.clone(), state) {
-                    let _ = app.emit("voxelle-load-error", e);
+                if save_voxelle(app.clone(), state).is_err() {
+                    let state: State<'_, Arc<ViewerState>> = app.state();
+                    let _ = save_voxelle_as(state, app.clone());
                 }
             } else if event.id() == "menu_save_as" {
                 let state: State<'_, Arc<ViewerState>> = app.state();
@@ -14446,6 +16349,7 @@ pub fn run() {
             create_new_project,
             voxel_pick_probe,
             voxel_stroke_anchor_coord_at_screen,
+            terrain_surface_y_at_screen,
             ping_cursor_pick,
             world_to_viewport_pixels,
             collab_peer_labels,
@@ -14453,6 +16357,7 @@ pub fn run() {
             voxel_stroke_begin,
             voxel_stroke_preview_reset,
             voxel_stroke_preview_at_screen,
+            query_cuboid_plane_geometry,
             voxel_stroke_end,
             voxel_pick_color_at_screen,
             voxel_edit_at_screen,
@@ -14504,6 +16409,11 @@ pub fn run() {
             camera_fly_look,
             selection_toggle_at_screen,
             get_selection_gizmo_projected,
+            gizmo_pointer_down,
+            gizmo_pointer_move,
+            gizmo_pointer_up,
+            gizmo_hit_test,
+            set_gizmo_on_top,
             selection_translate,
             selection_rotate,
             selection_scale,
@@ -14533,6 +16443,7 @@ pub fn run() {
             clipboard_copy_selection,
             clipboard_stamp_at_screen,
             clipboard_punch_at_screen,
+            stamp_face_normal_at_screen,
             get_selection_as_stamp_entries,
             stamp_book_load_entries,
             voxel_sculpt_raise_at_screen,
@@ -14569,6 +16480,10 @@ pub fn run() {
             set_active_object,
             set_object_visible,
             create_scene_object,
+            mascot_load,
+            mascot_load_embedded,
+            mascot_set_screen_rect,
+            mascot_set_visible,
         ])
         .build(tauri::generate_context!())
         .expect("error building app")
@@ -14821,6 +16736,9 @@ pub fn run() {
                 // Keep spinning while fly is on so the viewport and FPS/status UI stay live.
                 // Raytrace mode: accumulation requires one sample per frame, so spin continuously.
                 let rt_active = v.as_ref().map_or(false, |viewer| viewer.raytrace_enabled);
+                let mascots_active = v
+                    .as_ref()
+                    .map_or(false, |viewer| viewer.any_mascot_visible());
                 drop(v);
                 let fly_on = *state.fly_mode.lock();
                 let walk_on = *state.walk_mode.lock();
@@ -14831,7 +16749,12 @@ pub fn run() {
                     false
                 };
                 // Walk mode always spins (gravity may be in progress even with no input).
-                let needs_next = state.camera.lock().needs_redraw() || fly_on || walk_on || has_fly_movement || rt_active;
+                let needs_next = state.camera.lock().needs_redraw()
+                    || fly_on
+                    || walk_on
+                    || has_fly_movement
+                    || rt_active
+                    || mascots_active;
                 if needs_next {
                     tauri::async_runtime::spawn(async move {
                         let _ = app_wake.run_on_main_thread(|| {});
@@ -14898,10 +16821,12 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         stamp_clipboard: Mutex::new(None),
         squishy_session: Mutex::new(generators::SquishySession::new()),
         squishy_gizmo_drag: Mutex::new(None),
+        selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
         start_screen_logo_transparent: std::sync::atomic::AtomicBool::new(true),
         start_screen_light: std::sync::atomic::AtomicBool::new(false),
         viewport_cursor_debug_overlay: AtomicBool::new(false),
         show_grid_borders: AtomicBool::new(false),
+        hovered_gizmo_axis: AtomicU8::new(255),
         grid_overlay_cache_key: Mutex::new(None),
         selection_overlay_cache_key: Mutex::new(None),
         preview_overlay_cache_key: Mutex::new(None),

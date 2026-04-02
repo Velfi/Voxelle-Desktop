@@ -90,6 +90,13 @@ export function PreferencesModal({
     savePreferences(next);
   };
 
+  const onGizmoOnTop = (checked: boolean) => {
+    const next = { ...prefs, gizmoOnTop: checked };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_gizmo_on_top", { enabled: checked }).catch(() => {});
+  };
+
   const onFps = (checked: boolean) => {
     const next = { ...prefs, showFpsCounter: checked };
     setPrefs(next);
@@ -262,6 +269,14 @@ export function PreferencesModal({
                 onChange={(e) => onDragDelta(e.target.checked)}
               />
               Selection move hints
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.gizmoOnTop}
+                onChange={(e) => onGizmoOnTop(e.target.checked)}
+              />
+              Always render gizmo on top
             </label>
             <label className="prefs-checkbox-label">
               <input

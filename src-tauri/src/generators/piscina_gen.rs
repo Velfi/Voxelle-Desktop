@@ -1,67 +1,15 @@
+use super::common::{
+    hash3, smoothstep, v3_add, v3_cross, v3_len, v3_normalize, v3_scale, v3_sub,
+};
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{
     effective_ray_grid_size, ensure_grid_fits_coord, ray_first_solid, screen_to_world_ray,
     VoxelEditDelta,
 };
-use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
+use crate::voxelle::{MaterialId, Scene, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
-
-// ---------------------------------------------------------------------------
-// Deterministic hash helpers
-// ---------------------------------------------------------------------------
-
-fn hash3(x: i32, y: i32, z: i32, seed: i32) -> f32 {
-    let h = (x.wrapping_mul(73856093) as i64)
-        ^ (y.wrapping_mul(19349663) as i64)
-        ^ (z.wrapping_mul(83492791) as i64)
-        ^ ((seed as i64) << 20);
-    let u = (h as u64).wrapping_mul(6364136223846793005);
-    (u as f32) / (u64::MAX as f32)
-}
-
-// ---------------------------------------------------------------------------
-// Math utilities
-// ---------------------------------------------------------------------------
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-fn vec3_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn vec3_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn vec3_scale(v: [f32; 3], s: f32) -> [f32; 3] {
-    [v[0] * s, v[1] * s, v[2] * s]
-}
-
-fn vec3_len(v: [f32; 3]) -> f32 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
-}
-
-fn vec3_normalize(v: [f32; 3]) -> [f32; 3] {
-    let l = vec3_len(v);
-    if l < 1e-12 {
-        [1.0, 0.0, 0.0]
-    } else {
-        [v[0] / l, v[1] / l, v[2] / l]
-    }
-}
-
-fn vec3_cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
 
 // ---------------------------------------------------------------------------
 // Fin multiplier: finMul(scale) = 1 + ((scale-1)/7) * 6.25 for scale in [1,8]
@@ -180,9 +128,9 @@ fn build_spine(
         let s_offset = s_curve * (2.0 * std::f32::consts::PI * t).sin();
         let lateral = bend_offset + s_offset;
 
-        let p = vec3_add(
-            vec3_add(origin, vec3_scale(forward, i as f32)),
-            vec3_scale(side_base, lateral),
+        let p = v3_add(
+            v3_add(origin, v3_scale(forward, i as f32)),
+            v3_scale(side_base, lateral),
         );
         points.push(p);
     }
@@ -195,23 +143,23 @@ fn build_spine(
         let t = i as f32 / (count - 1) as f32;
         // Central difference for tangent (phantom endpoints)
         let prev = if i == 0 {
-            vec3_sub(vec3_scale(points[0], 2.0), points[1])
+            v3_sub(v3_scale(points[0], 2.0), points[1])
         } else {
             points[i - 1]
         };
         let next = if i == count - 1 {
-            vec3_sub(vec3_scale(points[count - 1], 2.0), points[count - 2])
+            v3_sub(v3_scale(points[count - 1], 2.0), points[count - 2])
         } else {
             points[i + 1]
         };
-        let tangent = vec3_normalize(vec3_sub(next, prev));
+        let tangent = v3_normalize(v3_sub(next, prev));
 
         // Side = cross(tangent, up_base), then re-derive up
-        let mut side = vec3_normalize(vec3_cross(tangent, up_base));
-        if vec3_len(vec3_cross(tangent, up_base)) < 1e-6 {
+        let mut side = v3_normalize(v3_cross(tangent, up_base));
+        if v3_len(v3_cross(tangent, up_base)) < 1e-6 {
             side = side_base;
         }
-        let up = vec3_normalize(vec3_cross(side, tangent));
+        let up = v3_normalize(v3_cross(side, tangent));
 
         stations.push(SpineStation {
             pos: points[i],
@@ -237,7 +185,7 @@ fn derive_frame(
     let nx = (face_empty.0 - solid.0) as f32;
     let ny = (face_empty.1 - solid.1) as f32;
     let nz = (face_empty.2 - solid.2) as f32;
-    let normal = vec3_normalize([nx, ny, nz]);
+    let normal = v3_normalize([nx, ny, nz]);
 
     // Forward = some tangent perpendicular to normal
     let candidate = if normal[1].abs() < 0.9 {
@@ -245,8 +193,8 @@ fn derive_frame(
     } else {
         [1.0, 0.0, 0.0]
     };
-    let forward = vec3_normalize(vec3_cross(normal, candidate));
-    let side = vec3_normalize(vec3_cross(normal, forward));
+    let forward = v3_normalize(v3_cross(normal, candidate));
+    let side = v3_normalize(v3_cross(normal, forward));
     let up = normal;
 
     // Origin at face_empty, shifted by anchor offsets along forward/side
@@ -337,7 +285,7 @@ fn generate_median_fin(
 
         for hi in 0..h {
             let offset = base_offset + dir * (hi as f32 + 1.0);
-            let p = vec3_add(st.pos, vec3_scale(st.up, offset));
+            let p = v3_add(st.pos, v3_scale(st.up, offset));
             let x = p[0].round() as i32;
             let y = p[1].round() as i32;
             let z = p[2].round() as i32;
@@ -382,7 +330,7 @@ fn generate_caudal_fin(
     let last = &stations[stations.len() - 1];
 
     for d in 0..tail_depth {
-        let fwd_p = vec3_add(last.pos, vec3_scale(last.tangent, d as f32 + 1.0));
+        let fwd_p = v3_add(last.pos, v3_scale(last.tangent, d as f32 + 1.0));
         let spread = (d as f32 + 1.0) / tail_depth as f32;
 
         for hi in -tail_span..=tail_span {
@@ -391,7 +339,7 @@ fn generate_caudal_fin(
             }
             // Fork: fan out from center
             let fan = hi as f32 + hi.signum() as f32 * spread * fork_factor * tail_span as f32;
-            let p = vec3_add(fwd_p, vec3_scale(last.up, fan));
+            let p = v3_add(fwd_p, v3_scale(last.up, fan));
             let x = p[0].round() as i32;
             let y = p[1].round() as i32;
             let z = p[2].round() as i32;
@@ -435,7 +383,7 @@ fn generate_paired_fin(
 
     // Place on both sides
     for sign in [-1.0_f32, 1.0] {
-        let down_dir = vec3_scale(st.up, -0.3); // fins angle slightly downward
+        let down_dir = v3_scale(st.up, -0.3); // fins angle slightly downward
 
         for fi in 0..fan_len {
             let spread = (fi as f32 + 1.0) / fan_len as f32;
@@ -444,15 +392,15 @@ fn generate_paired_fin(
                 if (fw.abs() as f32) > fan_width as f32 * taper {
                     continue;
                 }
-                let p = vec3_add(
-                    vec3_add(
+                let p = v3_add(
+                    v3_add(
                         st.pos,
-                        vec3_add(
-                            vec3_scale(st.side, sign * (base_lat + fi as f32 + 1.0)),
-                            vec3_scale(down_dir, fi as f32),
+                        v3_add(
+                            v3_scale(st.side, sign * (base_lat + fi as f32 + 1.0)),
+                            v3_scale(down_dir, fi as f32),
                         ),
                     ),
-                    vec3_scale(st.tangent, fw as f32),
+                    v3_scale(st.tangent, fw as f32),
                 );
                 let x = p[0].round() as i32;
                 let y = p[1].round() as i32;
@@ -494,9 +442,9 @@ fn generate_adipose_fin(
         let outline = species_outline(species, st.t, w_half, t_half);
 
         for j in 0..hi {
-            let p = vec3_add(
+            let p = v3_add(
                 st.pos,
-                vec3_scale(st.up, outline.half_dorsal + j as f32 + 1.0),
+                v3_scale(st.up, outline.half_dorsal + j as f32 + 1.0),
             );
             let x = p[0].round() as i32;
             let y = p[1].round() as i32;
@@ -545,9 +493,9 @@ fn generate_body(
                     continue;
                 }
 
-                let world = vec3_add(
+                let world = v3_add(
                     st.pos,
-                    vec3_add(vec3_scale(st.side, dv as f32), vec3_scale(st.up, dw as f32)),
+                    v3_add(v3_scale(st.side, dv as f32), v3_scale(st.up, dw as f32)),
                 );
                 let x = world[0].round() as i32;
                 let y = world[1].round() as i32;
@@ -566,7 +514,7 @@ fn generate_body(
 // Main generation logic
 // ---------------------------------------------------------------------------
 
-fn generate_piscina_deltas(
+pub fn generate_piscina_deltas(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
     face_empty: VoxelCoord,
@@ -785,4 +733,100 @@ pub fn generator_piscina_at_screen(
         color,
         material,
     ))
+}
+
+/// Preview-only: compute the set of voxel coords a fish would occupy,
+/// without mutating the real file. Used for hover preview.
+#[allow(clippy::too_many_arguments)]
+pub fn preview_piscina_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    seed: i32,
+    species: &str,
+    length: i32,
+    width_param: i32,
+    thickness: i32,
+    spine_bend: f32,
+    spine_s_curve: f32,
+    fin_dorsal: i32,
+    fin_anal: i32,
+    fin_caudal: i32,
+    fin_pectoral: i32,
+    fin_pelvic: i32,
+    fin_adipose: i32,
+    show_fin_dorsal: bool,
+    show_fin_anal: bool,
+    show_fin_caudal: bool,
+    show_fin_pectoral: bool,
+    show_fin_pelvic: bool,
+    show_fin_adipose: bool,
+    anchor_offset_u: i32,
+    anchor_offset_v: i32,
+    color: u32,
+    material: MaterialId,
+) -> Vec<(VoxelCoord, u32)> {
+    let grid_size = effective_ray_grid_size(file);
+    let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
+    let Some((solid, prev)) = ray_first_solid(origin, dir, voxel_map, grid_size) else {
+        return Vec::new();
+    };
+    let Some(face_empty) = prev else {
+        return Vec::new();
+    };
+    let mut stub_file = VoxelleFile {
+        version: 0,
+        grid_size: file.grid_size,
+        scene: Scene::default(),
+        scene_extra: None,
+        mood: None,
+        lighting: None,
+        voxels: Vec::new(),
+        objects: Vec::new(),
+        active_object_id: 0,
+    };
+    let mut stub_map: AHashMap<VoxelCoord, usize> = AHashMap::new();
+    generate_piscina_deltas(
+        &mut stub_file,
+        &mut stub_map,
+        face_empty,
+        solid,
+        seed,
+        species,
+        length,
+        width_param,
+        thickness,
+        spine_bend,
+        spine_s_curve,
+        fin_dorsal,
+        fin_anal,
+        fin_caudal,
+        fin_pectoral,
+        fin_pelvic,
+        fin_adipose,
+        show_fin_dorsal,
+        show_fin_anal,
+        show_fin_caudal,
+        show_fin_pectoral,
+        show_fin_pelvic,
+        show_fin_adipose,
+        anchor_offset_u,
+        anchor_offset_v,
+        color,
+        material,
+    )
+    .into_iter()
+    .filter_map(|d| {
+        if let VoxelEditDelta::Added(v) = d {
+            if !voxel_map.contains_key(&(v.x, v.y, v.z)) {
+                return Some(((v.x, v.y, v.z), v.color));
+            }
+        }
+        None
+    })
+    .collect()
 }

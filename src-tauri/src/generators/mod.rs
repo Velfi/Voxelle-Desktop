@@ -1,5 +1,6 @@
 //! Procedural generators (web parity). Face placement uses ray hit + inward normal.
 
+pub(super) mod common;
 mod ashlar_gen;
 mod cloth_gen;
 mod fauna_gen;
@@ -17,11 +18,11 @@ mod squishy_session;
 
 pub use ashlar_gen::{generator_ashlar_at_screen, preview_ashlar_at_screen};
 pub use cloth_gen::{generator_cloth_from_pins, preview_cloth_voxels, ClothSimOptions};
-pub use fauna_gen::generator_fauna_at_screen;
-pub use flora_gen::generator_flora_at_screen;
+pub use fauna_gen::{generator_fauna_at_screen, preview_fauna_at_screen};
+pub use flora_gen::{generator_flora_at_screen, preview_flora_at_screen};
 pub use grass_gen::{generator_grass_at_screen, preview_grass_at_screen};
-pub use insecta_gen::generator_insecta_at_screen;
-pub use piscina_gen::generator_piscina_at_screen;
+pub use insecta_gen::{generator_insecta_at_screen, preview_insecta_at_screen};
+pub use piscina_gen::{generator_piscina_at_screen, preview_piscina_at_screen};
 pub use rocks::{generator_rocks_at_screen, preview_rock_at_screen};
 pub use roof_gen::{generate_roof_from_pins, preview_roof_voxels};
 pub use rope_gen::{generator_rope_between_screens, preview_rope_voxels_between_screens};

@@ -1,66 +1,28 @@
 //! Fauna (creature) generator (web parity): skeleton-based quadruped/biped creatures with
 //! spine chain, body voxelization, limbs via 3-bone FABRIK IK, head, and tail.
 
+use super::common::{
+    v3_add, v3_cross, v3_len, v3_lerp, v3_normalize, v3_round, v3_scale, v3_sub, V3,
+};
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{
     effective_ray_grid_size, ensure_grid_fits_coord, ray_first_solid, screen_to_world_ray,
     VoxelEditDelta,
 };
-use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
+use crate::voxelle::{MaterialId, Scene, Voxel, VoxelleFile};
 use ahash::AHashMap;
 use std::collections::HashSet;
 
 const FAUNA_MAX_VOXELS: usize = 12_000;
 
-// ── Vector helpers ──────────────────────────────────────────────────────────
+// ── Local alias ─────────────────────────────────────────────────────────────
 
-fn v3_add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-
-fn v3_sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-
-fn v3_scale(v: [f32; 3], s: f32) -> [f32; 3] {
-    [v[0] * s, v[1] * s, v[2] * s]
-}
-
-fn v3_len(v: [f32; 3]) -> f32 {
-    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
-}
-
-fn v3_norm(v: [f32; 3]) -> [f32; 3] {
-    let l = v3_len(v);
-    if l < 1e-9 {
-        return [0.0, 0.0, 0.0];
-    }
-    [v[0] / l, v[1] / l, v[2] / l]
-}
-
-fn v3_cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-fn v3_lerp(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
-    [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    ]
-}
-
-fn v3_round(v: [f32; 3]) -> (i32, i32, i32) {
-    (
-        v[0].round() as i32,
-        v[1].round() as i32,
-        v[2].round() as i32,
-    )
+// `v3_norm` was the name used throughout this file; alias to common's
+// `v3_normalize` so call sites don't need to change.
+#[inline(always)]
+fn v3_norm(v: V3) -> V3 {
+    v3_normalize(v)
 }
 
 // ── Body frame ──────────────────────────────────────────────────────────────
@@ -1026,4 +988,125 @@ pub fn generator_fauna_at_screen(
     }
 
     Ok(out)
+}
+
+/// Preview-only: compute the set of voxel coords a fauna creature would occupy,
+/// without mutating the real file. Used for hover preview.
+#[allow(clippy::too_many_arguments)]
+pub fn preview_fauna_at_screen(
+    file: &VoxelleFile,
+    voxel_map: &AHashMap<VoxelCoord, usize>,
+    camera: &OrbitCamera,
+    width: f32,
+    height: f32,
+    sx: f32,
+    sy: f32,
+    stance: &str,
+    archetype: &str,
+    anchor_offset_u: i32,
+    anchor_offset_v: i32,
+    body_yaw: f32,
+    body_arch: f32,
+    spine_segments: i32,
+    body_length: i32,
+    body_half_width: i32,
+    body_half_height: i32,
+    neck_length: i32,
+    neck_half_width: i32,
+    neck_half_height: i32,
+    head_length: i32,
+    head_half_width: i32,
+    head_half_height: i32,
+    tail_length: i32,
+    shoulder_offset_forward: i32,
+    hip_offset_forward: i32,
+    front_upper_length: i32,
+    front_lower_length: i32,
+    hind_upper_length: i32,
+    hind_lower_length: i32,
+    auto_foot_placement: bool,
+    color: u32,
+    material: MaterialId,
+) -> Vec<(VoxelCoord, u32)> {
+    let limb_targets: [[f32; 3]; 4] = [
+        [20.0, -2.1, -19.0],
+        [20.0, 2.1, -19.0],
+        [-3.5, -2.2, -20.0],
+        [-3.5, 2.2, -20.0],
+    ];
+    let limb_poles: [[f32; 3]; 4] = [
+        [20.0, -2.4, 0.6],
+        [20.0, 2.4, 0.6],
+        [1.8, -2.8, 1.2],
+        [1.8, 2.8, 1.2],
+    ];
+    let spine_pose_chest = [0.0f32; 3];
+    let spine_pose_neck = [0.0f32; 3];
+    let spine_pose_head = [0.0f32; 3];
+
+    let mut stub_file = VoxelleFile {
+        version: 0,
+        grid_size: file.grid_size,
+        scene: Scene::default(),
+        scene_extra: None,
+        mood: None,
+        lighting: None,
+        voxels: Vec::new(),
+        objects: Vec::new(),
+        active_object_id: 0,
+    };
+    let mut stub_map: AHashMap<VoxelCoord, usize> = AHashMap::new();
+    match generator_fauna_at_screen(
+        &mut stub_file,
+        &mut stub_map,
+        camera,
+        width,
+        height,
+        sx,
+        sy,
+        stance,
+        archetype,
+        anchor_offset_u,
+        anchor_offset_v,
+        body_yaw,
+        body_arch,
+        spine_segments,
+        body_length,
+        body_half_width,
+        body_half_height,
+        neck_length,
+        neck_half_width,
+        neck_half_height,
+        head_length,
+        head_half_width,
+        head_half_height,
+        tail_length,
+        shoulder_offset_forward,
+        hip_offset_forward,
+        front_upper_length,
+        front_lower_length,
+        hind_upper_length,
+        hind_lower_length,
+        &limb_targets,
+        &limb_poles,
+        spine_pose_chest,
+        spine_pose_neck,
+        spine_pose_head,
+        auto_foot_placement,
+        color,
+        material,
+    ) {
+        Ok(deltas) => deltas
+            .into_iter()
+            .filter_map(|d| {
+                if let VoxelEditDelta::Added(v) = d {
+                    if !voxel_map.contains_key(&(v.x, v.y, v.z)) {
+                        return Some(((v.x, v.y, v.z), v.color));
+                    }
+                }
+                None
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
 }
