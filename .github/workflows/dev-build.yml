@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - platform: macos-15-intel
             artifact_name: dev-macos-universal
             bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
           - platform: ubuntu-22.04
@@ -34,21 +34,10 @@ jobs:
           node-version: lts/*
           cache: npm
 
-      - name: Remove Homebrew Rust to prevent rustup conflict (macOS only)
-        if: matrix.platform == 'macos-latest'
-        run: brew uninstall --ignore-dependencies rust rustup 2>/dev/null || true
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
-
-      - name: Ensure cargo bin takes priority over Homebrew in PATH (macOS only)
-        if: matrix.platform == 'macos-latest'
-        run: |
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
-          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          targets: ${{ matrix.platform == 'macos-15-intel' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -85,7 +74,7 @@ jobs:
           rm test_sign.exe
 
       - name: Import Apple signing certificate
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -115,7 +104,7 @@ jobs:
           fi
 
       - name: Collect macOS installer
-        if: matrix.platform == 'macos-latest'
+        if: matrix.platform == 'macos-15-intel'
         shell: bash
         run: |
           mkdir -p upload
