@@ -26,7 +26,7 @@
   },
   "bundle": {
     "macOS": {
-      "signingIdentity": "Apple Development: Zelda Hessler (QJ23JJ4F43)",
+      "signingIdentity": "Developer ID Application: Zelda Hessler (2XFBA46B9D)",
       "entitlements": "./Entitlements.plist",
       "minimumSystemVersion": "11.0",
       "dmg": {
