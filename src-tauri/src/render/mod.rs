@@ -4293,12 +4293,11 @@ impl WgpuViewer {
                     count: None,
                 }],
             });
-        let mascot_pl_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("mascot"),
-                bind_group_layouts: &[&mascot_bind_layout],
-                push_constant_ranges: &[],
-            });
+        let mascot_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mascot"),
+            bind_group_layouts: &[&mascot_bind_layout],
+            push_constant_ranges: &[],
+        });
         let shader_mascot = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mascot"),
             source: wgpu::ShaderSource::Wgsl(gpu::mascot::WGSL.into()),
@@ -7412,8 +7411,7 @@ impl WgpuViewer {
             &self.gen_preview_wire_proto_ib,
             &self.gen_preview_wire_instance_buf,
         ) {
-            if self.gen_preview_wire_instance_count > 0
-                && self.gen_preview_wire_proto_idx_count > 0
+            if self.gen_preview_wire_instance_count > 0 && self.gen_preview_wire_proto_idx_count > 0
             {
                 pass.set_vertex_buffer(0, pvb.slice(..));
                 pass.set_vertex_buffer(1, ibuf.slice(..));
@@ -8213,7 +8211,10 @@ impl WgpuViewer {
             let vh = self.viewport_height.max(1);
             self.glyphon_viewport.update(
                 &self.queue,
-                Resolution { width: vw, height: vh },
+                Resolution {
+                    width: vw,
+                    height: vh,
+                },
             );
             let font_size = 36.0_f32;
             let line_height = 46.0_f32;
@@ -8221,7 +8222,11 @@ impl WgpuViewer {
                 &mut self.glyphon_font_system,
                 Metrics::new(font_size, line_height),
             );
-            buf.set_size(&mut self.glyphon_font_system, Some(300.0), Some(line_height));
+            buf.set_size(
+                &mut self.glyphon_font_system,
+                Some(300.0),
+                Some(line_height),
+            );
             buf.set_text(
                 &mut self.glyphon_font_system,
                 &label.name,
@@ -8420,6 +8425,7 @@ impl WgpuViewer {
 
         // Mascots render directly on top of the swapchain (start-screen overlay).
         if self.start_screen_transparent {
+            let swap_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.render_mascots(&mut encoder, &swap_view);
         }
 
@@ -8474,20 +8480,20 @@ impl WgpuViewer {
     /// Creates the slot if it does not yet exist.
     pub fn load_mascot_mesh(&mut self, id: u32, mesh: &MeshBuffers, bounds: MeshBounds) {
         let interleaved = Self::interleaved_from_mesh(mesh);
-        let vertex_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mascot_vtx"),
-                    contents: bytemuck::cast_slice(&interleaved),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-        let index_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("mascot_idx"),
-                    contents: bytemuck::cast_slice(&mesh.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mascot_vtx"),
+                contents: bytemuck::cast_slice(&interleaved),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mascot_idx"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
         let index_count = mesh.indices.len() as u32;
 
         if let Some(entry) = self.mascots.iter_mut().find(|m| m.id == id) {
@@ -8648,16 +8654,14 @@ impl WgpuViewer {
                             store: wgpu::StoreOp::Store,
                         },
                     })],
-                    depth_stencil_attachment: Some(
-                        wgpu::RenderPassDepthStencilAttachment {
-                            view: &self.mascots[i].depth_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Discard,
-                            }),
-                            stencil_ops: None,
-                        },
-                    ),
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.mascots[i].depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Discard,
+                        }),
+                        stencil_ops: None,
+                    }),
                     occlusion_query_set: None,
                     timestamp_writes: None,
                 });
