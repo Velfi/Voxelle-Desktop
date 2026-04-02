@@ -75,6 +75,7 @@ jobs:
         run: |
           echo '{"bundle":{"createUpdaterArtifacts":false}}' > dev-override.json
           if [[ "$RUNNER_OS" == "macOS" ]]; then
+            export PATH="$CARGO_HOME/bin:$PATH"
             rustup target add aarch64-apple-darwin x86_64-apple-darwin
             npm run tauri -- build --target universal-apple-darwin --config dev-override.json
           else

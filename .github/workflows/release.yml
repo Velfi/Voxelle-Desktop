@@ -113,6 +113,10 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
+            # Prepend cargo's rustup so Tauri's internal target checks use the same
+            # installation we add targets to, not the Homebrew rustup that comes first
+            # in the default macOS PATH.
+            export PATH="$CARGO_HOME/bin:$PATH"
             rustup target add aarch64-apple-darwin x86_64-apple-darwin
             npm run tauri -- build --target universal-apple-darwin
           else
