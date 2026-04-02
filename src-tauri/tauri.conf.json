@@ -25,6 +25,9 @@
     "macOSPrivateApi": true
   },
   "bundle": {
+    "windows": {
+      "signCommand": "relic sign --file %1 --key azure --config src-tauri/relic.conf"
+    },
     "macOS": {
       "entitlements": "./Entitlements.plist",
       "minimumSystemVersion": "11.0",

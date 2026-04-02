@@ -46,6 +46,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install relic (Windows code signing)
+        if: matrix.platform == 'windows-latest'
+        run: go install github.com/sassoftware/relic/v8@latest
+
       - name: Import Apple signing certificate
         if: matrix.platform == 'macos-latest'
         env:
@@ -63,6 +67,10 @@ jobs:
           rm certificate.p12
 
       - name: Build Tauri app (no updater artifacts)
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         shell: bash
         run: |
           echo '{"bundle":{"createUpdaterArtifacts":false}}' > dev-override.json

@@ -76,6 +76,10 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Install relic (Windows code signing)
+        if: matrix.platform == 'windows-latest'
+        run: go install github.com/sassoftware/relic/v8@latest
+
       - name: Import Apple signing certificate and notarization key
         if: matrix.platform == 'macos-latest'
         env:
@@ -103,6 +107,9 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
