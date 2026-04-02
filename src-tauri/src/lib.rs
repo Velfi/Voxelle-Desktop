@@ -16889,9 +16889,7 @@ pub fn run() {
                 {
                     let items: Vec<collab::CollabInboxItem> =
                         state.collab_edit_inbox.lock().drain(..).collect();
-                    for item in items {
-                        collab::process_inbox_item(app, &state, &state.collab, item);
-                    }
+                    collab::process_inbox_items_batched(app, &state, &state.collab, items);
                 }
                 let mut v = state.viewer.lock();
                 if let Some(viewer) = v.as_mut() {

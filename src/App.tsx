@@ -1580,6 +1580,18 @@ function App() {
   });
   const [cylinderDepthUi, setCylinderDepthUi] = useState(1);
   const cylinderDepthRef = useRef(1);
+  /** Solid polygon: vertices placed; adjust depth then Done (same flow as cuboid/cylinder). */
+  const polygonPhase = useStrokePhase<{ endNorm: { nx: number; ny: number } }>({
+    phases: ["depth"],
+    onCancel: () => {
+      polygonDepthRef.current = 1;
+      setPolygonDepthUi(1);
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
+    onCommit: () => void commitPolygonSolid(),
+  });
+  const [polygonDepthUi, setPolygonDepthUi] = useState(1);
+  const polygonDepthRef = useRef(1);
   /** Extrude phased tool: drag creates preview, adjust settings, then commit. */
   const extrudePhase = useStrokePhase<Record<string, never>>({
     phases: ["settings"],
@@ -2133,6 +2145,8 @@ function App() {
   const fillOperationPendingRef = useRef(false);
   const [fpsDisplayed, setFpsDisplayed] = useState(0);
   const [showFpsCounter, setShowFpsCounter] = useState(() => loadPreferences().showFpsCounter);
+  const [pingMs, setPingMs] = useState<number | null>(null);
+  const [showPingLatency, setShowPingLatency] = useState(() => loadPreferences().showPingLatency);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newGridSize, setNewGridSize] = useState(() => loadPreferences().newProjectDefaultSize);
@@ -2449,6 +2463,7 @@ function App() {
       setNatError(null);
       setRoster([]);
       setLocalPeerId(0);
+      setPingMs(null);
       setChatLines([]);
       setChatInput("");
       setChatToasts([]);
@@ -2527,6 +2542,9 @@ function App() {
       }),
       listen<number>("viewport-fps", (e) => {
         setFpsDisplayed(e.payload);
+      }),
+      listen<number>("collab-latency-ms", (e) => {
+        setPingMs(e.payload);
       }),
       listen<{
         width: number;
@@ -3427,6 +3445,9 @@ function App() {
         out.cuboidFrozenPrev = geo.prev;
       }
     }
+    if ((sm === "polygon" || sm === "polygonHull") && polygonPhase.ref.current) {
+      out.polygonDepth = polygonDepthRef.current;
+    }
     return out;
   }
 
@@ -3493,6 +3514,34 @@ function App() {
       },
     }).catch(() => {});
   }, [cylinderPhase.snapshot, cylinderDepthUi, loading, workBusy, interactionMode]);
+
+  // Polygon solid depth preview: re-invoke when phase data or depth changes.
+  useEffect(() => {
+    const snap = polygonPhase.snapshot;
+    if (!snap || loading || workBusy) return;
+    const im = interactionModeRef.current;
+    if (im !== "add" && im !== "remove" && im !== "paint") return;
+    const { endNorm } = snap.data;
+    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    void invoke("voxel_stroke_preview_at_screen", {
+      args: {
+        nx: endNorm.nx,
+        ny: endNorm.ny,
+        tool,
+        color: activeColorRef.current,
+        material: activeMaterialRef.current,
+        brushRadius: brushRadiusRef.current,
+        brushShape: brushShapeRef.current,
+        sprayDensity: sprayDensityRef.current,
+        strokeMode: drawStrokeModeRef.current,
+        planeAxis: planeAxisRef.current,
+        strokeAux: mergedStrokeAux({}),
+        matchMaterial: matchMaterialSelectColorRef.current,
+        strokeLineStartNx: 0,
+        strokeLineStartNy: 0,
+      },
+    }).catch(() => {});
+  }, [polygonPhase.snapshot, polygonDepthUi, loading, workBusy, interactionMode]);
 
   // Cancel extrude phase if interaction mode changes
   useEffect(() => {
@@ -3563,6 +3612,20 @@ function App() {
 
   function commitCylinderSolidAtScreen() {
     commitDepthPhaseAtScreen("cylinder");
+  }
+
+  function commitPolygonSolid() {
+    const snap = polygonPhase.ref.current;
+    if (!snap) return;
+    const { endNorm } = snap.data;
+    runStrokeAtScreen(endNorm.nx, endNorm.ny, {
+      polygonVertices: strokePolygonVertsRef.current.map(
+        (v) => [v[0], v[1], v[2]] as [number, number, number],
+      ),
+    });
+    polygonPhase.cancel();
+    setStrokePolygonVerts([]);
+    strokePolygonVertsRef.current = [];
   }
 
   /** Payload for `sync_preview_input` — must match Rust `SyncPreviewInput` (camelCase). */
@@ -3967,6 +4030,12 @@ function App() {
     const scr = strokePolygonLastScreenRef.current ?? lastViewportPickNormRef.current;
     const nx = scr?.nx ?? 0;
     const ny = scr?.ny ?? 0;
+    if (strokeFamilyVariantRef.current === "solid") {
+      polygonDepthRef.current = 1;
+      setPolygonDepthUi(1);
+      polygonPhase.enter("depth", { endNorm: { nx, ny } });
+      return;
+    }
     runStrokeAtScreen(nx, ny, {
       polygonVertices: strokePolygonVerts.map((v) => [v[0], v[1], v[2]]),
     });
@@ -8240,12 +8309,16 @@ function App() {
                     ) : null}
                   </div>
                 ) : null}
-                {cuboidPhase.active || cylinderPhase.active ? (
+                {cuboidPhase.active || cylinderPhase.active || polygonPhase.active ? (
                   <div
                     className="viewport-cuboid-depth-bar"
                     role="dialog"
                     aria-label={
-                      cuboidPhase.active ? "Cuboid extrusion depth" : "Cylinder extrusion depth"
+                      cuboidPhase.active
+                        ? "Cuboid extrusion depth"
+                        : polygonPhase.active
+                          ? "Polygon extrusion depth"
+                          : "Cylinder extrusion depth"
                     }
                   >
                     <span>Depth</span>
@@ -8257,6 +8330,11 @@ function App() {
                           const n = Math.max(-256, cuboidDepthUi - 1);
                           cuboidDepthRef.current = n;
                           setCuboidDepthUi(n);
+                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
+                        } else if (polygonPhase.active) {
+                          const n = Math.max(-256, polygonDepthUi - 1);
+                          polygonDepthRef.current = n;
+                          setPolygonDepthUi(n);
                           if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
                         } else {
                           const n = Math.max(-256, cylinderDepthUi - 1);
@@ -8277,7 +8355,13 @@ function App() {
                       value={
                         extrusionDepthEditing
                           ? extrusionDepthDraft
-                          : String(cuboidPhase.active ? cuboidDepthUi : cylinderDepthUi)
+                          : String(
+                              cuboidPhase.active
+                                ? cuboidDepthUi
+                                : polygonPhase.active
+                                  ? polygonDepthUi
+                                  : cylinderDepthUi,
+                            )
                       }
                       onChange={(e) => {
                         const v = e.target.value;
@@ -8286,19 +8370,30 @@ function App() {
                         }
                       }}
                       onFocus={(e) => {
-                        const cur = cuboidPhase.active ? cuboidDepthUi : cylinderDepthUi;
+                        const cur = cuboidPhase.active
+                          ? cuboidDepthUi
+                          : polygonPhase.active
+                            ? polygonDepthUi
+                            : cylinderDepthUi;
                         setExtrusionDepthEditing(true);
                         setExtrusionDepthDraft(String(cur));
                         e.target.select();
                       }}
                       onBlur={() => {
-                        const current = cuboidPhase.active ? cuboidDepthUi : cylinderDepthUi;
+                        const current = cuboidPhase.active
+                          ? cuboidDepthUi
+                          : polygonPhase.active
+                            ? polygonDepthUi
+                            : cylinderDepthUi;
                         let n = parseInt(extrusionDepthDraft, 10);
                         if (Number.isNaN(n)) n = current;
                         n = Math.max(-256, Math.min(256, n));
                         if (cuboidPhase.active) {
                           setCuboidDepthUi(n);
                           cuboidDepthRef.current = n;
+                        } else if (polygonPhase.active) {
+                          setPolygonDepthUi(n);
+                          polygonDepthRef.current = n;
                         } else {
                           setCylinderDepthUi(n);
                           cylinderDepthRef.current = n;
@@ -8320,6 +8415,11 @@ function App() {
                           cuboidDepthRef.current = n;
                           setCuboidDepthUi(n);
                           if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
+                        } else if (polygonPhase.active) {
+                          const n = Math.min(256, polygonDepthUi + 1);
+                          polygonDepthRef.current = n;
+                          setPolygonDepthUi(n);
+                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
                         } else {
                           const n = Math.min(256, cylinderDepthUi + 1);
                           cylinderDepthRef.current = n;
@@ -8335,6 +8435,7 @@ function App() {
                       className="tool-options-shape-btn"
                       onClick={() => {
                         if (cuboidPhase.active) void commitCuboidSolidAtScreen();
+                        else if (polygonPhase.active) void commitPolygonSolid();
                         else void commitCylinderSolidAtScreen();
                       }}
                     >
@@ -8794,7 +8895,7 @@ function App() {
                     </div>
                   </div>
                 ) : null}
-                {showPolygonPhaseHud ? (
+                {showPolygonPhaseHud && !polygonPhase.active ? (
                   <div
                     className="viewport-polygon-phase-bar"
                     role="dialog"
@@ -12773,6 +12874,11 @@ function App() {
             {fpsDisplayed} FPS
           </div>
         ) : null}
+        {showPingLatency && collabActive && pingMs !== null && showEditorChrome ? (
+          <div className="fps-counter" role="status" aria-live="polite">
+            {pingMs} ms
+          </div>
+        ) : null}
       </footer>
       <JoinSessionModal
         open={joinModalOpen}
@@ -12817,6 +12923,7 @@ function App() {
         open={preferencesOpen}
         onClose={() => setPreferencesOpen(false)}
         onFpsCounterChange={setShowFpsCounter}
+        onPingLatencyChange={setShowPingLatency}
         onEnableUpnpChange={setPrefsEnableUpnp}
         onCollabDisplayNameChange={setDisplayName}
         onCollabAccentColorChange={setAccentColor}

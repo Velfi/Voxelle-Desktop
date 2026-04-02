@@ -1094,6 +1094,8 @@ pub struct WgpuViewer {
     pub mascot_bind_layout: wgpu::BindGroupLayout,
     /// Shared depth buffer for all mascot render passes; sized to the swapchain.
     mascot_depth_view: wgpu::TextureView,
+    /// Tracks the surface size at which `mascot_depth_view` was last created.
+    mascot_depth_size: (u32, u32),
     /// Wall-clock instant of the last frame that ran mascot animation.
     mascot_last_tick: std::time::Instant,
 
@@ -4721,6 +4723,7 @@ impl WgpuViewer {
             mascot_pipeline,
             mascot_bind_layout,
             mascot_depth_view,
+            mascot_depth_size: size,
             mascot_last_tick: std::time::Instant::now(),
 
             speech_bubbles: Vec::new(),
@@ -4834,6 +4837,7 @@ impl WgpuViewer {
         self.depth_snapshot_view = depth_snapshot_view;
         self.mascot_depth_view =
             Self::make_mascot_depth(&self.device, surface_w.max(1), surface_h.max(1)).1;
+        self.mascot_depth_size = (surface_w.max(1), surface_h.max(1));
 
         let (oit_accum_texture, oit_accum_view, oit_revealage_texture, oit_revealage_view) =
             create_oit_textures(&self.device, viewport_width, viewport_height);
@@ -6330,7 +6334,7 @@ impl WgpuViewer {
             self.queue.submit(std::iter::once(enc.finish()));
             poll_device_yielding_until_queue_empty(&self.device);
             draw.opaque_index_count = i_total;
-            draw.transparent_index_count = i_total;
+            draw.transparent_index_count = 0;
             draw.partitioned = false;
             return;
         }
@@ -6362,7 +6366,7 @@ impl WgpuViewer {
                 vertex_buffer: vb,
                 index_buffer: ib,
                 opaque_index_count: i_total,
-                transparent_index_count: i_total,
+                transparent_index_count: 0,
                 partitioned: false,
             },
         );
@@ -7772,6 +7776,13 @@ impl WgpuViewer {
         let tex_size = frame.texture.size();
         // Keep CPU-side surface size in sync with the actual swapchain (configure can differ slightly).
         self.surface_size = (tex_size.width.max(1), tex_size.height.max(1));
+        // If the swapchain resized without a `resize()` call (Windows DPI / restore), the mascot
+        // depth texture would mismatch the color attachment and cause a wgpu validation panic.
+        if self.surface_size != self.mascot_depth_size {
+            self.mascot_depth_view =
+                Self::make_mascot_depth(&self.device, self.surface_size.0, self.surface_size.1).1;
+            self.mascot_depth_size = self.surface_size;
+        }
         // #region agent log
         static RENDER_LOG_COUNTER: AtomicU32 = AtomicU32::new(0);
         let render_log_idx = RENDER_LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -8803,11 +8814,6 @@ impl WgpuViewer {
         // Upload uniforms, then issue render passes.
         for i in 0..self.mascots.len() {
             if !self.mascots[i].visible || self.mascots[i].vertex_buffer.is_none() {
-                log::warn!(
-                    "mascot {i}: skipping render (visible={}, has_buf={})",
-                    self.mascots[i].visible,
-                    self.mascots[i].vertex_buffer.is_some()
-                );
                 continue;
             }
 

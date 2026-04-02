@@ -64,6 +64,11 @@ jobs:
           node-version: lts/*
           cache: npm
 
+      - name: Pin RUSTUP_HOME (macOS only)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
@@ -82,6 +87,23 @@ jobs:
         run: |
           go install github.com/sassoftware/relic/v8@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Verify relic can authenticate with Azure Key Vault
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: |
+          echo "relic version: $(relic version 2>&1 || true)"
+          printf 'MZ' > test.exe
+          relic sign --file test.exe --key azure --config src-tauri/relic.conf 2>&1 || {
+            echo "--- relic sign failed, dumping debug info ---"
+            relic sign --file test.exe --key azure --config src-tauri/relic.conf -v 2>&1 || true
+            exit 1
+          }
+          rm test.exe
 
       - name: Import Apple signing certificate and notarization key
         if: matrix.platform == 'macos-latest'
@@ -116,10 +138,6 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            # Pin RUSTUP_HOME to whatever rustup is currently using so that all
-            # subprocesses (including Tauri's internal `rustup target list --installed`
-            # checks) read from the same location we write targets to.
-            export RUSTUP_HOME="$(rustup show home)"
             rustup target add aarch64-apple-darwin x86_64-apple-darwin
             npm run tauri -- build --target universal-apple-darwin
           else

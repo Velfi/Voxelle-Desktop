@@ -28,6 +28,7 @@ type Props = {
   open: boolean;
   onClose: () => void;
   onFpsCounterChange?: (show: boolean) => void;
+  onPingLatencyChange?: (show: boolean) => void;
   onEnableUpnpChange?: (enabled: boolean) => void;
   onCollabDisplayNameChange?: (name: string) => void;
   onCollabAccentColorChange?: (color: string) => void;
@@ -40,6 +41,7 @@ export function PreferencesModal({
   open,
   onClose,
   onFpsCounterChange,
+  onPingLatencyChange,
   onEnableUpnpChange,
   onCollabDisplayNameChange,
   onCollabAccentColorChange,
@@ -103,6 +105,13 @@ export function PreferencesModal({
     setPrefs(next);
     savePreferences(next);
     onFpsCounterChange?.(checked);
+  };
+
+  const onPingLatency = (checked: boolean) => {
+    const next = { ...prefs, showPingLatency: checked };
+    setPrefs(next);
+    savePreferences(next);
+    onPingLatencyChange?.(checked);
   };
 
   const onReopenLastProject = (checked: boolean) => {
@@ -447,6 +456,14 @@ export function PreferencesModal({
                 onChange={(e) => onEnableUpnp(e.target.checked)}
               />
               Internet guests (UPnP)
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showPingLatency}
+                onChange={(e) => onPingLatency(e.target.checked)}
+              />
+              Ping latency overlay
             </label>
             <hr className="prefs-section-divider" />
             <h4 id="prefs-autosave" className="prefs-section-title">

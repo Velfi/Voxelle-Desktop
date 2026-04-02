@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
@@ -41,6 +41,8 @@ const UPNP_RENEW_INTERVAL: Duration = Duration::from_secs(45 * 60);
 const HOST_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 /// Guest: if no inbound WebSocket frame for this long, treat the host as unresponsive.
 const CLIENT_HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
+/// How often a guest sends a latency probe to measure round-trip time.
+const CLIENT_LATENCY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 const GUEST_TIMEOUT_KICK_REASON: &str = "timed out (no activity)";
 
@@ -213,6 +215,8 @@ pub enum ClientToHost {
     },
     /// Periodic liveness; host also treats any other inbound message as activity.
     Heartbeat,
+    /// Round-trip latency probe; host echoes `sent_ms` back in a [`HostToClient::LatencyAck`].
+    LatencyProbe { sent_ms: u64 },
     /// Guest is leaving the session (best-effort before the socket closes).
     Leave,
 }
@@ -271,6 +275,8 @@ pub enum HostToClient {
     },
     /// Broadcast periodically while hosting so guests reset their read timeout during idle sessions.
     Keepalive,
+    /// Echo of a guest's [`ClientToHost::LatencyProbe`]; guest computes RTT as `now_ms - sent_ms`.
+    LatencyAck { sent_ms: u64 },
 }
 
 pub struct CollabRuntime {
@@ -613,50 +619,6 @@ pub(crate) enum CollabPeerLeftKind {
     Disconnected,
 }
 
-fn apply_deltas_on_main<R: Runtime>(
-    app: &AppHandle<R>,
-    state: &Arc<ViewerState>,
-    deltas: &[voxel_edit::VoxelEditDelta],
-) -> Result<(), String> {
-    if deltas.is_empty() {
-        return Ok(());
-    }
-    let owned: Vec<voxel_edit::VoxelEditDelta> = deltas.to_vec();
-    let app_rt = app.clone();
-    let app_progress = app.clone();
-    let state = Arc::clone(state);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let _ = app_rt.run_on_main_thread(move || {
-        let r = (|| {
-            let mut fg = state.current_file.lock();
-            let mut vm = state.voxel_map.lock();
-            let Some(file) = fg.as_mut() else {
-                return Err("no model loaded".into());
-            };
-            let Some(vmap) = vm.as_mut() else {
-                return Err("voxel index not ready".into());
-            };
-            for d in &owned {
-                voxel_edit::apply_forward_delta(file, vmap, d)?;
-            }
-            Ok::<(), String>(())
-        })();
-        let r2 = r.and_then(|_| {
-            let t = std::time::Instant::now();
-            crate::finish_voxel_edit_gpu_deltas(
-                &state,
-                &owned,
-                0.0,
-                t,
-                &app_progress,
-                VoxelGpuRefreshReason::CollabApply,
-            )
-        });
-        let _ = tx.send(r2);
-    });
-    rx.recv().map_err(|_| "main thread closed".to_string())?
-}
-
 fn replace_file_on_main<R: Runtime>(
     app: &AppHandle<R>,
     state: &Arc<ViewerState>,
@@ -905,6 +867,89 @@ pub fn process_inbox_item<R: Runtime>(
     }
 }
 
+fn flush_edit_batch<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<ViewerState>,
+    collab_mtx: &Arc<Mutex<CollabRuntime>>,
+    batch: &mut Vec<(u32, Vec<voxel_edit::VoxelEditDelta>)>,
+) {
+    if batch.is_empty() {
+        return;
+    }
+    let all_deltas: Vec<voxel_edit::VoxelEditDelta> =
+        batch.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+
+    let r: Result<(), String> = (|| {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let file = fg.as_mut().ok_or("no model loaded")?;
+        let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+        for d in &all_deltas {
+            voxel_edit::apply_forward_delta(file, vmap, d)?;
+        }
+        Ok(())
+    })();
+    if let Err(e) = r {
+        let _ = app.emit("collab-error", e);
+        batch.clear();
+        return;
+    }
+
+    let t = std::time::Instant::now();
+    if let Err(e) = crate::finish_voxel_edit_gpu_deltas(
+        state,
+        &all_deltas,
+        0.0,
+        t,
+        app,
+        VoxelGpuRefreshReason::CollabApply,
+    ) {
+        let _ = app.emit("collab-error", e);
+        batch.clear();
+        return;
+    }
+
+    for (peer_id, deltas) in batch.drain(..) {
+        let seq = {
+            let mut c = collab_mtx.lock();
+            if !c.roster.iter().any(|r| r.peer_id == peer_id) {
+                continue;
+            }
+            c.next_seq += 1;
+            c.host_undo.entry(peer_id).or_default().push(deltas.clone());
+            c.host_redo.remove(&peer_id);
+            c.next_seq
+        };
+        let br = HostToClient::Edit { seq, peer_id, deltas };
+        if let Ok(json) = serde_json::to_string(&br) {
+            emit_and_broadcast(collab_mtx, app, &json);
+        }
+    }
+}
+
+/// Drains a batch of [`CollabInboxItem`]s, coalescing consecutive `Edit` items into a single
+/// GPU refresh to avoid N mesh rebuilds per frame when many players edit simultaneously.
+pub fn process_inbox_items_batched<R: Runtime>(
+    app: &AppHandle<R>,
+    state: &Arc<ViewerState>,
+    collab_mtx: &Arc<Mutex<CollabRuntime>>,
+    items: Vec<CollabInboxItem>,
+) {
+    let mut batch: Vec<(u32, Vec<voxel_edit::VoxelEditDelta>)> = Vec::new();
+    for item in items {
+        match item {
+            CollabInboxItem::Edit { peer_id, deltas } if !deltas.is_empty() => {
+                batch.push((peer_id, deltas));
+            }
+            other => {
+                flush_edit_batch(app, state, collab_mtx, &mut batch);
+                process_inbox_item(app, state, collab_mtx, other);
+            }
+        }
+    }
+    flush_edit_batch(app, state, collab_mtx, &mut batch);
+}
+
 /// Pushes the current host scene to all guests (after load, new project, or open file).
 pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
     let bytes: Result<Vec<u8>, String> = (|| {
@@ -1147,6 +1192,10 @@ async fn handle_host_connection<R: Runtime>(
                 match cmd {
             ClientToHost::Join { .. } => {}
             ClientToHost::Heartbeat => {}
+            ClientToHost::LatencyProbe { sent_ms } => {
+                let ack = serde_json::to_string(&HostToClient::LatencyAck { sent_ms }).unwrap();
+                let _ = ws.send(Message::Text(ack)).await;
+            }
             ClientToHost::Leave => {
                 host_remove_peer_from_session(
                     &app,
@@ -1678,6 +1727,7 @@ pub async fn client_connect_blocking<R: Runtime>(
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     let tx_hb = tx.clone();
+    let tx_probe = tx.clone();
     collab_mtx.lock().client_tx = Some(tx);
     let heartbeat_msg = serde_json::to_string(&ClientToHost::Heartbeat).unwrap();
     tauri::async_runtime::spawn(async move {
@@ -1686,6 +1736,21 @@ pub async fn client_connect_blocking<R: Runtime>(
         loop {
             interval.tick().await;
             if tx_hb.send(heartbeat_msg.clone()).is_err() {
+                break;
+            }
+        }
+    });
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(CLIENT_LATENCY_PROBE_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let sent_ms = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let msg = serde_json::to_string(&ClientToHost::LatencyProbe { sent_ms }).unwrap();
+            if tx_probe.send(msg).is_err() {
                 break;
             }
         }
@@ -1738,6 +1803,14 @@ pub async fn client_connect_blocking<R: Runtime>(
                     if let Ok(ev) = serde_json::from_str::<HostToClient>(&t) {
                         match ev {
                             HostToClient::Keepalive => {}
+                            HostToClient::LatencyAck { sent_ms } => {
+                                let now_ms = SystemTime::now()
+                                    .duration_since(SystemTime::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let rtt_ms = now_ms.saturating_sub(sent_ms);
+                                let _ = app4.emit("collab-latency-ms", rtt_ms as u32);
+                            }
                             HostToClient::Edit {
                                 deltas, peer_id, ..
                             } => {
@@ -1745,8 +1818,9 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 if peer_id == local {
                                     continue;
                                 }
-                                let _ = apply_deltas_on_main(&app4, &st4, &deltas);
-                                let _ = app4.emit("collab-edit", t);
+                                st4.collab_edit_inbox
+                                    .lock()
+                                    .push_back(CollabInboxItem::Edit { peer_id, deltas });
                             }
                             HostToClient::Roster { roster } => {
                                 cm4.lock().roster = roster.clone();

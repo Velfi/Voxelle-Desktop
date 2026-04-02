@@ -67,6 +67,9 @@ pub struct StrokeAux {
     /// Solid cylinder: extrusion depth along face normal (web `getAxisAlignedCylinder`).
     #[serde(default)]
     pub cylinder_depth: Option<i32>,
+    /// Solid polygon: extrusion depth in voxel steps along the polygon plane normal.
+    #[serde(default)]
+    pub polygon_depth: Option<i32>,
     /// 0 = cylinder; 100 = cone; in-between = frustum (web `taperPct`).
     #[serde(default)]
     pub cylinder_taper_pct: Option<i32>,
@@ -131,6 +134,7 @@ impl Default for StrokeAux {
             cuboid_depth: None,
             cuboid_hollow_wall_thickness: None,
             cylinder_depth: None,
+            polygon_depth: None,
             cylinder_taper_pct: None,
             constrain_to_plane: false,
             spray_size_range: false,
@@ -952,6 +956,29 @@ fn fill_solid_polygon_hull_projected(
     }
     let filled = fill_polygon_2d(&hull);
     Some(lift_plane_2d_to_voxels(fixed_axis, fixed_coord, &filled))
+}
+
+/// Extrude a flat set of base voxel positions along `fixed_axis` by `depth` layers.
+/// Positive depth extrudes in the +axis direction, negative in −axis. Depth 0 returns base unchanged.
+fn extrude_base_positions(base: Vec<VoxelCoord>, fixed_axis: usize, depth: i32) -> Vec<VoxelCoord> {
+    if depth == 0 {
+        return base;
+    }
+    let layers = depth.abs();
+    let dir = if depth > 0 { 1i32 } else { -1i32 };
+    let mut positions = base.clone();
+    for k in 1..=layers {
+        let dk = dir * k;
+        for &(px, py, pz) in &base {
+            let p = match fixed_axis {
+                0 => (px + dk, py, pz),
+                1 => (px, py + dk, pz),
+                _ => (px, py, pz + dk),
+            };
+            positions.push(p);
+        }
+    }
+    positions
 }
 
 fn circle_radius_in_plane(center: [i32; 3], edge: [i32; 3], plane_axis: usize) -> i32 {
@@ -2039,6 +2066,21 @@ pub fn stroke_anchor_centers_with_mode(
         DrawStrokeMode::Polygon => {
             if aux.polygon_vertices.len() >= 3 {
                 if stroke_aux_is_solid_family(aux) {
+                    if let Some(depth) = aux.polygon_depth {
+                        if let Some((fixed_axis, fixed_coord)) =
+                            solid_polygon_fixed_plane(&aux.polygon_vertices, plane_axis)
+                        {
+                            let poly2d =
+                                project_vertices_to_plane_2d(&aux.polygon_vertices, fixed_axis);
+                            let base = lift_plane_2d_to_voxels(
+                                fixed_axis,
+                                fixed_coord,
+                                &fill_polygon_2d(&poly2d),
+                            );
+                            return extrude_base_positions(base, fixed_axis, depth);
+                        }
+                        return fill_polygon_axis_aligned(&aux.polygon_vertices);
+                    }
                     if let Some(v) =
                         fill_solid_polygon_simple_projected(&aux.polygon_vertices, plane_axis)
                     {
@@ -2058,6 +2100,24 @@ pub fn stroke_anchor_centers_with_mode(
         DrawStrokeMode::PolygonHull => {
             if aux.polygon_vertices.len() >= 3 {
                 if stroke_aux_is_solid_family(aux) {
+                    if let Some(depth) = aux.polygon_depth {
+                        if let Some((fixed_axis, fixed_coord)) =
+                            solid_polygon_fixed_plane(&aux.polygon_vertices, plane_axis)
+                        {
+                            let pts =
+                                project_vertices_to_plane_2d(&aux.polygon_vertices, fixed_axis);
+                            let hull = convex_hull_2d(pts);
+                            if hull.len() >= 3 {
+                                let base = lift_plane_2d_to_voxels(
+                                    fixed_axis,
+                                    fixed_coord,
+                                    &fill_polygon_2d(&hull),
+                                );
+                                return extrude_base_positions(base, fixed_axis, depth);
+                            }
+                        }
+                        return fill_polygon_hull_axis_aligned(&aux.polygon_vertices);
+                    }
                     if let Some(v) =
                         fill_solid_polygon_hull_projected(&aux.polygon_vertices, plane_axis)
                     {

@@ -64,6 +64,8 @@ export type VoxelleDesktopPreferences = {
   showMovementDeltaHint: boolean;
   showDragDeltaHint: boolean;
   showFpsCounter: boolean;
+  /** Show round-trip ping latency in the footer while in a session. */
+  showPingLatency: boolean;
   /** Shown to others when you host or join a session. */
   collabDisplayName: string;
   /** Hex color (#rgb or #rrggbb) for your collaboration accent. */
@@ -109,6 +111,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   showMovementDeltaHint: false,
   showDragDeltaHint: true,
   showFpsCounter: false,
+  showPingLatency: false,
   collabDisplayName: "Artist",
   collabAccentColor: "#6699cc",
   collabHostPort: 27300,
@@ -240,6 +243,8 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         typeof o.showDragDeltaHint === "boolean" ? o.showDragDeltaHint : DEFAULTS.showDragDeltaHint,
       showFpsCounter:
         typeof o.showFpsCounter === "boolean" ? o.showFpsCounter : DEFAULTS.showFpsCounter,
+      showPingLatency:
+        typeof o.showPingLatency === "boolean" ? o.showPingLatency : DEFAULTS.showPingLatency,
       collabDisplayName: (() => {
         if (typeof o.collabDisplayName === "string")
           return normalizeCollabDisplayName(o.collabDisplayName);
