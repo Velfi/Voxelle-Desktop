@@ -59,6 +59,23 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Import Apple signing certificate and notarization key
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm certificate.p12
+          mkdir -p ~/.private_keys
+          echo "$APPLE_API_KEY_CONTENT" > ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+
       # Updater: requires repository secrets TAURI_SIGNING_PRIVATE_KEY and optionally
       # TAURI_SIGNING_PRIVATE_KEY_PASSWORD (see https://v2.tauri.app/plugin/updater/).
       # includeUpdaterJson uploads/merges latest.json for the static updater endpoint (default: true).
@@ -67,6 +84,9 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
         with:
           tagName: ${{ env.RELEASE_TAG }}
           releaseName: "Voxelle Desktop ${{ env.RELEASE_TAG }}"
