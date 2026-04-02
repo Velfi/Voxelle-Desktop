@@ -53,6 +53,9 @@ mod gpu {
     pub mod mascot {
         pub const WGSL: &str = include_str!("mascot.wgsl");
     }
+    pub mod speech_bubble {
+        pub const WGSL: &str = include_str!("speech_bubble.wgsl");
+    }
 }
 
 use crate::camera::OrbitCamera;
@@ -698,18 +701,59 @@ struct MascotUniforms {
     _pad: [f32; 2],
 }
 
+/// Matches `speech_bubble.wgsl` `BubbleUniforms`. Must stay 16-byte aligned.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct SpeechBubbleUniforms {
+    /// x, y (top-left), w, h — swapchain pixels.
+    rect: [f32; 4],
+    /// Tail tip in swapchain pixels.
+    tail_tip: [f32; 2],
+    /// Horizontal shake offset.
+    shake_x: f32,
+    corner_r: f32,
+    bg_color: [f32; 4],
+    border_color: [f32; 4],
+    border_w: f32,
+    _pad: [f32; 3],
+}
+
+/// Animation state for a speech bubble.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BubbleState {
+    /// Showing normally; click advances page or begins shake on last page.
+    Active,
+    /// Shaking side-to-side; auto-dismisses when shake_t ≥ SHAKE_DURATION.
+    Shaking { shake_t: f32 },
+    /// Hidden; pending removal from the Vec.
+    Dismissed,
+}
+
+/// One GPU-rendered speech bubble / floating note.
+pub struct SpeechBubble {
+    pub id: u32,
+    /// Text pages shown in sequence; empty = no text.
+    pub pages: Vec<String>,
+    pub current_page: usize,
+    /// Viewport-relative rect [x, y, w, h] in physical pixels (before viewport_x/y offset).
+    pub screen_rect: [f32; 4],
+    /// Viewport-relative tail tip [x, y] in physical pixels.
+    pub tail_tip: [f32; 2],
+    pub state: BubbleState,
+    uniforms_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 /// Per-mascot GPU state for start-screen floating model views.
 pub struct MascotEntry {
     pub id: u32,
     pub vertex_buffer: Option<wgpu::Buffer>,
     pub index_buffer: Option<wgpu::Buffer>,
     pub index_count: u32,
-    depth_texture: wgpu::Texture,
-    depth_view: wgpu::TextureView,
     uniforms_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
-    /// Y-rotation in radians; incremented each frame.
-    pub rotation_y: f32,
+    /// Animation phase in seconds; incremented each frame.
+    pub anim_t: f32,
     /// Viewport-relative screen rect [x, y, w, h] in physical pixels.
     pub screen_rect: [f32; 4],
     pub visible: bool,
@@ -1048,8 +1092,25 @@ pub struct WgpuViewer {
     pub mascots: Vec<MascotEntry>,
     mascot_pipeline: wgpu::RenderPipeline,
     pub mascot_bind_layout: wgpu::BindGroupLayout,
+    /// Shared depth buffer for all mascot render passes; sized to the swapchain.
+    mascot_depth_view: wgpu::TextureView,
     /// Wall-clock instant of the last frame that ran mascot animation.
     mascot_last_tick: std::time::Instant,
+
+    // ── Speech bubbles (GPU-rendered floating notes / dialogue) ───────────────
+    pub speech_bubbles: Vec<SpeechBubble>,
+    speech_bubble_pipeline: wgpu::RenderPipeline,
+    speech_bubble_bind_layout: wgpu::BindGroupLayout,
+    speech_bubble_last_tick: std::time::Instant,
+    /// Bubble ids that completed their dismiss animation since the last drain.
+    /// The event loop in lib.rs drains this and emits `speech-bubble-dismissed`.
+    pub pending_dismissed_bubble_ids: Vec<u32>,
+    /// Separate glyphon atlas targeting sdr_format (swapchain surface).
+    #[allow(dead_code)]
+    speech_bubble_glyphon_cache: GlyphonCache,
+    speech_bubble_glyphon_atlas: TextAtlas,
+    speech_bubble_text_renderer: TextRenderer,
+    speech_bubble_glyphon_viewport: GlyphonViewport,
 }
 
 /// Screen-space peer label for GPU text rendering.
@@ -4256,6 +4317,9 @@ impl WgpuViewer {
         glyphon_font_system
             .db_mut()
             .set_sans_serif_family("Segoe UI");
+        glyphon_font_system.db_mut().load_font_data(
+            include_bytes!("../../../public/fonts/ZeldaSans-Regular-v1.otf").to_vec(),
+        );
         let glyphon_swash_cache = SwashCache::new();
         let glyphon_cache = GlyphonCache::new(&device);
         let mut glyphon_atlas = TextAtlas::new(&device, &queue, &glyphon_cache, format);
@@ -4337,6 +4401,85 @@ impl WgpuViewer {
             multiview: None,
             cache: None,
         });
+
+        let mascot_depth_view =
+            Self::make_mascot_depth(&device, size.0.max(1), size.1.max(1)).1;
+
+        // ── Speech bubble pipeline ────────────────────────────────────────────
+        let speech_bubble_bind_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("speech_bubble_uniform"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let speech_bubble_pl_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("speech_bubble"),
+                bind_group_layouts: &[&speech_bubble_bind_layout],
+                push_constant_ranges: &[],
+            });
+        let shader_speech_bubble = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("speech_bubble"),
+            source: wgpu::ShaderSource::Wgsl(gpu::speech_bubble::WGSL.into()),
+        });
+        let speech_bubble_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("speech_bubble"),
+                layout: Some(&speech_bubble_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader_speech_bubble,
+                    entry_point: Some("vs_bubble"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader_speech_bubble,
+                    entry_point: Some("fs_bubble"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: sdr_format,
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview: None,
+                cache: None,
+            });
+
+        // Glyphon text renderer targeting sdr_format (swapchain surface).
+        let speech_bubble_glyphon_cache = GlyphonCache::new(&device);
+        let mut speech_bubble_glyphon_atlas =
+            TextAtlas::new(&device, &queue, &speech_bubble_glyphon_cache, sdr_format);
+        let speech_bubble_text_renderer = TextRenderer::new(
+            &mut speech_bubble_glyphon_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let mut speech_bubble_glyphon_viewport =
+            GlyphonViewport::new(&device, &speech_bubble_glyphon_cache);
+        speech_bubble_glyphon_viewport.update(
+            &queue,
+            Resolution {
+                width: size.0.max(1),
+                height: size.1.max(1),
+            },
+        );
 
         Ok(Self {
             surface,
@@ -4578,7 +4721,18 @@ impl WgpuViewer {
             mascots: Vec::new(),
             mascot_pipeline,
             mascot_bind_layout,
+            mascot_depth_view,
             mascot_last_tick: std::time::Instant::now(),
+
+            speech_bubbles: Vec::new(),
+            speech_bubble_pipeline,
+            speech_bubble_bind_layout,
+            speech_bubble_last_tick: std::time::Instant::now(),
+            pending_dismissed_bubble_ids: Vec::new(),
+            speech_bubble_glyphon_cache,
+            speech_bubble_glyphon_atlas,
+            speech_bubble_text_renderer,
+            speech_bubble_glyphon_viewport,
         })
     }
 
@@ -4679,6 +4833,8 @@ impl WgpuViewer {
             create_depth_snapshot(&self.device, viewport_width, viewport_height);
         self.depth_snapshot_texture = depth_snapshot_texture;
         self.depth_snapshot_view = depth_snapshot_view;
+        self.mascot_depth_view =
+            Self::make_mascot_depth(&self.device, surface_w.max(1), surface_h.max(1)).1;
 
         let (oit_accum_texture, oit_accum_view, oit_revealage_texture, oit_revealage_view) =
             create_oit_textures(&self.device, viewport_width, viewport_height);
@@ -4786,6 +4942,34 @@ impl WgpuViewer {
         self.glyphon_cache = glyphon_cache;
         self.glyphon_atlas = glyphon_atlas;
         self.glyphon_text_renderer = glyphon_text_renderer;
+
+        // Recreate speech-bubble glyphon (targets sdr_format / swapchain).
+        let speech_bubble_glyphon_cache = GlyphonCache::new(&self.device);
+        let mut speech_bubble_glyphon_atlas = TextAtlas::new(
+            &self.device,
+            &self.queue,
+            &speech_bubble_glyphon_cache,
+            self.sdr_format,
+        );
+        let speech_bubble_text_renderer = TextRenderer::new(
+            &mut speech_bubble_glyphon_atlas,
+            &self.device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+        let mut speech_bubble_glyphon_viewport =
+            GlyphonViewport::new(&self.device, &speech_bubble_glyphon_cache);
+        speech_bubble_glyphon_viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width.max(1),
+                height: self.config.height.max(1),
+            },
+        );
+        self.speech_bubble_glyphon_cache = speech_bubble_glyphon_cache;
+        self.speech_bubble_glyphon_atlas = speech_bubble_glyphon_atlas;
+        self.speech_bubble_text_renderer = speech_bubble_text_renderer;
+        self.speech_bubble_glyphon_viewport = speech_bubble_glyphon_viewport;
     }
 
     /// `mode`: 0 neutral … 5 reinhard, 6 HDR display (see `post_composite.wgsl`).
@@ -8423,10 +8607,15 @@ impl WgpuViewer {
             },
         );
 
-        // Mascots render directly on top of the swapchain (start-screen overlay).
-        if self.start_screen_transparent {
+        // Mascots and speech bubbles render directly on the swapchain surface.
+        let needs_swap_pass =
+            self.start_screen_transparent || self.has_visible_speech_bubbles();
+        if needs_swap_pass {
             let swap_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            self.render_mascots(&mut encoder, &swap_view);
+            if self.start_screen_transparent {
+                self.render_mascots(&mut encoder, &swap_view);
+            }
+            self.render_speech_bubbles(&mut encoder, &swap_view);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -8502,9 +8691,6 @@ impl WgpuViewer {
             entry.index_count = index_count;
             entry.bounds = Some(bounds);
         } else {
-            let default_side = 200u32;
-            let (depth_texture, depth_view) =
-                Self::make_mascot_depth(&self.device, default_side, default_side);
             let uniforms_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mascot_uniforms"),
                 size: std::mem::size_of::<MascotUniforms>() as u64,
@@ -8524,12 +8710,10 @@ impl WgpuViewer {
                 vertex_buffer: Some(vertex_buffer),
                 index_buffer: Some(index_buffer),
                 index_count,
-                depth_texture,
-                depth_view,
                 uniforms_buffer,
                 bind_group,
-                rotation_y: 0.0,
-                screen_rect: [0.0, 0.0, default_side as f32, default_side as f32],
+                anim_t: 0.0,
+                screen_rect: [0.0, 0.0, 200.0, 200.0],
                 visible: false,
                 bounds: Some(bounds),
             });
@@ -8539,18 +8723,8 @@ impl WgpuViewer {
     /// Update the viewport-relative screen rect for mascot `id`.
     /// Recreates the depth buffer if the dimensions change.
     pub fn set_mascot_screen_rect(&mut self, id: u32, x: f32, y: f32, w: f32, h: f32) {
-        let Some(entry) = self.mascots.iter_mut().find(|m| m.id == id) else {
-            return;
-        };
-        let new_w = (w as u32).max(1);
-        let new_h = (h as u32).max(1);
-        let old_w = (entry.screen_rect[2] as u32).max(1);
-        let old_h = (entry.screen_rect[3] as u32).max(1);
-        entry.screen_rect = [x, y, w, h];
-        if new_w != old_w || new_h != old_h {
-            let (tex, view) = Self::make_mascot_depth(&self.device, new_w, new_h);
-            entry.depth_texture = tex;
-            entry.depth_view = view;
+        if let Some(entry) = self.mascots.iter_mut().find(|m| m.id == id) {
+            entry.screen_rect = [x, y, w, h];
         }
     }
 
@@ -8576,10 +8750,12 @@ impl WgpuViewer {
         if let Some(bounds) = &m.bounds {
             let center = bounds.center();
             let extent = (bounds.max - bounds.min).max_element().max(0.001);
-            let model = Mat4::from_scale(Vec3::splat(1.6 / extent))
-                * Mat4::from_rotation_y(m.rotation_y)
+            let bob_y = m.anim_t.sin() * 0.08;
+            let model = Mat4::from_scale(Vec3::splat(1.2 / extent))
+                * Mat4::from_rotation_y(-std::f32::consts::FRAC_PI_4)
+                * Mat4::from_translation(Vec3::new(0.0, bob_y, 0.0))
                 * Mat4::from_translation(-center);
-            let view = Mat4::look_at_rh(Vec3::new(0.0, 0.8, 3.0), Vec3::ZERO, Vec3::Y);
+            let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 3.5), Vec3::ZERO, Vec3::Y);
             let proj = Mat4::perspective_rh(0.5, aspect, 0.1, 50.0);
             MascotUniforms {
                 mvp: (proj * view * model).to_cols_array_2d(),
@@ -8617,16 +8793,21 @@ impl WgpuViewer {
             .clamp(0.0, 0.1);
         self.mascot_last_tick = now;
 
-        const ROT_SPEED: f32 = 0.6; // radians / second
+        const BOB_SPEED: f32 = 1.8; // radians / second
 
-        // Update rotations.
+        // Advance animation phase.
         for m in &mut self.mascots {
-            m.rotation_y = (m.rotation_y + dt * ROT_SPEED).rem_euclid(std::f32::consts::TAU);
+            m.anim_t += dt * BOB_SPEED;
         }
 
         // Upload uniforms, then issue render passes.
         for i in 0..self.mascots.len() {
             if !self.mascots[i].visible || self.mascots[i].vertex_buffer.is_none() {
+                log::warn!(
+                    "mascot {i}: skipping render (visible={}, has_buf={})",
+                    self.mascots[i].visible,
+                    self.mascots[i].vertex_buffer.is_some()
+                );
                 continue;
             }
 
@@ -8655,7 +8836,7 @@ impl WgpuViewer {
                         },
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &self.mascots[i].depth_view,
+                        view: &self.mascot_depth_view,
                         depth_ops: Some(wgpu::Operations {
                             load: wgpu::LoadOp::Clear(1.0),
                             store: wgpu::StoreOp::Discard,
@@ -8681,6 +8862,322 @@ impl WgpuViewer {
                 pass.draw_indexed(0..index_count, 0, 0..1);
             }
         }
+    }
+
+    // ── Speech bubble helpers ─────────────────────────────────────────────────
+
+    /// Returns true when at least one speech bubble is visible.
+    pub fn has_visible_speech_bubbles(&self) -> bool {
+        self.speech_bubbles
+            .iter()
+            .any(|b| !matches!(b.state, BubbleState::Dismissed))
+    }
+
+    /// Create or replace a speech bubble.
+    /// `screen_rect` and `tail_tip` are in viewport-relative physical pixels.
+    pub fn show_speech_bubble(
+        &mut self,
+        id: u32,
+        pages: Vec<String>,
+        screen_rect: [f32; 4],
+        tail_tip: [f32; 2],
+    ) {
+        // Remove any existing bubble with the same id.
+        self.speech_bubbles.retain(|b| b.id != id);
+
+        let uniforms_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("speech_bubble_uniforms"),
+            size: std::mem::size_of::<SpeechBubbleUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("speech_bubble_bg"),
+            layout: &self.speech_bubble_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms_buffer.as_entire_binding(),
+            }],
+        });
+        self.speech_bubbles.push(SpeechBubble {
+            id,
+            pages,
+            current_page: 0,
+            screen_rect,
+            tail_tip,
+            state: BubbleState::Active,
+            uniforms_buffer,
+            bind_group,
+        });
+    }
+
+    /// Handle a click on bubble `id`.
+    /// Returns `true` if the click caused a page advance (caller can re-render).
+    /// Transitions to `Shaking` on the last page instead of immediately dismissing.
+    pub fn click_speech_bubble(&mut self, id: u32) -> bool {
+        if let Some(b) = self.speech_bubbles.iter_mut().find(|b| b.id == id) {
+            match b.state {
+                BubbleState::Active => {
+                    if b.current_page + 1 < b.pages.len() {
+                        b.current_page += 1;
+                    } else {
+                        b.state = BubbleState::Shaking { shake_t: 0.0 };
+                    }
+                    true
+                }
+                BubbleState::Shaking { .. } => {
+                    // Click during shake → dismiss immediately.
+                    b.state = BubbleState::Dismissed;
+                    true
+                }
+                BubbleState::Dismissed => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Update the screen rect and tail tip of an existing bubble without resetting its page or state.
+    pub fn reposition_speech_bubble(&mut self, id: u32, screen_rect: [f32; 4], tail_tip: [f32; 2]) {
+        if let Some(b) = self.speech_bubbles.iter_mut().find(|b| b.id == id) {
+            b.screen_rect = screen_rect;
+            b.tail_tip = tail_tip;
+        }
+    }
+
+    /// Forcibly dismiss a bubble without shaking.
+    pub fn dismiss_speech_bubble(&mut self, id: u32) {
+        if let Some(b) = self.speech_bubbles.iter_mut().find(|b| b.id == id) {
+            b.state = BubbleState::Dismissed;
+        }
+    }
+
+    /// Advance shake animation; returns ids of bubbles that just finished dismissing.
+    pub fn tick_speech_bubbles(&mut self, dt: f32) -> Vec<u32> {
+        const SHAKE_DURATION: f32 = 0.65;
+        let mut dismissed = Vec::new();
+        for b in &mut self.speech_bubbles {
+            if let BubbleState::Shaking { shake_t } = &mut b.state {
+                *shake_t += dt;
+                if *shake_t >= SHAKE_DURATION {
+                    b.state = BubbleState::Dismissed;
+                    dismissed.push(b.id);
+                }
+            }
+        }
+        // Prune dismissed bubbles from the vec.
+        self.speech_bubbles
+            .retain(|b| !matches!(b.state, BubbleState::Dismissed));
+        dismissed
+    }
+
+    fn speech_bubble_uniforms(b: &SpeechBubble, vx: f32, vy: f32) -> SpeechBubbleUniforms {
+        const SHAKE_FREQ: f32 = 28.0;
+        const SHAKE_AMP: f32 = 10.0;
+        let shake_x = match &b.state {
+            BubbleState::Shaking { shake_t } => {
+                let t = *shake_t;
+                let decay = (-t * 6.0_f32).exp();
+                (t * SHAKE_FREQ).sin() * SHAKE_AMP * decay
+            }
+            _ => 0.0,
+        };
+        // Convert viewport-relative → swapchain-absolute.
+        SpeechBubbleUniforms {
+            rect: [
+                b.screen_rect[0] + vx,
+                b.screen_rect[1] + vy,
+                b.screen_rect[2],
+                b.screen_rect[3],
+            ],
+            tail_tip: [b.tail_tip[0] + vx, b.tail_tip[1] + vy],
+            shake_x,
+            corner_r: 12.0,
+            bg_color: [1.0, 1.0, 1.0, 0.96],
+            border_color: [0.18, 0.18, 0.22, 1.0],
+            border_w: 2.5,
+            _pad: [0.0; 3],
+        }
+    }
+
+    fn render_speech_bubbles(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        swap_view: &wgpu::TextureView,
+    ) {
+        if self.config.format != self.sdr_format {
+            return;
+        }
+
+        // Advance animations.
+        let now = std::time::Instant::now();
+        let dt = now
+            .duration_since(self.speech_bubble_last_tick)
+            .as_secs_f32()
+            .clamp(0.0, 0.1);
+        self.speech_bubble_last_tick = now;
+
+        // Advance shake; store dismissed ids for the event loop to emit.
+        let dismissed = self.tick_speech_bubbles(dt);
+        self.pending_dismissed_bubble_ids.extend(dismissed);
+
+        let sw = self.config.width as f32;
+        let sh = self.config.height as f32;
+        let vx = self.viewport_x as f32;
+        let vy = self.viewport_y as f32;
+
+        // Update speech bubble glyphon viewport to swapchain dimensions.
+        self.speech_bubble_glyphon_viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width.max(1),
+                height: self.config.height.max(1),
+            },
+        );
+
+        // Upload uniforms and draw the bubble shapes.
+        // We collect text areas separately; Glyphon needs all areas in one prepare call.
+        let bubble_count = self.speech_bubbles.len();
+        if bubble_count == 0 {
+            return;
+        }
+
+        for i in 0..bubble_count {
+            let uniforms = Self::speech_bubble_uniforms(&self.speech_bubbles[i], vx, vy);
+            self.queue.write_buffer(
+                &self.speech_bubbles[i].uniforms_buffer,
+                0,
+                bytemuck::bytes_of(&uniforms),
+            );
+
+            // Scissor to the bubble AABB (body + generous tail margin).
+            let rx = (uniforms.rect[0] - 30.0).max(0.0);
+            let ry = (uniforms.rect[1] - 10.0).max(0.0);
+            let rw = (uniforms.rect[2] + 60.0).min(sw - rx);
+            let rh = (uniforms.rect[3] + 60.0).min(sh - ry);
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("speech_bubble"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: swap_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                });
+                pass.set_scissor_rect(
+                    rx as u32,
+                    ry as u32,
+                    rw.max(1.0) as u32,
+                    rh.max(1.0) as u32,
+                );
+                pass.set_pipeline(&self.speech_bubble_pipeline);
+                pass.set_bind_group(0, &self.speech_bubbles[i].bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        // Render text for each bubble via Glyphon.
+        let font_size = 44.0_f32;
+        let line_height = 56.0_f32;
+        let padding = 18.0_f32;
+
+        let mut buffers: Vec<GlyphonBuffer> = Vec::new();
+        let mut text_areas: Vec<TextArea<'_>> = Vec::new();
+
+        // Collect per-bubble shake_x so text moves with the bubble during shake.
+        let shake_xs: Vec<f32> = self
+            .speech_bubbles
+            .iter()
+            .map(|b| Self::speech_bubble_uniforms(b, vx, vy).shake_x)
+            .collect();
+
+        for b in &self.speech_bubbles {
+            let text = b
+                .pages
+                .get(b.current_page)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let wrap_w = (b.screen_rect[2] - padding * 2.0).max(1.0);
+
+            let mut buf =
+                GlyphonBuffer::new(&mut self.glyphon_font_system, Metrics::new(font_size, line_height));
+            buf.set_size(
+                &mut self.glyphon_font_system,
+                Some(wrap_w),
+                Some(b.screen_rect[3] - padding * 2.0),
+            );
+            buf.set_text(
+                &mut self.glyphon_font_system,
+                text,
+                Attrs::new()
+                    .family(Family::Name("Zelda Sans"))
+                    .color(GlyphonColor::rgb(30, 30, 35)),
+                Shaping::Advanced,
+            );
+            buf.shape_until_scroll(&mut self.glyphon_font_system, false);
+            buffers.push(buf);
+        }
+
+        // Build TextArea slice (must be done in a second pass because buffers is borrowed).
+        for (i, b) in self.speech_bubbles.iter().enumerate() {
+            let sx = shake_xs[i];
+            let abs_x = b.screen_rect[0] + vx + sx;
+            let abs_y = b.screen_rect[1] + vy;
+            text_areas.push(TextArea {
+                buffer: &buffers[i],
+                left: abs_x + padding,
+                top: abs_y + padding,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: (abs_x + padding) as i32,
+                    top: (abs_y + padding) as i32,
+                    right: (abs_x + b.screen_rect[2] - padding) as i32,
+                    bottom: (abs_y + b.screen_rect[3] - padding) as i32,
+                },
+                default_color: GlyphonColor::rgb(30, 30, 35),
+                custom_glyphs: &[],
+            });
+        }
+
+        let _ = self.speech_bubble_text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.glyphon_font_system,
+            &mut self.speech_bubble_glyphon_atlas,
+            &self.speech_bubble_glyphon_viewport,
+            text_areas,
+            &mut self.glyphon_swash_cache,
+        );
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("speech_bubble_text"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: swap_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            let _ = self.speech_bubble_text_renderer.render(
+                &self.speech_bubble_glyphon_atlas,
+                &self.speech_bubble_glyphon_viewport,
+                &mut pass,
+            );
+        }
+        self.speech_bubble_glyphon_atlas.trim();
     }
 }
 

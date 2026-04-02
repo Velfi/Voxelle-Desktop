@@ -2,7 +2,8 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       tag:
@@ -13,9 +14,33 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
+  create-release:
+    runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+    outputs:
+      release_tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: tag
+        shell: bash
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release create "${{ steps.tag.outputs.tag }}" \
+            --title "Voxelle Desktop ${{ steps.tag.outputs.tag }}" \
+            --generate-notes \
+          || echo "Release already exists — continuing"
+
+  build:
+    needs: create-release
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -23,53 +48,53 @@ jobs:
           - platform: macos-latest
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
-            bundle-dir: src-tauri/target/aarch64-apple-darwin/release/bundle
+            bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle
           - platform: macos-latest
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
-            bundle-dir: src-tauri/target/x86_64-apple-darwin/release/bundle
+            bundle_dir: src-tauri/target/x86_64-apple-darwin/release/bundle
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             args: ""
-            bundle-dir: src-tauri/target/release/bundle
+            bundle_dir: src-tauri/target/release/bundle
           - platform: windows-latest
             target: x86_64-pc-windows-msvc
             args: ""
-            bundle-dir: src-tauri/target/release/bundle
+            bundle_dir: src-tauri/target/release/bundle
 
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.create-release.outputs.release_tag }}
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: lts/*
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # Caches compiled dependencies so subsequent runs only rebuild changed code.
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: src-tauri
-          key: ${{ matrix.target }}
-
       - name: Install Linux dependencies
-        if: runner.os == 'Linux'
+        if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Import Apple certificate and notarization key
-        if: runner.os == 'macOS'
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Import Apple signing certificate and notarization key
+        if: matrix.platform == 'macos-latest'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_KEY_CONTENT: ${{ secrets.APPLE_API_KEY_CONTENT }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
         run: |
           echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
           security create-keychain -p "" build.keychain
@@ -81,51 +106,129 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
           rm certificate.p12
           mkdir -p ~/.private_keys
-          echo "$APPLE_API_KEY_CONTENT" > ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+          echo "$APPLE_API_KEY_CONTENT" > ~/.private_keys/AuthKey_${APPLE_API_KEY}.p8
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Build
+      - name: Build Tauri app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
-        run: npm run tauri build -- ${{ matrix.args }}
+        run: npm run tauri -- build ${{ matrix.args }}
 
-      - name: Upload bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: bundle-${{ matrix.target }}
-          path: ${{ matrix.bundle-dir }}
-          retention-days: 1
+      - name: Rename macOS updater artifacts to include architecture
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        run: |
+          MACOS_DIR="${{ matrix.bundle_dir }}/macos"
+          if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
+            ARCH="aarch64"
+          else
+            ARCH="x64"
+          fi
+          for f in "$MACOS_DIR"/*.app.tar.gz; do
+            mv "$f" "${f%.app.tar.gz}_${ARCH}.app.tar.gz"
+          done
+          for f in "$MACOS_DIR"/*.app.tar.gz.sig; do
+            mv "$f" "${f%.app.tar.gz.sig}_${ARCH}.app.tar.gz.sig"
+          done
 
-  release:
-    needs: build
+      - name: Upload release artifacts (macOS)
+        if: matrix.platform == 'macos-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.create-release.outputs.release_tag }}"
+          BUNDLE="${{ matrix.bundle_dir }}"
+          gh release upload "$TAG" \
+            "$BUNDLE"/dmg/*.dmg \
+            "$BUNDLE"/macos/*.app.tar.gz \
+            "$BUNDLE"/macos/*.app.tar.gz.sig \
+            --clobber
+
+      - name: Upload release artifacts (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.create-release.outputs.release_tag }}"
+          BUNDLE="${{ matrix.bundle_dir }}"
+          gh release upload "$TAG" \
+            "$BUNDLE"/appimage/*.AppImage \
+            "$BUNDLE"/appimage/*.AppImage.tar.gz \
+            "$BUNDLE"/appimage/*.AppImage.tar.gz.sig \
+            "$BUNDLE"/deb/*.deb \
+            --clobber
+
+      - name: Upload release artifacts (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ needs.create-release.outputs.release_tag }}"
+          BUNDLE="${{ matrix.bundle_dir }}"
+          gh release upload "$TAG" \
+            "$BUNDLE"/msi/*.msi \
+            "$BUNDLE"/msi/*.msi.zip \
+            "$BUNDLE"/msi/*.msi.zip.sig \
+            "$BUNDLE"/nsis/*-setup.exe \
+            "$BUNDLE"/nsis/*.nsis.zip \
+            "$BUNDLE"/nsis/*.nsis.zip.sig \
+            --clobber
+
+  updater-manifest:
+    needs: [create-release, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Generate and upload latest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.create-release.outputs.release_tag }}
+        run: |
+          mkdir -p sigs
+          gh release download "$RELEASE_TAG" --pattern "*.sig" --dir sigs --clobber
 
-      - name: Download all bundles
-        uses: actions/download-artifact@v4
-        with:
-          path: bundles
+          python3 - <<'EOF'
+          import json, os, subprocess
+          from datetime import datetime, timezone
 
-      - name: Collect release files and generate latest.json
-        run: python3 .github/scripts/collect_release_artifacts.py bundles "$RELEASE_TAG"
+          tag = os.environ['RELEASE_TAG']
+          repo = os.environ['GITHUB_REPOSITORY']
+          base_url = f"https://github.com/{repo}/releases/download/{tag}"
 
-      - name: Create GitHub release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: "Voxelle Desktop ${{ env.RELEASE_TAG }}"
-          generate_release_notes: true
-          draft: false
-          prerelease: false
-          files: release-artifacts/*
+          def read_sig(name):
+              return open(os.path.join('sigs', name)).read().strip()
+
+          platforms = {}
+          for sig_name in os.listdir('sigs'):
+              asset_name = sig_name[:-4]  # strip .sig
+              asset_url = f"{base_url}/{asset_name}"
+              sig = read_sig(sig_name)
+              if asset_name.endswith('_aarch64.app.tar.gz'):
+                  platforms['darwin-aarch64'] = {'url': asset_url, 'signature': sig}
+              elif asset_name.endswith('_x64.app.tar.gz'):
+                  platforms['darwin-x86_64'] = {'url': asset_url, 'signature': sig}
+              elif asset_name.endswith('.AppImage.tar.gz'):
+                  platforms['linux-x86_64'] = {'url': asset_url, 'signature': sig}
+              elif asset_name.endswith('.msi.zip') and not asset_name.endswith('.nsis.zip'):
+                  platforms['windows-x86_64'] = {'url': asset_url, 'signature': sig}
+
+          version = tag.lstrip('v')
+          manifest = {
+              'version': version,
+              'notes': '',
+              'pub_date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+              'platforms': platforms,
+          }
+          with open('latest.json', 'w') as f:
+              json.dump(manifest, f, indent=2)
+          print(f"Generated latest.json v{version} — platforms: {sorted(platforms)}")
+          EOF
+
+          gh release upload "$RELEASE_TAG" latest.json --clobber

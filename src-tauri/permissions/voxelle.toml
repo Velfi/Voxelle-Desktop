@@ -54,6 +54,7 @@ commands.allow = [
   "collab_send_ping",
   "get_autosave_settings",
   "set_autosave_settings",
+  "debug_clear_autosaves",
   "get_rendering_mode",
   "set_rendering_mode",
   "get_orthographic",
@@ -150,4 +151,8 @@ commands.allow = [
   "mascot_load_embedded",
   "mascot_set_screen_rect",
   "mascot_set_visible",
+  "speech_bubble_show",
+  "speech_bubble_click",
+  "speech_bubble_dismiss",
+  "speech_bubble_reposition",
 ]

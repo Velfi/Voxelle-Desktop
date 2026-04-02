@@ -14703,6 +14703,13 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
         true,
         None::<&str>,
     )?;
+    let debug_clear_autosaves_item = MenuItem::with_id(
+        app,
+        "debug_clear_autosaves",
+        "Clear autosaves and session…",
+        true,
+        None::<&str>,
+    )?;
     let debug_test_crash = MenuItem::with_id(
         app,
         "debug_test_crash",
@@ -14718,6 +14725,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
             &debug_viewport_cursor,
             &debug_copy_perf,
             &debug_raytrace_bench,
+            &debug_clear_autosaves_item,
             &debug_test_crash,
         ],
     )?;
@@ -14750,7 +14758,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
     let view_render_ray = CheckMenuItem::with_id(
         app,
         "menu_view_render_ray",
-        "Ray (WebGPU)",
+        "Ray Tracing",
         true,
         matches!(current_mode, RenderingMode::Ray),
         None::<&str>,
@@ -15434,9 +15442,12 @@ fn mascot_load_embedded(
                 let mut v = state.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_mascot_mesh(id, &mesh, bounds);
+                    drop(v);
+                    let _ = app_main.emit("mascot-loaded", id);
+                    wake_viewport_loop(&app_main);
+                } else {
+                    log::warn!("mascot_load_embedded: viewer was None when uploading mascot id={id}, mesh not uploaded");
                 }
-                // Signal the frontend that the mesh is on the GPU and ready to show.
-                let _ = app_main.emit("mascot-loaded", id);
             });
         })
         .map_err(|e| e.to_string())?;
@@ -15447,6 +15458,7 @@ fn mascot_load_embedded(
 #[tauri::command]
 fn mascot_set_visible(
     state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
     id: u32,
     visible: bool,
 ) -> Result<(), String> {
@@ -15454,6 +15466,97 @@ fn mascot_set_visible(
     if let Some(viewer) = v.as_mut() {
         viewer.set_mascot_visible(id, visible);
     }
+    drop(v);
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+/// Show (or replace) a speech bubble.
+/// `rx`, `ry`, `rw`, `rh` — bubble rect in viewport-relative physical pixels.
+/// `tx`, `ty` — tail tip in viewport-relative physical pixels (anchor point toward subject).
+/// `pages` — ordered list of text strings; click advances through them.
+#[tauri::command]
+fn speech_bubble_show(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    id: u32,
+    pages: Vec<String>,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    tx: f32,
+    ty: f32,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    if let Some(viewer) = v.as_mut() {
+        viewer.show_speech_bubble(id, pages, [rx, ry, rw, rh], [tx, ty]);
+    }
+    drop(v);
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+/// Register a click on bubble `id`.
+/// Advances to the next page, or begins a shake-then-dismiss sequence on the last page.
+/// Emits `"speech-bubble-dismissed"` with `id` when the bubble finally closes.
+#[tauri::command]
+fn speech_bubble_click(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    id: u32,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    let changed = if let Some(viewer) = v.as_mut() {
+        viewer.click_speech_bubble(id)
+    } else {
+        false
+    };
+    drop(v);
+    if changed {
+        wake_viewport_loop(&app);
+    }
+    Ok(())
+}
+
+/// Immediately dismiss a speech bubble without the shake animation.
+/// Emits `"speech-bubble-dismissed"` with `id`.
+#[tauri::command]
+fn speech_bubble_dismiss(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    id: u32,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    if let Some(viewer) = v.as_mut() {
+        viewer.dismiss_speech_bubble(id);
+    }
+    drop(v);
+    let _ = app.emit("speech-bubble-dismissed", id);
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+/// Move an existing bubble to a new screen rect + tail tip without resetting its page or state.
+/// Used to keep bubbles anchored to their subject after a window resize.
+#[tauri::command]
+fn speech_bubble_reposition(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    id: u32,
+    rx: f32,
+    ry: f32,
+    rw: f32,
+    rh: f32,
+    tx: f32,
+    ty: f32,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    if let Some(viewer) = v.as_mut() {
+        viewer.reposition_speech_bubble(id, [rx, ry, rw, rh], [tx, ty]);
+    }
+    drop(v);
+    wake_viewport_loop(&app);
     Ok(())
 }
 
@@ -15837,6 +15940,31 @@ fn set_autosave_settings(
     Ok(())
 }
 
+fn clear_autosaves_and_session(app: &AppHandle) -> Result<(), String> {
+    let dir = autosave_dir(app)?;
+    let mut deleted = 0u32;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("voxelle") {
+                if std::fs::remove_file(&path).is_ok() {
+                    deleted += 1;
+                }
+            }
+        }
+    }
+    if let Ok(session_path) = session_state_path(app) {
+        let _ = std::fs::remove_file(&session_path);
+    }
+    log::info!("debug_clear_autosaves: deleted {deleted} autosave file(s) and cleared last_session.json");
+    Ok(())
+}
+
+#[tauri::command]
+fn debug_clear_autosaves(app: AppHandle) -> Result<(), String> {
+    clear_autosaves_and_session(&app)
+}
+
 #[tauri::command]
 fn create_new_project(
     state: State<'_, Arc<ViewerState>>,
@@ -16077,6 +16205,8 @@ pub fn run() {
                         );
                     }
                 }
+            } else if event.id() == "debug_clear_autosaves" {
+                let _ = clear_autosaves_and_session(&app);
             } else if event.id() == "debug_test_crash" {
                 panic!("Test crash triggered from Debug menu");
             } else if event.id() == "view_render_greedy"
@@ -16380,6 +16510,7 @@ pub fn run() {
             collab_send_ping,
             get_autosave_settings,
             set_autosave_settings,
+            debug_clear_autosaves,
             get_rendering_mode,
             set_rendering_mode,
             set_raytrace_mode,
@@ -16484,6 +16615,10 @@ pub fn run() {
             mascot_load_embedded,
             mascot_set_screen_rect,
             mascot_set_visible,
+            speech_bubble_show,
+            speech_bubble_click,
+            speech_bubble_dismiss,
+            speech_bubble_reposition,
         ])
         .build(tauri::generate_context!())
         .expect("error building app")
@@ -16695,6 +16830,12 @@ pub fn run() {
                     }
                     sample_fps_and_emit(app, &state.fps);
 
+                    // Drain speech bubbles that completed their shake-dismiss animation.
+                    // app.emit is non-blocking; holding viewer lock here is safe.
+                    for id in viewer.pending_dismissed_bubble_ids.drain(..) {
+                        let _ = app.emit("speech-bubble-dismissed", id);
+                    }
+
                     let enabled = *state.autosave_enabled.lock();
                     let interval = *state.autosave_interval_secs.lock();
                     let (collab_on, is_host) = {
@@ -16739,6 +16880,9 @@ pub fn run() {
                 let mascots_active = v
                     .as_ref()
                     .map_or(false, |viewer| viewer.any_mascot_visible());
+                let bubbles_active = v
+                    .as_ref()
+                    .map_or(false, |viewer| viewer.has_visible_speech_bubbles());
                 drop(v);
                 let fly_on = *state.fly_mode.lock();
                 let walk_on = *state.walk_mode.lock();
@@ -16754,7 +16898,8 @@ pub fn run() {
                     || walk_on
                     || has_fly_movement
                     || rt_active
-                    || mascots_active;
+                    || mascots_active
+                    || bubbles_active;
                 if needs_next {
                     tauri::async_runtime::spawn(async move {
                         let _ = app_wake.run_on_main_thread(|| {});

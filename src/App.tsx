@@ -5,6 +5,7 @@ import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
 import { MascotView } from "./MascotView";
+import { SpeechBubbleOverlay, type BubbleInfo } from "./SpeechBubbleOverlay";
 import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
 import { JoinSessionModal } from "./JoinSessionModal";
 import { PreferencesModal } from "./PreferencesModal";
@@ -57,6 +58,7 @@ interface DepthPhaseData {
   frozenGeo: CuboidPlaneGeo | null;
 }
 import { ViewportSettingsSidebar } from "./ViewportSettingsSidebar";
+import { generateIdea } from "./ideaGenerator";
 import packageJson from "../package.json";
 
 /** App semver from `package.json` (status bar when no file is open). */
@@ -2093,6 +2095,19 @@ function App() {
   const [pathLabel, setPathLabel] = useState("");
   /** Mascots loaded for the start screen. Set to true once mascot_load commands have fired. */
   const [mascotsLoaded, setMascotsLoaded] = useState(false);
+  const MASCOT_W = 180;
+  const MASCOT_H = 180;
+  const MASCOT_PAD = 24;
+  const [mascotRect, setMascotRect] = useState(() => ({
+    x: MASCOT_PAD,
+    y: window.innerHeight - MASCOT_H - MASCOT_PAD,
+    width: MASCOT_W,
+    height: MASCOT_H,
+  }));
+  /** Active GPU-rendered speech bubbles (click-capture overlays). */
+  const [speechBubbles, setSpeechBubbles] = useState<BubbleInfo[]>([]);
+  const nextBubbleId = useRef(0);
+
   /** Cold-start title mesh from `Logo.voxelle`; enables bottom menu layout and viewport orbit. */
   const [startScreenLogoLoaded, setStartScreenLogoLoaded] = useState(false);
   const startScreenLogoLoadedRef = useRef(false);
@@ -2916,20 +2931,110 @@ function App() {
     void invoke("load_start_screen_logo").catch(() => {});
   }, []);
 
-  // ── Mascot loading ────────────────────────────────────────────────────────
-  // Fire the load command once; wait for the "mascot-loaded" event (emitted
-  // after the GPU mesh upload) before showing the overlay divs.
+  // ── Mascot position (lower-left corner, tracks window size) ──────────────
   useEffect(() => {
-    const unlistenPromise = listen<number>("mascot-loaded", (ev) => {
-      if (ev.payload === 0) setMascotsLoaded(true);
-    });
-    void invoke("mascot_load_embedded", { id: 0, name: "seagull" }).catch((e) =>
-      console.error("[voxelle] mascot load error", e),
+    const update = () =>
+      setMascotRect({
+        x: MASCOT_PAD,
+        y: window.innerHeight - MASCOT_H - MASCOT_PAD,
+        width: MASCOT_W,
+        height: MASCOT_H,
+      });
+    window.addEventListener("resize", update);
+    return () => window.removeEventListener("resize", update);
+  }, []);
+
+  // ── Reposition speech bubbles when the mascot moves (window resize) ───────
+  useEffect(() => {
+    if (speechBubbles.length === 0) return;
+    const dpr = window.devicePixelRatio || 1;
+    const BUBBLE_W = 280;
+    const BUBBLE_H = 96;
+    const bubbleX = mascotRect.x + mascotRect.width + 12;
+    const bubbleY = mascotRect.y - 4;
+    const tailX = mascotRect.x + mascotRect.width * 0.35;
+    const tailY = mascotRect.y + mascotRect.height * 0.22;
+    for (const b of speechBubbles) {
+      void invoke("speech_bubble_reposition", {
+        id: b.id,
+        rx: bubbleX * dpr, ry: bubbleY * dpr, rw: BUBBLE_W * dpr, rh: BUBBLE_H * dpr,
+        tx: tailX * dpr,   ty: tailY * dpr,
+      });
+    }
+    setSpeechBubbles((prev) =>
+      prev.map((b) => ({ ...b, x: bubbleX, y: bubbleY, width: BUBBLE_W, height: BUBBLE_H })),
     );
+  }, [mascotRect]);
+
+  // ── Mascot loading ────────────────────────────────────────────────────────
+  // Await listener registration before invoking so the "mascot-loaded" event
+  // cannot fire before the handler is wired up.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | null = null;
+    void (async () => {
+      unlisten = await listen<number>("mascot-loaded", (ev) => {
+        if (ev.payload === 0) setMascotsLoaded(true);
+      });
+      if (cancelled) { unlisten(); return; }
+      void invoke("mascot_load_embedded", { id: 0, name: "seagull" }).catch((e) =>
+        console.error("[voxelle] mascot load error", e),
+      );
+    })();
     return () => {
-      void unlistenPromise.then((fn) => fn());
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
+
+  // ── Speech bubble dismissed event ─────────────────────────────────────────
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void listen<number>("speech-bubble-dismissed", (ev) => {
+      setSpeechBubbles((prev) => prev.filter((b) => b.id !== ev.payload));
+    }).then((fn) => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, []);
+
+  /** Show or advance the mascot's greeting speech bubble. */
+  const handleMascotClick = useCallback(
+    (mascotId: number) => {
+      if (mascotId !== 0) return;
+
+      // If a bubble is already open for this mascot, forward the click to it.
+      if (speechBubbles.length > 0) {
+        void invoke("speech_bubble_click", { id: speechBubbles[0].id });
+        return;
+      }
+
+      const dpr = window.devicePixelRatio || 1;
+      const BUBBLE_W = 280;
+      const BUBBLE_H = 96;
+      // Position bubble to the right of and level with the mascot top edge.
+      const bubbleX = mascotRect.x + mascotRect.width + 12;
+      const bubbleY = mascotRect.y - 4;
+      // Tail tip: upper-left area of the mascot (its head region).
+      const tailX = mascotRect.x + mascotRect.width * 0.35;
+      const tailY = mascotRect.y + mascotRect.height * 0.22;
+
+      const id = nextBubbleId.current++;
+      void invoke("speech_bubble_show", {
+        id,
+        pages: [generateIdea()],
+        rx: bubbleX * dpr,
+        ry: bubbleY * dpr,
+        rw: BUBBLE_W * dpr,
+        rh: BUBBLE_H * dpr,
+        tx: tailX * dpr,
+        ty: tailY * dpr,
+      });
+      setSpeechBubbles((prev) => [
+        ...prev,
+        { id, x: bubbleX, y: bubbleY, width: BUBBLE_W, height: BUBBLE_H },
+      ]);
+    },
+    [mascotRect, speechBubbles],
+  );
 
   useEffect(() => {
     selectionCountRef.current = selectionCount;
@@ -12849,11 +12954,15 @@ function App() {
       {showStartScreen && mascotsLoaded && (
         <MascotView
           id={0}
-          rect={{ x: 80, y: 380, width: 180, height: 180 }}
+          rect={mascotRect}
           visible={showStartScreen}
-          onClick={(id) => console.log("[voxelle] mascot clicked", id)}
+          onClick={handleMascotClick}
         />
       )}
+
+      {/* ── Speech bubble click-capture overlays ─────────────────────────────
+           GPU renders the actual bubble shapes; these divs only capture clicks. */}
+      <SpeechBubbleOverlay bubbles={speechBubbles} />
     </div>
   );
 }
