@@ -15,8 +15,13 @@ jobs:
       matrix:
         include:
           - platform: macos-15-intel
-            artifact_name: dev-macos-universal
-            bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
+            rust_target: x86_64-apple-darwin
+            artifact_name: dev-macos-intel
+            bundle_dir: src-tauri/target/x86_64-apple-darwin/release/bundle
+          - platform: macos-15
+            rust_target: aarch64-apple-darwin
+            artifact_name: dev-macos-arm
+            bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle
           - platform: ubuntu-22.04
             artifact_name: dev-linux
             bundle_dir: src-tauri/target/release/bundle
@@ -37,13 +42,13 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Add universal binary targets and pin rustup (macOS only)
-        if: matrix.platform == 'macos-15-intel'
+      - name: Add Rust target and pin rustup (macOS only)
+        if: runner.os == 'macOS'
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
-          "$HOME/.cargo/bin/rustup" target add aarch64-apple-darwin x86_64-apple-darwin
+          "$HOME/.cargo/bin/rustup" target add ${{ matrix.rust_target }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -80,7 +85,7 @@ jobs:
           rm test_sign.exe
 
       - name: Import Apple signing certificate
-        if: matrix.platform == 'macos-15-intel'
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -104,13 +109,13 @@ jobs:
         run: |
           echo '{"bundle":{"createUpdaterArtifacts":false}}' > dev-override.json
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            npm run tauri -- build --target universal-apple-darwin --config dev-override.json
+            npm run tauri -- build --target ${{ matrix.rust_target }} --config dev-override.json
           else
             npm run tauri -- build --config dev-override.json
           fi
 
       - name: Collect macOS installer
-        if: matrix.platform == 'macos-15-intel'
+        if: runner.os == 'macOS'
         shell: bash
         run: |
           mkdir -p upload

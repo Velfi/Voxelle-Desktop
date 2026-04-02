@@ -3535,10 +3535,8 @@ function App() {
         sprayDensity: sprayDensityRef.current,
         strokeMode: drawStrokeModeRef.current,
         planeAxis: planeAxisRef.current,
-        strokeAux: mergedStrokeAux({}),
+        strokeAux: mergedStrokeAux({ polygonDepth: polygonDepthRef.current }),
         matchMaterial: matchMaterialSelectColorRef.current,
-        strokeLineStartNx: 0,
-        strokeLineStartNy: 0,
       },
     }).catch(() => {});
   }, [polygonPhase.snapshot, polygonDepthUi, loading, workBusy, interactionMode]);
@@ -3618,10 +3616,12 @@ function App() {
     const snap = polygonPhase.ref.current;
     if (!snap) return;
     const { endNorm } = snap.data;
+    const depth = polygonDepthRef.current;
     runStrokeAtScreen(endNorm.nx, endNorm.ny, {
       polygonVertices: strokePolygonVertsRef.current.map(
         (v) => [v[0], v[1], v[2]] as [number, number, number],
       ),
+      polygonDepth: depth,
     });
     polygonPhase.cancel();
     setStrokePolygonVerts([]);
