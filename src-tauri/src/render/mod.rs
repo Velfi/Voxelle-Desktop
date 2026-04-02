@@ -1,4 +1,8 @@
 //! Multi-pass GPU renderer: shadow map, HDR+MRT, transmission, bloom, composite.
+//!
+//! Synchronization is WebGPU-style: the implementation inserts layout transitions and barriers;
+//! we only need valid `TextureUsages` / pass ordering and copies where a texture cannot be both
+//! written and sampled in one pass (e.g. depth snapshot for SSR).
 
 mod gpu {
     pub mod scene {
@@ -1379,7 +1383,9 @@ fn fullscreen_pipeline(
     })
 }
 
-/// Read-only depth snapshot for SSR in the trans pass (COPY_DST | TEXTURE_BINDING only).
+/// Read-only depth snapshot for SSR / OIT: main depth is a depth attachment while those passes
+/// sample depth; WebGPU forbids overlapping attachment + shader read on the same subresource.
+/// We copy into this texture (`COPY_DST` | `TEXTURE_BINDING` only) instead of manual barriers.
 fn create_depth_snapshot(
     device: &wgpu::Device,
     width: u32,
@@ -1820,10 +1826,19 @@ fn build_bloom_pyramid_bind_groups(
 
 impl WgpuViewer {
     pub async fn new(window: impl wgpu::WindowHandle + 'static) -> Result<Self, String> {
-        let backend_mask = wgpu::Backends::all();
+        // Prefer Vulkan on Windows to avoid D3D12 swapchain state-validation churn
+        // seen on some systems. Keep all backends elsewhere.
+        let backend_mask = if cfg!(target_os = "windows") {
+            wgpu::Backends::VULKAN
+        } else {
+            wgpu::Backends::all()
+        };
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: backend_mask,
+            // Enables backend API validation in debug builds (Vulkan layers, D3D12 debug, etc.).
+            // `with_env` honors WGPU_VALIDATION / WGPU_DEBUG so developers can disable if needed.
+            flags: wgpu::InstanceFlags::from_build_config().with_env(),
             ..Default::default()
         });
         let surface = instance.create_surface(window).map_err(|e| e.to_string())?;
@@ -1898,23 +1913,52 @@ impl WgpuViewer {
             .map_err(|e| e.to_string())?;
 
         let size = (800u32, 600u32);
+        // On Windows, prefer Opaque when available. Transparent swapchains can trigger
+        // D3D12 debug-layer state warnings in mixed compositor scenarios (wgpu + webview).
+        // Other platforms keep preferring composited alpha for native-under-webview blending.
+        let alpha_mode = if cfg!(target_os = "windows")
+            && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque)
+        {
+            wgpu::CompositeAlphaMode::Opaque
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PostMultiplied
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::Inherit)
+        {
+            wgpu::CompositeAlphaMode::Inherit
+        } else {
+            caps.alpha_modes[0]
+        };
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_DST,
             format,
             width: size.0.max(1),
             height: size.1.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: if caps
-                .alpha_modes
-                .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
-            {
-                wgpu::CompositeAlphaMode::PreMultiplied
-            } else {
-                caps.alpha_modes[0]
-            },
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        if matches!(config.alpha_mode, wgpu::CompositeAlphaMode::Opaque) {
+            debug_log(
+                "H3",
+                "src-tauri/src/render/mod.rs:new",
+                "opaque-alpha-mode-selected",
+                json!({
+                    "alpha_modes": format!("{:?}", caps.alpha_modes),
+                    "note": "Opaque swapchain can place viewport above webview UI on some systems"
+                }),
+            );
+        }
         surface.configure(&device, &config);
 
         let scene_layout0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -7326,7 +7370,8 @@ impl WgpuViewer {
                 },
                 ext,
             );
-            // Snapshot depth for SSR reads in the trans pass (avoids DEPTH_STENCIL_WRITE conflict).
+            // Copy depth to a read-only snapshot: next passes sample depth while the main depth
+            // attachment may still be bound in overlapping use; WebGPU disallows attach+sample.
             encoder.copy_texture_to_texture(
                 wgpu::ImageCopyTexture {
                     texture: &self.depth_texture,
@@ -7430,6 +7475,8 @@ impl WgpuViewer {
             }
         } // end rasterized path
 
+        // Bloom extract reads `bloom_extract_buf` uploaded at end of the *previous* frame (after
+        // meter readback). This frame's upload happens below, after the meter pass.
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bloom_ex"),
@@ -7631,7 +7678,7 @@ impl WgpuViewer {
             0,
             bytemuck::bytes_of(&self.post_composite_opts),
         );
-        // Sync exposure into the bloom extract uniform so the threshold scales with EV.
+        // EV for the *next* frame's bloom_extract pass (this frame's bloom already used prior value).
         self.queue.write_buffer(
             &self.bloom_extract_buf,
             0,

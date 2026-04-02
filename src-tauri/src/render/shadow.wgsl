@@ -26,6 +26,8 @@ struct VertexInput {
     @location(2) color: vec3<f32>,
     @location(3) mat_kind: f32,
     @location(4) vertex_ao: f32,
+    /// Must match main scene mesh layout (`vertex_layout`); unused for shadow depth.
+    @location(5) emission_tint: vec3<f32>,
 }
 
 struct ShadowVOut {
