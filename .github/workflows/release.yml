@@ -66,8 +66,14 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform == 'macos-15-intel' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Add universal binary targets and pin rustup (macOS only)
+        if: matrix.platform == 'macos-15-intel'
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
+          "$HOME/.cargo/bin/rustup" target add aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
