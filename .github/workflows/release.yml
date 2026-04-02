@@ -2,36 +2,40 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       tag:
         description: "Existing tag to re-release (e.g. v0.2.0)"
         required: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  publish-tauri:
-    # Use Node 24 for JS-based actions (checkout, setup-node) per GitHub deprecation of Node 20 runners.
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  build:
     permissions:
-      contents: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: "macos-latest"
-            args: "--target aarch64-apple-darwin"
+          - platform: macos-latest
             target: aarch64-apple-darwin
-          - platform: "macos-latest"
-            args: "--target x86_64-apple-darwin"
+            args: --target aarch64-apple-darwin
+            bundle-dir: src-tauri/target/aarch64-apple-darwin/release/bundle
+          - platform: macos-latest
             target: x86_64-apple-darwin
-          - platform: "ubuntu-22.04"
+            args: --target x86_64-apple-darwin
+            bundle-dir: src-tauri/target/x86_64-apple-darwin/release/bundle
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
             args: ""
-          - platform: "windows-latest"
+            bundle-dir: src-tauri/target/release/bundle
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
             args: ""
+            bundle-dir: src-tauri/target/release/bundle
 
     runs-on: ${{ matrix.platform }}
     steps:
@@ -39,28 +43,29 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: lts/*
           cache: npm
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
+      # Caches compiled dependencies so subsequent runs only rebuild changed code.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
-      - name: Install frontend dependencies
-        run: npm ci
-
-      - name: Import Apple signing certificate and notarization key
-        if: matrix.platform == 'macos-latest'
+      - name: Import Apple certificate and notarization key
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -70,29 +75,57 @@ jobs:
           security create-keychain -p "" build.keychain
           security default-keychain -s build.keychain
           security unlock-keychain -p "" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
           security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "" build.keychain
           rm certificate.p12
           mkdir -p ~/.private_keys
           echo "$APPLE_API_KEY_CONTENT" > ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
 
-      # Updater: requires repository secrets TAURI_SIGNING_PRIVATE_KEY and optionally
-      # TAURI_SIGNING_PRIVATE_KEY_PASSWORD (see https://v2.tauri.app/plugin/updater/).
-      # includeUpdaterJson uploads/merges latest.json for the static updater endpoint (default: true).
-      - uses: tauri-apps/tauri-action@v0.6.2
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
+        run: npm run tauri build -- ${{ matrix.args }}
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
         with:
-          tagName: ${{ env.RELEASE_TAG }}
-          releaseName: "Voxelle Desktop ${{ env.RELEASE_TAG }}"
-          releaseBody: "Installers and `latest.json` (updater manifest) are in the release assets."
-          generateReleaseNotes: true
-          releaseDraft: false
+          name: bundle-${{ matrix.target }}
+          path: ${{ matrix.bundle-dir }}
+          retention-days: 1
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: bundles
+
+      - name: Collect release files and generate latest.json
+        run: python3 .github/scripts/collect_release_artifacts.py bundles "$RELEASE_TAG"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: "Voxelle Desktop ${{ env.RELEASE_TAG }}"
+          generate_release_notes: true
+          draft: false
           prerelease: false
-          includeUpdaterJson: true
-          args: ${{ matrix.args }}
+          files: release-artifacts/*
