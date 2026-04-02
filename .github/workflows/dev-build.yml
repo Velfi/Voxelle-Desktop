@@ -34,13 +34,21 @@ jobs:
           node-version: lts/*
           cache: npm
 
-      - name: Pin RUSTUP_HOME (macOS only)
+      - name: Remove Homebrew Rust to prevent rustup conflict (macOS only)
         if: matrix.platform == 'macos-latest'
-        shell: bash
-        run: echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+        run: brew uninstall --ignore-dependencies rust rustup 2>/dev/null || true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Ensure cargo bin takes priority over Homebrew in PATH (macOS only)
+        if: matrix.platform == 'macos-latest'
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
+          echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -66,14 +74,15 @@ jobs:
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
         run: |
-          echo "relic version: $(relic version 2>&1 || true)"
-          printf 'MZ' > test.exe
-          relic sign --file test.exe --key azure --config src-tauri/relic.conf 2>&1 || {
+          relic --version
+          RELIC_BIN="$(which relic)"
+          cp "$RELIC_BIN" test_sign.exe
+          relic sign --file test_sign.exe --key azure --config src-tauri/relic.conf 2>&1 || {
             echo "--- relic sign failed, dumping debug info ---"
-            relic sign --file test.exe --key azure --config src-tauri/relic.conf -v 2>&1 || true
+            relic sign --file test_sign.exe --key azure --config src-tauri/relic.conf -d 9 2>&1 || true
             exit 1
           }
-          rm test.exe
+          rm test_sign.exe
 
       - name: Import Apple signing certificate
         if: matrix.platform == 'macos-latest'
@@ -100,7 +109,6 @@ jobs:
         run: |
           echo '{"bundle":{"createUpdaterArtifacts":false}}' > dev-override.json
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            rustup target add aarch64-apple-darwin x86_64-apple-darwin
             npm run tauri -- build --target universal-apple-darwin --config dev-override.json
           else
             npm run tauri -- build --config dev-override.json
