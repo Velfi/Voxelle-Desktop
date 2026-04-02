@@ -44,6 +44,22 @@ export function isToneMappingPreference(v: unknown): v is ToneMappingPreference 
   return typeof v === "string" && (TONE_ORDER as readonly string[]).includes(v);
 }
 
+export type StartShape = "cube" | "orb" | "cylinder" | "hollowCube" | "plane" | "circle" | "empty";
+
+const START_SHAPES: readonly StartShape[] = [
+  "cube",
+  "orb",
+  "cylinder",
+  "hollowCube",
+  "plane",
+  "circle",
+  "empty",
+];
+
+export function isStartShape(v: unknown): v is StartShape {
+  return typeof v === "string" && (START_SHAPES as readonly string[]).includes(v);
+}
+
 export type VoxelleDesktopPreferences = {
   showMovementDeltaHint: boolean;
   showDragDeltaHint: boolean;
@@ -83,6 +99,10 @@ export type VoxelleDesktopPreferences = {
   sunLocationLon: number;
   /** Always draw the selection gizmo on top of scene geometry. */
   gizmoOnTop: boolean;
+  /** Default grid size pre-filled in the New Project dialog (1–256). */
+  newProjectDefaultSize: number;
+  /** Default starting shape pre-filled in the New Project dialog. */
+  newProjectDefaultShape: StartShape;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -107,6 +127,8 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   sunLocationLat: 41.9,
   sunLocationLon: -87.6,
   gizmoOnTop: true,
+  newProjectDefaultSize: 32,
+  newProjectDefaultShape: "circle",
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -283,6 +305,13 @@ export function loadPreferences(): VoxelleDesktopPreferences {
           ? Math.max(-180, Math.min(180, o.sunLocationLon as number))
           : DEFAULTS.sunLocationLon,
       gizmoOnTop: typeof o.gizmoOnTop === "boolean" ? o.gizmoOnTop : DEFAULTS.gizmoOnTop,
+      newProjectDefaultSize:
+        typeof o.newProjectDefaultSize === "number" && Number.isFinite(o.newProjectDefaultSize)
+          ? clampInt(o.newProjectDefaultSize, 1, 256)
+          : DEFAULTS.newProjectDefaultSize,
+      newProjectDefaultShape: isStartShape(o.newProjectDefaultShape)
+        ? o.newProjectDefaultShape
+        : DEFAULTS.newProjectDefaultShape,
     };
   } catch {
     return { ...DEFAULTS };
@@ -323,6 +352,8 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.sunLocationLat = prefs.sunLocationLat;
     merged.sunLocationLon = prefs.sunLocationLon;
     merged.gizmoOnTop = prefs.gizmoOnTop;
+    merged.newProjectDefaultSize = prefs.newProjectDefaultSize;
+    merged.newProjectDefaultShape = prefs.newProjectDefaultShape;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

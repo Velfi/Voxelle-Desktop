@@ -78,7 +78,10 @@ jobs:
 
       - name: Install relic (Windows code signing)
         if: matrix.platform == 'windows-latest'
-        run: go install github.com/sassoftware/relic/v8@latest
+        shell: bash
+        run: |
+          go install github.com/sassoftware/relic/v8@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Import Apple signing certificate and notarization key
         if: matrix.platform == 'macos-latest'
@@ -113,10 +116,10 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            # Prepend cargo's rustup so Tauri's internal target checks use the same
-            # installation we add targets to, not the Homebrew rustup that comes first
-            # in the default macOS PATH.
-            export PATH="$CARGO_HOME/bin:$PATH"
+            # Pin RUSTUP_HOME to whatever rustup is currently using so that all
+            # subprocesses (including Tauri's internal `rustup target list --installed`
+            # checks) read from the same location we write targets to.
+            export RUSTUP_HOME="$(rustup show home)"
             rustup target add aarch64-apple-darwin x86_64-apple-darwin
             npm run tauri -- build --target universal-apple-darwin
           else

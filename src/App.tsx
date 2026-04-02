@@ -22,6 +22,7 @@ import {
   preferencesWithCollabIdentity,
   savePreferences,
   toneMappingToGpuMode,
+  type StartShape,
 } from "./preferences";
 import "./App.css";
 import {
@@ -770,7 +771,7 @@ let startScreenLogoInvokeSent = false;
 
 type RenderingMode = "greedy" | "marchingCubes" | "dualContour" | "ray";
 
-type StartShape = "cube" | "orb" | "cylinder" | "hollowCube" | "plane" | "circle" | "empty";
+// StartShape is defined in preferences.ts and re-exported from there
 
 type RosterEntry = {
   peerId: number;
@@ -2134,8 +2135,8 @@ function App() {
   const [showFpsCounter, setShowFpsCounter] = useState(() => loadPreferences().showFpsCounter);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
-  const [newGridSize, setNewGridSize] = useState(32);
-  const [newGridShape, setNewGridShape] = useState<StartShape>("circle");
+  const [newGridSize, setNewGridSize] = useState(() => loadPreferences().newProjectDefaultSize);
+  const [newGridShape, setNewGridShape] = useState<StartShape>(() => loadPreferences().newProjectDefaultShape);
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
   const [rotateDialogAxis, setRotateDialogAxis] = useState<0 | 1 | 2>(1);
   const [rotateDialogDegrees, setRotateDialogDegrees] = useState(90);
@@ -5047,6 +5048,14 @@ function App() {
     },
     [logPlaneStrokeDebug],
   );
+
+  useEffect(() => {
+    if (newProjectOpen) {
+      const p = loadPreferences();
+      setNewGridSize(p.newProjectDefaultSize);
+      setNewGridShape(p.newProjectDefaultShape);
+    }
+  }, [newProjectOpen]);
 
   const createNewProject = useCallback(() => {
     if (loading || workBusy) return;
@@ -12378,7 +12387,18 @@ function App() {
                       </button>
                     </div>
                   </div>
-                ) : null}
+                ) : (
+                  lastSessionReady ? (
+                    <button
+                      type="button"
+                      className="viewport-empty-open-btn"
+                      onClick={() => setNewProjectOpen(true)}
+                      disabled={loading || workBusy}
+                    >
+                      New Project
+                    </button>
+                  ) : null
+                )}
                 <button
                   type="button"
                   className="viewport-empty-open-btn is-secondary"

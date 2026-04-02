@@ -48,7 +48,10 @@ jobs:
 
       - name: Install relic (Windows code signing)
         if: matrix.platform == 'windows-latest'
-        run: go install github.com/sassoftware/relic/v8@latest
+        shell: bash
+        run: |
+          go install github.com/sassoftware/relic/v8@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Import Apple signing certificate
         if: matrix.platform == 'macos-latest'
@@ -75,7 +78,7 @@ jobs:
         run: |
           echo '{"bundle":{"createUpdaterArtifacts":false}}' > dev-override.json
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            export PATH="$CARGO_HOME/bin:$PATH"
+            export RUSTUP_HOME="$(rustup show home)"
             rustup target add aarch64-apple-darwin x86_64-apple-darwin
             npm run tauri -- build --target universal-apple-darwin --config dev-override.json
           else

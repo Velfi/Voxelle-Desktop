@@ -10,6 +10,7 @@ import {
   TONE_MAPPING_OPTIONS,
   toneMappingToGpuMode,
   type AppearanceTheme,
+  type StartShape,
   type ToneMappingPreference,
   type VoxelleDesktopPreferences,
 } from "./preferences";
@@ -106,6 +107,19 @@ export function PreferencesModal({
 
   const onReopenLastProject = (checked: boolean) => {
     const next = { ...prefs, reopenLastProject: checked };
+    setPrefs(next);
+    savePreferences(next);
+  };
+
+  const onNewProjectDefaultSize = (raw: number) => {
+    const v = Math.max(1, Math.min(256, Math.floor(raw)));
+    const next = { ...prefs, newProjectDefaultSize: Number.isFinite(v) ? v : 32 };
+    setPrefs(next);
+    savePreferences(next);
+  };
+
+  const onNewProjectDefaultShape = (value: StartShape) => {
+    const next = { ...prefs, newProjectDefaultShape: value };
     setPrefs(next);
     savePreferences(next);
   };
@@ -293,6 +307,35 @@ export function PreferencesModal({
                 onChange={(e) => onReopenLastProject(e.target.checked)}
               />
               Automatically reopen last project on startup
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Default new project size</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={1}
+                max={256}
+                step={1}
+                value={prefs.newProjectDefaultSize}
+                onChange={(e) => onNewProjectDefaultSize(Number(e.target.value))}
+              />
+              <span className="prefs-field-hint">Grid size pre-filled when creating a new project (1–256).</span>
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Default new project shape</span>
+              <select
+                className="prefs-tone-select"
+                value={prefs.newProjectDefaultShape}
+                onChange={(e) => onNewProjectDefaultShape(e.target.value as StartShape)}
+              >
+                <option value="cube">Cube</option>
+                <option value="orb">Orb</option>
+                <option value="cylinder">Cylinder</option>
+                <option value="hollowCube">Hollow cube</option>
+                <option value="plane">Plane</option>
+                <option value="circle">Circle</option>
+                <option value="empty">Empty</option>
+              </select>
             </label>
             <label className="prefs-select-label">
               <span className="prefs-select-label-text">Appearance</span>
