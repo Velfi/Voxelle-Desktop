@@ -22,8 +22,6 @@ mod stroke_modes;
 mod voxel_edit;
 /// Voxel format / types (public for `cargo bench` and tests).
 pub mod voxelle;
-#[cfg(target_os = "windows")]
-mod win_child_window;
 
 use camera::OrbitCamera;
 use gpu_brick::{BrickCellWrite, GpuVoxelBrick};
@@ -931,9 +929,6 @@ impl Default for FlyInputState {
 
 pub struct ViewerState {
     pub viewer: Mutex<Option<WgpuViewer>>,
-    /// Windows-only child HWND hosting the wgpu surface (keeps it behind WebView2).
-    #[cfg(target_os = "windows")]
-    pub render_child_window: Mutex<Option<win_child_window::ChildRenderWindow>>,
     pub camera: Mutex<OrbitCamera>,
     pub file_label: Mutex<String>,
     /// Latest loaded model for CPU-side edits (add/remove voxels).
@@ -1329,26 +1324,8 @@ fn viewer_resize(
     let sw = surface_width.max(1);
     let sh = surface_height.max(1);
 
-    // On Windows the wgpu surface lives on a child HWND sized to the viewport,
-    // so surface == viewport and offsets are zero.  Reposition the child window
-    // to match the viewport location within the parent.
-    #[cfg(target_os = "windows")]
-    {
-        let vw = viewport_width.max(1);
-        let vh = viewport_height.max(1);
-        if let Some(child) = state.render_child_window.lock().as_ref() {
-            child.reposition(viewport_x as i32, viewport_y as i32, vw as i32, vh as i32);
-        }
-    }
-
     let mut g = state.viewer.lock();
     if let Some(v) = g.as_mut() {
-        #[cfg(target_os = "windows")]
-        let (sw, sh, viewport_x, viewport_y) = {
-            let vw = viewport_width.max(1);
-            let vh = viewport_height.max(1);
-            (vw, vh, 0u32, 0u32)
-        };
         v.resize(
             sw,
             sh,
@@ -12866,7 +12843,6 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
 
     let menu = Menu::default(app)?;
     let about_item = PredefinedMenuItem::about(app, None, Some(vd_about_metadata(app)?))?;
-    let app_menu_title = app.package_info().name.clone();
     let new_item = MenuItem::with_id(app, "new_project", "New Project…", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open_voxelle", "Open…", true, Some("CommandOrCtrl+O"))?;
     let save_item = MenuItem::with_id(app, "menu_save", "Save", true, Some("CommandOrCtrl+S"))?;
@@ -13054,7 +13030,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
         if let MenuItemKind::Submenu(sub) = item {
             let text = sub.text()?;
             #[cfg(target_os = "macos")]
-            if text == app_menu_title {
+            if text == app.package_info().name.clone() {
                 sub.remove_at(0)?;
                 sub.insert(&about_item, 0)?;
                 sub.insert(&preferences_item, 1)?;
@@ -14000,8 +13976,6 @@ pub fn run() {
 
     let viewer_state = Arc::new(ViewerState {
         viewer: Mutex::new(None),
-        #[cfg(target_os = "windows")]
-        render_child_window: Mutex::new(None),
         camera: Mutex::new(OrbitCamera::new()),
         file_label: Mutex::new(String::new()),
         current_file: Mutex::new(None),
@@ -14427,28 +14401,6 @@ pub fn run() {
             if headless_server_port.is_some() {
                 let _ = window.hide();
             }
-            // On Windows, create a child HWND for the wgpu surface so it sits
-            // behind WebView2 in z-order (avoids viewport-on-top-of-UI on some
-            // GPU driver / Windows version combinations).
-            #[cfg(target_os = "windows")]
-            let viewer = {
-                use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                let handle = window.window_handle().map_err(|e| format!("{e}"))?;
-                let RawWindowHandle::Win32(win32) = handle.as_raw() else {
-                    return Err("expected Win32 window handle".into());
-                };
-                let parent_hwnd =
-                    windows::Win32::Foundation::HWND(win32.hwnd.get() as _);
-                let child = win_child_window::ChildRenderWindow::new(parent_hwnd)
-                    .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-                let surface_handle = child.surface_handle();
-                *vs.render_child_window.lock() = Some(child);
-                tauri::async_runtime::block_on(async move {
-                    WgpuViewer::new(surface_handle).await
-                })
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
-            };
-            #[cfg(not(target_os = "windows"))]
             let viewer = {
                 let w = window.clone();
                 tauri::async_runtime::block_on(async move { WgpuViewer::new(w).await })
@@ -14893,8 +14845,6 @@ pub fn run() {
 pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
     Arc::new(ViewerState {
         viewer: Mutex::new(None),
-        #[cfg(target_os = "windows")]
-        render_child_window: Mutex::new(None),
         camera: Mutex::new(OrbitCamera::new()),
         file_label: Mutex::new(String::new()),
         current_file: Mutex::new(None),

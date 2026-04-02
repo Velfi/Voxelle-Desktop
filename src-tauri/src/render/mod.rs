@@ -60,8 +60,12 @@ use glyphon::{
     FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds,
     TextRenderer, Viewport as GlyphonViewport,
 };
+use serde_json::json;
 use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::SystemTime;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Runtime};
 use wgpu::util::DeviceExt;
@@ -70,6 +74,29 @@ use wgpu::util::DeviceExt;
 const MESH_GREEDY_PIPELINE_LAYOUT_VERSION: u32 = 2;
 /// Number of mip levels in the bloom downsample/upsample pyramid.
 const BLOOM_LEVELS: usize = 5;
+
+fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_json::Value) {
+    let ts = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let payload = json!({
+        "sessionId": "373ecd",
+        "runId": "run-pre-fix-1",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "data": data,
+        "timestamp": ts
+    });
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("C:\\Users\\zelda\\Documents\\Voxelle-Desktop\\debug-373ecd.log")
+    {
+        let _ = writeln!(f, "{}", payload);
+    }
+}
 
 /// Opaque mesh vertex: `vec3 pos, vec3 n, vec3 color, mat_kind, ao, vec3 emission_tint` → 14×`f32`.
 const OPAQUE_VERTEX_STRIDE: u64 = 56;
@@ -1793,8 +1820,10 @@ fn build_bloom_pyramid_bind_groups(
 
 impl WgpuViewer {
     pub async fn new(window: impl wgpu::WindowHandle + 'static) -> Result<Self, String> {
+        let backend_mask = wgpu::Backends::all();
+
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: backend_mask,
             ..Default::default()
         });
         let surface = instance.create_surface(window).map_err(|e| e.to_string())?;
@@ -1806,7 +1835,34 @@ impl WgpuViewer {
             })
             .await
             .ok_or_else(|| "no wgpu adapter".to_string())?;
+        let adapter_info = adapter.get_info();
+        // #region agent log
+        debug_log(
+            "H1",
+            "src-tauri/src/render/mod.rs:new",
+            "adapter-selected",
+            json!({
+                "backend_mask": format!("{:?}", backend_mask),
+                "adapter_backend": format!("{:?}", adapter_info.backend),
+                "adapter_name": adapter_info.name,
+                "adapter_driver": adapter_info.driver,
+                "adapter_device_type": format!("{:?}", adapter_info.device_type)
+            }),
+        );
+        // #endregion
         let caps = surface.get_capabilities(&adapter);
+        // #region agent log
+        debug_log(
+            "H2",
+            "src-tauri/src/render/mod.rs:new",
+            "surface-caps",
+            json!({
+                "present_modes": format!("{:?}", caps.present_modes),
+                "alpha_modes": format!("{:?}", caps.alpha_modes),
+                "formats_count": caps.formats.len()
+            }),
+        );
+        // #endregion
         let format = caps
             .formats
             .iter()
@@ -2133,6 +2189,18 @@ impl WgpuViewer {
             label: Some("composite"),
             source: wgpu::ShaderSource::Wgsl(gpu::post_composite::WGSL.into()),
         });
+        // #region agent log
+        debug_log(
+            "H3",
+            "src-tauri/src/render/mod.rs:new",
+            "post-composite-shader-signature",
+            json!({
+                "wgsl_len": gpu::post_composite::WGSL.len(),
+                "has_dynamic_sunshaft_loop": gpu::post_composite::WGSL.contains("for (var i = 0; i < num_samples; i = i + 1)"),
+                "has_loop_break": gpu::post_composite::WGSL.contains("if any(clamped != sample_uv) { break; }")
+            }),
+        );
+        // #endregion
         let shader_meter = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("meter_lum"),
             source: wgpu::ShaderSource::Wgsl(gpu::meter_luminance::WGSL.into()),
@@ -3184,6 +3252,18 @@ impl WgpuViewer {
             })],
             None,
         );
+        // #region agent log
+        debug_log(
+            "H4",
+            "src-tauri/src/render/mod.rs:new",
+            "pipeline-composite-created",
+            json!({
+                "surface_format": format!("{:?}", format),
+                "config_alpha_mode": format!("{:?}", config.alpha_mode),
+                "config_present_mode": format!("{:?}", config.present_mode)
+            }),
+        );
+        // #endregion
         let pipeline_meter = fullscreen_pipeline(
             &device,
             &pl_bloom,
@@ -3300,6 +3380,18 @@ impl WgpuViewer {
             min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        // #region agent log
+        debug_log(
+            "H7",
+            "src-tauri/src/render/mod.rs:new",
+            "samplers-created",
+            json!({
+                "linear_label": "linear",
+                "comparison_label": "shadow_cmp",
+                "depth_label": "depth_non_filter"
+            }),
+        );
+        // #endregion
 
         let (shadow_texture, shadow_view) =
             create_shadow_tex(&device, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
@@ -3849,6 +3941,16 @@ impl WgpuViewer {
             })],
             None,
         );
+        // #region agent log
+        debug_log(
+            "H8",
+            "src-tauri/src/render/mod.rs:new",
+            "raytrace-pipeline-created",
+            json!({
+                "rt_enabled_default": false
+            }),
+        );
+        // #endregion
 
         let rt_accum_textures = [rt_accum_tex0, rt_accum_tex1];
         let rt_accum_views = [rt_accum_view0, rt_accum_view1];
@@ -3873,6 +3975,17 @@ impl WgpuViewer {
             None,
         );
         let glyphon_viewport = GlyphonViewport::new(&device, &glyphon_cache);
+        // #region agent log
+        debug_log(
+            "H9",
+            "src-tauri/src/render/mod.rs:new",
+            "viewer-construction-ready",
+            json!({
+                "glyphon_ready": true,
+                "surface_size": [size.0, size.1]
+            }),
+        );
+        // #endregion
 
         Ok(Self {
             surface,
@@ -6940,10 +7053,22 @@ impl WgpuViewer {
         let tex_size = frame.texture.size();
         // Keep CPU-side surface size in sync with the actual swapchain (configure can differ slightly).
         self.surface_size = (tex_size.width.max(1), tex_size.height.max(1));
-        let swap_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
+        // #region agent log
+        static RENDER_LOG_COUNTER: AtomicU32 = AtomicU32::new(0);
+        let render_log_idx = RENDER_LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
+        if render_log_idx < 8 {
+            debug_log(
+                "H5",
+                "src-tauri/src/render/mod.rs:render",
+                "frame-begin",
+                json!({
+                    "index": render_log_idx,
+                    "viewport": [self.viewport_x, self.viewport_y, self.viewport_width, self.viewport_height],
+                    "surface": [self.surface_size.0, self.surface_size.1]
+                }),
+            );
+        }
+        // #endregion
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -7654,23 +7779,6 @@ impl WgpuViewer {
             self.glyphon_atlas.trim();
         }
 
-        {
-            let _clear_swap = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear_swap"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &swap_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-            });
-        }
-
         let vw = self.viewport_width.max(1);
         let vh = self.viewport_height.max(1);
         encoder.copy_texture_to_texture(
@@ -7702,6 +7810,20 @@ impl WgpuViewer {
             self.read_meter_luminance_and_update_auto_exposure();
         }
         frame.present();
+        // #region agent log
+        if render_log_idx < 8 {
+            debug_log(
+                "H6",
+                "src-tauri/src/render/mod.rs:render",
+                "frame-end",
+                json!({
+                    "index": render_log_idx,
+                    "auto_exposure": self.auto_exposure_enabled,
+                    "raytrace": self.raytrace_enabled
+                }),
+            );
+        }
+        // #endregion
         Ok(())
     }
 }

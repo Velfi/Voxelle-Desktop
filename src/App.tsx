@@ -1379,9 +1379,9 @@ function App() {
   const [stampBookOpen, setStampBookOpen] = useState(false);
   /** True when a stamp was loaded from the stamp book (not from the edit selection). */
   const [stampBookPatternActive, setStampBookPatternActive] = useState(false);
-  const [stampRotX, setStampRotX] = useState(0);
-  const [stampRotY, setStampRotY] = useState(0);
-  const [stampRotZ, setStampRotZ] = useState(0);
+  const [stampRotX] = useState(0);
+  const [stampRotY] = useState(0);
+  const [stampRotZ] = useState(0);
   const stampRotXRef = useRef(0);
   const stampRotYRef = useRef(0);
   const stampRotZRef = useRef(0);

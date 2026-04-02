@@ -304,8 +304,9 @@ fn apply_sun_shafts(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if po.ss_enabled < 0.5 { return color; }
 
     let sun_uv = vec2<f32>(po.ss_sun_uv_x, po.ss_sun_uv_y);
-    let num_samples = i32(po.ss_samples);
-    let delta_uv = (sun_uv - uv) / f32(num_samples);
+    let max_samples: i32 = 64;
+    let clamped_samples = clamp(i32(po.ss_samples), 1, max_samples);
+    let delta_uv = (sun_uv - uv) / f32(clamped_samples);
 
     // Jitter the starting offset by a per-pixel hash to break banding,
     // same idea as the IGN rotation used for PCF shadow smoothing.
@@ -315,14 +316,16 @@ fn apply_sun_shafts(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     var decay_accum: f32 = 1.0;
     var current_density = po.ss_density;
 
-    for (var i = 0; i < num_samples; i = i + 1) {
+    // Keep a fixed upper bound so FXC can compile this path on D3D12.
+    for (var i = 0; i < max_samples; i = i + 1) {
         sample_uv = sample_uv + delta_uv;
-        let clamped = clamp(sample_uv, vec2<f32>(0.0), vec2<f32>(1.0));
-        if any(clamped != sample_uv) { break; }
-
-        let d = textureSample(t_depth, samp_depth, sample_uv);
+        let in_sample_range = i < clamped_samples;
+        let clamped_uv = clamp(sample_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+        let in_bounds = all(clamped_uv == sample_uv);
+        let sample_enabled = in_sample_range && in_bounds;
+        let d = textureSample(t_depth, samp_depth, clamped_uv);
         // Sky pixels (depth near far plane) contribute light
-        let is_sky = select(0.0, 1.0, d >= 0.9992);
+        let is_sky = select(0.0, 1.0, sample_enabled && d >= 0.9992);
 
         illumination = illumination + is_sky * decay_accum * po.ss_weight * current_density;
         decay_accum = decay_accum * po.ss_decay;
