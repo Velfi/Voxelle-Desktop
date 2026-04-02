@@ -742,6 +742,27 @@ pub fn get_ray_direction_path(origin: VoxelCoord, direction: Vec3, length: u32) 
     positions
 }
 
+/// Compute the extrude footprint for a selection: copies all selected coords forward
+/// by `direction` (unit vector) for each depth step 1..=length.
+pub fn extrude_selection_footprint(
+    selection: &AHashSet<VoxelCoord>,
+    direction: Vec3,
+    length: u32,
+) -> Vec<VoxelCoord> {
+    let mut result = Vec::new();
+    for depth in 1..=length {
+        let offset = direction * depth as f32;
+        for &(x, y, z) in selection {
+            result.push((
+                x + offset.x.round() as i32,
+                y + offset.y.round() as i32,
+                z + offset.z.round() as i32,
+            ));
+        }
+    }
+    result
+}
+
 /// Compute the extrude footprint for a straight-line ray spine.
 /// This handles both cube and cylinder profiles, matching the web version's behavior.
 pub fn extrude_ray_footprint(

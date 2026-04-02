@@ -1326,8 +1326,8 @@ fn viewer_resize(
     viewport_width: u32,
     viewport_height: u32,
 ) -> Result<(), String> {
-    let _sw = surface_width.max(1);
-    let _sh = surface_height.max(1);
+    let sw = surface_width.max(1);
+    let sh = surface_height.max(1);
 
     // On Windows the wgpu surface lives on a child HWND sized to the viewport,
     // so surface == viewport and offsets are zero.  Reposition the child window
@@ -4543,7 +4543,7 @@ fn collab_peer_labels(state: State<'_, Arc<ViewerState>>) -> Result<Vec<PeerLabe
 
 fn push_solo_undo_step(
     state: &Arc<ViewerState>,
-    _app: &AppHandle,
+    app: &AppHandle,
     deltas: Vec<voxel_edit::VoxelEditDelta>,
 ) -> Result<(), String> {
     if deltas.is_empty() {
@@ -4561,7 +4561,7 @@ fn push_solo_undo_step(
 
 fn push_solo_selection_undo_step(
     state: &Arc<ViewerState>,
-    _app: &AppHandle,
+    app: &AppHandle,
     before: AHashSet<greedy_mesh::VoxelCoord>,
 ) -> Result<(), String> {
     state
@@ -5937,7 +5937,7 @@ fn get_selection_gizmo_projected(
 /// selection sync, so we just apply the voxel changes without solo undo).
 fn push_selection_transform_undo(
     state: &Arc<ViewerState>,
-    _app: &AppHandle,
+    app: &AppHandle,
     before_sel: AHashSet<greedy_mesh::VoxelCoord>,
     deltas: Vec<voxel_edit::VoxelEditDelta>,
 ) {
@@ -7866,6 +7866,169 @@ fn extrude_ray_preview(
         union.clear();
         for c in &footprint {
             union.insert(*c);
+        }
+    }
+
+    state
+        .stroke_preview_suppresses_hover
+        .store(true, Ordering::Relaxed);
+
+    // Generate and upload preview mesh.
+    let instanced = {
+        let fg = state.current_file.lock();
+        let vm = state.voxel_map.lock();
+        let Some(file) = fg.as_ref() else {
+            return Ok(());
+        };
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(());
+        };
+        let union = state.stroke_preview_union.lock();
+        stroke_preview_meshes_for_union(
+            voxel_edit::EditTool::Add,
+            &union,
+            vmap,
+            file,
+            false,
+            args.color,
+            None,
+        )
+    };
+
+    {
+        let mut v = state.viewer.lock();
+        let Some(viewer) = v.as_mut() else {
+            return Ok(());
+        };
+        if instanced.solid_instances.is_empty() {
+            clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
+        } else {
+            viewer.upload_preview_mesh_instanced(&instanced);
+            viewer.preview_cache_key = None;
+            *state.preview_overlay_cache_key.lock() = None;
+        }
+    }
+
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+// ── Selection extrude preview ─────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectionExtrudePreviewArgs {
+    screen_dx: f32,
+    screen_dy: f32,
+    direction_ref: voxel_edit::ExtrudeDirectionRef,
+    color: u32,
+    material: String,
+}
+
+#[tauri::command]
+fn selection_extrude_preview(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: SelectionExtrudePreviewArgs,
+) -> Result<(), String> {
+    {
+        let cm = state.collab.lock();
+        if cm.is_client() {
+            return Ok(());
+        }
+    }
+
+    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
+        state.selection_cells.lock().clone();
+    if selection.is_empty() {
+        return Ok(());
+    }
+
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(());
+        };
+        viewer.viewport_size()
+    };
+    let w = w as f32;
+    let h = h as f32;
+    let _ = (w, h); // viewport size not needed for direction resolution
+
+    let direction = {
+        let cam = state.camera.lock();
+        voxel_edit::resolve_extrude_direction(
+            args.direction_ref,
+            &cam,
+            args.screen_dx,
+            args.screen_dy,
+            None,
+        )
+    };
+
+    let drag_dist =
+        (args.screen_dx * args.screen_dx + args.screen_dy * args.screen_dy).sqrt();
+    let length = (drag_dist / 6.0).round().max(0.0) as u32;
+
+    let footprint = voxel_edit::extrude_selection_footprint(&selection, direction, length);
+
+    // Replace preview union.
+    {
+        let mut union = state.stroke_preview_union.lock();
+        union.clear();
+        for c in &footprint {
+            union.insert(*c);
+        }
+    }
+
+    // Store a synthetic sculpt replay entry so voxel_stroke_end knows to commit from the union.
+    {
+        let mut replay = state.sculpt_stroke_replay.lock();
+        if replay.is_empty() {
+            replay.push(SculptStrokeAtScreenArgs {
+                nx: 0.5,
+                ny: 0.5,
+                sculpt_mode: voxel_edit::SculptStrokeMode::Extrude,
+                color: args.color,
+                material: args.material.clone(),
+                brush_radius: 0,
+                brush_shape: Default::default(),
+                spray_density: 0.0,
+                brush_clip_bottom_half: false,
+                stroke_line_start_nx: None,
+                stroke_line_start_ny: None,
+                stroke_segment_prev_nx: None,
+                stroke_segment_prev_ny: None,
+                terrain_op: None,
+                terrain_base_y: 0,
+                terrain_strength: 50,
+                terrain_smooth_radius: 0,
+                smooth_neighbor_passes: 1,
+                brush_strength: 100,
+                brush_falloff: 100,
+                stroke_seed: 0,
+                wall_area_shape: Default::default(),
+                spray_direction: Default::default(),
+                wall_width_index: 0,
+                wall_height_vox: 2,
+                wall_lock_start_height: false,
+                wall_axis_align: false,
+                sculpt_smooth_variant: Default::default(),
+                smooth_neighbor_radius: 0,
+                smooth_aggressiveness: 100,
+                smooth_laplacian_iterations: 4,
+                smooth_laplacian_relax_pct: 50,
+                wall_polygon_vertices: None,
+                extrude_profile: Default::default(),
+                extrude_end_cap: Default::default(),
+                extrude_taper: false,
+                extrude_taper_start: 0.0,
+                extrude_taper_end: 0.0,
+            });
+        } else {
+            let entry = &mut replay[0];
+            entry.color = args.color;
+            entry.material = args.material.clone();
         }
     }
 
@@ -12509,7 +12672,7 @@ fn vd_about_metadata(app: &AppHandle) -> tauri::Result<tauri::menu::AboutMetadat
     // Public repo (matches updater endpoint in `tauri.conf.json`).
     const GITHUB_VD: &str = "https://github.com/Velfi/Voxelle-Desktop";
     let pkg = app.package_info();
-    let m = AboutMetadata {
+    let mut m = AboutMetadata {
         name: Some(pkg.name.clone()),
         version: Some(pkg.version.to_string()),
         website: Some(GITHUB_VD.into()),
@@ -12689,7 +12852,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
 
     let menu = Menu::default(app)?;
     let about_item = PredefinedMenuItem::about(app, None, Some(vd_about_metadata(app)?))?;
-    let _app_menu_title = app.package_info().name.clone();
+    let app_menu_title = app.package_info().name.clone();
     let new_item = MenuItem::with_id(app, "new_project", "New Project…", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open_voxelle", "Open…", true, Some("CommandOrCtrl+O"))?;
     let save_item = MenuItem::with_id(app, "menu_save", "Save", true, Some("CommandOrCtrl+S"))?;
@@ -14410,6 +14573,7 @@ pub fn run() {
             voxel_sculpt_stroke_at_screen,
             voxel_sculpt_stroke_preview_at_screen,
             extrude_ray_preview,
+            selection_extrude_preview,
             extrude_recompute_preview,
             generator_rocks_at_screen,
             generator_grass_at_screen,
