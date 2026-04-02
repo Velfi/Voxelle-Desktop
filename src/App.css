@@ -430,8 +430,6 @@ body,
   overflow-y: auto;
 }
 
-
-
 .sidebar-section-label {
   margin: 0;
   font-size: 0.62rem;
@@ -3282,4 +3280,3 @@ body,
   flex-shrink: 0;
   border-top: 1px solid var(--app-control-border-strong);
 }
-

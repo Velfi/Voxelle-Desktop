@@ -173,61 +173,465 @@ const LS_PALETTE_FLOAT_SIZE = "voxellePaletteFloatSize";
 /** `localStorage` = `"1"`: show JS vs Rust viewport cursor overlay (see `get_viewport_cursor_debug`). */
 const LS_VIEWPORT_CURSOR_DEBUG = "voxelleDebugViewportCursor";
 
-const INSECTA_SPECIES_PRESETS: Record<string, {
-  totalLength: number; headRatio: number; thoraxRatio: number; abdomenRatio: number;
-  bodyHalfWidth: number; bodyHalfHeight: number; abdomenTaper: number; headShape: number;
-  bodyArch: number; antennaLength: number; antennaSpread: number; antennaPitch: number;
-  antennaRoot: number; mandibleLength: number; mandibleSpread: number; mandibleForward: number;
-  wingShape: number; showWingFore: boolean; wingForeLength: number; wingForeWidth: number;
-  wingForeSpread: number; wingForePitch: number; wingForeOffset: number; wingForeForwardCant: number;
-  showWingHind: boolean; wingHindLength: number; wingHindWidth: number;
-  wingHindSpread: number; wingHindPitch: number; wingHindOffset: number;
-}> = {
-  bee:         { totalLength: 30, headRatio: 0.17, thoraxRatio: 0.28, abdomenRatio: 0.55, bodyHalfWidth: 4, bodyHalfHeight: 4, abdomenTaper: 0.48, headShape: 75,  bodyArch:  0.05, antennaLength: 5,  antennaSpread: 12, antennaPitch: 18, antennaRoot: 2, mandibleLength: 2, mandibleSpread: 9,  mandibleForward: 1, wingShape: 85, showWingFore: true,  wingForeLength: 15, wingForeWidth: 4, wingForeSpread: 78, wingForePitch: 5,  wingForeOffset:  1, wingForeForwardCant: 5,  showWingHind: true,  wingHindLength: 12, wingHindWidth: 3, wingHindSpread: 72, wingHindPitch: 4,  wingHindOffset: -1 },
-  dragonfly:   { totalLength: 52, headRatio: 0.08, thoraxRatio: 0.28, abdomenRatio: 0.64, bodyHalfWidth: 1, bodyHalfHeight: 2, abdomenTaper: 0.58, headShape: 35,  bodyArch:  0.02, antennaLength: 2,  antennaSpread: 10, antennaPitch: 12, antennaRoot: 1, mandibleLength: 1, mandibleSpread: 5,  mandibleForward: 1, wingShape: 90, showWingFore: true,  wingForeLength: 28, wingForeWidth: 2, wingForeSpread:  7, wingForePitch: 14, wingForeOffset:  1, wingForeForwardCant: 16, showWingHind: true,  wingHindLength: 26, wingHindWidth: 2, wingHindSpread: 18, wingHindPitch: 12, wingHindOffset:  4 },
-  grasshopper: { totalLength: 40, headRatio: 0.14, thoraxRatio: 0.40, abdomenRatio: 0.46, bodyHalfWidth: 3, bodyHalfHeight: 3, abdomenTaper: 0.34, headShape: 50,  bodyArch: -0.10, antennaLength: 22, antennaSpread: 10, antennaPitch: 18, antennaRoot: 2, mandibleLength: 2, mandibleSpread: 8,  mandibleForward: 1, wingShape: 75, showWingFore: true,  wingForeLength: 16, wingForeWidth: 2, wingForeSpread: 74, wingForePitch: 7,  wingForeOffset:  0, wingForeForwardCant: 0,  showWingHind: true,  wingHindLength: 14, wingHindWidth: 2, wingHindSpread: 70, wingHindPitch: 5,  wingHindOffset: -1 },
-  fly:         { totalLength: 22, headRatio: 0.48, thoraxRatio: 0.30, abdomenRatio: 0.22, bodyHalfWidth: 3, bodyHalfHeight: 3, abdomenTaper: 0.22, headShape: 52,  bodyArch:  0.04, antennaLength: 2,  antennaSpread: 18, antennaPitch: 38, antennaRoot: 1, mandibleLength: 1, mandibleSpread: 10, mandibleForward: 1, wingShape: 80, showWingFore: true,  wingForeLength: 13, wingForeWidth: 3, wingForeSpread: 76, wingForePitch: 9,  wingForeOffset: -3, wingForeForwardCant: 6,  showWingHind: true,  wingHindLength:  3, wingHindWidth: 1, wingHindSpread: 55, wingHindPitch: 18, wingHindOffset: -4 },
-  junebug:     { totalLength: 24, headRatio: 0.10, thoraxRatio: 0.38, abdomenRatio: 0.52, bodyHalfWidth: 4, bodyHalfHeight: 3, abdomenTaper: 0.18, headShape: 55,  bodyArch:  0.08, antennaLength: 3,  antennaSpread: 14, antennaPitch: 22, antennaRoot: 1, mandibleLength: 1, mandibleSpread: 6,  mandibleForward: 1, wingShape: 20, showWingFore: true,  wingForeLength: 12, wingForeWidth: 3, wingForeSpread: 82, wingForePitch: 3,  wingForeOffset:  1, wingForeForwardCant: 0,  showWingHind: false, wingHindLength:  4, wingHindWidth: 2, wingHindSpread: 24, wingHindPitch: 18, wingHindOffset: -1 },
+const INSECTA_SPECIES_PRESETS: Record<
+  string,
+  {
+    totalLength: number;
+    headRatio: number;
+    thoraxRatio: number;
+    abdomenRatio: number;
+    bodyHalfWidth: number;
+    bodyHalfHeight: number;
+    abdomenTaper: number;
+    headShape: number;
+    bodyArch: number;
+    antennaLength: number;
+    antennaSpread: number;
+    antennaPitch: number;
+    antennaRoot: number;
+    mandibleLength: number;
+    mandibleSpread: number;
+    mandibleForward: number;
+    wingShape: number;
+    showWingFore: boolean;
+    wingForeLength: number;
+    wingForeWidth: number;
+    wingForeSpread: number;
+    wingForePitch: number;
+    wingForeOffset: number;
+    wingForeForwardCant: number;
+    showWingHind: boolean;
+    wingHindLength: number;
+    wingHindWidth: number;
+    wingHindSpread: number;
+    wingHindPitch: number;
+    wingHindOffset: number;
+  }
+> = {
+  bee: {
+    totalLength: 30,
+    headRatio: 0.17,
+    thoraxRatio: 0.28,
+    abdomenRatio: 0.55,
+    bodyHalfWidth: 4,
+    bodyHalfHeight: 4,
+    abdomenTaper: 0.48,
+    headShape: 75,
+    bodyArch: 0.05,
+    antennaLength: 5,
+    antennaSpread: 12,
+    antennaPitch: 18,
+    antennaRoot: 2,
+    mandibleLength: 2,
+    mandibleSpread: 9,
+    mandibleForward: 1,
+    wingShape: 85,
+    showWingFore: true,
+    wingForeLength: 15,
+    wingForeWidth: 4,
+    wingForeSpread: 78,
+    wingForePitch: 5,
+    wingForeOffset: 1,
+    wingForeForwardCant: 5,
+    showWingHind: true,
+    wingHindLength: 12,
+    wingHindWidth: 3,
+    wingHindSpread: 72,
+    wingHindPitch: 4,
+    wingHindOffset: -1,
+  },
+  dragonfly: {
+    totalLength: 52,
+    headRatio: 0.08,
+    thoraxRatio: 0.28,
+    abdomenRatio: 0.64,
+    bodyHalfWidth: 1,
+    bodyHalfHeight: 2,
+    abdomenTaper: 0.58,
+    headShape: 35,
+    bodyArch: 0.02,
+    antennaLength: 2,
+    antennaSpread: 10,
+    antennaPitch: 12,
+    antennaRoot: 1,
+    mandibleLength: 1,
+    mandibleSpread: 5,
+    mandibleForward: 1,
+    wingShape: 90,
+    showWingFore: true,
+    wingForeLength: 28,
+    wingForeWidth: 2,
+    wingForeSpread: 7,
+    wingForePitch: 14,
+    wingForeOffset: 1,
+    wingForeForwardCant: 16,
+    showWingHind: true,
+    wingHindLength: 26,
+    wingHindWidth: 2,
+    wingHindSpread: 18,
+    wingHindPitch: 12,
+    wingHindOffset: 4,
+  },
+  grasshopper: {
+    totalLength: 40,
+    headRatio: 0.14,
+    thoraxRatio: 0.4,
+    abdomenRatio: 0.46,
+    bodyHalfWidth: 3,
+    bodyHalfHeight: 3,
+    abdomenTaper: 0.34,
+    headShape: 50,
+    bodyArch: -0.1,
+    antennaLength: 22,
+    antennaSpread: 10,
+    antennaPitch: 18,
+    antennaRoot: 2,
+    mandibleLength: 2,
+    mandibleSpread: 8,
+    mandibleForward: 1,
+    wingShape: 75,
+    showWingFore: true,
+    wingForeLength: 16,
+    wingForeWidth: 2,
+    wingForeSpread: 74,
+    wingForePitch: 7,
+    wingForeOffset: 0,
+    wingForeForwardCant: 0,
+    showWingHind: true,
+    wingHindLength: 14,
+    wingHindWidth: 2,
+    wingHindSpread: 70,
+    wingHindPitch: 5,
+    wingHindOffset: -1,
+  },
+  fly: {
+    totalLength: 22,
+    headRatio: 0.48,
+    thoraxRatio: 0.3,
+    abdomenRatio: 0.22,
+    bodyHalfWidth: 3,
+    bodyHalfHeight: 3,
+    abdomenTaper: 0.22,
+    headShape: 52,
+    bodyArch: 0.04,
+    antennaLength: 2,
+    antennaSpread: 18,
+    antennaPitch: 38,
+    antennaRoot: 1,
+    mandibleLength: 1,
+    mandibleSpread: 10,
+    mandibleForward: 1,
+    wingShape: 80,
+    showWingFore: true,
+    wingForeLength: 13,
+    wingForeWidth: 3,
+    wingForeSpread: 76,
+    wingForePitch: 9,
+    wingForeOffset: -3,
+    wingForeForwardCant: 6,
+    showWingHind: true,
+    wingHindLength: 3,
+    wingHindWidth: 1,
+    wingHindSpread: 55,
+    wingHindPitch: 18,
+    wingHindOffset: -4,
+  },
+  junebug: {
+    totalLength: 24,
+    headRatio: 0.1,
+    thoraxRatio: 0.38,
+    abdomenRatio: 0.52,
+    bodyHalfWidth: 4,
+    bodyHalfHeight: 3,
+    abdomenTaper: 0.18,
+    headShape: 55,
+    bodyArch: 0.08,
+    antennaLength: 3,
+    antennaSpread: 14,
+    antennaPitch: 22,
+    antennaRoot: 1,
+    mandibleLength: 1,
+    mandibleSpread: 6,
+    mandibleForward: 1,
+    wingShape: 20,
+    showWingFore: true,
+    wingForeLength: 12,
+    wingForeWidth: 3,
+    wingForeSpread: 82,
+    wingForePitch: 3,
+    wingForeOffset: 1,
+    wingForeForwardCant: 0,
+    showWingHind: false,
+    wingHindLength: 4,
+    wingHindWidth: 2,
+    wingHindSpread: 24,
+    wingHindPitch: 18,
+    wingHindOffset: -1,
+  },
 };
 
-const PISCINA_SPECIES_PRESETS: Record<string, {
-  length: number; width: number; thickness: number;
-  finDorsal: number; finAnal: number; finCaudal: number;
-  finPectoral: number; finPelvic: number; finAdipose: number;
-}> = {
-  bass:     { length: 54, width: 14, thickness: 20, finDorsal: 2, finAnal: 1, finCaudal: 2, finPectoral: 1, finPelvic: 1, finAdipose: 1 },
-  trout:    { length: 55, width: 13, thickness: 20, finDorsal: 2, finAnal: 1, finCaudal: 2, finPectoral: 1, finPelvic: 1, finAdipose: 1 },
-  goldfish: { length: 42, width: 16, thickness: 22, finDorsal: 2, finAnal: 1, finCaudal: 3, finPectoral: 1, finPelvic: 1, finAdipose: 1 },
-  tuna:     { length: 52, width: 16, thickness: 18, finDorsal: 1, finAnal: 1, finCaudal: 2, finPectoral: 1, finPelvic: 1, finAdipose: 1 },
-  eel:      { length: 72, width:  4, thickness:  7, finDorsal: 2, finAnal: 2, finCaudal: 1, finPectoral: 1, finPelvic: 1, finAdipose: 1 },
+const PISCINA_SPECIES_PRESETS: Record<
+  string,
+  {
+    length: number;
+    width: number;
+    thickness: number;
+    finDorsal: number;
+    finAnal: number;
+    finCaudal: number;
+    finPectoral: number;
+    finPelvic: number;
+    finAdipose: number;
+  }
+> = {
+  bass: {
+    length: 54,
+    width: 14,
+    thickness: 20,
+    finDorsal: 2,
+    finAnal: 1,
+    finCaudal: 2,
+    finPectoral: 1,
+    finPelvic: 1,
+    finAdipose: 1,
+  },
+  trout: {
+    length: 55,
+    width: 13,
+    thickness: 20,
+    finDorsal: 2,
+    finAnal: 1,
+    finCaudal: 2,
+    finPectoral: 1,
+    finPelvic: 1,
+    finAdipose: 1,
+  },
+  goldfish: {
+    length: 42,
+    width: 16,
+    thickness: 22,
+    finDorsal: 2,
+    finAnal: 1,
+    finCaudal: 3,
+    finPectoral: 1,
+    finPelvic: 1,
+    finAdipose: 1,
+  },
+  tuna: {
+    length: 52,
+    width: 16,
+    thickness: 18,
+    finDorsal: 1,
+    finAnal: 1,
+    finCaudal: 2,
+    finPectoral: 1,
+    finPelvic: 1,
+    finAdipose: 1,
+  },
+  eel: {
+    length: 72,
+    width: 4,
+    thickness: 7,
+    finDorsal: 2,
+    finAnal: 2,
+    finCaudal: 1,
+    finPectoral: 1,
+    finPelvic: 1,
+    finAdipose: 1,
+  },
 };
 
-const FAUNA_STANCE_PRESETS: Record<string, {
-  archetype: string; bodyArch: number; spineSegments: number;
-  bodyLength: number; bodyHalfWidth: number; bodyHalfHeight: number;
-  neckLength: number; neckHalfWidth: number; neckHalfHeight: number;
-  headLength: number; headHalfWidth: number; headHalfHeight: number;
-  tailLength: number; shoulderOffsetForward: number; hipOffsetForward: number;
-  frontUpperLength: number; frontLowerLength: number;
-  hindUpperLength: number; hindLowerLength: number;
-}> = {
-  quadruped: { archetype: "ungulate",   bodyArch: 0.02,  spineSegments: 7, bodyLength: 17, bodyHalfWidth: 2, bodyHalfHeight: 3, neckLength: 8, neckHalfWidth: 2, neckHalfHeight: 3, headLength: 6, headHalfWidth: 2, headHalfHeight: 3, tailLength: 1, shoulderOffsetForward:  3, hipOffsetForward: -3, frontUpperLength: 7, frontLowerLength: 7, hindUpperLength: 8, hindLowerLength: 8 },
-  biped:      { archetype: "plantigrade", bodyArch: 0.015, spineSegments: 6, bodyLength: 11, bodyHalfWidth: 4, bodyHalfHeight: 4, neckLength: 5, neckHalfWidth: 4, neckHalfHeight: 4, headLength: 2, headHalfWidth: 4, headHalfHeight: 4, tailLength: 0, shoulderOffsetForward:  0, hipOffsetForward: -1, frontUpperLength: 4, frontLowerLength: 3, hindUpperLength: 7, hindLowerLength: 6 },
+const FAUNA_STANCE_PRESETS: Record<
+  string,
+  {
+    archetype: string;
+    bodyArch: number;
+    spineSegments: number;
+    bodyLength: number;
+    bodyHalfWidth: number;
+    bodyHalfHeight: number;
+    neckLength: number;
+    neckHalfWidth: number;
+    neckHalfHeight: number;
+    headLength: number;
+    headHalfWidth: number;
+    headHalfHeight: number;
+    tailLength: number;
+    shoulderOffsetForward: number;
+    hipOffsetForward: number;
+    frontUpperLength: number;
+    frontLowerLength: number;
+    hindUpperLength: number;
+    hindLowerLength: number;
+  }
+> = {
+  quadruped: {
+    archetype: "ungulate",
+    bodyArch: 0.02,
+    spineSegments: 7,
+    bodyLength: 17,
+    bodyHalfWidth: 2,
+    bodyHalfHeight: 3,
+    neckLength: 8,
+    neckHalfWidth: 2,
+    neckHalfHeight: 3,
+    headLength: 6,
+    headHalfWidth: 2,
+    headHalfHeight: 3,
+    tailLength: 1,
+    shoulderOffsetForward: 3,
+    hipOffsetForward: -3,
+    frontUpperLength: 7,
+    frontLowerLength: 7,
+    hindUpperLength: 8,
+    hindLowerLength: 8,
+  },
+  biped: {
+    archetype: "plantigrade",
+    bodyArch: 0.015,
+    spineSegments: 6,
+    bodyLength: 11,
+    bodyHalfWidth: 4,
+    bodyHalfHeight: 4,
+    neckLength: 5,
+    neckHalfWidth: 4,
+    neckHalfHeight: 4,
+    headLength: 2,
+    headHalfWidth: 4,
+    headHalfHeight: 4,
+    tailLength: 0,
+    shoulderOffsetForward: 0,
+    hipOffsetForward: -1,
+    frontUpperLength: 4,
+    frontLowerLength: 3,
+    hindUpperLength: 7,
+    hindLowerLength: 6,
+  },
 };
 
-const FLORA_PRESETS: Record<string, {
-  height: number; girth: number; wobble: number; taper: number;
-  stemCount: number; clusterRadius: number; branchCount: number;
-  branchDepth: number; branchStart: number; branchSpread: number;
-  braidStrands: number; braidTwist: number; canopy: number;
-}> = {
-  stalk:      { height: 14, girth: 0, wobble: 0.12, taper: 0.12, stemCount: 1, clusterRadius: 0, branchCount: 0, branchDepth: 1, branchStart: 0.5,  branchSpread: 1, braidStrands: 1, braidTwist: 0.35, canopy: 0.18 },
-  trunk:      { height: 20, girth: 3, wobble: 0.08, taper: 0.55, stemCount: 1, clusterRadius: 0, branchCount: 0, branchDepth: 1, branchStart: 0.5,  branchSpread: 1, braidStrands: 1, braidTwist: 0.35, canopy: 0.06 },
-  contorted:  { height: 22, girth: 1, wobble: 0.72, taper: 0.2,  stemCount: 1, clusterRadius: 0, branchCount: 0, branchDepth: 1, branchStart: 0.5,  branchSpread: 2, braidStrands: 1, braidTwist: 0.45, canopy: 0.12 },
-  multi_stem: { height: 16, girth: 1, wobble: 0.22, taper: 0.25, stemCount: 4, clusterRadius: 2, branchCount: 0, branchDepth: 1, branchStart: 0.5,  branchSpread: 2, braidStrands: 1, braidTwist: 0.35, canopy: 0.22 },
-  branched:   { height: 18, girth: 2, wobble: 0.18, taper: 0.35, stemCount: 1, clusterRadius: 0, branchCount: 4, branchDepth: 2, branchStart: 0.48, branchSpread: 2, braidStrands: 1, braidTwist: 0.35, canopy: 0.38 },
-  braided:    { height: 16, girth: 1, wobble: 0.15, taper: 0.15, stemCount: 1, clusterRadius: 0, branchCount: 0, branchDepth: 1, branchStart: 0.5,  branchSpread: 1, braidStrands: 3, braidTwist: 0.52, canopy: 0.1  },
-  tuft:       { height: 6,  girth: 0, wobble: 0.35, taper: 0.05, stemCount: 8, clusterRadius: 3, branchCount: 0, branchDepth: 1, branchStart: 0.5,  branchSpread: 1, braidStrands: 1, braidTwist: 0.35, canopy: 0.52 },
+const FLORA_PRESETS: Record<
+  string,
+  {
+    height: number;
+    girth: number;
+    wobble: number;
+    taper: number;
+    stemCount: number;
+    clusterRadius: number;
+    branchCount: number;
+    branchDepth: number;
+    branchStart: number;
+    branchSpread: number;
+    braidStrands: number;
+    braidTwist: number;
+    canopy: number;
+  }
+> = {
+  stalk: {
+    height: 14,
+    girth: 0,
+    wobble: 0.12,
+    taper: 0.12,
+    stemCount: 1,
+    clusterRadius: 0,
+    branchCount: 0,
+    branchDepth: 1,
+    branchStart: 0.5,
+    branchSpread: 1,
+    braidStrands: 1,
+    braidTwist: 0.35,
+    canopy: 0.18,
+  },
+  trunk: {
+    height: 20,
+    girth: 3,
+    wobble: 0.08,
+    taper: 0.55,
+    stemCount: 1,
+    clusterRadius: 0,
+    branchCount: 0,
+    branchDepth: 1,
+    branchStart: 0.5,
+    branchSpread: 1,
+    braidStrands: 1,
+    braidTwist: 0.35,
+    canopy: 0.06,
+  },
+  contorted: {
+    height: 22,
+    girth: 1,
+    wobble: 0.72,
+    taper: 0.2,
+    stemCount: 1,
+    clusterRadius: 0,
+    branchCount: 0,
+    branchDepth: 1,
+    branchStart: 0.5,
+    branchSpread: 2,
+    braidStrands: 1,
+    braidTwist: 0.45,
+    canopy: 0.12,
+  },
+  multi_stem: {
+    height: 16,
+    girth: 1,
+    wobble: 0.22,
+    taper: 0.25,
+    stemCount: 4,
+    clusterRadius: 2,
+    branchCount: 0,
+    branchDepth: 1,
+    branchStart: 0.5,
+    branchSpread: 2,
+    braidStrands: 1,
+    braidTwist: 0.35,
+    canopy: 0.22,
+  },
+  branched: {
+    height: 18,
+    girth: 2,
+    wobble: 0.18,
+    taper: 0.35,
+    stemCount: 1,
+    clusterRadius: 0,
+    branchCount: 4,
+    branchDepth: 2,
+    branchStart: 0.48,
+    branchSpread: 2,
+    braidStrands: 1,
+    braidTwist: 0.35,
+    canopy: 0.38,
+  },
+  braided: {
+    height: 16,
+    girth: 1,
+    wobble: 0.15,
+    taper: 0.15,
+    stemCount: 1,
+    clusterRadius: 0,
+    branchCount: 0,
+    branchDepth: 1,
+    branchStart: 0.5,
+    branchSpread: 1,
+    braidStrands: 3,
+    braidTwist: 0.52,
+    canopy: 0.1,
+  },
+  tuft: {
+    height: 6,
+    girth: 0,
+    wobble: 0.35,
+    taper: 0.05,
+    stemCount: 8,
+    clusterRadius: 3,
+    branchCount: 0,
+    branchDepth: 1,
+    branchStart: 0.5,
+    branchSpread: 1,
+    braidStrands: 1,
+    braidTwist: 0.35,
+    canopy: 0.52,
+  },
 };
 const LS_PAINT_COLOR_DISTRIB = "voxellePaintColorDistrib";
 
@@ -485,7 +889,16 @@ type InteractionMode =
   | "generator"
   | "squishy";
 
-type ToolsPane = "hand" | "draw" | "select" | "sculpt" | "generators" | "squishy" | "mood" | "fly" | "walk";
+type ToolsPane =
+  | "hand"
+  | "draw"
+  | "select"
+  | "sculpt"
+  | "generators"
+  | "squishy"
+  | "mood"
+  | "fly"
+  | "walk";
 
 /** Matches Rust `SculptStrokeMode` (JSON camelCase). */
 type SculptStrokeModeApi = "draw" | "smooth" | "gouge" | "wall" | "terrain" | "extrude";
@@ -1268,19 +1681,28 @@ function App() {
   /** Single-click generators: click → settings overlay → Done/Cancel. */
   const rocksPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny, seed } = snap.data;
       void invoke("generator_rocks_at_screen", {
         args: {
-          nx, ny, seed,
+          nx,
+          ny,
+          seed,
           size: Math.max(1, generatorSphereRadiusRef.current),
           roughness: rockRoughnessRef.current,
           color: activeColorRef.current,
           material: activeMaterialRef.current,
           count: rockCountRef.current,
           clusterRadius: rockClusterRadiusRef.current,
-          sinkDirection: rockSinkDirectionRef.current === "under" ? -1 : rockSinkDirectionRef.current === "over" ? 1 : 0,
+          sinkDirection:
+            rockSinkDirectionRef.current === "under"
+              ? -1
+              : rockSinkDirectionRef.current === "over"
+                ? 1
+                : 0,
           sinkAmount: rockSinkAmountRef.current,
         },
       }).catch(() => {});
@@ -1289,12 +1711,16 @@ function App() {
   });
   const grassPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny, seed } = snap.data;
       void invoke("generator_grass_at_screen", {
         args: {
-          nx, ny, seed,
+          nx,
+          ny,
+          seed,
           radius: Math.max(1, generatorSphereRadiusRef.current),
           density: grassDensityRef.current,
           maxHeight: grassMaxHeightRef.current,
@@ -1307,30 +1733,40 @@ function App() {
   });
   const ashlarPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny, seed } = snap.data;
       void invoke("generator_ashlar_at_screen", {
         args: {
-          nx, ny, seed,
+          nx,
+          ny,
+          seed,
           size: Math.max(1, generatorSphereRadiusRef.current),
           roughness: rockRoughnessRef.current,
           color: activeColorRef.current,
           material: activeMaterialRef.current,
           thickness: ashlarThicknessRef.current,
         },
-      }).catch((err: unknown) => { console.error("[ashlar] placement failed:", err); });
+      }).catch((err: unknown) => {
+        console.error("[ashlar] placement failed:", err);
+      });
       ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
     },
   });
   const floraPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny, seed } = snap.data;
       void invoke("generator_flora_at_screen", {
         args: {
-          nx, ny, seed,
+          nx,
+          ny,
+          seed,
           height: floraHeight,
           girth: floraGirth,
           wobble: floraWobble,
@@ -1353,12 +1789,16 @@ function App() {
   });
   const piscinaPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny, seed } = snap.data;
       void invoke("generator_piscina_at_screen", {
         args: {
-          nx, ny, seed,
+          nx,
+          ny,
+          seed,
           species: piscinaSpecies,
           length: piscinaLength,
           widthParam: piscinaWidth,
@@ -1388,12 +1828,15 @@ function App() {
   });
   const insectaPhase = useStrokePhase<{ nx: number; ny: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny } = snap.data;
       void invoke("generator_insecta_at_screen", {
         args: {
-          nx, ny,
+          nx,
+          ny,
           species: insectaSpecies,
           totalLength: insectaTotalLength,
           headRatio: insectaHeadRatio,
@@ -1436,12 +1879,15 @@ function App() {
   });
   const faunaPhase = useStrokePhase<{ nx: number; ny: number }>({
     phases: ["settings"],
-    onCancel: () => { void invoke("voxel_stroke_preview_reset").catch(() => {}); },
+    onCancel: () => {
+      void invoke("voxel_stroke_preview_reset").catch(() => {});
+    },
     onCommit: (snap) => {
       const { nx, ny } = snap.data;
       void invoke("generator_fauna_at_screen", {
         args: {
-          nx, ny,
+          nx,
+          ny,
           stance: faunaStance,
           archetype: faunaArchetype,
           anchorOffsetU: faunaAnchorU,
@@ -1605,7 +2051,7 @@ function App() {
   const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
   const [terrainBaseY, setTerrainBaseY] = useState(0);
-  const [terrainStrength, setTerrainStrength] = useState(4);
+  const [terrainStrength] = useState(4);
   const [terrainSmoothRadius, setTerrainSmoothRadius] = useState(2);
   const [terrainFlattenUseBaseY, setTerrainFlattenUseBaseY] = useState(false);
   const [terrainSubVoxel, setTerrainSubVoxel] = useState(false);
@@ -1754,13 +2200,12 @@ function App() {
   const colorPalettePosRef = useRef(colorPalettePos);
   colorPalettePosRef.current = colorPalettePos;
 
-
   const [stampBookOpen, setStampBookOpen] = useState(false);
   /** True when a stamp was loaded from the stamp book (not from the edit selection). */
   const [stampBookPatternActive, setStampBookPatternActive] = useState(false);
-  const [stampRotX] = useState(0);
-  const [stampRotY] = useState(0);
-  const [stampRotZ] = useState(0);
+  const [stampRotX, setStampRotX] = useState(0);
+  const [stampRotY, setStampRotY] = useState(0);
+  const [stampRotZ, setStampRotZ] = useState(0);
   const stampRotXRef = useRef(0);
   const stampRotYRef = useRef(0);
   const stampRotZRef = useRef(0);
@@ -3187,7 +3632,8 @@ function App() {
             generatorFaunaHindLowerLength: faunaHindLowerLength,
             generatorFaunaAutoFootPlacement: faunaAutoFootPlacement,
             // Piscina
-            generatorPiscinaSeed: piscinaPhase.ref.current?.data.seed ?? piscinaPreviewSeedRef.current,
+            generatorPiscinaSeed:
+              piscinaPhase.ref.current?.data.seed ?? piscinaPreviewSeedRef.current,
             generatorPiscinaSpecies: piscinaSpecies,
             generatorPiscinaLength: piscinaLength,
             generatorPiscinaWidth: piscinaWidth,
@@ -5059,9 +5505,14 @@ function App() {
       return;
     }
     if (!gestureRef.current) {
-      gizmoRef.current?.updateHover(e.clientX, e.clientY)
-        .then((h) => { gizmoHoverRef.current = h ?? false; })
-        .catch(() => { gizmoHoverRef.current = false; });
+      gizmoRef.current
+        ?.updateHover(e.clientX, e.clientY)
+        .then((h) => {
+          gizmoHoverRef.current = h ?? false;
+        })
+        .catch(() => {
+          gizmoHoverRef.current = false;
+        });
     } else {
       gizmoHoverRef.current = false;
     }
@@ -5657,9 +6108,7 @@ function App() {
                   if (!c) return;
                   setRoofPins((v) => {
                     // Click on existing pin → remove it.
-                    const idx = v.findIndex(
-                      (p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2],
-                    );
+                    const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
                     const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
                     roofPinsRef.current = next;
                     return next;
@@ -5773,7 +6222,9 @@ function App() {
                 strokeLineStartNy: lineStart.ny,
               },
             })
-              .then((geo) => { phase.update({ frozenGeo: geo ?? null }); })
+              .then((geo) => {
+                phase.update({ frozenGeo: geo ?? null });
+              })
               .catch(() => {});
           }
         }
@@ -5813,7 +6264,9 @@ function App() {
                   strokeLineStartNy: lineStart.ny,
                 },
               })
-                .then((geo) => { phase.update({ frozenGeo: geo ?? null }); })
+                .then((geo) => {
+                  phase.update({ frozenGeo: geo ?? null });
+                })
                 .catch(() => {});
             }
           } else if (strokeModeSkipsDrag(sm)) {
@@ -7061,17 +7514,19 @@ function App() {
               ) : (
                 <div className="sidebar-collapsed-tools">
                   {/* ── Pane tabs ── */}
-                  {([
-                    { pane: "hand", label: "Hand", mode: "navigate" },
-                    { pane: "draw", label: "Draw", mode: "add" },
-                    { pane: "select", label: "Sel", mode: "select" },
-                    { pane: "sculpt", label: "Sculpt", mode: "sculpt" },
-                    { pane: "generators", label: "Gen", mode: "generator" },
-                    { pane: "squishy", label: "Sqsh", mode: "squishy" },
-                    { pane: "mood", label: "Mood", mode: null },
-                    { pane: "fly", label: "Fly", mode: "fly" },
-                    { pane: "walk", label: "Walk", mode: "walk" },
-                  ] as const).map(({ pane, label, mode }) => (
+                  {(
+                    [
+                      { pane: "hand", label: "Hand", mode: "navigate" },
+                      { pane: "draw", label: "Draw", mode: "add" },
+                      { pane: "select", label: "Sel", mode: "select" },
+                      { pane: "sculpt", label: "Sculpt", mode: "sculpt" },
+                      { pane: "generators", label: "Gen", mode: "generator" },
+                      { pane: "squishy", label: "Sqsh", mode: "squishy" },
+                      { pane: "mood", label: "Mood", mode: null },
+                      { pane: "fly", label: "Fly", mode: "fly" },
+                      { pane: "walk", label: "Walk", mode: "walk" },
+                    ] as const
+                  ).map(({ pane, label, mode }) => (
                     <button
                       key={pane}
                       type="button"
@@ -7116,9 +7571,7 @@ function App() {
                         type="button"
                         className={`sidebar-collapsed-sub-btn${interactionMode === "stamp" ? " is-active" : ""}`}
                         disabled={
-                          loading ||
-                          workBusy ||
-                          (selectionCount === 0 && !stampBookPatternActive)
+                          loading || workBusy || (selectionCount === 0 && !stampBookPatternActive)
                         }
                         onClick={() => setInteractionMode("stamp")}
                       >
@@ -7170,9 +7623,7 @@ function App() {
                         type="button"
                         className={`sidebar-collapsed-sub-btn${interactionMode === "stamp" ? " is-active" : ""}`}
                         disabled={
-                          loading ||
-                          workBusy ||
-                          (selectionCount === 0 && !stampBookPatternActive)
+                          loading || workBusy || (selectionCount === 0 && !stampBookPatternActive)
                         }
                         onClick={() => setInteractionMode("stamp")}
                       >
@@ -8018,73 +8469,185 @@ function App() {
                   </div>
                 ) : null}
                 {rocksPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Rocks settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Rocks settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Rocks</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => rocksPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => rocksPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => rocksPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => rocksPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {grassPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Grass settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Grass settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Grass</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => grassPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => grassPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => grassPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => grassPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {ashlarPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Ashlar settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Ashlar settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Ashlar</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => ashlarPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => ashlarPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => ashlarPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => ashlarPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {floraPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Flora settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Flora settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Flora</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => floraPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => floraPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => floraPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => floraPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {piscinaPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Piscina settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Piscina settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Fish</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => piscinaPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => piscinaPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => piscinaPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => piscinaPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {insectaPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Insecta settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Insecta settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Insect</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => insectaPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => insectaPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => insectaPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => insectaPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {faunaPhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Fauna settings">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Fauna settings"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Fauna</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       Adjust in sidebar — Enter to place
                     </span>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => faunaPhase.cancel()}>Cancel</button>
-                    <button type="button" className="tool-options-shape-btn" onClick={() => faunaPhase.commit()}>Done</button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => faunaPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => faunaPhase.commit()}
+                    >
+                      Done
+                    </button>
                   </div>
                 ) : null}
                 {showWallSculptPolygonHud ? (
@@ -8403,8 +8966,7 @@ function App() {
                         />
                         <span className="tool-options-range-value">{sculptBrushFalloff}</span>
                       </label>
-                      {sculptStrokeMode === "draw" ||
-                      sculptStrokeMode === "smooth" ? (
+                      {sculptStrokeMode === "draw" || sculptStrokeMode === "smooth" ? (
                         <label
                           className="tool-options-checkbox-row"
                           style={{ marginTop: "0.35rem" }}
@@ -8787,9 +9349,7 @@ function App() {
                               <input
                                 type="checkbox"
                                 checked={terrainFlattenUseBaseY}
-                                onChange={(ev) =>
-                                  setTerrainFlattenUseBaseY(ev.target.checked)
-                                }
+                                onChange={(ev) => setTerrainFlattenUseBaseY(ev.target.checked)}
                                 disabled={loading || workBusy}
                               />
                               <span title="Flatten to the Base Y value instead of the average surface height">
@@ -9462,28 +10022,203 @@ function App() {
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Stem</div>
-                        <label className="tool-options-range-label"><span>Height</span><input type="range" min={1} max={96} value={floraHeight} onChange={(ev) => { setFloraPreset("custom"); setFloraHeight(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Girth</span><input type="range" min={0} max={20} value={floraGirth} onChange={(ev) => { setFloraPreset("custom"); setFloraGirth(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Wobble</span><input type="range" min={0} max={1} step={0.01} value={floraWobble} onChange={(ev) => { setFloraPreset("custom"); setFloraWobble(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Taper</span><input type="range" min={0} max={1} step={0.01} value={floraTaper} onChange={(ev) => { setFloraPreset("custom"); setFloraTaper(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Height</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={96}
+                            value={floraHeight}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraHeight(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Girth</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={20}
+                            value={floraGirth}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraGirth(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Wobble</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={floraWobble}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraWobble(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Taper</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={floraTaper}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraTaper(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Stems</div>
-                        <label className="tool-options-range-label"><span>Count</span><input type="range" min={1} max={8} value={floraStemCount} onChange={(ev) => { setFloraPreset("custom"); setFloraStemCount(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Cluster r</span><input type="range" min={0} max={4} value={floraClusterRadius} onChange={(ev) => { setFloraPreset("custom"); setFloraClusterRadius(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Count</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            value={floraStemCount}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraStemCount(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Cluster r</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={4}
+                            value={floraClusterRadius}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraClusterRadius(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Branches</div>
-                        <label className="tool-options-range-label"><span>Count</span><input type="range" min={0} max={6} value={floraBranchCount} onChange={(ev) => { setFloraPreset("custom"); setFloraBranchCount(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Depth</span><input type="range" min={1} max={2} value={floraBranchDepth} onChange={(ev) => { setFloraPreset("custom"); setFloraBranchDepth(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Start</span><input type="range" min={0} max={0.9} step={0.05} value={floraBranchStart} onChange={(ev) => { setFloraPreset("custom"); setFloraBranchStart(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Spread</span><input type="range" min={0} max={3} step={0.1} value={floraBranchSpread} onChange={(ev) => { setFloraPreset("custom"); setFloraBranchSpread(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Count</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={6}
+                            value={floraBranchCount}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraBranchCount(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Depth</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={2}
+                            value={floraBranchDepth}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraBranchDepth(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Start</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={0.9}
+                            step={0.05}
+                            value={floraBranchStart}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraBranchStart(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Spread</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={3}
+                            step={0.1}
+                            value={floraBranchSpread}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraBranchSpread(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Braid</div>
-                        <label className="tool-options-range-label"><span>Strands</span><input type="range" min={1} max={5} value={floraBraidStrands} onChange={(ev) => { setFloraPreset("custom"); setFloraBraidStrands(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Twist</span><input type="range" min={0} max={1} step={0.01} value={floraBraidTwist} onChange={(ev) => { setFloraPreset("custom"); setFloraBraidTwist(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Canopy</span><input type="range" min={0} max={1} step={0.02} value={floraCanopy} onChange={(ev) => { setFloraPreset("custom"); setFloraCanopy(Number(ev.target.value)); }} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Strands</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={5}
+                            value={floraBraidStrands}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraBraidStrands(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Twist</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={floraBraidTwist}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraBraidTwist(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Canopy</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.02}
+                            value={floraCanopy}
+                            onChange={(ev) => {
+                              setFloraPreset("custom");
+                              setFloraCanopy(Number(ev.target.value));
+                            }}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                     </div>
                   ) : null}
@@ -9576,41 +10311,188 @@ function App() {
                     <div className="gen-wide-grid">
                       <div className="gen-card">
                         <div className="gen-card-title">Body</div>
-                        <label className="tool-options-range-label"><span>Species</span><select value={piscinaSpecies} onChange={(ev) => {
-                            const sp = ev.target.value;
-                            setPiscinaSpecies(sp);
-                            const p = PISCINA_SPECIES_PRESETS[sp];
-                            if (p) {
-                              setPiscinaLength(p.length); setPiscinaWidth(p.width); setPiscinaThickness(p.thickness);
-                              setPiscinaFinDorsal(p.finDorsal); setPiscinaFinAnal(p.finAnal); setPiscinaFinCaudal(p.finCaudal);
-                              setPiscinaFinPectoral(p.finPectoral); setPiscinaFinPelvic(p.finPelvic); setPiscinaFinAdipose(p.finAdipose);
-                            }
-                          }} disabled={loading || workBusy}><option value="trout">Trout</option><option value="bass">Bass</option><option value="goldfish">Goldfish</option><option value="tuna">Tuna</option><option value="eel">Eel</option></select></label>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={4} max={72} value={piscinaLength} onChange={(ev) => setPiscinaLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Width</span><input type="range" min={2} max={48} value={piscinaWidth} onChange={(ev) => setPiscinaWidth(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Thickness</span><input type="range" min={1} max={36} value={piscinaThickness} onChange={(ev) => setPiscinaThickness(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Species</span>
+                          <select
+                            value={piscinaSpecies}
+                            onChange={(ev) => {
+                              const sp = ev.target.value;
+                              setPiscinaSpecies(sp);
+                              const p = PISCINA_SPECIES_PRESETS[sp];
+                              if (p) {
+                                setPiscinaLength(p.length);
+                                setPiscinaWidth(p.width);
+                                setPiscinaThickness(p.thickness);
+                                setPiscinaFinDorsal(p.finDorsal);
+                                setPiscinaFinAnal(p.finAnal);
+                                setPiscinaFinCaudal(p.finCaudal);
+                                setPiscinaFinPectoral(p.finPectoral);
+                                setPiscinaFinPelvic(p.finPelvic);
+                                setPiscinaFinAdipose(p.finAdipose);
+                              }
+                            }}
+                            disabled={loading || workBusy}
+                          >
+                            <option value="trout">Trout</option>
+                            <option value="bass">Bass</option>
+                            <option value="goldfish">Goldfish</option>
+                            <option value="tuna">Tuna</option>
+                            <option value="eel">Eel</option>
+                          </select>
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={4}
+                            max={72}
+                            value={piscinaLength}
+                            onChange={(ev) => setPiscinaLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Width</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={48}
+                            value={piscinaWidth}
+                            onChange={(ev) => setPiscinaWidth(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Thickness</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={36}
+                            value={piscinaThickness}
+                            onChange={(ev) => setPiscinaThickness(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Pose</div>
-                        <label className="tool-options-range-label"><span>Bend</span><input type="range" min={-1} max={1} step={0.05} value={piscinaSpineBend} onChange={(ev) => setPiscinaSpineBend(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>S-curve</span><input type="range" min={-1} max={1} step={0.05} value={piscinaSpineSCurve} onChange={(ev) => setPiscinaSpineSCurve(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Anchor U</span><input type="range" min={-24} max={24} value={piscinaAnchorU} onChange={(ev) => setPiscinaAnchorU(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Anchor V</span><input type="range" min={-24} max={24} value={piscinaAnchorV} onChange={(ev) => setPiscinaAnchorV(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Bend</span>
+                          <input
+                            type="range"
+                            min={-1}
+                            max={1}
+                            step={0.05}
+                            value={piscinaSpineBend}
+                            onChange={(ev) => setPiscinaSpineBend(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>S-curve</span>
+                          <input
+                            type="range"
+                            min={-1}
+                            max={1}
+                            step={0.05}
+                            value={piscinaSpineSCurve}
+                            onChange={(ev) => setPiscinaSpineSCurve(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Anchor U</span>
+                          <input
+                            type="range"
+                            min={-24}
+                            max={24}
+                            value={piscinaAnchorU}
+                            onChange={(ev) => setPiscinaAnchorU(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Anchor V</span>
+                          <input
+                            type="range"
+                            min={-24}
+                            max={24}
+                            value={piscinaAnchorV}
+                            onChange={(ev) => setPiscinaAnchorV(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card gen-card-full">
                         <div className="gen-card-title">Fins</div>
                         <div className="gen-fin-grid">
-                          {([
-                            ["Dorsal",   piscinaShowFinDorsal,   setPiscinaShowFinDorsal,   piscinaFinDorsal,   setPiscinaFinDorsal],
-                            ["Anal",     piscinaShowFinAnal,     setPiscinaShowFinAnal,     piscinaFinAnal,     setPiscinaFinAnal],
-                            ["Caudal",   piscinaShowFinCaudal,   setPiscinaShowFinCaudal,   piscinaFinCaudal,   setPiscinaFinCaudal],
-                            ["Pectoral", piscinaShowFinPectoral, setPiscinaShowFinPectoral, piscinaFinPectoral, setPiscinaFinPectoral],
-                            ["Pelvic",   piscinaShowFinPelvic,   setPiscinaShowFinPelvic,   piscinaFinPelvic,   setPiscinaFinPelvic],
-                            ["Adipose",  piscinaShowFinAdipose,  setPiscinaShowFinAdipose,  piscinaFinAdipose,  setPiscinaFinAdipose],
-                          ] as const).map(([name, show, setShow, scale, setScale]) => (
+                          {(
+                            [
+                              [
+                                "Dorsal",
+                                piscinaShowFinDorsal,
+                                setPiscinaShowFinDorsal,
+                                piscinaFinDorsal,
+                                setPiscinaFinDorsal,
+                              ],
+                              [
+                                "Anal",
+                                piscinaShowFinAnal,
+                                setPiscinaShowFinAnal,
+                                piscinaFinAnal,
+                                setPiscinaFinAnal,
+                              ],
+                              [
+                                "Caudal",
+                                piscinaShowFinCaudal,
+                                setPiscinaShowFinCaudal,
+                                piscinaFinCaudal,
+                                setPiscinaFinCaudal,
+                              ],
+                              [
+                                "Pectoral",
+                                piscinaShowFinPectoral,
+                                setPiscinaShowFinPectoral,
+                                piscinaFinPectoral,
+                                setPiscinaFinPectoral,
+                              ],
+                              [
+                                "Pelvic",
+                                piscinaShowFinPelvic,
+                                setPiscinaShowFinPelvic,
+                                piscinaFinPelvic,
+                                setPiscinaFinPelvic,
+                              ],
+                              [
+                                "Adipose",
+                                piscinaShowFinAdipose,
+                                setPiscinaShowFinAdipose,
+                                piscinaFinAdipose,
+                                setPiscinaFinAdipose,
+                              ],
+                            ] as const
+                          ).map(([name, show, setShow, scale, setScale]) => (
                             <div key={name} className="gen-card">
-                              <label className="tool-options-checkbox-row"><input type="checkbox" checked={show} onChange={(ev) => setShow(ev.target.checked)} disabled={loading || workBusy} /><span>{name}</span></label>
-                              <label className="tool-options-range-label"><span>Scale</span><input type="range" min={1} max={8} value={scale} onChange={(ev) => setScale(Number(ev.target.value))} disabled={loading || workBusy || !show} /></label>
+                              <label className="tool-options-checkbox-row">
+                                <input
+                                  type="checkbox"
+                                  checked={show}
+                                  onChange={(ev) => setShow(ev.target.checked)}
+                                  disabled={loading || workBusy}
+                                />
+                                <span>{name}</span>
+                              </label>
+                              <label className="tool-options-range-label">
+                                <span>Scale</span>
+                                <input
+                                  type="range"
+                                  min={1}
+                                  max={8}
+                                  value={scale}
+                                  onChange={(ev) => setScale(Number(ev.target.value))}
+                                  disabled={loading || workBusy || !show}
+                                />
+                              </label>
                             </div>
                           ))}
                         </div>
@@ -9621,71 +10503,443 @@ function App() {
                     <div className="gen-wide-grid">
                       <div className="gen-card">
                         <div className="gen-card-title">Body</div>
-                        <label className="tool-options-range-label"><span>Species</span><select value={insectaSpecies} onChange={(ev) => {
-                            const sp = ev.target.value;
-                            setInsectaSpecies(sp);
-                            const p = INSECTA_SPECIES_PRESETS[sp];
-                            if (p) {
-                              setInsectaTotalLength(p.totalLength); setInsectaHeadRatio(p.headRatio); setInsectaThoraxRatio(p.thoraxRatio); setInsectaAbdomenRatio(p.abdomenRatio);
-                              setInsectaBodyHalfWidth(p.bodyHalfWidth); setInsectaBodyHalfHeight(p.bodyHalfHeight); setInsectaAbdomenTaper(p.abdomenTaper); setInsectaHeadShape(p.headShape);
-                              setInsectaBodyArch(p.bodyArch); setInsectaAntennaLength(p.antennaLength); setInsectaAntennaSpread(p.antennaSpread); setInsectaAntennaPitch(p.antennaPitch); setInsectaAntennaRoot(p.antennaRoot);
-                              setInsectaMandibleLength(p.mandibleLength); setInsectaMandibleSpread(p.mandibleSpread); setInsectaMandibleForward(p.mandibleForward);
-                              setInsectaWingShape(p.wingShape); setInsectaShowWingFore(p.showWingFore); setInsectaWingForeLength(p.wingForeLength); setInsectaWingForeWidth(p.wingForeWidth);
-                              setInsectaWingForeSpread(p.wingForeSpread); setInsectaWingForePitch(p.wingForePitch); setInsectaWingForeOffset(p.wingForeOffset); setInsectaWingForeForwardCant(p.wingForeForwardCant);
-                              setInsectaShowWingHind(p.showWingHind); setInsectaWingHindLength(p.wingHindLength); setInsectaWingHindWidth(p.wingHindWidth);
-                              setInsectaWingHindSpread(p.wingHindSpread); setInsectaWingHindPitch(p.wingHindPitch); setInsectaWingHindOffset(p.wingHindOffset);
-                            }
-                          }} disabled={loading || workBusy}><option value="bee">Bee</option><option value="dragonfly">Dragonfly</option><option value="grasshopper">Grasshopper</option><option value="fly">Fly</option><option value="junebug">June Bug</option></select></label>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={12} max={72} value={insectaTotalLength} onChange={(ev) => setInsectaTotalLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-width</span><input type="range" min={1} max={12} value={insectaBodyHalfWidth} onChange={(ev) => setInsectaBodyHalfWidth(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-height</span><input type="range" min={1} max={10} value={insectaBodyHalfHeight} onChange={(ev) => setInsectaBodyHalfHeight(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Yaw °</span><input type="range" min={-45} max={45} value={insectaBodyYawDeg} onChange={(ev) => setInsectaBodyYawDeg(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Arch</span><input type="range" min={-1} max={1} step={0.05} value={insectaBodyArch} onChange={(ev) => setInsectaBodyArch(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Species</span>
+                          <select
+                            value={insectaSpecies}
+                            onChange={(ev) => {
+                              const sp = ev.target.value;
+                              setInsectaSpecies(sp);
+                              const p = INSECTA_SPECIES_PRESETS[sp];
+                              if (p) {
+                                setInsectaTotalLength(p.totalLength);
+                                setInsectaHeadRatio(p.headRatio);
+                                setInsectaThoraxRatio(p.thoraxRatio);
+                                setInsectaAbdomenRatio(p.abdomenRatio);
+                                setInsectaBodyHalfWidth(p.bodyHalfWidth);
+                                setInsectaBodyHalfHeight(p.bodyHalfHeight);
+                                setInsectaAbdomenTaper(p.abdomenTaper);
+                                setInsectaHeadShape(p.headShape);
+                                setInsectaBodyArch(p.bodyArch);
+                                setInsectaAntennaLength(p.antennaLength);
+                                setInsectaAntennaSpread(p.antennaSpread);
+                                setInsectaAntennaPitch(p.antennaPitch);
+                                setInsectaAntennaRoot(p.antennaRoot);
+                                setInsectaMandibleLength(p.mandibleLength);
+                                setInsectaMandibleSpread(p.mandibleSpread);
+                                setInsectaMandibleForward(p.mandibleForward);
+                                setInsectaWingShape(p.wingShape);
+                                setInsectaShowWingFore(p.showWingFore);
+                                setInsectaWingForeLength(p.wingForeLength);
+                                setInsectaWingForeWidth(p.wingForeWidth);
+                                setInsectaWingForeSpread(p.wingForeSpread);
+                                setInsectaWingForePitch(p.wingForePitch);
+                                setInsectaWingForeOffset(p.wingForeOffset);
+                                setInsectaWingForeForwardCant(p.wingForeForwardCant);
+                                setInsectaShowWingHind(p.showWingHind);
+                                setInsectaWingHindLength(p.wingHindLength);
+                                setInsectaWingHindWidth(p.wingHindWidth);
+                                setInsectaWingHindSpread(p.wingHindSpread);
+                                setInsectaWingHindPitch(p.wingHindPitch);
+                                setInsectaWingHindOffset(p.wingHindOffset);
+                              }
+                            }}
+                            disabled={loading || workBusy}
+                          >
+                            <option value="bee">Bee</option>
+                            <option value="dragonfly">Dragonfly</option>
+                            <option value="grasshopper">Grasshopper</option>
+                            <option value="fly">Fly</option>
+                            <option value="junebug">June Bug</option>
+                          </select>
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={12}
+                            max={72}
+                            value={insectaTotalLength}
+                            onChange={(ev) => setInsectaTotalLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-width</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={12}
+                            value={insectaBodyHalfWidth}
+                            onChange={(ev) => setInsectaBodyHalfWidth(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-height</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={10}
+                            value={insectaBodyHalfHeight}
+                            onChange={(ev) => setInsectaBodyHalfHeight(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Yaw °</span>
+                          <input
+                            type="range"
+                            min={-45}
+                            max={45}
+                            value={insectaBodyYawDeg}
+                            onChange={(ev) => setInsectaBodyYawDeg(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Arch</span>
+                          <input
+                            type="range"
+                            min={-1}
+                            max={1}
+                            step={0.05}
+                            value={insectaBodyArch}
+                            onChange={(ev) => setInsectaBodyArch(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Segments</div>
-                        <label className="tool-options-range-label"><span>Head</span><input type="range" min={0.1} max={3} step={0.1} value={insectaHeadRatio} onChange={(ev) => setInsectaHeadRatio(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Thorax</span><input type="range" min={0.1} max={3} step={0.1} value={insectaThoraxRatio} onChange={(ev) => setInsectaThoraxRatio(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Abdomen</span><input type="range" min={0.1} max={4} step={0.1} value={insectaAbdomenRatio} onChange={(ev) => setInsectaAbdomenRatio(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Abd taper</span><input type="range" min={0} max={1} step={0.05} value={insectaAbdomenTaper} onChange={(ev) => setInsectaAbdomenTaper(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Head shape</span><input type="range" min={0} max={100} value={insectaHeadShape} onChange={(ev) => setInsectaHeadShape(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Head</span>
+                          <input
+                            type="range"
+                            min={0.1}
+                            max={3}
+                            step={0.1}
+                            value={insectaHeadRatio}
+                            onChange={(ev) => setInsectaHeadRatio(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Thorax</span>
+                          <input
+                            type="range"
+                            min={0.1}
+                            max={3}
+                            step={0.1}
+                            value={insectaThoraxRatio}
+                            onChange={(ev) => setInsectaThoraxRatio(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Abdomen</span>
+                          <input
+                            type="range"
+                            min={0.1}
+                            max={4}
+                            step={0.1}
+                            value={insectaAbdomenRatio}
+                            onChange={(ev) => setInsectaAbdomenRatio(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Abd taper</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={insectaAbdomenTaper}
+                            onChange={(ev) => setInsectaAbdomenTaper(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Head shape</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={insectaHeadShape}
+                            onChange={(ev) => setInsectaHeadShape(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Antennae</div>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={0} max={32} value={insectaAntennaLength} onChange={(ev) => setInsectaAntennaLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Spread °</span><input type="range" min={0} max={45} value={insectaAntennaSpread} onChange={(ev) => setInsectaAntennaSpread(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Pitch °</span><input type="range" min={0} max={80} value={insectaAntennaPitch} onChange={(ev) => setInsectaAntennaPitch(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Root</span><input type="range" min={0} max={12} value={insectaAntennaRoot} onChange={(ev) => setInsectaAntennaRoot(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <div className="gen-card-title" style={{marginTop:"0.25rem"}}>Mandibles</div>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={0} max={8} value={insectaMandibleLength} onChange={(ev) => setInsectaMandibleLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Spread</span><input type="range" min={0} max={25} value={insectaMandibleSpread} onChange={(ev) => setInsectaMandibleSpread(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Forward</span><input type="range" min={0} max={6} value={insectaMandibleForward} onChange={(ev) => setInsectaMandibleForward(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={32}
+                            value={insectaAntennaLength}
+                            onChange={(ev) => setInsectaAntennaLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Spread °</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={45}
+                            value={insectaAntennaSpread}
+                            onChange={(ev) => setInsectaAntennaSpread(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Pitch °</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={80}
+                            value={insectaAntennaPitch}
+                            onChange={(ev) => setInsectaAntennaPitch(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Root</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={12}
+                            value={insectaAntennaRoot}
+                            onChange={(ev) => setInsectaAntennaRoot(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <div className="gen-card-title" style={{ marginTop: "0.25rem" }}>
+                          Mandibles
+                        </div>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={8}
+                            value={insectaMandibleLength}
+                            onChange={(ev) => setInsectaMandibleLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Spread</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={25}
+                            value={insectaMandibleSpread}
+                            onChange={(ev) => setInsectaMandibleSpread(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Forward</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={6}
+                            value={insectaMandibleForward}
+                            onChange={(ev) => setInsectaMandibleForward(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Placement</div>
-                        <label className="tool-options-range-label"><span>Anchor U</span><input type="range" min={-24} max={24} value={insectaAnchorU} onChange={(ev) => setInsectaAnchorU(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Anchor V</span><input type="range" min={-24} max={24} value={insectaAnchorV} onChange={(ev) => setInsectaAnchorV(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Anchor U</span>
+                          <input
+                            type="range"
+                            min={-24}
+                            max={24}
+                            value={insectaAnchorU}
+                            onChange={(ev) => setInsectaAnchorU(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Anchor V</span>
+                          <input
+                            type="range"
+                            min={-24}
+                            max={24}
+                            value={insectaAnchorV}
+                            onChange={(ev) => setInsectaAnchorV(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card gen-card-full">
                         <div className="gen-card-title">Wings</div>
-                        <div style={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:"0.4rem"}}>
+                        <div
+                          style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.4rem" }}
+                        >
                           <div className="gen-card">
-                            <label className="tool-options-checkbox-row"><input type="checkbox" checked={insectaShowWingFore} onChange={(ev) => setInsectaShowWingFore(ev.target.checked)} disabled={loading || workBusy} /><span>Fore wings</span></label>
-                            <label className="tool-options-range-label"><span>Shape</span><input type="range" min={0} max={100} value={insectaWingShape} onChange={(ev) => setInsectaWingShape(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                            <label className="tool-options-range-label"><span>Length</span><input type="range" min={0} max={40} value={insectaWingForeLength} onChange={(ev) => setInsectaWingForeLength(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingFore} /></label>
-                            <label className="tool-options-range-label"><span>Width</span><input type="range" min={0} max={12} value={insectaWingForeWidth} onChange={(ev) => setInsectaWingForeWidth(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingFore} /></label>
-                            <label className="tool-options-range-label"><span>Spread °</span><input type="range" min={0} max={90} value={insectaWingForeSpread} onChange={(ev) => setInsectaWingForeSpread(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingFore} /></label>
-                            <label className="tool-options-range-label"><span>Pitch °</span><input type="range" min={0} max={45} value={insectaWingForePitch} onChange={(ev) => setInsectaWingForePitch(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingFore} /></label>
-                            <label className="tool-options-range-label"><span>Offset</span><input type="range" min={-8} max={8} value={insectaWingForeOffset} onChange={(ev) => setInsectaWingForeOffset(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingFore} /></label>
-                            <label className="tool-options-range-label"><span>Fwd cant °</span><input type="range" min={0} max={35} value={insectaWingForeForwardCant} onChange={(ev) => setInsectaWingForeForwardCant(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingFore} /></label>
+                            <label className="tool-options-checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={insectaShowWingFore}
+                                onChange={(ev) => setInsectaShowWingFore(ev.target.checked)}
+                                disabled={loading || workBusy}
+                              />
+                              <span>Fore wings</span>
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Shape</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={100}
+                                value={insectaWingShape}
+                                onChange={(ev) => setInsectaWingShape(Number(ev.target.value))}
+                                disabled={loading || workBusy}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Length</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={40}
+                                value={insectaWingForeLength}
+                                onChange={(ev) => setInsectaWingForeLength(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingFore}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Width</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={12}
+                                value={insectaWingForeWidth}
+                                onChange={(ev) => setInsectaWingForeWidth(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingFore}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Spread °</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={90}
+                                value={insectaWingForeSpread}
+                                onChange={(ev) => setInsectaWingForeSpread(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingFore}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Pitch °</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={45}
+                                value={insectaWingForePitch}
+                                onChange={(ev) => setInsectaWingForePitch(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingFore}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Offset</span>
+                              <input
+                                type="range"
+                                min={-8}
+                                max={8}
+                                value={insectaWingForeOffset}
+                                onChange={(ev) => setInsectaWingForeOffset(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingFore}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Fwd cant °</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={35}
+                                value={insectaWingForeForwardCant}
+                                onChange={(ev) =>
+                                  setInsectaWingForeForwardCant(Number(ev.target.value))
+                                }
+                                disabled={loading || workBusy || !insectaShowWingFore}
+                              />
+                            </label>
                           </div>
                           <div className="gen-card">
-                            <label className="tool-options-checkbox-row"><input type="checkbox" checked={insectaShowWingHind} onChange={(ev) => setInsectaShowWingHind(ev.target.checked)} disabled={loading || workBusy} /><span>Hind wings</span></label>
-                            <label className="tool-options-range-label"><span>Length</span><input type="range" min={0} max={40} value={insectaWingHindLength} onChange={(ev) => setInsectaWingHindLength(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingHind} /></label>
-                            <label className="tool-options-range-label"><span>Width</span><input type="range" min={0} max={12} value={insectaWingHindWidth} onChange={(ev) => setInsectaWingHindWidth(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingHind} /></label>
-                            <label className="tool-options-range-label"><span>Spread °</span><input type="range" min={0} max={90} value={insectaWingHindSpread} onChange={(ev) => setInsectaWingHindSpread(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingHind} /></label>
-                            <label className="tool-options-range-label"><span>Pitch °</span><input type="range" min={0} max={45} value={insectaWingHindPitch} onChange={(ev) => setInsectaWingHindPitch(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingHind} /></label>
-                            <label className="tool-options-range-label"><span>Offset</span><input type="range" min={-8} max={8} value={insectaWingHindOffset} onChange={(ev) => setInsectaWingHindOffset(Number(ev.target.value))} disabled={loading || workBusy || !insectaShowWingHind} /></label>
+                            <label className="tool-options-checkbox-row">
+                              <input
+                                type="checkbox"
+                                checked={insectaShowWingHind}
+                                onChange={(ev) => setInsectaShowWingHind(ev.target.checked)}
+                                disabled={loading || workBusy}
+                              />
+                              <span>Hind wings</span>
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Length</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={40}
+                                value={insectaWingHindLength}
+                                onChange={(ev) => setInsectaWingHindLength(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingHind}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Width</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={12}
+                                value={insectaWingHindWidth}
+                                onChange={(ev) => setInsectaWingHindWidth(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingHind}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Spread °</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={90}
+                                value={insectaWingHindSpread}
+                                onChange={(ev) => setInsectaWingHindSpread(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingHind}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Pitch °</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={45}
+                                value={insectaWingHindPitch}
+                                onChange={(ev) => setInsectaWingHindPitch(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingHind}
+                              />
+                            </label>
+                            <label className="tool-options-range-label">
+                              <span>Offset</span>
+                              <input
+                                type="range"
+                                min={-8}
+                                max={8}
+                                value={insectaWingHindOffset}
+                                onChange={(ev) => setInsectaWingHindOffset(Number(ev.target.value))}
+                                disabled={loading || workBusy || !insectaShowWingHind}
+                              />
+                            </label>
                           </div>
                         </div>
                       </div>
@@ -9695,53 +10949,309 @@ function App() {
                     <div className="gen-wide-grid">
                       <div className="gen-card">
                         <div className="gen-card-title">Type</div>
-                        <label className="tool-options-range-label"><span>Stance</span><select value={faunaStance} onChange={(ev) => {
-                            const st = ev.target.value;
-                            setFaunaStance(st);
-                            const p = FAUNA_STANCE_PRESETS[st];
-                            if (p) {
-                              setFaunaArchetype(p.archetype); setFaunaBodyArch(p.bodyArch); setFaunaSpineSegments(p.spineSegments);
-                              setFaunaBodyLength(p.bodyLength); setFaunaBodyHalfWidth(p.bodyHalfWidth); setFaunaBodyHalfHeight(p.bodyHalfHeight);
-                              setFaunaNeckLength(p.neckLength); setFaunaNeckHalfWidth(p.neckHalfWidth); setFaunaNeckHalfHeight(p.neckHalfHeight);
-                              setFaunaHeadLength(p.headLength); setFaunaHeadHalfWidth(p.headHalfWidth); setFaunaHeadHalfHeight(p.headHalfHeight);
-                              setFaunaTailLength(p.tailLength); setFaunaShoulderOffsetForward(p.shoulderOffsetForward); setFaunaHipOffsetForward(p.hipOffsetForward);
-                              setFaunaFrontUpperLength(p.frontUpperLength); setFaunaFrontLowerLength(p.frontLowerLength);
-                              setFaunaHindUpperLength(p.hindUpperLength); setFaunaHindLowerLength(p.hindLowerLength);
-                            }
-                          }} disabled={loading || workBusy}><option value="quadruped">Quadruped</option><option value="biped">Biped</option></select></label>
-                        <label className="tool-options-range-label"><span>Archetype</span><select value={faunaArchetype} onChange={(ev) => setFaunaArchetype(ev.target.value)} disabled={loading || workBusy}><option value="plantigrade">Plantigrade</option><option value="digitigrade">Digitigrade</option><option value="ungulate">Ungulate</option></select></label>
-                        <label className="tool-options-range-label"><span>Yaw °</span><input type="range" min={-180} max={180} value={faunaBodyYawDeg} onChange={(ev) => setFaunaBodyYawDeg(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Arch</span><input type="range" min={-1} max={1} step={0.02} value={faunaBodyArch} onChange={(ev) => setFaunaBodyArch(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-checkbox-row"><input type="checkbox" checked={faunaAutoFootPlacement} onChange={(ev) => setFaunaAutoFootPlacement(ev.target.checked)} disabled={loading || workBusy} /><span>Auto feet</span></label>
-                        <label className="tool-options-range-label"><span>Anchor U</span><input type="range" min={-24} max={24} value={faunaAnchorU} onChange={(ev) => setFaunaAnchorU(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Anchor V</span><input type="range" min={-24} max={24} value={faunaAnchorV} onChange={(ev) => setFaunaAnchorV(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Stance</span>
+                          <select
+                            value={faunaStance}
+                            onChange={(ev) => {
+                              const st = ev.target.value;
+                              setFaunaStance(st);
+                              const p = FAUNA_STANCE_PRESETS[st];
+                              if (p) {
+                                setFaunaArchetype(p.archetype);
+                                setFaunaBodyArch(p.bodyArch);
+                                setFaunaSpineSegments(p.spineSegments);
+                                setFaunaBodyLength(p.bodyLength);
+                                setFaunaBodyHalfWidth(p.bodyHalfWidth);
+                                setFaunaBodyHalfHeight(p.bodyHalfHeight);
+                                setFaunaNeckLength(p.neckLength);
+                                setFaunaNeckHalfWidth(p.neckHalfWidth);
+                                setFaunaNeckHalfHeight(p.neckHalfHeight);
+                                setFaunaHeadLength(p.headLength);
+                                setFaunaHeadHalfWidth(p.headHalfWidth);
+                                setFaunaHeadHalfHeight(p.headHalfHeight);
+                                setFaunaTailLength(p.tailLength);
+                                setFaunaShoulderOffsetForward(p.shoulderOffsetForward);
+                                setFaunaHipOffsetForward(p.hipOffsetForward);
+                                setFaunaFrontUpperLength(p.frontUpperLength);
+                                setFaunaFrontLowerLength(p.frontLowerLength);
+                                setFaunaHindUpperLength(p.hindUpperLength);
+                                setFaunaHindLowerLength(p.hindLowerLength);
+                              }
+                            }}
+                            disabled={loading || workBusy}
+                          >
+                            <option value="quadruped">Quadruped</option>
+                            <option value="biped">Biped</option>
+                          </select>
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Archetype</span>
+                          <select
+                            value={faunaArchetype}
+                            onChange={(ev) => setFaunaArchetype(ev.target.value)}
+                            disabled={loading || workBusy}
+                          >
+                            <option value="plantigrade">Plantigrade</option>
+                            <option value="digitigrade">Digitigrade</option>
+                            <option value="ungulate">Ungulate</option>
+                          </select>
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Yaw °</span>
+                          <input
+                            type="range"
+                            min={-180}
+                            max={180}
+                            value={faunaBodyYawDeg}
+                            onChange={(ev) => setFaunaBodyYawDeg(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Arch</span>
+                          <input
+                            type="range"
+                            min={-1}
+                            max={1}
+                            step={0.02}
+                            value={faunaBodyArch}
+                            onChange={(ev) => setFaunaBodyArch(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-checkbox-row">
+                          <input
+                            type="checkbox"
+                            checked={faunaAutoFootPlacement}
+                            onChange={(ev) => setFaunaAutoFootPlacement(ev.target.checked)}
+                            disabled={loading || workBusy}
+                          />
+                          <span>Auto feet</span>
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Anchor U</span>
+                          <input
+                            type="range"
+                            min={-24}
+                            max={24}
+                            value={faunaAnchorU}
+                            onChange={(ev) => setFaunaAnchorU(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Anchor V</span>
+                          <input
+                            type="range"
+                            min={-24}
+                            max={24}
+                            value={faunaAnchorV}
+                            onChange={(ev) => setFaunaAnchorV(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Trunk</div>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={4} max={60} value={faunaBodyLength} onChange={(ev) => setFaunaBodyLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-width</span><input type="range" min={1} max={12} value={faunaBodyHalfWidth} onChange={(ev) => setFaunaBodyHalfWidth(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-height</span><input type="range" min={1} max={12} value={faunaBodyHalfHeight} onChange={(ev) => setFaunaBodyHalfHeight(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Spine segs</span><input type="range" min={2} max={20} value={faunaSpineSegments} onChange={(ev) => setFaunaSpineSegments(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Tail</span><input type="range" min={0} max={20} value={faunaTailLength} onChange={(ev) => setFaunaTailLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={4}
+                            max={60}
+                            value={faunaBodyLength}
+                            onChange={(ev) => setFaunaBodyLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-width</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={12}
+                            value={faunaBodyHalfWidth}
+                            onChange={(ev) => setFaunaBodyHalfWidth(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-height</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={12}
+                            value={faunaBodyHalfHeight}
+                            onChange={(ev) => setFaunaBodyHalfHeight(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Spine segs</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={20}
+                            value={faunaSpineSegments}
+                            onChange={(ev) => setFaunaSpineSegments(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Tail</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={20}
+                            value={faunaTailLength}
+                            onChange={(ev) => setFaunaTailLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Neck</div>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={0} max={24} value={faunaNeckLength} onChange={(ev) => setFaunaNeckLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-width</span><input type="range" min={1} max={8} value={faunaNeckHalfWidth} onChange={(ev) => setFaunaNeckHalfWidth(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-height</span><input type="range" min={1} max={8} value={faunaNeckHalfHeight} onChange={(ev) => setFaunaNeckHalfHeight(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <div className="gen-card-title" style={{marginTop:"0.25rem"}}>Head</div>
-                        <label className="tool-options-range-label"><span>Length</span><input type="range" min={2} max={20} value={faunaHeadLength} onChange={(ev) => setFaunaHeadLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-width</span><input type="range" min={1} max={8} value={faunaHeadHalfWidth} onChange={(ev) => setFaunaHeadHalfWidth(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Half-height</span><input type="range" min={1} max={8} value={faunaHeadHalfHeight} onChange={(ev) => setFaunaHeadHalfHeight(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={0}
+                            max={24}
+                            value={faunaNeckLength}
+                            onChange={(ev) => setFaunaNeckLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-width</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            value={faunaNeckHalfWidth}
+                            onChange={(ev) => setFaunaNeckHalfWidth(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-height</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            value={faunaNeckHalfHeight}
+                            onChange={(ev) => setFaunaNeckHalfHeight(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <div className="gen-card-title" style={{ marginTop: "0.25rem" }}>
+                          Head
+                        </div>
+                        <label className="tool-options-range-label">
+                          <span>Length</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={20}
+                            value={faunaHeadLength}
+                            onChange={(ev) => setFaunaHeadLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-width</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            value={faunaHeadHalfWidth}
+                            onChange={(ev) => setFaunaHeadHalfWidth(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Half-height</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            value={faunaHeadHalfHeight}
+                            onChange={(ev) => setFaunaHeadHalfHeight(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                       <div className="gen-card">
                         <div className="gen-card-title">Limbs</div>
-                        <label className="tool-options-range-label"><span>Shoulder fwd</span><input type="range" min={-8} max={8} value={faunaShoulderOffsetForward} onChange={(ev) => setFaunaShoulderOffsetForward(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Hip fwd</span><input type="range" min={-8} max={8} value={faunaHipOffsetForward} onChange={(ev) => setFaunaHipOffsetForward(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Front upper</span><input type="range" min={2} max={20} value={faunaFrontUpperLength} onChange={(ev) => setFaunaFrontUpperLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Front lower</span><input type="range" min={2} max={20} value={faunaFrontLowerLength} onChange={(ev) => setFaunaFrontLowerLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Hind upper</span><input type="range" min={2} max={20} value={faunaHindUpperLength} onChange={(ev) => setFaunaHindUpperLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
-                        <label className="tool-options-range-label"><span>Hind lower</span><input type="range" min={2} max={20} value={faunaHindLowerLength} onChange={(ev) => setFaunaHindLowerLength(Number(ev.target.value))} disabled={loading || workBusy} /></label>
+                        <label className="tool-options-range-label">
+                          <span>Shoulder fwd</span>
+                          <input
+                            type="range"
+                            min={-8}
+                            max={8}
+                            value={faunaShoulderOffsetForward}
+                            onChange={(ev) =>
+                              setFaunaShoulderOffsetForward(Number(ev.target.value))
+                            }
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Hip fwd</span>
+                          <input
+                            type="range"
+                            min={-8}
+                            max={8}
+                            value={faunaHipOffsetForward}
+                            onChange={(ev) => setFaunaHipOffsetForward(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Front upper</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={20}
+                            value={faunaFrontUpperLength}
+                            onChange={(ev) => setFaunaFrontUpperLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Front lower</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={20}
+                            value={faunaFrontLowerLength}
+                            onChange={(ev) => setFaunaFrontLowerLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Hind upper</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={20}
+                            value={faunaHindUpperLength}
+                            onChange={(ev) => setFaunaHindUpperLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                        <label className="tool-options-range-label">
+                          <span>Hind lower</span>
+                          <input
+                            type="range"
+                            min={2}
+                            max={20}
+                            value={faunaHindLowerLength}
+                            onChange={(ev) => setFaunaHindLowerLength(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
                       </div>
                     </div>
                   ) : null}
@@ -10653,7 +12163,9 @@ function App() {
                     ))}
                   </div>
                   <div style={{ marginTop: "0.4rem" }}>
-                    <span style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}>Origin</span>
+                    <span style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}>
+                      Origin
+                    </span>
                     <div
                       style={{
                         display: "grid",
@@ -11259,7 +12771,9 @@ function App() {
                 max={8}
                 step={0.25}
                 value={scaleDialogFactor}
-                onChange={(e) => setScaleDialogFactor(Math.max(0.1, Math.min(8, Number(e.target.value))))}
+                onChange={(e) =>
+                  setScaleDialogFactor(Math.max(0.1, Math.min(8, Number(e.target.value))))
+                }
               />
             </label>
             <div className="modal-buttons">
