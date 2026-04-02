@@ -6189,9 +6189,12 @@ pub(crate) enum SelectionGizmoDrag {
 /// Returns the pending visual offset for the selection during a move drag, or `(0,0,0)`.
 fn pending_gizmo_translate(state: &ViewerState) -> (i32, i32, i32) {
     match &*state.selection_gizmo_drag.lock() {
-        SelectionGizmoDrag::Move { pending_dx, pending_dy, pending_dz, .. } => {
-            (*pending_dx, *pending_dy, *pending_dz)
-        }
+        SelectionGizmoDrag::Move {
+            pending_dx,
+            pending_dy,
+            pending_dz,
+            ..
+        } => (*pending_dx, *pending_dy, *pending_dz),
         _ => (0, 0, 0),
     }
 }
@@ -6210,12 +6213,24 @@ fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
     let mut min_z = i32::MAX;
     let mut max_z = i32::MIN;
     for &(x, y, z) in sel.iter() {
-        if x < min_x { min_x = x; }
-        if x > max_x { max_x = x; }
-        if y < min_y { min_y = y; }
-        if y > max_y { max_y = y; }
-        if z < min_z { min_z = z; }
-        if z > max_z { max_z = z; }
+        if x < min_x {
+            min_x = x;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if y > max_y {
+            max_y = y;
+        }
+        if z < min_z {
+            min_z = z;
+        }
+        if z > max_z {
+            max_z = z;
+        }
     }
     drop(sel);
     let cx = (min_x + max_x) as f32 * 0.5;
@@ -6224,7 +6239,9 @@ fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
     let center = glam::Vec3::new(cx, cy, cz);
     let (vw, vh) = {
         let v = state.viewer.lock();
-        v.as_ref().map(|vw| vw.viewport_size()).unwrap_or((512, 512))
+        v.as_ref()
+            .map(|vw| vw.viewport_size())
+            .unwrap_or((512, 512))
     };
     let w = vw as f32;
     let h = vh as f32;
@@ -6239,11 +6256,18 @@ fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
         .unwrap_or(12.0);
     let in_front_dir = |dir: glam::Vec3| -> bool { (cam_eye - center).dot(dir) > 0.0 };
     let dirs = [
-        glam::Vec3::X, -glam::Vec3::X,
-        glam::Vec3::Y, -glam::Vec3::Y,
-        glam::Vec3::Z, -glam::Vec3::Z,
+        glam::Vec3::X,
+        -glam::Vec3::X,
+        glam::Vec3::Y,
+        -glam::Vec3::Y,
+        glam::Vec3::Z,
+        -glam::Vec3::Z,
     ];
-    let mut move_handles = [GizmoProj { sx: 0.0, sy: 0.0, in_front: true }; 6];
+    let mut move_handles = [GizmoProj {
+        sx: 0.0,
+        sy: 0.0,
+        in_front: true,
+    }; 6];
     for (i, &dir) in dirs.iter().enumerate() {
         move_handles[i] = gizmo_proj_point(&cam, w, h, center + dir * arm_world, in_front_dir(dir));
     }
@@ -6273,7 +6297,12 @@ fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
 
 /// Hit-test physical-pixel point (sx, sy) against the gizmo.
 /// Returns `Some(SelectionGizmoDrag)` (never `None`) on hit.
-fn gizmo_hit_test_inner(proj: &SelectionGizmoProjected, sx: f32, sy: f32, dpr: f32) -> Option<SelectionGizmoDrag> {
+fn gizmo_hit_test_inner(
+    proj: &SelectionGizmoProjected,
+    sx: f32,
+    sy: f32,
+    dpr: f32,
+) -> Option<SelectionGizmoDrag> {
     let move_hit_sq = (GIZMO_MOVE_HIT_CSS * dpr).powi(2);
     let ring_hit_sq = (GIZMO_RING_HIT_CSS * dpr).powi(2);
     // Move handles
@@ -6282,7 +6311,11 @@ fn gizmo_hit_test_inner(proj: &SelectionGizmoProjected, sx: f32, sy: f32, dpr: f
             let adx = h.sx - proj.center_sx;
             let ady = h.sy - proj.center_sy;
             let alen = adx.hypot(ady);
-            let (axis_sx, axis_sy) = if alen > 0.5 { (adx / alen, ady / alen) } else { (1.0, 0.0) };
+            let (axis_sx, axis_sy) = if alen > 0.5 {
+                (adx / alen, ady / alen)
+            } else {
+                (1.0, 0.0)
+            };
             return Some(SelectionGizmoDrag::Move {
                 axis_sx,
                 axis_sy,
@@ -6331,14 +6364,13 @@ fn gizmo_hit_test_inner(proj: &SelectionGizmoProjected, sx: f32, sy: f32, dpr: f
 }
 
 #[tauri::command]
-fn gizmo_pointer_down(
-    state: State<'_, Arc<ViewerState>>,
-    sx: f32,
-    sy: f32,
-    dpr: f32,
-) -> bool {
-    let Some(proj) = compute_gizmo_proj(&state) else { return false };
-    let Some(drag) = gizmo_hit_test_inner(&proj, sx, sy, dpr) else { return false };
+fn gizmo_pointer_down(state: State<'_, Arc<ViewerState>>, sx: f32, sy: f32, dpr: f32) -> bool {
+    let Some(proj) = compute_gizmo_proj(&state) else {
+        return false;
+    };
+    let Some(drag) = gizmo_hit_test_inner(&proj, sx, sy, dpr) else {
+        return false;
+    };
     *state.selection_gizmo_drag.lock() = drag;
     true
 }
@@ -6354,35 +6386,64 @@ fn gizmo_pointer_move(
     match drag {
         SelectionGizmoDrag::None => Ok(()),
         SelectionGizmoDrag::Move {
-            axis_sx, axis_sy, world_axis, positive,
-            mut accum, step_threshold,
-            mut pending_dx, mut pending_dy, mut pending_dz,
+            axis_sx,
+            axis_sy,
+            world_axis,
+            positive,
+            mut accum,
+            step_threshold,
+            mut pending_dx,
+            mut pending_dy,
+            mut pending_dz,
         } => {
             accum += dcx * axis_sx + dcy * axis_sy;
             let steps = (accum / step_threshold).trunc() as i32;
             accum -= steps as f32 * step_threshold;
             if steps != 0 {
                 let magnitude = if positive { steps } else { -steps };
-                if world_axis == 0 { pending_dx += magnitude; }
-                else if world_axis == 1 { pending_dy += magnitude; }
-                else { pending_dz += magnitude; }
+                if world_axis == 0 {
+                    pending_dx += magnitude;
+                } else if world_axis == 1 {
+                    pending_dy += magnitude;
+                } else {
+                    pending_dz += magnitude;
+                }
                 // Invalidate overlay so render loop rebuilds it at the new preview position.
                 *state.selection_overlay_cache_key.lock() = None;
             }
             *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Move {
-                axis_sx, axis_sy, world_axis, positive, accum, step_threshold,
-                pending_dx, pending_dy, pending_dz,
+                axis_sx,
+                axis_sy,
+                world_axis,
+                positive,
+                accum,
+                step_threshold,
+                pending_dx,
+                pending_dy,
+                pending_dz,
             };
             Ok(())
         }
-        SelectionGizmoDrag::Rotate { ring, tangent_x, tangent_y, mut accum, step_threshold } => {
+        SelectionGizmoDrag::Rotate {
+            ring,
+            tangent_x,
+            tangent_y,
+            mut accum,
+            step_threshold,
+        } => {
             accum += dcx * tangent_x + dcy * tangent_y;
             let steps = (accum / step_threshold).trunc() as i32;
             accum -= steps as f32 * step_threshold;
             *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Rotate {
-                ring, tangent_x, tangent_y, accum, step_threshold,
+                ring,
+                tangent_x,
+                tangent_y,
+                accum,
+                step_threshold,
             };
-            if steps == 0 { return Ok(()); }
+            if steps == 0 {
+                return Ok(());
+            }
             selection_rotate_inner(state.inner(), &app, ring, steps)?;
             Ok(())
         }
@@ -6390,16 +6451,19 @@ fn gizmo_pointer_move(
 }
 
 #[tauri::command]
-fn gizmo_pointer_up(
-    state: State<'_, Arc<ViewerState>>,
-    app: AppHandle,
-) -> Result<(), String> {
+fn gizmo_pointer_up(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
     let drag = state.selection_gizmo_drag.lock().clone();
     // Clear drag state before the translate so the overlay fingerprint (which reads pending)
     // won't double-apply the offset after selection_cells is updated.
     *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::None;
     *state.selection_overlay_cache_key.lock() = None;
-    if let SelectionGizmoDrag::Move { pending_dx, pending_dy, pending_dz, .. } = drag {
+    if let SelectionGizmoDrag::Move {
+        pending_dx,
+        pending_dy,
+        pending_dz,
+        ..
+    } = drag
+    {
         if pending_dx != 0 || pending_dy != 0 || pending_dz != 0 {
             selection_translate_inner(state.inner(), &app, pending_dx, pending_dy, pending_dz)?;
         }
@@ -6408,19 +6472,16 @@ fn gizmo_pointer_up(
 }
 
 #[tauri::command]
-fn gizmo_hit_test(
-    state: State<'_, Arc<ViewerState>>,
-    sx: f32,
-    sy: f32,
-    dpr: f32,
-) -> bool {
+fn gizmo_hit_test(state: State<'_, Arc<ViewerState>>, sx: f32, sy: f32, dpr: f32) -> bool {
     let Some(proj) = compute_gizmo_proj(&state) else {
         state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
         return false;
     };
     match gizmo_hit_test_inner(&proj, sx, sy, dpr) {
         Some(SelectionGizmoDrag::Move { world_axis, .. }) => {
-            state.hovered_gizmo_axis.store(world_axis, Ordering::Relaxed);
+            state
+                .hovered_gizmo_axis
+                .store(world_axis, Ordering::Relaxed);
             true
         }
         Some(SelectionGizmoDrag::Rotate { ring, .. }) => {
@@ -6461,7 +6522,10 @@ fn push_selection_transform_undo(
     state
         .solo_undo
         .lock()
-        .push(SoloUndoEntry::SelectionTransform { before: before_sel, deltas });
+        .push(SoloUndoEntry::SelectionTransform {
+            before: before_sel,
+            deltas,
+        });
     state.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::register_solo_edit_completed(app, state);
@@ -7671,9 +7735,19 @@ fn clipboard_stamp_at_screen(
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         voxel_edit::stamp_clipboard_at_screen(
-            file, vmap, &cam, w, h, sx, sy, &clip,
-            args.rot_x, args.rot_y, args.rot_z,
-            args.origin_x, args.origin_z,
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            &clip,
+            args.rot_x,
+            args.rot_y,
+            args.rot_z,
+            args.origin_x,
+            args.origin_z,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
@@ -7709,9 +7783,19 @@ fn clipboard_punch_at_screen(
         let cam = state.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         voxel_edit::punch_clipboard_at_screen(
-            file, vmap, &cam, w, h, sx, sy, &clip,
-            args.rot_x, args.rot_y, args.rot_z,
-            args.origin_x, args.origin_z,
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            &clip,
+            args.rot_x,
+            args.rot_y,
+            args.rot_z,
+            args.origin_x,
+            args.origin_z,
         )?
     };
     commit_voxel_edits(&state, &app, deltas)
@@ -7742,8 +7826,7 @@ fn stamp_face_normal_at_screen(
     };
     let cam = state.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let normal =
-        voxel_edit::outward_face_normal_from_screen_ray(file, vmap, &cam, w, h, sx, sy);
+    let normal = voxel_edit::outward_face_normal_from_screen_ray(file, vmap, &cam, w, h, sx, sy);
     Ok(normal.map(|(x, y, z)| [x, y, z]))
 }
 
@@ -8522,8 +8605,7 @@ fn selection_extrude_preview(
         }
     }
 
-    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
-        state.selection_cells.lock().clone();
+    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> = state.selection_cells.lock().clone();
     if selection.is_empty() {
         return Ok(());
     }
@@ -8550,8 +8632,7 @@ fn selection_extrude_preview(
         )
     };
 
-    let drag_dist =
-        (args.screen_dx * args.screen_dx + args.screen_dy * args.screen_dy).sqrt();
+    let drag_dist = (args.screen_dx * args.screen_dx + args.screen_dy * args.screen_dy).sqrt();
     let length = (drag_dist / 6.0).round().max(0.0) as u32;
 
     let footprint = voxel_edit::extrude_selection_footprint(&selection, direction, length);
@@ -12066,8 +12147,15 @@ fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamer
     if pending != (0, 0, 0) {
         let text = format!("{:+}, {:+}, {:+}", pending.0, pending.1, pending.2);
         let (vw, vh) = viewer.viewport_size();
-        if let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(cam, vw as f32, vh as f32, pivot.x, pivot.y, pivot.z) {
-            viewer.upload_gizmo_delta_label(Some(GpuPeerLabel { name: text, color_rgb: 0x9FD8FF, x: sx, y: sy }));
+        if let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(
+            cam, vw as f32, vh as f32, pivot.x, pivot.y, pivot.z,
+        ) {
+            viewer.upload_gizmo_delta_label(Some(GpuPeerLabel {
+                name: text,
+                color_rgb: 0x9FD8FF,
+                x: sx,
+                y: sy,
+            }));
         } else {
             viewer.upload_gizmo_delta_label(None);
         }
@@ -13425,15 +13513,19 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let set: AHashSet<_> = cells.iter().copied().collect();
                         let visible: AHashSet<_> = set
                             .iter()
                             .filter(|&&(x, y, z)| {
-                                NBRS.iter().any(|&(dx, dy, dz)| {
-                                    !set.contains(&(x + dx, y + dy, z + dz))
-                                })
+                                NBRS.iter()
+                                    .any(|&(dx, dy, dz)| !set.contains(&(x + dx, y + dy, z + dz)))
                             })
                             .copied()
                             .collect();
@@ -13482,15 +13574,19 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let set: AHashSet<_> = cells.iter().copied().collect();
                         let visible: AHashSet<_> = set
                             .iter()
                             .filter(|&&(x, y, z)| {
-                                NBRS.iter().any(|&(dx, dy, dz)| {
-                                    !set.contains(&(x + dx, y + dy, z + dz))
-                                })
+                                NBRS.iter()
+                                    .any(|&(dx, dy, dz)| !set.contains(&(x + dx, y + dy, z + dz)))
                             })
                             .copied()
                             .collect();
@@ -13539,15 +13635,19 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let set: AHashSet<_> = cells.iter().copied().collect();
                         let visible: AHashSet<_> = set
                             .iter()
                             .filter(|&&(x, y, z)| {
-                                NBRS.iter().any(|&(dx, dy, dz)| {
-                                    !set.contains(&(x + dx, y + dy, z + dz))
-                                })
+                                NBRS.iter()
+                                    .any(|&(dx, dy, dz)| !set.contains(&(x + dx, y + dy, z + dz)))
                             })
                             .copied()
                             .collect();
@@ -13619,7 +13719,12 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let color_map: AHashMap<(i32, i32, i32), u32> =
                             cells.iter().cloned().collect();
@@ -13640,9 +13745,7 @@ fn prepare_preview_mesh(
                             file,
                             dbg,
                             fallback,
-                            Some(&|x, y, z| {
-                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
-                            }),
+                            Some(&|x, y, z| *color_map.get(&(x, y, z)).unwrap_or(&fallback)),
                         );
                         return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
@@ -13743,7 +13846,12 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let color_map: AHashMap<(i32, i32, i32), u32> =
                             cells.iter().cloned().collect();
@@ -13764,9 +13872,7 @@ fn prepare_preview_mesh(
                             file,
                             dbg,
                             fallback,
-                            Some(&|x, y, z| {
-                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
-                            }),
+                            Some(&|x, y, z| *color_map.get(&(x, y, z)).unwrap_or(&fallback)),
                         );
                         return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
@@ -13847,7 +13953,12 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let color_map: AHashMap<(i32, i32, i32), u32> =
                             cells.iter().cloned().collect();
@@ -13868,9 +13979,7 @@ fn prepare_preview_mesh(
                             file,
                             dbg,
                             fallback,
-                            Some(&|x, y, z| {
-                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
-                            }),
+                            Some(&|x, y, z| *color_map.get(&(x, y, z)).unwrap_or(&fallback)),
                         );
                         return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
@@ -13945,7 +14054,12 @@ fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         const NBRS: [(i32, i32, i32); 6] = [
-                            (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
                         ];
                         let color_map: AHashMap<(i32, i32, i32), u32> =
                             cells.iter().cloned().collect();
@@ -13966,9 +14080,7 @@ fn prepare_preview_mesh(
                             file,
                             dbg,
                             fallback,
-                            Some(&|x, y, z| {
-                                *color_map.get(&(x, y, z)).unwrap_or(&fallback)
-                            }),
+                            Some(&|x, y, z| *color_map.get(&(x, y, z)).unwrap_or(&fallback)),
                         );
                         return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
@@ -14156,7 +14268,8 @@ fn prepare_preview_mesh(
             voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy).map(|(c, _)| c)
         };
         let (origin_x, origin_z) = (ctx.stamp_origin_x, ctx.stamp_origin_z);
-        let (off_x, off_z) = voxel_edit::stamp_origin_offsets_pub(&clip.entries, origin_x, origin_z);
+        let (off_x, off_z) =
+            voxel_edit::stamp_origin_offsets_pub(&clip.entries, origin_x, origin_z);
         let key = {
             let mut hasher = AHasher::default();
             mode.hash(&mut hasher);
@@ -14187,7 +14300,9 @@ fn prepare_preview_mesh(
         let color_map: AHashMap<greedy_mesh::VoxelCoord, u32> = clip
             .entries
             .iter()
-            .map(|&(dx, dy, dz, src_color, _)| ((ax + dx - off_x, ay + dy, az + dz - off_z), src_color))
+            .map(|&(dx, dy, dz, src_color, _)| {
+                ((ax + dx - off_x, ay + dy, az + dz - off_z), src_color)
+            })
             .collect();
         let cells: AHashSet<greedy_mesh::VoxelCoord> = color_map.keys().copied().collect();
         let color_resolver =
@@ -15344,7 +15459,13 @@ fn load_start_screen_logo(
     app: AppHandle,
 ) -> Result<(), String> {
     *state.file_label.lock() = String::new();
-    spawn_decode_and_mesh_from_bytes(Arc::clone(&*state), app, START_SCREEN_LOGO, String::new(), true);
+    spawn_decode_and_mesh_from_bytes(
+        Arc::clone(&*state),
+        app,
+        START_SCREEN_LOGO,
+        String::new(),
+        true,
+    );
     Ok(())
 }
 
@@ -15379,8 +15500,7 @@ fn mascot_load(
                     return;
                 }
             };
-            let (mesh, bounds) =
-                greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
             let state_up = Arc::clone(&state);
             let _ = app_err.run_on_main_thread(move || {
                 let mut v = state_up.viewer.lock();
@@ -15956,7 +16076,9 @@ fn clear_autosaves_and_session(app: &AppHandle) -> Result<(), String> {
     if let Ok(session_path) = session_state_path(app) {
         let _ = std::fs::remove_file(&session_path);
     }
-    log::info!("debug_clear_autosaves: deleted {deleted} autosave file(s) and cleared last_session.json");
+    log::info!(
+        "debug_clear_autosaves: deleted {deleted} autosave file(s) and cleared last_session.json"
+    );
     Ok(())
 }
 

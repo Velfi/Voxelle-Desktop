@@ -1,6 +1,4 @@
-use super::common::{
-    v3_add, v3_normalize, v3_round, v3_scale, PlacementFrame, V3,
-};
+use super::common::{v3_add, v3_normalize, v3_round, v3_scale, PlacementFrame, V3};
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{
@@ -470,12 +468,9 @@ pub fn generate_insecta_deltas(
     }
 
     // Build body frame using common PlacementFrame
-    let frame = PlacementFrame::from_normal(
-        (face_empty.0, face_empty.1, face_empty.2),
-        nx, ny, nz,
-    )
-    .with_anchor_offset(anchor_offset_u as f32, anchor_offset_v as f32)
-    .with_yaw(body_yaw);
+    let frame = PlacementFrame::from_normal((face_empty.0, face_empty.1, face_empty.2), nx, ny, nz)
+        .with_anchor_offset(anchor_offset_u as f32, anchor_offset_v as f32)
+        .with_yaw(body_yaw);
     let forward = frame.forward;
     let side = frame.side;
     let up = frame.up;

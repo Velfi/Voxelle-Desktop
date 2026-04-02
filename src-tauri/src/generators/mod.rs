@@ -1,8 +1,8 @@
 //! Procedural generators (web parity). Face placement uses ray hit + inward normal.
 
-pub(super) mod common;
 mod ashlar_gen;
 mod cloth_gen;
+pub(super) mod common;
 mod fauna_gen;
 mod flora_gen;
 mod grass_gen;

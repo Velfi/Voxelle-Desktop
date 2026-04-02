@@ -68,7 +68,11 @@ pub fn v3_lerp(a: V3, b: V3, t: f32) -> V3 {
 
 #[inline(always)]
 pub fn v3_round(a: V3) -> (i32, i32, i32) {
-    (a[0].round() as i32, a[1].round() as i32, a[2].round() as i32)
+    (
+        a[0].round() as i32,
+        a[1].round() as i32,
+        a[2].round() as i32,
+    )
 }
 
 /// Rodrigues rotation: rotate `v` around unit `axis` by `angle` radians.

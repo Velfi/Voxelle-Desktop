@@ -1,6 +1,4 @@
-use super::common::{
-    hash3, smoothstep, v3_add, v3_cross, v3_len, v3_normalize, v3_scale, v3_sub,
-};
+use super::common::{hash3, smoothstep, v3_add, v3_cross, v3_len, v3_normalize, v3_scale, v3_sub};
 use crate::camera::OrbitCamera;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{

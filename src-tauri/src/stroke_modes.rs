@@ -1463,7 +1463,13 @@ fn frozen_cuboid_geo(
     let plane_ax = aux.cuboid_frozen_plane_ax? as usize;
     let [hx, hy, hz] = aux.cuboid_frozen_hit?;
     let [px, py, pz] = aux.cuboid_frozen_prev?;
-    Some(((ax, ay, az), (bx, by, bz), plane_ax, (hx, hy, hz), (px, py, pz)))
+    Some((
+        (ax, ay, az),
+        (bx, by, bz),
+        plane_ax,
+        (hx, hy, hz),
+        (px, py, pz),
+    ))
 }
 
 /// Public re-export of [`cuboid_drag_plane_geometry`] for use by `lib.rs`'s
@@ -1551,7 +1557,11 @@ fn cuboid_drag_plane_geometry(
                         camera.target.y - eye.y,
                         camera.target.z - eye.z,
                     ];
-                    if cam[plane_ax] < 0.0 { 1 } else { -1 }
+                    if cam[plane_ax] < 0.0 {
+                        1
+                    } else {
+                        -1
+                    }
                 }
             };
             let syn_prev = match plane_ax {

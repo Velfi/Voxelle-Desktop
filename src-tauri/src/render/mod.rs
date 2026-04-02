@@ -4402,8 +4402,7 @@ impl WgpuViewer {
             cache: None,
         });
 
-        let mascot_depth_view =
-            Self::make_mascot_depth(&device, size.0.max(1), size.1.max(1)).1;
+        let mascot_depth_view = Self::make_mascot_depth(&device, size.0.max(1), size.1.max(1)).1;
 
         // ── Speech bubble pipeline ────────────────────────────────────────────
         let speech_bubble_bind_layout =
@@ -8608,10 +8607,11 @@ impl WgpuViewer {
         );
 
         // Mascots and speech bubbles render directly on the swapchain surface.
-        let needs_swap_pass =
-            self.start_screen_transparent || self.has_visible_speech_bubbles();
+        let needs_swap_pass = self.start_screen_transparent || self.has_visible_speech_bubbles();
         if needs_swap_pass {
-            let swap_view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let swap_view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
             if self.start_screen_transparent {
                 self.render_mascots(&mut encoder, &swap_view);
             }
@@ -9071,12 +9071,7 @@ impl WgpuViewer {
                     occlusion_query_set: None,
                     timestamp_writes: None,
                 });
-                pass.set_scissor_rect(
-                    rx as u32,
-                    ry as u32,
-                    rw.max(1.0) as u32,
-                    rh.max(1.0) as u32,
-                );
+                pass.set_scissor_rect(rx as u32, ry as u32, rw.max(1.0) as u32, rh.max(1.0) as u32);
                 pass.set_pipeline(&self.speech_bubble_pipeline);
                 pass.set_bind_group(0, &self.speech_bubbles[i].bind_group, &[]);
                 pass.draw(0..3, 0..1);
@@ -9106,8 +9101,10 @@ impl WgpuViewer {
                 .unwrap_or("");
             let wrap_w = (b.screen_rect[2] - padding * 2.0).max(1.0);
 
-            let mut buf =
-                GlyphonBuffer::new(&mut self.glyphon_font_system, Metrics::new(font_size, line_height));
+            let mut buf = GlyphonBuffer::new(
+                &mut self.glyphon_font_system,
+                Metrics::new(font_size, line_height),
+            );
             buf.set_size(
                 &mut self.glyphon_font_system,
                 Some(wrap_w),

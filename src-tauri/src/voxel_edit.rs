@@ -5265,7 +5265,9 @@ pub fn stamp_clipboard_at_screen(
     let (off_x, off_z) = stamp_origin_offsets(&rotated, origin_x, origin_z);
     ensure_grid_fits_coords(
         file,
-        rotated.iter().map(|e| (ax + e.0 - off_x, ay + e.1, az + e.2 - off_z)),
+        rotated
+            .iter()
+            .map(|e| (ax + e.0 - off_x, ay + e.1, az + e.2 - off_z)),
     );
     let grid_size = file.grid_size.max(1);
     let mut seen: HashSet<(i32, i32, i32)> = HashSet::new();
@@ -5726,8 +5728,7 @@ pub fn scale_selected_voxels(
     }
     let mut seen: HashSet<VoxelCoord> = HashSet::new();
     for (dest, voxel) in new_voxels {
-        if dest.0 < lo || dest.0 > hi || dest.1 < lo || dest.1 > hi || dest.2 < lo || dest.2 > hi
-        {
+        if dest.0 < lo || dest.0 > hi || dest.1 < lo || dest.1 > hi || dest.2 < lo || dest.2 > hi {
             continue;
         }
         if !seen.insert(dest) {

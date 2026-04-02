@@ -115,7 +115,9 @@ pub fn generate_grass_on_face_deltas(
             if i * i + j * j > r * r {
                 continue;
             }
-            let blade_seed = (seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663)) & 0xFFFF_FFFF;
+            let blade_seed =
+                (seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663))
+                    & 0xFFFF_FFFF;
             let mut rng = Rng::new(blade_seed);
             if rng.next() > dens {
                 continue;
@@ -125,8 +127,11 @@ pub fn generate_grass_on_face_deltas(
             let bz = cz + i * t1[2] + j * t2[2];
             let blade_h = 1 + (rng.next() * max_h as f32) as i32;
             let bend_angle = rng.next() * std::f32::consts::TAU;
-            let bend_rate = (BEND_RATE_BASE + (rng.next() - 0.5) * 2.0 * BEND_RATE_VARIANCE).max(0.02);
-            for (x, y, z) in blade_coords(bx, by, bz, nx, ny, nz, t1, t2, blade_h, bend_angle, bend_rate) {
+            let bend_rate =
+                (BEND_RATE_BASE + (rng.next() - 0.5) * 2.0 * BEND_RATE_VARIANCE).max(0.02);
+            for (x, y, z) in blade_coords(
+                bx, by, bz, nx, ny, nz, t1, t2, blade_h, bend_angle, bend_rate,
+            ) {
                 ensure_grid_fits_coord(file, x, y, z);
                 if !seen.insert((x, y, z)) {
                     continue;
@@ -184,7 +189,9 @@ pub fn preview_grass_coords(
             if i * i + j * j > r * r {
                 continue;
             }
-            let blade_seed = (seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663)) & 0xFFFF_FFFF;
+            let blade_seed =
+                (seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663))
+                    & 0xFFFF_FFFF;
             let mut rng = Rng::new(blade_seed);
             if rng.next() > dens {
                 continue;
@@ -194,8 +201,11 @@ pub fn preview_grass_coords(
             let bz = cz + i * t1[2] + j * t2[2];
             let blade_h = 1 + (rng.next() * max_h as f32) as i32;
             let bend_angle = rng.next() * std::f32::consts::TAU;
-            let bend_rate = (BEND_RATE_BASE + (rng.next() - 0.5) * 2.0 * BEND_RATE_VARIANCE).max(0.02);
-            for coord in blade_coords(bx, by, bz, nx, ny, nz, t1, t2, blade_h, bend_angle, bend_rate) {
+            let bend_rate =
+                (BEND_RATE_BASE + (rng.next() - 0.5) * 2.0 * BEND_RATE_VARIANCE).max(0.02);
+            for coord in blade_coords(
+                bx, by, bz, nx, ny, nz, t1, t2, blade_h, bend_angle, bend_rate,
+            ) {
                 if seen.insert(coord) {
                     out.push(coord);
                 }
