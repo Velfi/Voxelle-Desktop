@@ -46,20 +46,10 @@ jobs:
       matrix:
         include:
           - platform: macos-latest
-            target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin
-            bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle
-          - platform: macos-latest
-            target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
-            bundle_dir: src-tauri/target/x86_64-apple-darwin/release/bundle
+            bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
           - platform: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            args: ""
             bundle_dir: src-tauri/target/release/bundle
           - platform: windows-latest
-            target: x86_64-pc-windows-msvc
-            args: ""
             bundle_dir: src-tauri/target/release/bundle
 
     runs-on: ${{ matrix.platform }}
@@ -76,11 +66,6 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Add Rust cross-compilation target
-        run: rustup target add ${{ matrix.target }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -118,23 +103,25 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_API_KEY_PATH: ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY }}.p8
-        run: npm run tauri -- build ${{ matrix.args }}
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            rustup target add aarch64-apple-darwin x86_64-apple-darwin
+            npm run tauri -- build --target universal-apple-darwin
+          else
+            npm run tauri -- build
+          fi
 
-      - name: Rename macOS updater artifacts to include architecture
+      - name: Rename macOS updater artifact
         if: matrix.platform == 'macos-latest'
         shell: bash
         run: |
           MACOS_DIR="${{ matrix.bundle_dir }}/macos"
-          if [[ "${{ matrix.target }}" == "aarch64-apple-darwin" ]]; then
-            ARCH="aarch64"
-          else
-            ARCH="x64"
-          fi
           for f in "$MACOS_DIR"/*.app.tar.gz; do
-            mv "$f" "${f%.app.tar.gz}_${ARCH}.app.tar.gz"
+            mv "$f" "${f%.app.tar.gz}_universal.app.tar.gz"
           done
           for f in "$MACOS_DIR"/*.app.tar.gz.sig; do
-            mv "$f" "${f%.app.tar.gz.sig}_${ARCH}.app.tar.gz.sig"
+            mv "$f" "${f%.app.tar.gz.sig}_universal.app.tar.gz.sig"
           done
 
       - name: Upload release artifacts (macOS)
@@ -198,7 +185,7 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern "*.sig" --dir sigs --clobber
 
           python3 - <<'EOF'
-          import json, os, subprocess
+          import json, os
           from datetime import datetime, timezone
 
           tag = os.environ['RELEASE_TAG']
@@ -213,9 +200,9 @@ jobs:
               asset_name = sig_name[:-4]  # strip .sig
               asset_url = f"{base_url}/{asset_name}"
               sig = read_sig(sig_name)
-              if asset_name.endswith('_aarch64.app.tar.gz'):
+              if asset_name.endswith('_universal.app.tar.gz'):
+                  # Universal binary serves both Intel and ARM macOS users
                   platforms['darwin-aarch64'] = {'url': asset_url, 'signature': sig}
-              elif asset_name.endswith('_x64.app.tar.gz'):
                   platforms['darwin-x86_64'] = {'url': asset_url, 'signature': sig}
               elif asset_name.endswith('.AppImage.tar.gz'):
                   platforms['linux-x86_64'] = {'url': asset_url, 'signature': sig}
