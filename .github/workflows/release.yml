@@ -46,7 +46,11 @@ jobs:
       matrix:
         include:
           - platform: macos-15-intel
-            bundle_dir: src-tauri/target/universal-apple-darwin/release/bundle
+            rust_target: x86_64-apple-darwin
+            bundle_dir: src-tauri/target/x86_64-apple-darwin/release/bundle
+          - platform: macos-15
+            rust_target: aarch64-apple-darwin
+            bundle_dir: src-tauri/target/aarch64-apple-darwin/release/bundle
           - platform: ubuntu-22.04
             bundle_dir: src-tauri/target/release/bundle
           - platform: windows-latest
@@ -67,13 +71,13 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Add universal binary targets and pin rustup (macOS only)
-        if: matrix.platform == 'macos-15-intel'
+      - name: Add Rust target and pin rustup (macOS only)
+        if: runner.os == 'macOS'
         run: |
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           echo "RUSTUP_HOME=$HOME/.rustup" >> "$GITHUB_ENV"
           echo "CARGO_HOME=$HOME/.cargo" >> "$GITHUB_ENV"
-          "$HOME/.cargo/bin/rustup" target add aarch64-apple-darwin x86_64-apple-darwin
+          "$HOME/.cargo/bin/rustup" target add ${{ matrix.rust_target }}
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -110,7 +114,7 @@ jobs:
           rm test_sign.exe
 
       - name: Import Apple signing certificate and notarization key
-        if: matrix.platform == 'macos-15-intel'
+        if: runner.os == 'macOS'
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -142,25 +146,13 @@ jobs:
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
-            npm run tauri -- build --target universal-apple-darwin
+            npm run tauri -- build --target ${{ matrix.rust_target }}
           else
             npm run tauri -- build
           fi
 
-      - name: Rename macOS updater artifact
-        if: matrix.platform == 'macos-15-intel'
-        shell: bash
-        run: |
-          MACOS_DIR="${{ matrix.bundle_dir }}/macos"
-          for f in "$MACOS_DIR"/*.app.tar.gz; do
-            mv "$f" "${f%.app.tar.gz}_universal.app.tar.gz"
-          done
-          for f in "$MACOS_DIR"/*.app.tar.gz.sig; do
-            mv "$f" "${f%.app.tar.gz.sig}_universal.app.tar.gz.sig"
-          done
-
       - name: Upload release artifacts (macOS)
-        if: matrix.platform == 'macos-15-intel'
+        if: runner.os == 'macOS'
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -235,9 +227,9 @@ jobs:
               asset_name = sig_name[:-4]  # strip .sig
               asset_url = f"{base_url}/{asset_name}"
               sig = read_sig(sig_name)
-              if asset_name.endswith('_universal.app.tar.gz'):
-                  # Universal binary serves both Intel and ARM macOS users
+              if asset_name.endswith('_aarch64.app.tar.gz'):
                   platforms['darwin-aarch64'] = {'url': asset_url, 'signature': sig}
+              elif asset_name.endswith('_x86_64.app.tar.gz'):
                   platforms['darwin-x86_64'] = {'url': asset_url, 'signature': sig}
               elif asset_name.endswith('.AppImage.tar.gz'):
                   platforms['linux-x86_64'] = {'url': asset_url, 'signature': sig}
