@@ -25,6 +25,21 @@
     "macOSPrivateApi": true
   },
   "bundle": {
+    "macOS": {
+      "signingIdentity": "Apple Development: Zelda Hessler (QJ23JJ4F43)",
+      "entitlements": "./Entitlements.plist",
+      "minimumSystemVersion": "11.0",
+      "dmg": {
+        "appPosition": {
+          "x": 180,
+          "y": 170
+        },
+        "applicationFolderPosition": {
+          "x": 480,
+          "y": 170
+        }
+      }
+    },
     "active": true,
     "targets": "all",
     "icon": [
