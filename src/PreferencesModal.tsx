@@ -52,6 +52,7 @@ export function PreferencesModal({
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeSection, setActiveSection] = useState<SectionId>("prefs-general");
   const [avatarNames, setAvatarNames] = useState<string[]>([]);
+  const [userAvatarNames, setUserAvatarNames] = useState<string[]>([]);
 
   const scrollToSection = (id: SectionId) => {
     const container = scrollRef.current;
@@ -83,6 +84,13 @@ export function PreferencesModal({
       .then(setAvatarNames)
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    void (invoke("avatar_list_user") as Promise<string[]>)
+      .then(setUserAvatarNames)
+      .catch(() => {});
+  }, [open]);
 
   const applyToneToGpu = (t: ToneMappingPreference) => {
     void invoke("set_tone_mapping", { mode: toneMappingToGpuMode(t) }).catch(() => {});
@@ -447,13 +455,36 @@ export function PreferencesModal({
                 onChange={(e) => onCollabAvatar(e.target.value)}
               >
                 <option value="">Default (glowing dot)</option>
-                {avatarNames.map((name) => (
-                  <option key={name} value={name}>
-                    {name}
-                  </option>
-                ))}
+                <optgroup label="Built-in">
+                  {avatarNames.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </optgroup>
+                {userAvatarNames.length > 0 && (
+                  <optgroup label="My Avatars">
+                    {userAvatarNames.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
               </select>
             </label>
+            <div className="prefs-select-label">
+              <span className="prefs-select-label-text" />
+              <button
+                className="prefs-action-button"
+                onClick={() => void invoke("avatar_open_user_folder").catch(() => {})}
+              >
+                Open avatars folder
+              </button>
+            </div>
+            <p className="prefs-field-hint">
+              To create an avatar: build your character in Voxelle, then use <strong>File › Save As</strong> to save it as a <code>.voxelle</code> file. Drop that file into the avatars folder and reopen Preferences to see it here. Files must be under 64 KB.
+            </p>
             {collabHosting ? (
               <p className="prefs-field-hint prefs-section-hint">
                 Port and internet sharing are locked while you host. End the session to change them.

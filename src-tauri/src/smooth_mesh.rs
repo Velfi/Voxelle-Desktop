@@ -604,9 +604,9 @@ fn dual_contour_bucket(
         ny,
         nz,
         values,
-        grad_x,
-        grad_y,
-        grad_z,
+        grad_x: _,
+        grad_y: _,
+        grad_z: _,
         col_r,
         col_g,
         col_b,
@@ -703,6 +703,9 @@ fn dual_contour_bucket(
                 let mut cx_sum = 0.0f64;
                 let mut cy_sum = 0.0f64;
                 let mut cz_sum = 0.0f64;
+                let mut nx_sum = 0.0f64;
+                let mut ny_sum = 0.0f64;
+                let mut nz_sum = 0.0f64;
                 let mut n_herm = 0i32;
                 let mut col_sr = 0.0f64;
                 let mut col_sg = 0.0f64;
@@ -757,6 +760,9 @@ fn dual_contour_bucket(
                     cx_sum += px as f64;
                     cy_sum += py as f64;
                     cz_sum += pz as f64;
+                    nx_sum += nx_l as f64;
+                    ny_sum += ny_l as f64;
+                    nz_sum += nz_l as f64;
                     n_herm += 1;
 
                     let use_a = va >= vb;
@@ -789,8 +795,25 @@ fn dual_contour_bucket(
                 let max_wz = node_min_z as f32 + cz as f32 + 1.5;
 
                 let nh = n_herm as f64;
+                let mx = cx_sum / nh;
+                let my = cy_sum / nh;
+                let mz = cz_sum / nh;
+
+                // Tikhonov regularization: add λI to pull the QEF solution toward the
+                // mass point when normals are nearly coplanar (rank-deficient system).
+                // λ scales with 1/nh so poorly-constrained cells (few crossings, prone to
+                // spikes) get strong regularization while well-constrained cells (many
+                // diverse normals, real sharp corners) get weak relative pull and stay sharp.
+                let lambda = 0.1 / nh;
+                let ra00 = a00 + lambda;
+                let ra11 = a11 + lambda;
+                let ra22 = a22 + lambda;
+                let rb0 = bb0 + lambda * mx;
+                let rb1 = bb1 + lambda * my;
+                let rb2 = bb2 + lambda * mz;
+
                 let (px, py, pz) =
-                    if let Some(s) = solve3x3(a00, a01, a02, a11, a12, a22, bb0, bb1, bb2) {
+                    if let Some(s) = solve3x3(ra00, a01, a02, ra11, a12, ra22, rb0, rb1, rb2) {
                         (
                             s[0].clamp(min_wx as f64, max_wx as f64) as f32,
                             s[1].clamp(min_wy as f64, max_wy as f64) as f32,
@@ -798,9 +821,9 @@ fn dual_contour_bucket(
                         )
                     } else {
                         (
-                            (cx_sum / nh).clamp(min_wx as f64, max_wx as f64) as f32,
-                            (cy_sum / nh).clamp(min_wy as f64, max_wy as f64) as f32,
-                            (cz_sum / nh).clamp(min_wz as f64, max_wz as f64) as f32,
+                            mx.clamp(min_wx as f64, max_wx as f64) as f32,
+                            my.clamp(min_wy as f64, max_wy as f64) as f32,
+                            mz.clamp(min_wz as f64, max_wz as f64) as f32,
                         )
                     };
 
@@ -808,15 +831,14 @@ fn dual_contour_bucket(
                 cell_vertex.insert((cx, cy, cz), vi);
                 positions.extend_from_slice(&[px, py, pz]);
 
-                let gix = ((px - node_min_x as f32 - 0.5).round() as i32).clamp(0, nx as i32 - 1);
-                let giy = ((py - node_min_y as f32 - 0.5).round() as i32).clamp(0, ny as i32 - 1);
-                let giz = ((pz - node_min_z as f32 - 0.5).round() as i32).clamp(0, nz as i32 - 1);
-                let gi = idx(gix as usize, giy as usize, giz as usize, nx, ny);
-                let mut nnx = grad_x[gi];
-                let mut nny = grad_y[gi];
-                let mut nnz = grad_z[gi];
+                // Use the average of the Hermite normals accumulated during QEF building.
+                // These are the actual surface normals at each edge crossing — much more
+                // accurate at corners than a nearest-neighbour lattice gradient lookup.
+                let mut nnx = (nx_sum / nh) as f32;
+                let mut nny = (ny_sum / nh) as f32;
+                let mut nnz = (nz_sum / nh) as f32;
                 let gn = (nnx * nnx + nny * nny + nnz * nnz).sqrt();
-                if gn > EPS {
+                if gn > EPS as f32 {
                     nnx /= gn;
                     nny /= gn;
                     nnz /= gn;

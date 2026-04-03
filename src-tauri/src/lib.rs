@@ -14875,7 +14875,7 @@ fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, Recen
     let view_render_dual = CheckMenuItem::with_id(
         app,
         "view_render_dual",
-        "Crisp",
+        "Puffy",
         true,
         matches!(current_mode, RenderingMode::DualContour),
         None::<&str>,
@@ -15462,10 +15462,8 @@ static START_SCREEN_LOGO: &[u8] = include_bytes!("../Logo.voxelle");
 /// Bundled mascot models.  Key strings are used in the `mascot_load_embedded` command.
 static MASCOT_SEAGULL: &[u8] = include_bytes!("../mascots/Seagull.voxelle");
 
-// ── Bundled avatar models ────────────────────────────────────────────────────
-static AVATAR_HE_IS_RISEN: &[u8] = include_bytes!("../avatars/HeIsRisen.voxelle");
-static AVATAR_OLD_SCALY: &[u8] = include_bytes!("../avatars/OldScaly.voxelle");
-static AVATAR_STONE_HEAD: &[u8] = include_bytes!("../avatars/StoneHead.voxelle");
+// ── Bundled avatar models (auto-generated from avatars/ at compile time) ─────
+include!(concat!(env!("OUT_DIR"), "/avatars_generated.rs"));
 
 /// Average of voxel center positions — used to pivot avatar rotation at the visual center
 /// of mass rather than the bounding-box midpoint.
@@ -15497,14 +15495,6 @@ fn init_default_avatar_mesh(viewer: &mut WgpuViewer) {
     viewer.cache_avatar_mesh(String::new(), &mesh, centroid, 1.0);
 }
 
-fn embedded_avatar_bytes(name: &str) -> Option<&'static [u8]> {
-    match name {
-        "HeIsRisen" => Some(AVATAR_HE_IS_RISEN),
-        "OldScaly" => Some(AVATAR_OLD_SCALY),
-        "StoneHead" => Some(AVATAR_STONE_HEAD),
-        _ => None,
-    }
-}
 
 /// Spawn a background thread that decodes an embedded avatar and uploads its mesh
 /// to the shared avatar cache. No-op if the name is unknown.
@@ -15696,11 +15686,7 @@ fn mascot_set_visible(
 /// The empty string `""` is NOT included; it represents the default glow dot.
 #[tauri::command]
 fn avatar_list_embedded() -> Vec<String> {
-    vec![
-        "HeIsRisen".to_string(),
-        "OldScaly".to_string(),
-        "StoneHead".to_string(),
-    ]
+    avatar_list_embedded_names()
 }
 
 /// Set this client's avatar choice, broadcast it to all collab peers, and kick off a
@@ -15816,6 +15802,76 @@ fn avatar_load_file(
             }
         })
         .ok();
+    Ok(())
+}
+
+/// Return the names of all `.voxelle` files found in the user's avatars folder
+/// (`{app_data}/avatars/`).  Each valid file is decoded and its mesh cached so it
+/// can be selected immediately.  Files that are too large or fail to decode are
+/// silently skipped (a warning is logged).
+#[tauri::command]
+fn avatar_list_user(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Vec<String> {
+    let avatars_dir = match app.path().app_data_dir() {
+        Ok(mut d) => { d.push("avatars"); d }
+        Err(_) => return vec![],
+    };
+    let _ = std::fs::create_dir_all(&avatars_dir);
+    let entries = match std::fs::read_dir(&avatars_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+    let mut names = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("voxelle") {
+            continue;
+        }
+        let stem = match path.file_stem().and_then(|s| s.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) => { log::warn!("avatar_list_user: read {:?}: {e}", path); continue; }
+        };
+        if bytes.len() > collab::MAX_AVATAR_FILE_BYTES {
+            log::warn!("avatar_list_user: {:?} exceeds MAX_AVATAR_FILE_BYTES, skipping", path);
+            continue;
+        }
+        let file = match decode_payload(&bytes) {
+            Ok(f) => f,
+            Err(e) => { log::warn!("avatar_list_user: decode {:?}: {e}", path); continue; }
+        };
+        // Cache raw bytes for collab peer distribution.
+        state.local_avatar_data.lock().insert(stem.clone(), bytes);
+        // Build and upload mesh.
+        let centroid = avatar_voxel_centroid(&file.voxels);
+        let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+        let extent = (bounds.max - bounds.min).max_element().max(0.001);
+        if let Some(viewer) = state.viewer.lock().as_mut() {
+            viewer.cache_avatar_mesh(stem.clone(), &mesh, centroid, 1.5 / extent);
+        }
+        names.push(stem);
+    }
+    names.sort();
+    names
+}
+
+/// Open (and create if needed) the user avatars folder in the OS file manager.
+/// Drop `.voxelle` files here to make them appear in the Avatar picker.
+#[tauri::command]
+fn avatar_open_user_folder(app: AppHandle) -> Result<(), String> {
+    let avatars_dir = app.path().app_data_dir().map_err(|e| e.to_string()).map(|mut d| { d.push("avatars"); d })?;
+    std::fs::create_dir_all(&avatars_dir).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    std::process::Command::new("open").arg(&avatars_dir).spawn().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "windows")]
+    std::process::Command::new("explorer").arg(&avatars_dir).spawn().map_err(|e| e.to_string())?;
+    #[cfg(target_os = "linux")]
+    std::process::Command::new("xdg-open").arg(&avatars_dir).spawn().map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -16974,6 +17030,8 @@ pub fn run() {
             mascot_set_screen_rect,
             mascot_set_visible,
             avatar_list_embedded,
+            avatar_list_user,
+            avatar_open_user_folder,
             set_local_avatar,
             avatar_load_file,
             speech_bubble_show,

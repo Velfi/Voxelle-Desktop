@@ -23,12 +23,16 @@ myNewPref: typeof o.myNewPref === "boolean" ? o.myNewPref : DEFAULTS.myNewPref,
 myNewPref: typeof o.myNewPref === "number" && Number.isFinite(o.myNewPref)
   ? clampInt(o.myNewPref, MIN, MAX)
   : DEFAULTS.myNewPref,
+// string:
+myNewPref: typeof o.myNewPref === "string" ? o.myNewPref.trim().slice(0, MAX_LEN) : DEFAULTS.myNewPref,
 ```
 
 **Save** — add to `savePreferences()` before `localStorage.setItem`:
 ```typescript
 merged.myNewPref = prefs.myNewPref;
 ```
+
+> **Common mistake:** `loadPreferences` and `savePreferences` are separate code paths — a field added to `load` but forgotten in `save` will silently reset to its default on every restart. Always add both in the same commit and verify the checklist below.
 
 ## Step 2 — Add UI to `src/PreferencesModal.tsx`
 

@@ -152,6 +152,8 @@ commands.allow = [
   "mascot_set_screen_rect",
   "mascot_set_visible",
   "avatar_list_embedded",
+  "avatar_list_user",
+  "avatar_open_user_folder",
   "set_local_avatar",
   "avatar_load_file",
   "speech_bubble_show",

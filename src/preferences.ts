@@ -346,8 +346,10 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.showMovementDeltaHint = prefs.showMovementDeltaHint;
     merged.showDragDeltaHint = prefs.showDragDeltaHint;
     merged.showFpsCounter = prefs.showFpsCounter;
+    merged.showPingLatency = prefs.showPingLatency;
     merged.collabDisplayName = prefs.collabDisplayName;
     merged.collabAccentColor = prefs.collabAccentColor;
+    merged.collabAvatarName = prefs.collabAvatarName;
     merged.collabHostPort = prefs.collabHostPort;
     merged.enableUpnp = prefs.enableUpnp;
     merged.toneMapping = prefs.toneMapping;

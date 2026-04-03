@@ -8960,12 +8960,18 @@ impl WgpuViewer {
         const SHAKE_DURATION: f32 = 0.65;
         let mut dismissed = Vec::new();
         for b in &mut self.speech_bubbles {
-            if let BubbleState::Shaking { shake_t } = &mut b.state {
-                *shake_t += dt;
-                if *shake_t >= SHAKE_DURATION {
-                    b.state = BubbleState::Dismissed;
-                    dismissed.push(b.id);
+            match &mut b.state {
+                BubbleState::Shaking { shake_t } => {
+                    *shake_t += dt;
+                    if *shake_t >= SHAKE_DURATION {
+                        b.state = BubbleState::Dismissed;
+                        dismissed.push(b.id);
+                    }
                 }
+                // Bubble was click-dismissed during shake before the timer expired.
+                // Must be collected here so the frontend receives the dismissed event.
+                BubbleState::Dismissed => dismissed.push(b.id),
+                BubbleState::Active => {}
             }
         }
         // Prune dismissed bubbles from the vec.
