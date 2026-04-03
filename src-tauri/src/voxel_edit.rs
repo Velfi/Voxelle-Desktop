@@ -6100,6 +6100,7 @@ mod tests {
         };
         let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
         vm.insert((0, 0, 0), 0);
+        let mut terrain_accum: AHashMap<(i32, i32), f32> = AHashMap::new();
         let mut cam = OrbitCamera::new();
         cam.smooth_target = glam::Vec3::ZERO;
         cam.smooth_spherical = cam.spherical;
@@ -6126,6 +6127,9 @@ mod tests {
             0,
             4,
             2,
+            false,
+            false,
+            &mut terrain_accum,
             1,
             100,
             0,

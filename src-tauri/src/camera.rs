@@ -379,6 +379,10 @@ impl OrbitCamera {
         }
         let delta = (look * forward + strafe_right * right + Vec3::Y * up) * (speed * dt);
         self.target += delta;
+        // Snap smooth state so view_matrix reflects the move immediately.
+        // fly_look_rotate_screen does the same; FLY_MODE_DAMPING = 0.0 means
+        // update_damping never advances smooth_target on its own.
+        self.smooth_target = self.target;
     }
 
     /// Walk mode: reposition the camera so the eye sits at `feet_pos + Y * eye_height`,

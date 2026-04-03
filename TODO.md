@@ -1,4 +1,1 @@
-- Fly mode jumps forward  when moving forward and moving the mouse
 - I want the ability to extrude a selected face
-- sculpt brushes shouldn't snap to surface, they should embed
-  - is this still happening?

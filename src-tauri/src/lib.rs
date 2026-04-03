@@ -1188,6 +1188,9 @@ pub struct ViewerState {
     /// Stored ray spine for straight-line extrude (used by ray-based extrude preview/recompute).
     pub(crate) extrude_ray_spine: Mutex<Option<Vec<greedy_mesh::VoxelCoord>>>,
     pub collab: Arc<Mutex<collab::CollabRuntime>>,
+    /// Raw `.voxelle` bytes for custom avatars the local user has loaded, keyed by name.
+    /// Persists across collab sessions so the bytes can be re-sent to new peers.
+    pub local_avatar_data: Mutex<HashMap<String, Vec<u8>>>,
     /// Smoothed peer camera presence for frustum rendering (lerped each frame).
     pub smooth_presence: Mutex<HashMap<u32, collab::CameraPresence>>,
     /// Short-lived voxel highlight when a peer sends a world ping (see [`collab::record_ping_flash`]).
@@ -4851,7 +4854,7 @@ fn commit_voxel_edits(
                 deltas: deltas.clone(),
             })
             .unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -5571,7 +5574,7 @@ fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Resul
                 deltas: buf.clone(),
             })
             .unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -5799,6 +5802,9 @@ struct SelectionStrokeAtScreen {
     /// `select` | `selectByColor` | `selectCoplanar` | `selectCoplanarEmpty`
     #[serde(default)]
     interaction: String,
+    /// When set, overrides the global selection_combine_mode for this stroke (e.g. shift-key → add).
+    #[serde(default)]
+    combine_mode_override: Option<SelectionCombineMode>,
 }
 
 fn default_fill_respects_color() -> bool {
@@ -6026,7 +6032,9 @@ async fn selection_stroke_at_screen(
             c
         };
 
-    let mode = *state.selection_combine_mode.lock();
+    let mode = args
+        .combine_mode_override
+        .unwrap_or_else(|| *state.selection_combine_mode.lock());
     let mut accum_guard = state.selection_stroke_accum.lock();
     let before_guard = state.selection_stroke_before.lock();
     let mut sel = state.selection_cells.lock();
@@ -6787,7 +6795,7 @@ fn selection_delete_selected_voxels(
                 deltas: deltas.clone(),
             })
             .unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -6900,6 +6908,17 @@ struct SelectByColorArgs {
     nx: f32,
     ny: f32,
     match_material: bool,
+    #[serde(default)]
+    combine_mode_override: Option<SelectionCombineMode>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SelectCoplanarArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default)]
+    combine_mode_override: Option<SelectionCombineMode>,
 }
 
 #[tauri::command]
@@ -6932,7 +6951,9 @@ fn selection_add_by_color_at_screen(
         };
         voxel_edit::coords_matching_color(file, v.color, args.match_material, v.material)
     };
-    let mode = *state.selection_combine_mode.lock();
+    let mode = args
+        .combine_mode_override
+        .unwrap_or_else(|| *state.selection_combine_mode.lock());
     let mut sel = state.selection_cells.lock();
     merge_coords_into_selection(&mut sel, coords, mode);
     let n = sel.len() as u32;
@@ -6945,7 +6966,7 @@ fn selection_add_by_color_at_screen(
 fn selection_add_coplanar_at_screen(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
-    args: PickAtScreen,
+    args: SelectCoplanarArgs,
 ) -> Result<u32, String> {
     let (w, h) = {
         let v = state.viewer.lock();
@@ -6972,7 +6993,9 @@ fn selection_add_coplanar_at_screen(
         };
         c
     };
-    let mode = *state.selection_combine_mode.lock();
+    let mode = args
+        .combine_mode_override
+        .unwrap_or_else(|| *state.selection_combine_mode.lock());
     let mut sel = state.selection_cells.lock();
     merge_coords_into_selection(&mut sel, coords, mode);
     let n = sel.len() as u32;
@@ -6985,7 +7008,7 @@ fn selection_add_coplanar_at_screen(
 fn selection_add_coplanar_empty_at_screen(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
-    args: PickAtScreen,
+    args: SelectCoplanarArgs,
 ) -> Result<u32, String> {
     let (w, h) = {
         let v = state.viewer.lock();
@@ -7013,7 +7036,9 @@ fn selection_add_coplanar_empty_at_screen(
         };
         c
     };
-    let mode = *state.selection_combine_mode.lock();
+    let mode = args
+        .combine_mode_override
+        .unwrap_or_else(|| *state.selection_combine_mode.lock());
     let mut sel = state.selection_cells.lock();
     merge_coords_into_selection(&mut sel, coords, mode);
     let n = sel.len() as u32;
@@ -7655,7 +7680,7 @@ async fn voxel_fill_at_screen(
                 deltas: deltas.clone(),
             })
             .unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -8043,7 +8068,7 @@ fn voxel_sculpt_stroke_at_screen(
                 deltas: deltas.clone(),
             })
             .unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -10552,7 +10577,7 @@ async fn voxel_edit_at_screen(
                 deltas: deltas.clone(),
             })
             .unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -10773,7 +10798,7 @@ fn voxel_undo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool
         let mut c = cm.lock();
         if c.is_client() {
             if let Some(tx) = &c.client_tx {
-                let _ = tx.send(serde_json::to_string(&collab::ClientToHost::Undo).unwrap());
+                let _ = tx.try_send(serde_json::to_string(&collab::ClientToHost::Undo).unwrap());
             }
             return Ok(true);
         }
@@ -10835,7 +10860,7 @@ fn voxel_redo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool
         let mut c = cm.lock();
         if c.is_client() {
             if let Some(tx) = &c.client_tx {
-                let _ = tx.send(serde_json::to_string(&collab::ClientToHost::Redo).unwrap());
+                let _ = tx.try_send(serde_json::to_string(&collab::ClientToHost::Redo).unwrap());
             }
             return Ok(true);
         }
@@ -12285,58 +12310,88 @@ fn sync_collab_peer_labels(viewer: &mut WgpuViewer, state: &ViewerState, cam: &O
     viewer.upload_peer_labels(labels);
 }
 
-fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
-    const NEAR_DIST: f32 = 0.3;
-    const FAR_DIST: f32 = 12.0;
-    const ASPECT: f32 = 16.0 / 9.0;
-    const NEAR_ALPHA: f32 = 1.0;
-    const FAR_ALPHA: f32 = 0.05;
+fn sync_collab_peer_avatars(viewer: &mut WgpuViewer, state: &Arc<ViewerState>, cam: &camera::OrbitCamera) {
     const SMOOTH_T: f32 = 0.12;
 
-    let (local_id, roster, presence) = {
+    let (local_id, roster, presence, avatar_names, avatar_data) = {
         let c = state.collab.lock();
         if !c.is_active() {
-            viewer.clear_collab_frustum_lines();
+            viewer.clear_avatar_peers();
             state.smooth_presence.lock().clear();
             return;
         }
-        (c.local_peer_id, c.roster.clone(), c.presence.clone())
+        (
+            c.local_peer_id,
+            c.roster.clone(),
+            c.presence.clone(),
+            c.avatar_names.clone(),
+            c.avatar_data.clone(),
+        )
     };
 
-    // Lerp smooth presence toward raw presence each frame
+    // Lerp smooth presence toward raw presence each frame.
     let mut smooth = state.smooth_presence.lock();
-    // Remove peers that left
     smooth.retain(|pid, _| presence.contains_key(pid));
-    // Update / insert smoothed values
     for (&pid, raw) in &presence {
         let entry = smooth.entry(pid).or_insert(*raw);
         *entry = lerp_presence(entry, raw, SMOOTH_T);
     }
 
-    // Lines: 24 vertices × 7 floats = 168 floats per peer
-    // Tris:  4 side faces × 2 triangles × 3 verts × 7 floats = 168 floats per peer
-    let peer_count = smooth.len();
-    let mut line_verts: Vec<f32> = Vec::with_capacity(peer_count.saturating_mul(168));
-    let mut tri_verts: Vec<f32> = Vec::with_capacity(peer_count.saturating_mul(168));
+    // Remove GPU entries for peers that left.
+    let present_ids: Vec<u32> = smooth.keys().copied().collect();
+    for id in viewer
+        .avatar_peers
+        .iter()
+        .map(|p| p.peer_id)
+        .collect::<Vec<_>>()
+    {
+        if !present_ids.contains(&id) {
+            viewer.remove_avatar_peer(id);
+        }
+    }
+
+    // Build view-proj from the local camera.
+    let (vw, vh) = viewer.viewport_size();
+    let vp = cam.proj_matrix(vw.max(1) as f32, vh.max(1) as f32) * cam.view_matrix();
+
     for (&pid, pr) in smooth.iter() {
         if pid == local_id {
             continue;
         }
+
         let color = roster
             .iter()
             .find(|r| r.peer_id == pid)
             .map(|r| r.color_rgb)
-            .unwrap_or(0x888888);
+            .unwrap_or(0x6688cc);
         let rf = ((color >> 16) & 0xff) as f32 / 255.0;
         let gf = ((color >> 8) & 0xff) as f32 / 255.0;
         let bf = (color & 0xff) as f32 / 255.0;
-        let eye = collab::presence_eye(&pr);
+
+        let eye = collab::presence_eye(pr);
         let target = glam::Vec3::new(pr.target[0], pr.target[1], pr.target[2]);
         if (target - eye).length_squared() < 1e-8 {
             continue;
         }
+
+        let avatar_name = avatar_names
+            .get(&pid)
+            .cloned()
+            .unwrap_or_default();
+
+        // Tint: peer accent color for default glow dot; neutral white for named avatars.
+        let tint = if avatar_name.is_empty() {
+            [rf, gf, bf]
+        } else {
+            [1.0_f32, 1.0, 1.0]
+        };
+
+        // Build orientation: avatar faces the viewer (away from peer's look target).
+        // forward = peer's look direction; we store -forward as the Z column so the
+        // rotation matrix has det=+1 (proper rotation, no winding flip).  The greedy
+        // mesh has outward CCW faces in right-handed local space, so det=+1 is required
+        // to preserve winding and keep normals pointing outward.
         let forward = (target - eye).normalize();
-        // Avoid degenerate cross product when looking straight up/down
         let ref_up = if forward.y.abs() > 0.999 {
             glam::Vec3::Z
         } else {
@@ -12344,93 +12399,47 @@ fn sync_collab_peer_lines(viewer: &mut WgpuViewer, state: &ViewerState) {
         };
         let right = forward.cross(ref_up).normalize();
         let up = right.cross(forward);
+        // Columns [right, up, -forward] rotated 90° CCW around Y → [forward, up, right].
+        let rot = glam::Mat4::from_cols(
+            forward.extend(0.0),
+            up.extend(0.0),
+            right.extend(0.0),
+            glam::Vec4::W,
+        );
 
-        let (near_half_h, near_half_w, far_half_h, far_half_w) = if pr.perspective {
-            let half_fov_tan = (pr.fov_y * 0.5).tan();
-            let nh = NEAR_DIST * half_fov_tan;
-            let fh = FAR_DIST * half_fov_tan;
-            (nh, nh * ASPECT, fh, fh * ASPECT)
-        } else {
-            let hh = pr.ortho_half_height;
-            let hw = hh * ASPECT;
-            (hh, hw, hh, hw)
-        };
+        // Look up mesh scale/offset from cache (fall back to default glow dot).
+        let (scale, center_offset) = viewer
+            .avatar_mesh_cache
+            .get(&avatar_name)
+            .or_else(|| viewer.avatar_mesh_cache.get(""))
+            .map(|m| (m.scale, m.center_offset))
+            .unwrap_or((1.5, glam::Vec3::ZERO));
 
-        let near_center = eye + forward * NEAR_DIST;
-        let far_center = eye + forward * FAR_DIST;
+        let model = glam::Mat4::from_translation(eye)
+            * rot
+            * glam::Mat4::from_scale(glam::Vec3::splat(scale))
+            * glam::Mat4::from_translation(center_offset);
+        let mvp = vp * model;
 
-        // Near plane corners: top-left, top-right, bottom-right, bottom-left
-        let ntl = near_center + up * near_half_h - right * near_half_w;
-        let ntr = near_center + up * near_half_h + right * near_half_w;
-        let nbr = near_center - up * near_half_h + right * near_half_w;
-        let nbl = near_center - up * near_half_h - right * near_half_w;
-
-        // Far plane corners
-        let ftl = far_center + up * far_half_h - right * far_half_w;
-        let ftr = far_center + up * far_half_h + right * far_half_w;
-        let fbr = far_center - up * far_half_h + right * far_half_w;
-        let fbl = far_center - up * far_half_h - right * far_half_w;
-
-        // --- Wireframe edges ---
-        let mut push_line = |p: glam::Vec3, a: f32| {
-            line_verts.extend_from_slice(&[p.x, p.y, p.z, rf, gf, bf, a]);
-        };
-
-        // Near rectangle (4 edges)
-        push_line(ntl, NEAR_ALPHA);
-        push_line(ntr, NEAR_ALPHA);
-        push_line(ntr, NEAR_ALPHA);
-        push_line(nbr, NEAR_ALPHA);
-        push_line(nbr, NEAR_ALPHA);
-        push_line(nbl, NEAR_ALPHA);
-        push_line(nbl, NEAR_ALPHA);
-        push_line(ntl, NEAR_ALPHA);
-
-        // Far rectangle (4 edges)
-        push_line(ftl, FAR_ALPHA);
-        push_line(ftr, FAR_ALPHA);
-        push_line(ftr, FAR_ALPHA);
-        push_line(fbr, FAR_ALPHA);
-        push_line(fbr, FAR_ALPHA);
-        push_line(fbl, FAR_ALPHA);
-        push_line(fbl, FAR_ALPHA);
-        push_line(ftl, FAR_ALPHA);
-
-        // Connecting edges (near→far)
-        push_line(ntl, NEAR_ALPHA);
-        push_line(ftl, FAR_ALPHA);
-        push_line(ntr, NEAR_ALPHA);
-        push_line(ftr, FAR_ALPHA);
-        push_line(nbr, NEAR_ALPHA);
-        push_line(fbr, FAR_ALPHA);
-        push_line(nbl, NEAR_ALPHA);
-        push_line(fbl, FAR_ALPHA);
-
-        // --- Filled side faces (2 triangles per quad, 4 faces) ---
-        let mut push_tri = |p: glam::Vec3, a: f32| {
-            tri_verts.extend_from_slice(&[p.x, p.y, p.z, rf, gf, bf, a]);
-        };
-
-        // Each side face: near_a, near_b → far_a, far_b (quad as 2 tris)
-        let sides: [(glam::Vec3, glam::Vec3, glam::Vec3, glam::Vec3); 4] = [
-            (ntl, ntr, ftl, ftr), // top
-            (ntr, nbr, ftr, fbr), // right
-            (nbr, nbl, fbr, fbl), // bottom
-            (nbl, ntl, fbl, ftl), // left
+        // Extract rotation columns for the normal matrix (std140: each column padded to vec4).
+        // Columns match the rot matrix: [forward, up, right].
+        let rot_cols = [
+            [forward.x, forward.y, forward.z, 0.0],
+            [up.x,      up.y,      up.z,      0.0],
+            [right.x,   right.y,   right.z,   0.0],
         ];
-        for (na, nb, fa, fb) in sides {
-            // Triangle 1: na, fa, nb
-            push_tri(na, NEAR_ALPHA);
-            push_tri(fa, FAR_ALPHA);
-            push_tri(nb, NEAR_ALPHA);
-            // Triangle 2: nb, fa, fb
-            push_tri(nb, NEAR_ALPHA);
-            push_tri(fa, FAR_ALPHA);
-            push_tri(fb, FAR_ALPHA);
+
+        viewer.update_avatar_peer(pid, avatar_name.clone(), mvp.to_cols_array_2d(), tint, rot_cols);
+
+        // If the named mesh isn't cached yet, kick off a background load.
+        if !avatar_name.is_empty() && !viewer.avatar_mesh_cache.contains_key(&avatar_name) {
+            if embedded_avatar_bytes(&avatar_name).is_some() {
+                spawn_load_avatar_mesh(Arc::clone(state), &avatar_name);
+            } else if let Some(bytes) = avatar_data.get(&avatar_name) {
+                spawn_load_avatar_from_bytes(Arc::clone(state), avatar_name.clone(), bytes.clone());
+            }
         }
     }
-    viewer.upload_collab_frustum_lines(&line_verts);
-    viewer.upload_collab_frustum_tris(&tri_verts);
 }
 
 fn selection_overlay_cache_fingerprint(
@@ -14522,7 +14531,7 @@ fn leave_collab_guest(state: &Arc<ViewerState>, app: &AppHandle) {
     if c.is_client() {
         if let Some(tx) = &c.client_tx {
             let msg = serde_json::to_string(&collab::ClientToHost::Leave).unwrap();
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
         c.leave();
         drop(c);
@@ -15453,6 +15462,95 @@ static START_SCREEN_LOGO: &[u8] = include_bytes!("../Logo.voxelle");
 /// Bundled mascot models.  Key strings are used in the `mascot_load_embedded` command.
 static MASCOT_SEAGULL: &[u8] = include_bytes!("../mascots/Seagull.voxelle");
 
+// ── Bundled avatar models ────────────────────────────────────────────────────
+static AVATAR_HE_IS_RISEN: &[u8] = include_bytes!("../avatars/HeIsRisen.voxelle");
+static AVATAR_OLD_SCALY: &[u8] = include_bytes!("../avatars/OldScaly.voxelle");
+static AVATAR_STONE_HEAD: &[u8] = include_bytes!("../avatars/StoneHead.voxelle");
+
+/// Average of voxel center positions — used to pivot avatar rotation at the visual center
+/// of mass rather than the bounding-box midpoint.
+fn avatar_voxel_centroid(voxels: &[voxelle::Voxel]) -> glam::Vec3 {
+    if voxels.is_empty() {
+        return glam::Vec3::ZERO;
+    }
+    let sum: glam::Vec3 = voxels
+        .iter()
+        .map(|v| glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32))
+        .sum();
+    sum / voxels.len() as f32
+}
+
+/// Build a single-voxel white glow mesh and register it under the key `""` (the default avatar).
+fn init_default_avatar_mesh(viewer: &mut WgpuViewer) {
+    use voxelle::{MaterialId, Voxel};
+    let voxels = vec![Voxel {
+        x: 0,
+        y: 0,
+        z: 0,
+        color: 0xffffff,
+        material: MaterialId::Glow,
+        object_id: 0,
+    }];
+    let centroid = avatar_voxel_centroid(&voxels);
+    let (mesh, _bounds) = greedy_mesh::build_greedy_mesh(&voxels, &[] as &[voxelle::SceneObject]);
+    // scale=1.0 → exactly one voxel in world space.
+    viewer.cache_avatar_mesh(String::new(), &mesh, centroid, 1.0);
+}
+
+fn embedded_avatar_bytes(name: &str) -> Option<&'static [u8]> {
+    match name {
+        "HeIsRisen" => Some(AVATAR_HE_IS_RISEN),
+        "OldScaly" => Some(AVATAR_OLD_SCALY),
+        "StoneHead" => Some(AVATAR_STONE_HEAD),
+        _ => None,
+    }
+}
+
+/// Spawn a background thread that decodes an embedded avatar and uploads its mesh
+/// to the shared avatar cache. No-op if the name is unknown.
+fn spawn_load_avatar_mesh(state: Arc<ViewerState>, name: &str) {
+    let Some(bytes) = embedded_avatar_bytes(name) else {
+        return;
+    };
+    let name = name.to_owned();
+    std::thread::Builder::new()
+        .name("avatar-load".into())
+        .spawn(move || {
+            let file = match decode_payload(bytes) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let centroid = avatar_voxel_centroid(&file.voxels);
+            let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let extent = (bounds.max - bounds.min).max_element().max(0.001);
+            if let Some(viewer) = state.viewer.lock().as_mut() {
+                viewer.cache_avatar_mesh(name, &mesh, centroid, 1.5 / extent);
+            }
+        })
+        .ok();
+}
+
+/// Spawn a background thread that decodes a custom avatar from raw bytes and uploads
+/// its mesh to the shared avatar cache.  Used for peer-supplied avatar files received
+/// over collab.
+fn spawn_load_avatar_from_bytes(state: Arc<ViewerState>, name: String, bytes: Vec<u8>) {
+    std::thread::Builder::new()
+        .name("avatar-load-collab".into())
+        .spawn(move || {
+            let file = match decode_payload(&bytes) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let centroid = avatar_voxel_centroid(&file.voxels);
+            let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let extent = (bounds.max - bounds.min).max_element().max(0.001);
+            if let Some(viewer) = state.viewer.lock().as_mut() {
+                viewer.cache_avatar_mesh(name, &mesh, centroid, 1.5 / extent);
+            }
+        })
+        .ok();
+}
+
 /// Loads bundled `Logo.voxelle` for the cold-start screen (no `voxelle-load-start`, empty `file_label`).
 #[tauri::command]
 fn load_start_screen_logo(
@@ -15592,6 +15690,135 @@ fn mascot_set_visible(
     Ok(())
 }
 
+// ── Avatar commands ──────────────────────────────────────────────────────────
+
+/// List the names of all bundled (compile-time embedded) avatars.
+/// The empty string `""` is NOT included; it represents the default glow dot.
+#[tauri::command]
+fn avatar_list_embedded() -> Vec<String> {
+    vec![
+        "HeIsRisen".to_string(),
+        "OldScaly".to_string(),
+        "StoneHead".to_string(),
+    ]
+}
+
+/// Set this client's avatar choice, broadcast it to all collab peers, and kick off a
+/// background mesh load so it appears on-screen immediately.
+#[tauri::command]
+fn set_local_avatar(
+    state: State<'_, Arc<ViewerState>>,
+    avatar_name: String,
+) -> Result<(), String> {
+    // If this is a custom (non-embedded) avatar, grab the raw bytes to send alongside
+    // the AvatarChoice so peers can decode the mesh.
+    let custom_bytes = if !avatar_name.is_empty() && embedded_avatar_bytes(&avatar_name).is_none() {
+        state.local_avatar_data.lock().get(&avatar_name).cloned()
+    } else {
+        None
+    };
+
+    // Send to host (or, if we are the host, record locally and broadcast).
+    {
+        let c = state.collab.lock();
+        if c.is_active() {
+            let msg = serde_json::to_string(&collab::ClientToHost::AvatarChoice {
+                avatar_name: avatar_name.clone(),
+            })
+            .map_err(|e| e.to_string())?;
+            if let Some(tx) = &c.client_tx {
+                let _ = tx.try_send(msg.clone());
+            }
+            // If there are custom bytes, also send AvatarData so peers can render it.
+            if let (Some(bytes), Some(tx)) = (&custom_bytes, &c.client_tx) {
+                if let Ok(data_msg) = serde_json::to_string(&collab::ClientToHost::AvatarData {
+                    name: avatar_name.clone(),
+                    bytes: bytes.clone(),
+                }) {
+                    let _ = tx.try_send(data_msg);
+                }
+            }
+            // If we are the host, also record locally and broadcast to guests.
+            if c.is_host() {
+                let local_id = c.local_peer_id;
+                drop(c);
+                let mut c2 = state.collab.lock();
+                c2.avatar_names.insert(local_id, avatar_name.clone());
+                if let Some(bytes) = &custom_bytes {
+                    c2.avatar_data.insert(avatar_name.clone(), bytes.clone());
+                }
+                let ev = serde_json::to_string(&collab::HostToClient::AvatarChoice {
+                    peer_id: local_id,
+                    avatar_name: avatar_name.clone(),
+                })
+                .unwrap_or_default();
+                if let Some(tx) = &c2.host_broadcast {
+                    let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(ev));
+                }
+                // Broadcast the raw bytes to guests as well.
+                if let Some(bytes) = custom_bytes {
+                    if let Ok(data_ev) = serde_json::to_string(&collab::HostToClient::AvatarData {
+                        peer_id: local_id,
+                        name: avatar_name.clone(),
+                        bytes,
+                    }) {
+                        if let Some(tx) = &c2.host_broadcast {
+                            let _ = tx.send(tokio_tungstenite::tungstenite::Message::Text(data_ev));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Ensure the mesh is cached so it renders on our own screen too.
+    if !avatar_name.is_empty() {
+        spawn_load_avatar_mesh(Arc::clone(&*state), &avatar_name);
+    }
+    Ok(())
+}
+
+/// Load a custom `.voxelle` file as a named avatar and cache its mesh.
+#[tauri::command]
+fn avatar_load_file(
+    state: State<'_, Arc<ViewerState>>,
+    path: String,
+    name: String,
+) -> Result<(), String> {
+    let state = Arc::clone(&*state);
+    std::thread::Builder::new()
+        .name("avatar-load-file".into())
+        .spawn(move || {
+            let bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!("avatar_load_file: read {path}: {e}");
+                    return;
+                }
+            };
+            if bytes.len() > collab::MAX_AVATAR_FILE_BYTES {
+                log::warn!("avatar_load_file: {path} exceeds MAX_AVATAR_FILE_BYTES, ignoring");
+                return;
+            }
+            let file = match decode_payload(&bytes) {
+                Ok(f) => f,
+                Err(e) => {
+                    log::warn!("avatar_load_file: decode {path}: {e}");
+                    return;
+                }
+            };
+            // Store raw bytes so they can be sent to collab peers.
+            state.local_avatar_data.lock().insert(name.clone(), bytes);
+            let centroid = avatar_voxel_centroid(&file.voxels);
+            let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let extent = (bounds.max - bounds.min).max_element().max(0.001);
+            if let Some(viewer) = state.viewer.lock().as_mut() {
+                viewer.cache_avatar_mesh(name, &mesh, centroid, 1.5 / extent);
+            }
+        })
+        .ok();
+    Ok(())
+}
+
 /// Show (or replace) a speech bubble.
 /// `rx`, `ry`, `rw`, `rh` — bubble rect in viewport-relative physical pixels.
 /// `tx`, `ty` — tail tip in viewport-relative physical pixels (anchor point toward subject).
@@ -15608,14 +15835,16 @@ fn speech_bubble_show(
     rh: f32,
     tx: f32,
     ty: f32,
-) -> Result<(), String> {
+) -> Result<f32, String> {
     let mut v = state.viewer.lock();
-    if let Some(viewer) = v.as_mut() {
-        viewer.show_speech_bubble(id, pages, [rx, ry, rw, rh], [tx, ty]);
-    }
+    let computed_rh = if let Some(viewer) = v.as_mut() {
+        viewer.show_speech_bubble(id, pages, [rx, ry, rw, rh], [tx, ty])
+    } else {
+        rh
+    };
     drop(v);
     wake_viewport_loop(&app);
-    Ok(())
+    Ok(computed_rh)
 }
 
 /// Register a click on bubble `id`.
@@ -15776,7 +16005,7 @@ fn collab_leave(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<()
         if wc {
             if let Some(tx) = &c.client_tx {
                 let msg = serde_json::to_string(&collab::ClientToHost::Leave).unwrap();
-                let _ = tx.send(msg);
+                let _ = tx.try_send(msg);
             }
         }
         c.leave();
@@ -15826,7 +16055,7 @@ fn collab_update_profile(
         })
         .unwrap();
         if let Some(tx) = &c.client_tx {
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
         return Ok(());
     }
@@ -15859,7 +16088,7 @@ fn collab_set_can_edit(
     let mut c = state.collab.lock();
     if c.is_client() {
         if let Some(tx) = &c.client_tx {
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if c.is_host() {
         for r in &mut c.roster {
@@ -15896,7 +16125,7 @@ fn collab_push_camera(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Res
     if c.is_client() {
         let msg = serde_json::to_string(&collab::ClientToHost::Camera { presence }).unwrap();
         if let Some(tx) = &c.client_tx {
-            let _ = tx.send(msg);
+            let _ = tx.try_send(msg);
         }
     } else if c.is_host() {
         // Guests only receive camera updates via WebSocket; without this broadcast the host's
@@ -15965,7 +16194,7 @@ fn collab_send_chat(
     }
     if let Some(tx) = &c.client_tx {
         let msg = serde_json::to_string(&collab::ClientToHost::Chat { text }).unwrap();
-        let _ = tx.send(msg);
+        let _ = tx.try_send(msg);
     }
     Ok(())
 }
@@ -16019,7 +16248,7 @@ fn collab_send_ping(
     }
     if let Some(tx) = &c.client_tx {
         let msg = serde_json::to_string(&collab::ClientToHost::Ping { x, y, z }).unwrap();
-        let _ = tx.send(msg);
+        let _ = tx.try_send(msg);
     }
     Ok(())
 }
@@ -16157,6 +16386,7 @@ pub fn run() {
         sculpt_stroke_replay: Mutex::new(Vec::new()),
         extrude_ray_spine: Mutex::new(None),
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
+        local_avatar_data: Mutex::new(HashMap::new()),
         smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
         autosave_interval_secs: Mutex::new(120),
@@ -16565,7 +16795,12 @@ pub fn run() {
             // Do not resize to `inner_size()` here: the 3D view matches the `.viewport` div (below
             // toolbar / beside sidebar), not the full window. Wrong dimensions break screen→world
             // raycasts until the frontend sends `viewer_resize`.
-            *vs.viewer.lock() = Some(viewer);
+            {
+                let mut vl = vs.viewer.lock();
+                let v = vl.insert(viewer);
+                // Pre-cache the default avatar: a single white glowing voxel, tinted per-peer at runtime.
+                init_default_avatar_mesh(v);
+            }
 
             #[cfg(desktop)]
             if let Some(port) = headless_server_port {
@@ -16738,6 +16973,9 @@ pub fn run() {
             mascot_load_embedded,
             mascot_set_screen_rect,
             mascot_set_visible,
+            avatar_list_embedded,
+            set_local_avatar,
+            avatar_load_file,
             speech_bubble_show,
             speech_bubble_click,
             speech_bubble_dismiss,
@@ -16901,7 +17139,7 @@ pub fn run() {
                         apply_selection_overlay(viewer, Arc::as_ref(&state), sel_p);
                         apply_preview_mesh(viewer, Arc::as_ref(&state), prev_p);
                     }
-                    sync_collab_peer_lines(viewer, Arc::as_ref(&state));
+                    sync_collab_peer_avatars(viewer, &state, &cam);
                     sync_collab_peer_labels(viewer, Arc::as_ref(&state), &cam);
                     sync_ping_flash(viewer, Arc::as_ref(&state), &cam);
                     sync_gizmo_gpu(viewer, Arc::as_ref(&state), &cam);
@@ -17057,6 +17295,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         voxel_edit_stats_cache: Mutex::new(None),
         solo_undo: Mutex::new(Vec::new()),
         solo_redo: Mutex::new(Vec::new()),
+        terrain_accum: Mutex::new(AHashMap::new()),
         stroke_active: Mutex::new(false),
         stroke_buffer: Mutex::new(Vec::new()),
         stroke_preview_union: Mutex::new(AHashSet::new()),
@@ -17065,6 +17304,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         sculpt_stroke_replay: Mutex::new(Vec::new()),
         extrude_ray_spine: Mutex::new(None),
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
+        local_avatar_data: Mutex::new(HashMap::new()),
         smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
         autosave_interval_secs: Mutex::new(120),

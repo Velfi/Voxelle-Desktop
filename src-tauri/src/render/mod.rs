@@ -38,8 +38,8 @@ mod gpu {
     pub mod collab_peer_lines {
         pub const WGSL: &str = include_str!("collab_peer_lines.wgsl");
     }
-    pub mod collab_frustum {
-        pub const WGSL: &str = include_str!("collab_frustum.wgsl");
+    pub mod avatar {
+        pub const WGSL: &str = include_str!("avatar.wgsl");
     }
     pub mod ray_trace {
         pub const WGSL: &str = include_str!("ray_trace.wgsl");
@@ -701,6 +701,42 @@ struct MascotUniforms {
     _pad: [f32; 2],
 }
 
+/// Matches `avatar.wgsl` `AvatarUniforms`.
+#[repr(C, align(16))]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AvatarUniforms {
+    mvp: [[f32; 4]; 4],
+    light_dir: [f32; 4],
+    /// Per-peer color tint (xyz); w unused. [1,1,1,0] = preserve mesh colors.
+    color_tint: [f32; 4],
+    ambient: f32,
+    sun: f32,
+    _pad: [f32; 2],
+    /// Rotation part of the model matrix, column-major with std140 padding (each column is
+    /// stored as [x, y, z, 0.0]).  Transforms mesh-local normals into world space.
+    normal_mat: [[f32; 4]; 3],
+}
+
+/// Shared GPU mesh for one named avatar, stored in local space (centered, facing +Z).
+pub struct AvatarMeshData {
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    index_count: u32,
+    /// Translation to apply before scale: `-bounds.center()`.
+    pub center_offset: Vec3,
+    /// Uniform scale so the avatar fits in a ~1.5-unit cube.
+    pub scale: f32,
+}
+
+/// Per-peer GPU draw state for collab avatar rendering.
+pub struct AvatarPeerEntry {
+    pub peer_id: u32,
+    /// Key into `WgpuViewer::avatar_mesh_cache`; `""` = default glow dot.
+    pub mesh_name: String,
+    uniforms_buf: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 /// Matches `speech_bubble.wgsl` `BubbleUniforms`. Must stay 16-byte aligned.
 #[repr(C, align(16))]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -886,10 +922,12 @@ pub struct WgpuViewer {
     pipeline_gen_preview_inst_front_wire: wgpu::RenderPipeline,
     pipeline_collab_lines_occluded: wgpu::RenderPipeline,
     pipeline_collab_lines_front: wgpu::RenderPipeline,
-    pipeline_collab_frustum_occluded: wgpu::RenderPipeline,
-    pipeline_collab_frustum_front: wgpu::RenderPipeline,
-    pipeline_collab_frustum_tri_occluded: wgpu::RenderPipeline,
-    pipeline_collab_frustum_tri_front: wgpu::RenderPipeline,
+    pipeline_avatar: wgpu::RenderPipeline,
+    avatar_bind_layout: wgpu::BindGroupLayout,
+    /// Shared GPU meshes keyed by avatar name; `""` = default glow dot.
+    pub avatar_mesh_cache: std::collections::HashMap<String, AvatarMeshData>,
+    /// One entry per visible remote peer.
+    pub avatar_peers: Vec<AvatarPeerEntry>,
     /// Voxel grid borders: depth-tested only (no occluded ghost pass), semi-transparent.
     pipeline_grid_border_lines: wgpu::RenderPipeline,
     /// Selection transform gizmo (move arrows + rotation rings).
@@ -1025,10 +1063,7 @@ pub struct WgpuViewer {
     gen_preview_wire_instance_count: u32,
     collab_line_vertex_buffer: Option<wgpu::Buffer>,
     collab_line_vertex_count: u32,
-    collab_frustum_vertex_buffer: Option<wgpu::Buffer>,
-    collab_frustum_vertex_count: u32,
-    collab_frustum_tri_vertex_buffer: Option<wgpu::Buffer>,
-    collab_frustum_tri_vertex_count: u32,
+
     ping_wave_line_vertex_buffer: Option<wgpu::Buffer>,
     ping_wave_line_vertex_count: u32,
     ping_vertex_buffer: Option<wgpu::Buffer>,
@@ -1453,29 +1488,6 @@ fn vertex_layout_collab_lines() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
-fn vertex_layout_collab_frustum() -> wgpu::VertexBufferLayout<'static> {
-    wgpu::VertexBufferLayout {
-        array_stride: (3 + 3 + 1) * 4, // 28 bytes: pos + color + alpha
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-            wgpu::VertexAttribute {
-                offset: 12,
-                shader_location: 1,
-                format: wgpu::VertexFormat::Float32x3,
-            },
-            wgpu::VertexAttribute {
-                offset: 24,
-                shader_location: 2,
-                format: wgpu::VertexFormat::Float32,
-            },
-        ],
-    }
-}
 
 fn fullscreen_pipeline(
     device: &wgpu::Device,
@@ -2378,9 +2390,9 @@ impl WgpuViewer {
             label: Some("collab_peer_lines"),
             source: wgpu::ShaderSource::Wgsl(gpu::collab_peer_lines::WGSL.into()),
         });
-        let shader_collab_frustum = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("collab_frustum"),
-            source: wgpu::ShaderSource::Wgsl(gpu::collab_frustum::WGSL.into()),
+        let shader_avatar = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("avatar"),
+            source: wgpu::ShaderSource::Wgsl(gpu::avatar::WGSL.into()),
         });
 
         let pl_opaque = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -3097,149 +3109,71 @@ impl WgpuViewer {
                 cache: None,
             });
 
-        let pipeline_collab_frustum_occluded =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("collab_frustum_occluded"),
-                layout: Some(&pl_opaque),
-                vertex: wgpu::VertexState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("vs_main"),
-                    buffers: &[vertex_layout_collab_frustum()],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("fs_frustum_occluded"),
-                    targets: preview_targets,
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::Greater,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState {
-                        constant: 1,
-                        slope_scale: 1.0,
-                        clamp: 0.0,
+        // ── Avatar pipeline (per-peer collab voxel avatars) ──────────────────
+        let avatar_bind_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("avatar_uniform"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
+                    count: None,
+                }],
             });
-        let pipeline_collab_frustum_front =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("collab_frustum_front"),
-                layout: Some(&pl_opaque),
-                vertex: wgpu::VertexState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("vs_main"),
-                    buffers: &[vertex_layout_collab_frustum()],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("fs_frustum_front"),
-                    targets: preview_targets,
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::LineList,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState {
-                        constant: -2,
-                        slope_scale: -0.5,
-                        clamp: 0.0,
-                    },
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
-
-        let pipeline_collab_frustum_tri_occluded =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("collab_frustum_tri_occluded"),
-                layout: Some(&pl_opaque),
-                vertex: wgpu::VertexState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("vs_main"),
-                    buffers: &[vertex_layout_collab_frustum()],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("fs_frustum_occluded"),
-                    targets: preview_targets,
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::Greater,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState {
-                        constant: 1,
-                        slope_scale: 1.0,
-                        clamp: 0.0,
-                    },
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
-        let pipeline_collab_frustum_tri_front =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("collab_frustum_tri_front"),
-                layout: Some(&pl_opaque),
-                vertex: wgpu::VertexState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("vs_main"),
-                    buffers: &[vertex_layout_collab_frustum()],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader_collab_frustum,
-                    entry_point: Some("fs_frustum_front"),
-                    targets: preview_targets,
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: false,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState {
-                        constant: -2,
-                        slope_scale: -0.5,
-                        clamp: 0.0,
-                    },
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
+        let avatar_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("avatar"),
+            bind_group_layouts: &[&avatar_bind_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline_avatar = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("avatar"),
+            layout: Some(&avatar_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &shader_avatar,
+                entry_point: Some("vs_avatar"),
+                buffers: &[vertex_layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader_avatar,
+                entry_point: Some("fs_avatar"),
+                // Two MRT targets: HDR color + world-space normal gbuf.
+                // Both write_masks are ALL so the shader's @location(1) (gbuf_n) is
+                // actually stored, preventing SSR from reading stale scene normals at
+                // avatar pixels.
+                targets: &[
+                    Some(wgpu::ColorTargetState {
+                        format: vf,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: vf,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                ],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
         let pipeline_sky = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
@@ -4575,10 +4509,10 @@ impl WgpuViewer {
             pipeline_gen_preview_inst_front_wire,
             pipeline_collab_lines_occluded,
             pipeline_collab_lines_front,
-            pipeline_collab_frustum_occluded,
-            pipeline_collab_frustum_front,
-            pipeline_collab_frustum_tri_occluded,
-            pipeline_collab_frustum_tri_front,
+            pipeline_avatar,
+            avatar_bind_layout,
+            avatar_mesh_cache: std::collections::HashMap::new(),
+            avatar_peers: Vec::new(),
             pipeline_grid_border_lines,
             pipeline_gizmo_lines_front,
             pipeline_gizmo_lines_occluded,
@@ -4670,10 +4604,7 @@ impl WgpuViewer {
             gen_preview_wire_instance_count: 0,
             collab_line_vertex_buffer: None,
             collab_line_vertex_count: 0,
-            collab_frustum_vertex_buffer: None,
-            collab_frustum_vertex_count: 0,
-            collab_frustum_tri_vertex_buffer: None,
-            collab_frustum_tri_vertex_count: 0,
+
             ping_wave_line_vertex_buffer: None,
             ping_wave_line_vertex_count: 0,
             ping_vertex_buffer: None,
@@ -7015,65 +6946,110 @@ impl WgpuViewer {
         self.gizmo_on_top = v;
     }
 
-    /// Frustum wireframe: each vertex is `[x,y,z, r,g,b, a]` (7 floats); line-list pairs.
-    pub fn upload_collab_frustum_lines(&mut self, verts: &[f32]) {
-        if verts.is_empty() || verts.len() % 7 != 0 {
-            self.collab_frustum_vertex_buffer = None;
-            self.collab_frustum_vertex_count = 0;
+    // ── Avatar methods (per-peer collab voxel avatars) ───────────────────────
+
+    /// Store a decoded voxel mesh as a named avatar in the shared cache.
+    /// No-op if the name is already cached.  Pass `name = ""` for the default glow dot.
+    /// Store a decoded voxel mesh as a named avatar.  `centroid` is the world-space point that
+    /// will be placed at the peer's eye position; `scale` maps mesh units to world units.
+    /// No-op if the name is already cached.
+    pub fn cache_avatar_mesh(
+        &mut self,
+        name: String,
+        mesh: &MeshBuffers,
+        centroid: Vec3,
+        scale: f32,
+    ) {
+        if self.avatar_mesh_cache.contains_key(&name) {
             return;
         }
-        let n_floats = verts.len();
-        let vertex_count = (n_floats / 7) as u32;
-        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
-        if let Some(ref buf) = self.collab_frustum_vertex_buffer {
-            if buf.size() == nbytes {
-                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
-                self.collab_frustum_vertex_count = vertex_count;
-                return;
-            }
-        }
-        self.collab_frustum_vertex_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("collab_frustum_vtx"),
-                contents: bytemuck::cast_slice(verts),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        let interleaved = Self::interleaved_from_mesh(mesh);
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("avatar_vtx"),
+                contents: bytemuck::cast_slice(&interleaved),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("avatar_idx"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        self.avatar_mesh_cache.insert(
+            name,
+            AvatarMeshData {
+                vertex_buffer,
+                index_buffer,
+                index_count: mesh.indices.len() as u32,
+                center_offset: -centroid,
+                scale,
             },
-        ));
-        self.collab_frustum_vertex_count = vertex_count;
+        );
     }
 
-    pub fn clear_collab_frustum_lines(&mut self) {
-        self.collab_frustum_vertex_buffer = None;
-        self.collab_frustum_vertex_count = 0;
-        self.collab_frustum_tri_vertex_buffer = None;
-        self.collab_frustum_tri_vertex_count = 0;
+    /// Update or insert a peer's avatar draw state.  Called every frame from
+    /// `sync_collab_peer_avatars` with the pre-computed MVP, tint, and rotation.
+    /// `rot_cols` is the upper-left 3×3 of the model rotation matrix, column-major,
+    /// each column stored as `[x, y, z, 0.0]` to match WGSL `mat3x3` std140 layout.
+    pub fn update_avatar_peer(
+        &mut self,
+        peer_id: u32,
+        mesh_name: String,
+        mvp: [[f32; 4]; 4],
+        tint: [f32; 3],
+        rot_cols: [[f32; 4]; 3],
+    ) {
+        let uniforms = AvatarUniforms {
+            mvp,
+            light_dir: [0.6, 0.8, 0.5, 0.0],
+            color_tint: [tint[0], tint[1], tint[2], 0.0],
+            ambient: 0.55,
+            sun: 0.7,
+            _pad: [0.0; 2],
+            normal_mat: rot_cols,
+        };
+        if let Some(idx) = self.avatar_peers.iter().position(|p| p.peer_id == peer_id) {
+            // Reuse existing bind group; just update mesh_name and uniforms.
+            self.avatar_peers[idx].mesh_name = mesh_name;
+            self.queue.write_buffer(
+                &self.avatar_peers[idx].uniforms_buf,
+                0,
+                bytemuck::bytes_of(&uniforms),
+            );
+        } else {
+            let uniforms_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("avatar_peer_uniforms"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("avatar_peer_bg"),
+                layout: &self.avatar_bind_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniforms_buf.as_entire_binding(),
+                }],
+            });
+            self.avatar_peers.push(AvatarPeerEntry {
+                peer_id,
+                mesh_name,
+                uniforms_buf,
+                bind_group,
+            });
+        }
     }
 
-    /// Frustum side faces: each vertex is `[x,y,z, r,g,b, a]` (7 floats); triangle-list.
-    pub fn upload_collab_frustum_tris(&mut self, verts: &[f32]) {
-        if verts.is_empty() || verts.len() % 7 != 0 {
-            self.collab_frustum_tri_vertex_buffer = None;
-            self.collab_frustum_tri_vertex_count = 0;
-            return;
-        }
-        let n_floats = verts.len();
-        let vertex_count = (n_floats / 7) as u32;
-        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
-        if let Some(ref buf) = self.collab_frustum_tri_vertex_buffer {
-            if buf.size() == nbytes {
-                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
-                self.collab_frustum_tri_vertex_count = vertex_count;
-                return;
-            }
-        }
-        self.collab_frustum_tri_vertex_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("collab_frustum_tri_vtx"),
-                contents: bytemuck::cast_slice(verts),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-        self.collab_frustum_tri_vertex_count = vertex_count;
+    /// Remove a peer's avatar entry (called when they leave the session).
+    pub fn remove_avatar_peer(&mut self, peer_id: u32) {
+        self.avatar_peers.retain(|p| p.peer_id != peer_id);
+    }
+
+    /// Remove all peer avatar entries (called on collab disconnect).
+    pub fn clear_avatar_peers(&mut self) {
+        self.avatar_peers.clear();
     }
 
     pub fn upload_ping_mesh(&mut self, solid: &MeshBuffers, wire: &MeshBuffers) {
@@ -7723,33 +7699,25 @@ impl WgpuViewer {
         }
     }
 
-    fn draw_collab_frustum_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
-        // Draw filled side faces first (triangles behind wireframe)
-        if let Some(ref tb) = self.collab_frustum_tri_vertex_buffer {
-            if self.collab_frustum_tri_vertex_count >= 3 {
-                pass.set_vertex_buffer(0, tb.slice(..));
-                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-                pass.set_pipeline(&self.pipeline_collab_frustum_tri_occluded);
-                pass.draw(0..self.collab_frustum_tri_vertex_count, 0..1);
-                pass.set_pipeline(&self.pipeline_collab_frustum_tri_front);
-                pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-                pass.draw(0..self.collab_frustum_tri_vertex_count, 0..1);
+    fn render_avatars(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.avatar_peers.is_empty() {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline_avatar);
+        for peer in &self.avatar_peers {
+            let mesh = self
+                .avatar_mesh_cache
+                .get(&peer.mesh_name)
+                .or_else(|| self.avatar_mesh_cache.get(""));
+            let Some(mesh) = mesh else { continue };
+            if mesh.index_count == 0 {
+                continue;
             }
+            pass.set_bind_group(0, &peer.bind_group, &[]);
+            pass.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
+            pass.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
         }
-        // Draw wireframe edges on top
-        let Some(ref vb) = self.collab_frustum_vertex_buffer else {
-            return;
-        };
-        if self.collab_frustum_vertex_count < 2 {
-            return;
-        }
-        pass.set_vertex_buffer(0, vb.slice(..));
-        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-        pass.set_pipeline(&self.pipeline_collab_frustum_occluded);
-        pass.draw(0..self.collab_frustum_vertex_count, 0..1);
-        pass.set_pipeline(&self.pipeline_collab_frustum_front);
-        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
-        pass.draw(0..self.collab_frustum_vertex_count, 0..1);
     }
 
     fn draw_ping_wave_lines(&self, pass: &mut wgpu::RenderPass<'_>) {
@@ -7946,7 +7914,7 @@ impl WgpuViewer {
                 self.draw_indexed_preview(&mut pass);
                 self.draw_selection_overlay_lines(&mut pass);
                 self.draw_grid_border_lines(&mut pass);
-                self.draw_collab_frustum_lines(&mut pass);
+                self.render_avatars(&mut pass);
                 self.draw_ping_wave_lines(&mut pass);
                 self.draw_indexed_ping(&mut pass);
                 self.draw_gizmo(&mut pass);
@@ -8030,7 +7998,7 @@ impl WgpuViewer {
                 self.draw_indexed_preview(&mut pass);
                 self.draw_selection_overlay_lines(&mut pass);
                 self.draw_grid_border_lines(&mut pass);
-                self.draw_collab_frustum_lines(&mut pass);
+                self.render_avatars(&mut pass);
                 self.draw_ping_wave_lines(&mut pass);
                 self.draw_indexed_ping(&mut pass);
                 self.draw_gizmo(&mut pass);
@@ -8881,13 +8849,41 @@ impl WgpuViewer {
 
     /// Create or replace a speech bubble.
     /// `screen_rect` and `tail_tip` are in viewport-relative physical pixels.
+    /// Returns the actual bubble height (physical pixels) after fitting to content.
     pub fn show_speech_bubble(
         &mut self,
         id: u32,
         pages: Vec<String>,
-        screen_rect: [f32; 4],
+        mut screen_rect: [f32; 4],
         tail_tip: [f32; 2],
-    ) {
+    ) -> f32 {
+        // Measure each page's wrapped text height and use the tallest.
+        const FONT_SIZE: f32 = 44.0;
+        const LINE_HEIGHT: f32 = 56.0;
+        const PADDING: f32 = 18.0;
+        let wrap_w = (screen_rect[2] - PADDING * 2.0).max(1.0);
+        let mut max_content_h: f32 = LINE_HEIGHT;
+        for text in &pages {
+            let mut buf = GlyphonBuffer::new(
+                &mut self.glyphon_font_system,
+                Metrics::new(FONT_SIZE, LINE_HEIGHT),
+            );
+            buf.set_size(&mut self.glyphon_font_system, Some(wrap_w), None);
+            buf.set_text(
+                &mut self.glyphon_font_system,
+                text,
+                Attrs::new()
+                    .family(Family::Name("Zelda Sans"))
+                    .color(GlyphonColor::rgb(30, 30, 35)),
+                Shaping::Advanced,
+            );
+            buf.shape_until_scroll(&mut self.glyphon_font_system, false);
+            if let Some(last) = buf.layout_runs().last() {
+                max_content_h = max_content_h.max(last.line_top + last.line_height);
+            }
+        }
+        screen_rect[3] = (max_content_h + PADDING * 2.0).ceil();
+
         // Remove any existing bubble with the same id.
         self.speech_bubbles.retain(|b| b.id != id);
 
@@ -8915,6 +8911,7 @@ impl WgpuViewer {
             uniforms_buffer,
             bind_group,
         });
+        screen_rect[3]
     }
 
     /// Handle a click on bubble `id`.

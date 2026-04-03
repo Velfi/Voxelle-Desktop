@@ -105,6 +105,8 @@ export type VoxelleDesktopPreferences = {
   newProjectDefaultSize: number;
   /** Default starting shape pre-filled in the New Project dialog. */
   newProjectDefaultShape: StartShape;
+  /** Avatar name shown to other collab peers. Empty string = default glowing dot. */
+  collabAvatarName: string;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -132,6 +134,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   gizmoOnTop: true,
   newProjectDefaultSize: 32,
   newProjectDefaultShape: "circle",
+  collabAvatarName: "",
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -317,6 +320,10 @@ export function loadPreferences(): VoxelleDesktopPreferences {
       newProjectDefaultShape: isStartShape(o.newProjectDefaultShape)
         ? o.newProjectDefaultShape
         : DEFAULTS.newProjectDefaultShape,
+      collabAvatarName:
+        typeof o.collabAvatarName === "string"
+          ? o.collabAvatarName.trim().slice(0, 64)
+          : DEFAULTS.collabAvatarName,
     };
   } catch {
     return { ...DEFAULTS };

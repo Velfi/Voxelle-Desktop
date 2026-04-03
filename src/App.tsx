@@ -1420,6 +1420,8 @@ function App() {
   /** Stable ref to onPointerUp so it can be called from inside onPointerDown's async continuation. */
   const onPointerUpRef = useRef<((e: React.PointerEvent) => void) | null>(null);
   const activePointerIdRef = useRef<number | null>(null);
+  /** Whether shift was held at the start of the current stroke (used to apply add combine mode). */
+  const strokeShiftKeyRef = useRef(false);
   /** Pointer id currently captured by the viewport element (or null when not captured). */
   const capturedPointerIdRef = useRef<number | null>(null);
   const interactionModeRef = useRef<InteractionMode>("navigate");
@@ -1458,6 +1460,9 @@ function App() {
   /** Physical-pixel look deltas coalesced per animation frame (pointermove IPC was starving RAF and inflating fly dt). */
   const flyPendingLookDxRef = useRef(0);
   const flyPendingLookDyRef = useRef(0);
+  const [flySpeed, setFlySpeed] = useState<1 | 2 | 4>(1);
+  const flySpeedRef = useRef<1 | 2 | 4>(1);
+  flySpeedRef.current = flySpeed;
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("navigate");
   const [mood, setMood] = useState<MoodState>(() => defaultMoodState());
   const [selectionCount, setSelectionCount] = useState(0);
@@ -2252,6 +2257,7 @@ function App() {
   stampOriginZRef.current = stampOriginZ;
 
   const [joinModalOpen, setJoinModalOpen] = useState(false);
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
   const [collabJoinPending, setCollabJoinPending] = useState(false);
   const [hostWsUrl, setHostWsUrl] = useState<string | null>(null);
   const [joinUrl, setJoinUrl] = useState(() => {
@@ -2647,6 +2653,9 @@ function App() {
           pendingJoinUrlRef.current = null;
         }
         setJoinModalOpen(false);
+        // Announce our avatar choice so other peers see the right model immediately.
+        const avatarName = loadPreferences().collabAvatarName;
+        void invoke("set_local_avatar", { avatarName }).catch(() => {});
       }),
       listen<number>("collab-local-peer", (e) => {
         setLocalPeerId(typeof e.payload === "number" ? e.payload : 0);
@@ -2969,7 +2978,6 @@ function App() {
     if (speechBubbles.length === 0) return;
     const dpr = window.devicePixelRatio || 1;
     const BUBBLE_W = 280;
-    const BUBBLE_H = 96;
     const bubbleX = mascotRect.x + mascotRect.width + 12;
     const bubbleY = mascotRect.y - 4;
     const tailX = mascotRect.x + mascotRect.width * 0.35;
@@ -2977,12 +2985,12 @@ function App() {
     for (const b of speechBubbles) {
       void invoke("speech_bubble_reposition", {
         id: b.id,
-        rx: bubbleX * dpr, ry: bubbleY * dpr, rw: BUBBLE_W * dpr, rh: BUBBLE_H * dpr,
+        rx: bubbleX * dpr, ry: bubbleY * dpr, rw: BUBBLE_W * dpr, rh: b.height * dpr,
         tx: tailX * dpr,   ty: tailY * dpr,
       });
     }
     setSpeechBubbles((prev) =>
-      prev.map((b) => ({ ...b, x: bubbleX, y: bubbleY, width: BUBBLE_W, height: BUBBLE_H })),
+      prev.map((b) => ({ ...b, x: bubbleX, y: bubbleY, width: BUBBLE_W })),
     );
   }, [mascotRect]);
 
@@ -3018,7 +3026,7 @@ function App() {
 
   /** Show or advance the mascot's greeting speech bubble. */
   const handleMascotClick = useCallback(
-    (mascotId: number) => {
+    async (mascotId: number) => {
       if (mascotId !== 0) return;
 
       // If a bubble is already open for this mascot, forward the click to it.
@@ -3038,7 +3046,7 @@ function App() {
       const tailY = mascotRect.y + mascotRect.height * 0.22;
 
       const id = nextBubbleId.current++;
-      void invoke("speech_bubble_show", {
+      const computedRhPx = await invoke<number>("speech_bubble_show", {
         id,
         pages: [generateIdea()],
         rx: bubbleX * dpr,
@@ -3048,9 +3056,10 @@ function App() {
         tx: tailX * dpr,
         ty: tailY * dpr,
       });
+      const actualH = computedRhPx / dpr;
       setSpeechBubbles((prev) => [
         ...prev,
-        { id, x: bubbleX, y: bubbleY, width: BUBBLE_W, height: BUBBLE_H },
+        { id, x: bubbleX, y: bubbleY, width: BUBBLE_W, height: actualH },
       ]);
     },
     [mascotRect, speechBubbles],
@@ -3904,6 +3913,7 @@ function App() {
         args: {
           ...sharedArgs,
           interaction: dispatch.interaction,
+          ...(strokeShiftKeyRef.current ? { combineModeOverride: "add" } : {}),
         },
       })
         .then((n) => {
@@ -3932,6 +3942,9 @@ function App() {
     const args: Record<string, unknown> = { nx, ny };
     if (interaction === "selectByColor") {
       args.matchMaterial = matchMaterialSelectColorRef.current;
+    }
+    if (strokeShiftKeyRef.current) {
+      args.combineModeOverride = "add";
     }
     void invoke<number>(cmd, { args })
       .then((n) => {
@@ -4861,7 +4874,7 @@ function App() {
       if (k.has("KeyE")) up += 1;
       if (k.has("KeyQ")) up -= 1;
       const slow = k.has("ShiftLeft") || k.has("ShiftRight");
-      const speedScale = slow ? 1 / 8 : 1;
+      const speedScale = (slow ? 1 / 8 : 1) * flySpeedRef.current;
       void invoke("sync_fly_input", {
         args: { forward, right, up, speedScale },
       }).catch(() => {});
@@ -5213,6 +5226,7 @@ function App() {
 
     const { nx, ny } = clientToViewportNormalized(e);
     const pointerId = e.pointerId;
+    const shiftKey = e.shiftKey;
     const middleButton = e.button === 1;
     const mode = interactionModeRef.current;
     const navigate = mode === "navigate" || mode === "fly" || mode === "walk";
@@ -5374,6 +5388,7 @@ function App() {
         strokeViewportStartRef.current = { nx, ny };
         lastStrokeNormRef.current = { nx, ny };
         currentStrokeSeedRef.current = Math.floor(Math.random() * 0xffffffff) >>> 0;
+        strokeShiftKeyRef.current = shiftKey;
         if (dispatch?.kind === "selection") {
           selectionStrokeBegunRef.current = true;
           void invoke("selection_stroke_begin").catch(() => {});
@@ -6151,7 +6166,7 @@ function App() {
           dy,
           button: e.button,
           buttons: e.buttons,
-          shiftKey: e.shiftKey,
+          shiftKey: e.shiftKey && gestureRef.current?.mode !== "voxel",
         },
       });
     }
@@ -7125,10 +7140,27 @@ function App() {
                     ) : null}
 
                     {toolsPane === "fly" ? (
-                      <p className="sidebar-pane-hint">
-                        Click viewport to capture pointer. WASD move, E/Q up/down, Shift slow. Mouse
-                        looks. Esc releases pointer.
-                      </p>
+                      <>
+                        <p className="sidebar-pane-hint">
+                          Click viewport to capture pointer. WASD move, E/Q up/down, Shift slow.
+                          Mouse looks. Esc releases pointer.
+                        </p>
+                        <div className="sidebar-section-label">Speed</div>
+                        <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                          {([1, 2, 4] as const).map((s) => (
+                            <button
+                              key={s}
+                              type="button"
+                              className={
+                                flySpeed === s ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
+                              }
+                              onClick={() => setFlySpeed(s)}
+                            >
+                              <span className="sidebar-mode-label">{s}×</span>
+                            </button>
+                          ))}
+                        </div>
+                      </>
                     ) : null}
 
                     {toolsPane === "walk" ? (
@@ -12850,10 +12882,7 @@ function App() {
               <button
                 type="button"
                 className="status-bar-hosting-btn is-leave"
-                onClick={() => {
-                  const msg = hostWsUrl ? "End the session for everyone?" : "Leave this session?";
-                  if (window.confirm(msg)) leaveSession();
-                }}
+                onClick={() => setLeaveConfirmOpen(true)}
                 title={hostWsUrl ? "End session" : "Leave session"}
               >
                 {hostWsUrl ? "End" : "Leave"}
@@ -12881,6 +12910,32 @@ function App() {
           </div>
         ) : null}
       </footer>
+      {leaveConfirmOpen && (
+        <div className="modal-overlay" onClick={() => setLeaveConfirmOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>{hostWsUrl ? "End session?" : "Leave session?"}</h3>
+            <p style={{ margin: "0 0 0.75rem", fontSize: "0.875rem" }}>
+              {hostWsUrl
+                ? "This will end the session for everyone."
+                : "You will leave the current session."}
+            </p>
+            <div className="modal-buttons">
+              <button type="button" onClick={() => setLeaveConfirmOpen(false)}>
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLeaveConfirmOpen(false);
+                  leaveSession();
+                }}
+              >
+                {hostWsUrl ? "End session" : "Leave"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <JoinSessionModal
         open={joinModalOpen}
         onClose={() => setJoinModalOpen(false)}

@@ -51,6 +51,7 @@ export function PreferencesModal({
   const [prefs, setPrefs] = useState<VoxelleDesktopPreferences>(loadPreferences);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [activeSection, setActiveSection] = useState<SectionId>("prefs-general");
+  const [avatarNames, setAvatarNames] = useState<string[]>([]);
 
   const scrollToSection = (id: SectionId) => {
     const container = scrollRef.current;
@@ -76,6 +77,12 @@ export function PreferencesModal({
   useEffect(() => {
     if (open) setPrefs(loadPreferences());
   }, [open]);
+
+  useEffect(() => {
+    void (invoke("avatar_list_embedded") as Promise<string[]>)
+      .then(setAvatarNames)
+      .catch(() => {});
+  }, []);
 
   const applyToneToGpu = (t: ToneMappingPreference) => {
     void invoke("set_tone_mapping", { mode: toneMappingToGpuMode(t) }).catch(() => {});
@@ -174,6 +181,13 @@ export function PreferencesModal({
     });
     savePreferences(toSave);
     onCollabAccentColorChange?.(toSave.collabAccentColor);
+  };
+
+  const onCollabAvatar = (name: string) => {
+    const next = { ...prefs, collabAvatarName: name };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_local_avatar", { avatarName: name }).catch(() => {});
   };
 
   const onCollabHostPort = (raw: number) => {
@@ -424,6 +438,21 @@ export function PreferencesModal({
                 value={prefs.collabAccentColor}
                 onChange={(e) => onCollabColor(e.target.value)}
               />
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Avatar</span>
+              <select
+                className="prefs-tone-select"
+                value={prefs.collabAvatarName}
+                onChange={(e) => onCollabAvatar(e.target.value)}
+              >
+                <option value="">Default (glowing dot)</option>
+                {avatarNames.map((name) => (
+                  <option key={name} value={name}>
+                    {name}
+                  </option>
+                ))}
+              </select>
             </label>
             {collabHosting ? (
               <p className="prefs-field-hint prefs-section-hint">

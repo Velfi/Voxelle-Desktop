@@ -111,7 +111,7 @@ export function ViewportCameraHud(props: { flyMode: boolean; loadingOrBusy: bool
     canvas.height = GIZMO_SIZE * dpr;
     ctxRef.current = canvas.getContext("2d");
     draw();
-  }, [draw]);
+  }, [draw, flyMode]);
 
   useEffect(() => {
     if (flyMode || loadingOrBusy) return;

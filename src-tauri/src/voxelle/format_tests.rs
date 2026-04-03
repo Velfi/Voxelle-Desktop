@@ -190,3 +190,43 @@ fn dense_wire_version_4_legacy_20_byte_record_loads() {
     assert_eq!(file.voxels[0].color, 0xff0000);
     assert_eq!(file.voxels[0].object_id, 0);
 }
+
+/// A fully-filled 15×15×15 cube (3 375 voxels) must encode below `MAX_AVATAR_FILE_BYTES`
+/// (512 KB).  This guards against the collab avatar transfer limit being too tight for
+/// dense voxel art at a realistic avatar scale.
+#[test]
+fn full_15_cube_fits_in_avatar_size_limit() {
+    use super::format::{MaterialId, Voxel, VoxelleFile};
+    use crate::collab::MAX_AVATAR_FILE_BYTES;
+
+    let voxels: Vec<Voxel> = (0..15)
+        .flat_map(|x| (0..15).flat_map(move |y| (0..15).map(move |z| Voxel {
+            x,
+            y,
+            z,
+            color: 0xff8800,
+            material: MaterialId::Plastic,
+            object_id: 0,
+        })))
+        .collect();
+    assert_eq!(voxels.len(), 15 * 15 * 15);
+
+    let file = VoxelleFile {
+        version: 4,
+        grid_size: 15,
+        scene: Default::default(),
+        scene_extra: None,
+        mood: None,
+        lighting: None,
+        voxels,
+        objects: super::format::default_scene_objects(),
+        active_object_id: 0,
+    };
+    let bytes = encode_payload_v4(&file).unwrap();
+    assert!(
+        bytes.len() < MAX_AVATAR_FILE_BYTES,
+        "encoded size {} bytes exceeds MAX_AVATAR_FILE_BYTES ({})",
+        bytes.len(),
+        MAX_AVATAR_FILE_BYTES,
+    );
+}

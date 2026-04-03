@@ -18,12 +18,29 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, mpsc};
 use tokio::sync::watch;
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
 type WsTcp = WebSocketStream<TcpStream>;
+
+/// Broadcast channel capacity.  Large enough that a slow guest has time to drain
+/// before messages are overwritten; we handle [`broadcast::error::RecvError::Lagged`]
+/// explicitly rather than silently dropping the guest.
+const BROADCAST_CAPACITY: usize = 2048;
+
+/// How long a guest may continuously lag the broadcast channel before being kicked.
+/// Within this window we send them a resync snapshot and keep them in the session.
+const GUEST_LAG_KICK_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Minimum interval between camera-presence forwards for a single peer.
+/// Limits broadcast traffic to ≤ 10 Hz per guest regardless of push rate.
+const CAMERA_BROADCAST_MIN_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Maximum undo-stack depth per peer.  Oldest strokes are evicted when the cap is
+/// reached so memory is bounded even in long sessions with many editors.
+const MAX_UNDO_PER_PEER: usize = 100;
 
 /// If a guest sends no message (including [`ClientToHost::Heartbeat`]) for this long, the host drops them from the roster.
 const GUEST_ACTIVITY_TIMEOUT: Duration = Duration::from_secs(45);
@@ -45,6 +62,10 @@ const CLIENT_HOST_SILENCE_TIMEOUT: Duration = Duration::from_secs(45);
 const CLIENT_LATENCY_PROBE_INTERVAL: Duration = Duration::from_secs(5);
 
 const GUEST_TIMEOUT_KICK_REASON: &str = "timed out (no activity)";
+
+/// Maximum raw byte size accepted for a peer-supplied custom avatar file.
+/// Peers that send larger payloads are silently ignored.
+pub const MAX_AVATAR_FILE_BYTES: usize = 64 * 1024; // 64 KB
 
 /// Raw snapshot bytes below this threshold are sent inline in the Welcome message;
 /// above it the host sends a [`HostToClient::WelcomeHeader`] followed by binary
@@ -219,6 +240,11 @@ pub enum ClientToHost {
     LatencyProbe { sent_ms: u64 },
     /// Guest is leaving the session (best-effort before the socket closes).
     Leave,
+    /// Guest is changing their avatar model.
+    AvatarChoice { avatar_name: String },
+    /// Guest is uploading the raw bytes of a custom avatar file so the host can
+    /// redistribute them to all other peers.  Only sent for non-embedded avatars.
+    AvatarData { name: String, bytes: Vec<u8> },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -229,6 +255,13 @@ pub enum HostToClient {
         leader_id: u32,
         snapshot: Vec<u8>,
         roster: Vec<RosterEntry>,
+        /// Avatar name chosen by each existing peer so the new joiner sees them immediately.
+        #[serde(default)]
+        avatar_names: HashMap<u32, String>,
+        /// Raw `.voxelle` bytes for any custom (non-embedded) avatars currently in use,
+        /// keyed by name, so the new joiner can decode them without a separate round-trip.
+        #[serde(default)]
+        avatar_data: HashMap<String, Vec<u8>>,
     },
     Roster {
         roster: Vec<RosterEntry>,
@@ -272,11 +305,22 @@ pub enum HostToClient {
         roster: Vec<RosterEntry>,
         snapshot_len: u64,
         chunk_count: u32,
+        /// Avatar name chosen by each existing peer so the new joiner sees them immediately.
+        #[serde(default)]
+        avatar_names: HashMap<u32, String>,
+        /// Raw `.voxelle` bytes for any custom (non-embedded) avatars currently in use.
+        #[serde(default)]
+        avatar_data: HashMap<String, Vec<u8>>,
     },
     /// Broadcast periodically while hosting so guests reset their read timeout during idle sessions.
     Keepalive,
     /// Echo of a guest's [`ClientToHost::LatencyProbe`]; guest computes RTT as `now_ms - sent_ms`.
     LatencyAck { sent_ms: u64 },
+    /// A peer changed their avatar model; broadcast to all other peers.
+    AvatarChoice { peer_id: u32, avatar_name: String },
+    /// Raw bytes of a peer's custom avatar file; broadcast to all other peers so
+    /// they can decode and render it without having the file locally.
+    AvatarData { peer_id: u32, name: String, bytes: Vec<u8> },
 }
 
 pub struct CollabRuntime {
@@ -285,6 +329,12 @@ pub struct CollabRuntime {
     pub leader_id: u32,
     pub roster: Vec<RosterEntry>,
     pub presence: HashMap<u32, CameraPresence>,
+    /// Avatar name chosen by each peer (`""` = default glow dot).
+    pub avatar_names: HashMap<u32, String>,
+    /// Raw `.voxelle` bytes for custom (non-embedded) avatars, keyed by avatar name.
+    /// Populated when any peer sends `AvatarData`; used to decode mesh for rendering
+    /// and to forward to new joiners in the `Welcome` message.
+    pub avatar_data: HashMap<String, Vec<u8>>,
     pub next_seq: u64,
     shutdown: Option<Arc<AtomicBool>>,
     /// Each vec is one logical edit (stroke or click).
@@ -293,7 +343,7 @@ pub struct CollabRuntime {
     /// Host → all connected guest websockets.  Carries [`Message`] so we can send both
     /// JSON text frames and raw binary snapshot chunks.
     pub host_broadcast: Option<broadcast::Sender<Message>>,
-    pub client_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    pub client_tx: Option<mpsc::Sender<String>>,
     /// Per connected guest (peer id ≥ 2): send [`Some`] with kick reason to close the socket.
     pub host_peer_kick_tx: HashMap<u32, watch::Sender<Option<String>>>,
     /// Last inbound activity from each guest (any message or heartbeat). Host only.
@@ -314,6 +364,8 @@ impl Default for CollabRuntime {
             leader_id: 0,
             roster: Vec::new(),
             presence: HashMap::new(),
+            avatar_names: HashMap::new(),
+            avatar_data: HashMap::new(),
             next_seq: 0,
             shutdown: None,
             host_undo: HashMap::new(),
@@ -358,6 +410,8 @@ impl CollabRuntime {
         self.role = CollabRole::None;
         self.roster.clear();
         self.presence.clear();
+        self.avatar_names.clear();
+        self.avatar_data.clear();
         self.host_undo.clear();
         self.host_redo.clear();
         self.local_peer_id = 0;
@@ -734,7 +788,12 @@ pub fn process_inbox_item<R: Runtime>(
                     return; // peer left while queued
                 }
                 c.next_seq += 1;
-                c.host_undo.entry(peer_id).or_default().push(deltas.clone());
+                let undo = c.host_undo.entry(peer_id).or_default();
+                undo.push(deltas.clone());
+                if undo.len() > MAX_UNDO_PER_PEER {
+                    let excess = undo.len() - MAX_UNDO_PER_PEER;
+                    undo.drain(0..excess);
+                }
                 c.host_redo.remove(&peer_id);
                 c.next_seq
             };
@@ -916,7 +975,12 @@ fn flush_edit_batch<R: Runtime>(
                 continue;
             }
             c.next_seq += 1;
-            c.host_undo.entry(peer_id).or_default().push(deltas.clone());
+            let undo = c.host_undo.entry(peer_id).or_default();
+            undo.push(deltas.clone());
+            if undo.len() > MAX_UNDO_PER_PEER {
+                let excess = undo.len() - MAX_UNDO_PER_PEER;
+                undo.drain(0..excess);
+            }
             c.host_redo.remove(&peer_id);
             c.next_seq
         };
@@ -980,6 +1044,8 @@ pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
             roster: Vec::new(),
             snapshot_len: bytes.len() as u64,
             chunk_count,
+            avatar_names: HashMap::new(),
+            avatar_data: HashMap::new(),
         })
         .unwrap();
         let g = state.collab.lock();
@@ -1054,6 +1120,7 @@ fn host_remove_peer_from_session<R: Runtime>(
         g.host_peer_kick_tx.remove(&peer_id);
         g.guest_last_activity.remove(&peer_id);
         g.presence.remove(&peer_id);
+        g.avatar_names.remove(&peer_id);
         g.host_undo.remove(&peer_id);
         g.host_redo.remove(&peer_id);
         (g.roster.clone(), display_name)
@@ -1120,6 +1187,10 @@ async fn handle_host_connection<R: Runtime>(
             return;
         }
     };
+    let (existing_avatars, existing_avatar_data) = {
+        let g = collab_mtx.lock();
+        (g.avatar_names.clone(), g.avatar_data.clone())
+    };
     if snap.len() <= SNAPSHOT_CHUNK_THRESHOLD {
         // Small map – send inline Welcome (original path).
         let welcome = HostToClient::Welcome {
@@ -1127,6 +1198,8 @@ async fn handle_host_connection<R: Runtime>(
             leader_id: HOST_PEER_ID,
             snapshot: snap,
             roster: roster.clone(),
+            avatar_names: existing_avatars,
+            avatar_data: existing_avatar_data,
         };
         let _ = ws
             .send(Message::Text(serde_json::to_string(&welcome).unwrap()))
@@ -1140,6 +1213,8 @@ async fn handle_host_connection<R: Runtime>(
             roster: roster.clone(),
             snapshot_len: snap.len() as u64,
             chunk_count,
+            avatar_names: existing_avatars,
+            avatar_data: existing_avatar_data,
         };
         let _ = ws
             .send(Message::Text(serde_json::to_string(&header).unwrap()))
@@ -1151,6 +1226,11 @@ async fn handle_host_connection<R: Runtime>(
 
     let mut peer_already_removed = false;
     let mut kicked = false;
+    // Tracks when this guest first started lagging. Cleared when they catch up.
+    let mut lag_since: Option<Instant> = None;
+    // Rate-limits camera-presence forwards for this guest: at most one per CAMERA_BROADCAST_MIN_INTERVAL.
+    let mut last_camera_forward =
+        Instant::now().checked_sub(CAMERA_BROADCAST_MIN_INTERVAL).unwrap_or_else(Instant::now);
     loop {
         tokio::select! {
             biased;
@@ -1170,8 +1250,69 @@ async fn handle_host_connection<R: Runtime>(
                 }
             }
             bmsg = broadcast_rx.recv() => {
-                if let Ok(msg) = bmsg {
-                    let _ = ws.send(msg).await;
+                match bmsg {
+                    Ok(msg) => {
+                        lag_since = None; // caught up — clear any lag window
+                        let _ = ws.send(msg).await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        let now = Instant::now();
+                        if let Some(since) = lag_since {
+                            if now.duration_since(since) > GUEST_LAG_KICK_TIMEOUT {
+                                // Too slow for too long — kick the guest cleanly.
+                                log::warn!(
+                                    "collab: kicking peer {peer_id} after lagging for > {}s",
+                                    GUEST_LAG_KICK_TIMEOUT.as_secs()
+                                );
+                                let _ = ws.send(Message::Text(
+                                    serde_json::to_string(&HostToClient::Kicked {
+                                        reason: "connection too slow to keep up with the session".into(),
+                                    }).unwrap(),
+                                )).await;
+                                kicked = true;
+                                break;
+                            }
+                            // Still within the grace window — resync already sent, just wait.
+                        } else {
+                            // First lag for this peer: record time and push a fresh snapshot
+                            // so the guest's state converges despite the missed messages.
+                            lag_since = Some(now);
+                            log::warn!(
+                                "collab: peer {peer_id} lagged {n} broadcast messages — sending resync snapshot"
+                            );
+                            let snap_result: Result<Vec<u8>, String> = (|| {
+                                let g = state.current_file.lock();
+                                let file = g.as_ref().cloned().unwrap_or_else(empty_collab_placeholder);
+                                encode_payload_v4(&file).map_err(|e| e.to_string())
+                            })();
+                            if let Ok(snap) = snap_result {
+                                if snap.len() <= SNAPSHOT_CHUNK_THRESHOLD {
+                                    if let Ok(json) = serde_json::to_string(&HostToClient::Snapshot { bytes: snap }) {
+                                        let _ = ws.send(Message::Text(json)).await;
+                                    }
+                                } else {
+                                    let chunk_count =
+                                        snap.len().div_ceil(SNAPSHOT_CHUNK_SIZE).max(1) as u32;
+                                    let header = HostToClient::WelcomeHeader {
+                                        peer_id: 0,
+                                        leader_id: HOST_PEER_ID,
+                                        roster: Vec::new(),
+                                        snapshot_len: snap.len() as u64,
+                                        chunk_count,
+                                        avatar_names: HashMap::new(),
+                                        avatar_data: HashMap::new(),
+                                    };
+                                    if let Ok(json) = serde_json::to_string(&header) {
+                                        let _ = ws.send(Message::Text(json)).await;
+                                    }
+                                    for chunk in snap.chunks(SNAPSHOT_CHUNK_SIZE) {
+                                        let _ = ws.send(Message::Binary(chunk.to_vec())).await;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
             incoming = ws.next() => {
@@ -1225,10 +1366,12 @@ async fn handle_host_connection<R: Runtime>(
                     let seq = {
                         let mut c = collab_mtx.lock();
                         c.next_seq += 1;
-                        c.host_undo
-                            .entry(peer_id)
-                            .or_default()
-                            .push(deltas.clone());
+                        let undo = c.host_undo.entry(peer_id).or_default();
+                        undo.push(deltas.clone());
+                        if undo.len() > MAX_UNDO_PER_PEER {
+                            let excess = undo.len() - MAX_UNDO_PER_PEER;
+                            undo.drain(0..excess);
+                        }
                         c.host_redo.remove(&peer_id);
                         c.next_seq
                     };
@@ -1339,10 +1482,58 @@ async fn handle_host_connection<R: Runtime>(
                 }
             }
             ClientToHost::Camera { presence } => {
+                // Always update the presence record so snap-to-peer is current.
                 collab_mtx.lock().presence.insert(peer_id, presence);
-                let cam_ev = HostToClient::Camera { peer_id, presence };
-                let json = serde_json::to_string(&cam_ev).unwrap();
-                let _ = app.emit("collab-camera", &json);
+                // Rate-limit broadcasts: each guest gets at most one camera forward
+                // per CAMERA_BROADCAST_MIN_INTERVAL to cap broadcast traffic at 40+ peers.
+                let now = Instant::now();
+                if now.duration_since(last_camera_forward) >= CAMERA_BROADCAST_MIN_INTERVAL {
+                    last_camera_forward = now;
+                    let cam_ev = HostToClient::Camera { peer_id, presence };
+                    let json = serde_json::to_string(&cam_ev).unwrap();
+                    let _ = app.emit("collab-camera", &json);
+                    {
+                        let g = collab_mtx.lock();
+                        if let Some(tx) = &g.host_broadcast {
+                            let _ = tx.send(Message::Text(json));
+                        }
+                    }
+                }
+            }
+            ClientToHost::AvatarChoice { avatar_name } => {
+                collab_mtx
+                    .lock()
+                    .avatar_names
+                    .insert(peer_id, avatar_name.clone());
+                let ev = HostToClient::AvatarChoice {
+                    peer_id,
+                    avatar_name,
+                };
+                let json = serde_json::to_string(&ev).unwrap();
+                let _ = app.emit("collab-avatar-choice", &json);
+                {
+                    let g = collab_mtx.lock();
+                    if let Some(tx) = &g.host_broadcast {
+                        let _ = tx.send(Message::Text(json));
+                    }
+                }
+            }
+            ClientToHost::AvatarData { name, bytes } => {
+                if bytes.len() > MAX_AVATAR_FILE_BYTES {
+                    continue;
+                }
+                collab_mtx
+                    .lock()
+                    .avatar_data
+                    .insert(name.clone(), bytes.clone());
+                let ev = HostToClient::AvatarData {
+                    peer_id,
+                    name: name.clone(),
+                    bytes: bytes.clone(),
+                };
+                let json = serde_json::to_string(&ev).unwrap();
+                // Notify the local render loop so it can decode and cache the mesh.
+                let _ = app.emit("collab-avatar-data", &json);
                 {
                     let g = collab_mtx.lock();
                     if let Some(tx) = &g.host_broadcast {
@@ -1409,7 +1600,7 @@ pub fn start_host<R: Runtime>(
         is_leader: true,
         can_edit: true,
     }];
-    let (btx, _) = broadcast::channel::<Message>(128);
+    let (btx, _) = broadcast::channel::<Message>(BROADCAST_CAPACITY);
     c.host_broadcast = Some(btx.clone());
     let roster_json = serde_json::to_string(&c.roster).unwrap();
     drop(c);
@@ -1663,6 +1854,8 @@ pub async fn client_connect_blocking<R: Runtime>(
             leader_id,
             snapshot,
             roster,
+            avatar_names,
+            avatar_data,
         } => {
             {
                 let mut c = collab_mtx.lock();
@@ -1670,6 +1863,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                 c.local_peer_id = peer_id;
                 c.leader_id = leader_id;
                 c.roster = roster;
+                c.avatar_names = avatar_names;
+                c.avatar_data = avatar_data;
             }
             if let Err(e) = replace_file_on_main(&app, &state, &snapshot) {
                 collab_mtx.lock().leave();
@@ -1690,6 +1885,8 @@ pub async fn client_connect_blocking<R: Runtime>(
             roster,
             snapshot_len,
             chunk_count,
+            avatar_names,
+            avatar_data,
         } => {
             {
                 let mut c = collab_mtx.lock();
@@ -1697,6 +1894,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                 c.local_peer_id = peer_id;
                 c.leader_id = leader_id;
                 c.roster = roster;
+                c.avatar_names = avatar_names;
+                c.avatar_data = avatar_data;
             }
             let _ = app.emit("collab-joined", ());
             let _ = app.emit("collab-local-peer", peer_id);
@@ -1725,7 +1924,7 @@ pub async fn client_connect_blocking<R: Runtime>(
         }
     }
 
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (tx, mut rx) = mpsc::channel::<String>(512);
     let tx_hb = tx.clone();
     let tx_probe = tx.clone();
     collab_mtx.lock().client_tx = Some(tx);
@@ -1735,7 +1934,7 @@ pub async fn client_connect_blocking<R: Runtime>(
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             interval.tick().await;
-            if tx_hb.send(heartbeat_msg.clone()).is_err() {
+            if tx_hb.try_send(heartbeat_msg.clone()).is_err() {
                 break;
             }
         }
@@ -1750,7 +1949,7 @@ pub async fn client_connect_blocking<R: Runtime>(
                 .unwrap_or_default()
                 .as_millis() as u64;
             let msg = serde_json::to_string(&ClientToHost::LatencyProbe { sent_ms }).unwrap();
-            if tx_probe.send(msg).is_err() {
+            if tx_probe.try_send(msg).is_err() {
                 break;
             }
         }
@@ -1867,6 +2066,16 @@ pub async fn client_connect_blocking<R: Runtime>(
                             HostToClient::Camera { peer_id, presence } => {
                                 cm4.lock().presence.insert(peer_id, presence);
                                 let _ = app4.emit("collab-camera", t);
+                            }
+                            HostToClient::AvatarChoice { peer_id, ref avatar_name } => {
+                                cm4.lock().avatar_names.insert(peer_id, avatar_name.clone());
+                                let _ = app4.emit("collab-avatar-choice", t);
+                            }
+                            HostToClient::AvatarData { ref name, ref bytes, .. } => {
+                                if bytes.len() <= MAX_AVATAR_FILE_BYTES {
+                                    cm4.lock().avatar_data.insert(name.clone(), bytes.clone());
+                                }
+                                let _ = app4.emit("collab-avatar-data", t);
                             }
                             _ => {
                                 let _ = app4.emit("collab-msg", t);
@@ -2675,5 +2884,150 @@ mod tests {
             inbox.len()
         );
         stop_host(&cm);
+    }
+
+    // ---------------------------------------------------------------
+    //  Stress: 50 concurrent clients join, each floods the host with
+    //  empty edits, and the roster must not shrink mid-flood.
+    //
+    //  Empty edits are processed inline in handle_host_connection (no
+    //  render loop required), so next_seq must advance by exactly
+    //  N × EDITS_PER_CLIENT when all tasks finish.
+    // ---------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn stress_50_clients_concurrent_join_and_flood() {
+        const N: usize = 50;
+        const EDITS_PER_CLIENT: usize = 20;
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle().clone();
+        let state = minimal_viewer_state_for_collab_tests();
+        let cm = Arc::clone(&state.collab);
+        let port = pick_listen_port();
+        start_host(
+            handle.clone(),
+            Arc::clone(&state),
+            Arc::clone(&cm),
+            port,
+            "Host".into(),
+            0x00_ff_00,
+            false,
+        )
+        .expect("start_host");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (go_tx, _) = tokio::sync::broadcast::channel::<()>(1);
+        let (joined_tx, mut joined_rx) = tokio::sync::mpsc::channel::<u32>(N);
+        let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<()>(N);
+        let empty_edit = serde_json::to_string(&ClientToHost::Edit { deltas: vec![] }).unwrap();
+
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let mut go_rx = go_tx.subscribe();
+            let joined = joined_tx.clone();
+            let done = done_tx.clone();
+            let edit_msg = empty_edit.clone();
+            handles.push(tokio::spawn(async move {
+                let (mut write, _read, peer_id) = ws_join(port).await.unwrap();
+                let _ = joined.send(peer_id).await;
+                let _ = go_rx.recv().await; // wait for flood signal
+                for _ in 0..EDITS_PER_CLIENT {
+                    if write.send(Message::Text(edit_msg.clone())).await.is_err() {
+                        break;
+                    }
+                }
+                let _ = done.send(()).await;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }));
+        }
+        drop(joined_tx);
+        drop(done_tx);
+
+        // Wait for all N guests to join
+        for _ in 0..N {
+            joined_rx.recv().await.expect("guest join timed out");
+        }
+        assert_eq!(
+            cm.lock().roster.len(),
+            N + 1,
+            "roster should have {} entries after join",
+            N + 1
+        );
+
+        // Grant edit permission so empty edits are processed inline
+        {
+            let mut g = cm.lock();
+            for r in g.roster.iter_mut() {
+                r.can_edit = true;
+            }
+        }
+
+        // Release all clients simultaneously
+        let _ = go_tx.send(());
+
+        // Wait for every client's flood loop to finish sending
+        for _ in 0..N {
+            done_rx.recv().await.expect("done signal timed out");
+        }
+
+        // Poll next_seq until it reaches the expected value (host may still be draining
+        // frames from the TCP receive buffer when the client write loop finishes).
+        let expected_seq = (N * EDITS_PER_CLIENT) as u64;
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if cm.lock().next_seq == expected_seq {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for next_seq={expected_seq}; got {}",
+                cm.lock().next_seq
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        // No guest should have been dropped during the flood
+        assert_eq!(
+            cm.lock().roster.len(),
+            N + 1,
+            "roster shrank during flood — a guest was spuriously disconnected"
+        );
+
+        stop_host(&cm);
+        for h in handles {
+            let _ = h.await;
+        }
+    }
+
+    // ---------------------------------------------------------------
+    //  Verify that a broadcast channel whose ring buffer overflows
+    //  returns RecvError::Lagged rather than panicking or silently
+    //  losing the receiver — this is the precondition our resync
+    //  logic in handle_host_connection depends on.
+    // ---------------------------------------------------------------
+    #[tokio::test]
+    async fn broadcast_overflow_returns_lagged_not_panic() {
+        // Capacity 2: sending a third message must evict the oldest.
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<Message>(2);
+        for i in 0u32..3 {
+            tx.send(Message::Text(format!("msg{i}"))).unwrap();
+        }
+        // First recv must be Lagged (the ring wrapped)
+        match rx.recv().await {
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                assert!(n >= 1, "lagged count must be ≥ 1, got {n}");
+            }
+            Ok(_) => panic!("expected RecvError::Lagged, got a message"),
+            Err(broadcast::error::RecvError::Closed) => {
+                panic!("expected RecvError::Lagged, got Closed")
+            }
+        }
+        // After recovering the receiver is positioned at the oldest surviving message
+        // (capacity 2, 3 sent → msg0 evicted, ring holds msg1 and msg2; lag repositions to msg1)
+        match rx.recv().await {
+            Ok(Message::Text(t)) => assert_eq!(t, "msg1", "should receive oldest surviving message after lag"),
+            other => panic!("unexpected result after lag recovery: {other:?}"),
+        }
     }
 }

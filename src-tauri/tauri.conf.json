@@ -26,7 +26,7 @@
   },
   "bundle": {
     "windows": {
-      "signCommand": "cmd /C sign.bat %1"
+      "signCommand": "relic sign --file %1 --key azure --config src-tauri/relic.conf"
     },
     "macOS": {
       "entitlements": "./Entitlements.plist",
