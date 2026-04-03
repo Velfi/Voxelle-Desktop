@@ -162,6 +162,7 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          RELIC_CONFIG: ${{ github.workspace }}/src-tauri/relic.conf
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
