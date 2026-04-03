@@ -2393,6 +2393,7 @@ fn unload_current_project<R: Runtime>(
     viewer.clear_collab_peer_lines();
     viewer.clear_ping_mesh();
     viewer.set_mood_params(&MoodParams::default());
+    viewer.speech_bubbles.clear();
     drop(v);
 
     *state.last_scene_bounds.lock() = Some(prepared.bounds);

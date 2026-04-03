@@ -2481,6 +2481,7 @@ function App() {
         setLoading(true);
         setLoadProgress(0);
         setLoadPhase("");
+        setSpeechBubbles([]);
       }),
       listen<{ fraction: number; phase: string }>("voxelle-load-progress", (e) => {
         const p = e.payload;
