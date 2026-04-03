@@ -152,6 +152,8 @@ jobs:
           mkdir -p ~/.private_keys
           echo "$APPLE_API_KEY_CONTENT" > ~/.private_keys/AuthKey_${APPLE_API_KEY}.p8
           echo "APPLE_API_KEY_PATH=$HOME/.private_keys/AuthKey_${APPLE_API_KEY}.p8" >> "$GITHUB_ENV"
+          IDENTITY=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
       - name: Build Tauri app
         env:
@@ -162,7 +164,6 @@ jobs:
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          RELIC_CONFIG: ${{ github.workspace }}/src-tauri/relic.conf
         shell: bash
         run: |
           if [[ "$RUNNER_OS" == "macOS" ]]; then
