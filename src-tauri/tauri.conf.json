@@ -26,7 +26,7 @@
   },
   "bundle": {
     "windows": {
-      "signCommand": "relic sign --file %1 --key azure --config %RELIC_CONFIG%"
+      "signCommand": "cmd /C sign.bat %1"
     },
     "macOS": {
       "entitlements": "./Entitlements.plist",
