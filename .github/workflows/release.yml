@@ -203,12 +203,14 @@ jobs:
         run: |
           TAG="${{ needs.create-release.outputs.release_tag }}"
           BUNDLE="${{ matrix.bundle_dir }}"
-          gh release upload "$TAG" \
-            "$BUNDLE"/appimage/*.AppImage \
-            "$BUNDLE"/appimage/*.AppImage.tar.gz \
-            "$BUNDLE"/appimage/*.AppImage.tar.gz.sig \
-            "$BUNDLE"/deb/*.deb \
-            --clobber
+          shopt -s nullglob
+          FILES=(
+            "$BUNDLE"/appimage/*.AppImage
+            "$BUNDLE"/appimage/*.AppImage.tar.gz
+            "$BUNDLE"/appimage/*.AppImage.tar.gz.sig
+            "$BUNDLE"/deb/*.deb
+          )
+          gh release upload "$TAG" "${FILES[@]}" --clobber
 
       - name: Upload release artifacts (Windows)
         if: matrix.platform == 'windows-latest'
@@ -220,11 +222,9 @@ jobs:
           BUNDLE="${{ matrix.bundle_dir }}"
           gh release upload "$TAG" \
             "$BUNDLE"/msi/*.msi \
-            "$BUNDLE"/msi/*.msi.zip \
-            "$BUNDLE"/msi/*.msi.zip.sig \
+            "$BUNDLE"/msi/*.msi.sig \
             "$BUNDLE"/nsis/*-setup.exe \
-            "$BUNDLE"/nsis/*.nsis.zip \
-            "$BUNDLE"/nsis/*.nsis.zip.sig \
+            "$BUNDLE"/nsis/*-setup.exe.sig \
             --clobber
 
   updater-manifest:
@@ -263,7 +263,7 @@ jobs:
                   platforms['darwin-x86_64'] = {'url': asset_url, 'signature': sig}
               elif asset_name.endswith('.AppImage.tar.gz'):
                   platforms['linux-x86_64'] = {'url': asset_url, 'signature': sig}
-              elif asset_name.endswith('.msi.zip') and not asset_name.endswith('.nsis.zip'):
+              elif asset_name.endswith('.msi'):
                   platforms['windows-x86_64'] = {'url': asset_url, 'signature': sig}
 
           version = tag.lstrip('v')

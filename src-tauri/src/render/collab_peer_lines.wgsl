@@ -92,7 +92,7 @@ fn fs_gizmo_occluded(in: VertexOut) -> OpaqueOut {
 @fragment
 fn fs_grid_border_line(in: VertexOut) -> OpaqueOut {
     var out: OpaqueOut;
-    let dark = vec3<f32>(0.035, 0.036, 0.04);
+    let dark = vec3<f32>(0.0, 0.0, 0.0);
     let rgb = preview_tonemap(dark);
 
     let inv_w = 1.0 / max(abs(in.clip_pos.w), 1e-5);
@@ -100,15 +100,11 @@ fn fs_grid_border_line(in: VertexOut) -> OpaqueOut {
     let ndc_grad = max(fwidth(ndc.x), fwidth(ndc.y));
     let screen_fade = smoothstep(0.0001, 0.005, ndc_grad);
 
-    let to_cam = normalize(g.cam_pos.xyz - in.world_pos);
-    let ndotl = abs(dot(to_cam, vec3<f32>(0.0, 1.0, 0.0)));
-    let grazing_fade = smoothstep(0.03, 0.3, ndotl);
-
     let dist = length(g.cam_pos.xyz - in.world_pos);
     // Earlier / tighter than before: far camera → thin lines fight the depth buffer.
     let dist_fade = 1.0 - smoothstep(48.0, 150.0, dist);
 
-    let a = 0.42 * screen_fade * grazing_fade * dist_fade;
+    let a = 0.72 * screen_fade * dist_fade;
     out.color = vec4<f32>(rgb, a);
     out.gbuf_n = vec4<f32>(0.0);
     return out;
