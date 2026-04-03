@@ -155,6 +155,15 @@ jobs:
           IDENTITY=$(security find-identity -v -p codesigning build.keychain | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "APPLE_SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
+      - name: Patch relic.conf path in signCommand (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          jq --arg cmd "relic sign --file %1 --key azure --config $GITHUB_WORKSPACE/src-tauri/relic.conf" \
+            '.bundle.windows.signCommand = $cmd' \
+            src-tauri/tauri.conf.json > patched.json
+          mv patched.json src-tauri/tauri.conf.json
+
       - name: Build Tauri app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
