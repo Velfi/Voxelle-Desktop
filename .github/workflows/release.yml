@@ -164,6 +164,23 @@ jobs:
             src-tauri/tauri.conf.json > patched.json
           mv patched.json src-tauri/tauri.conf.json
 
+      - name: Verify updater signing key
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY secret is empty or not set — updater artifacts will not be generated"
+            exit 1
+          fi
+          echo "TAURI_SIGNING_PRIVATE_KEY is set (${#TAURI_SIGNING_PRIVATE_KEY} chars)"
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ]; then
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY_PASSWORD is not set — this is fine only if the key has no password"
+          else
+            echo "TAURI_SIGNING_PRIVATE_KEY_PASSWORD is set"
+          fi
+
       - name: Build Tauri app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -180,6 +197,11 @@ jobs:
           else
             npm run tauri -- build
           fi
+
+      - name: List bundle artifacts
+        if: always()
+        shell: bash
+        run: find "${{ matrix.bundle_dir }}" -type f | sort || echo "(bundle dir not found)"
 
       - name: Upload release artifacts (macOS)
         if: runner.os == 'macOS'
