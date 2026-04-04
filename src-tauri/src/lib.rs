@@ -892,13 +892,11 @@ pub fn run() {
             } else if event.id() == "view_render_greedy"
                 || event.id() == "view_render_marching"
                 || event.id() == "view_render_dual"
-                || event.id() == "menu_view_render_ray"
             {
                 let (mode, label) = match event.id().0.as_ref() {
                     "view_render_greedy" => (RenderingMode::Greedy, "greedy"),
                     "view_render_marching" => (RenderingMode::MarchingCubes, "marchingCubes"),
-                    "view_render_dual" => (RenderingMode::DualContour, "dualContour"),
-                    _ => (RenderingMode::Ray, "ray"),
+                    _ => (RenderingMode::DualContour, "dualContour"),
                 };
                 let state = app.state::<Arc<ViewerState>>();
                 let _ = apply_rendering_mode(&state, &app, mode);
@@ -908,13 +906,27 @@ pub fn run() {
                     "voxelle-rendering-mode-changed",
                     label,
                 );
-                // Enforce radio-button style: exactly one checked at a time.
                 #[cfg(desktop)]
                 if let Some(sel) = app.try_state::<SelectionMenuState>() {
                     let _ = sel.render_greedy.set_checked(matches!(mode, RenderingMode::Greedy));
                     let _ = sel.render_marching.set_checked(matches!(mode, RenderingMode::MarchingCubes));
                     let _ = sel.render_dual.set_checked(matches!(mode, RenderingMode::DualContour));
-                    let _ = sel.render_ray.set_checked(matches!(mode, RenderingMode::Ray));
+                }
+            } else if event.id() == "menu_view_render_ray" {
+                // RT is an independent toggle, not a radio button.
+                #[cfg(desktop)]
+                if let Some(sel) = app.try_state::<SelectionMenuState>() {
+                    let enabled = sel.render_ray.is_checked().unwrap_or(false);
+                    let state = app.state::<Arc<ViewerState>>();
+                    if let Some(viewer) = state.viewer.lock().as_mut() {
+                        viewer.set_raytrace_mode(enabled);
+                    }
+                    wake_viewport_loop(&app);
+                    let _ = app.emit_to(
+                        EventTarget::webview_window("main"),
+                        "voxelle-raytrace-changed",
+                        enabled,
+                    );
                 }
             } else if event.id() == "menu_view_ortho" {
                 #[cfg(desktop)]
@@ -1201,6 +1213,7 @@ pub fn run() {
             debug_clear_autosaves,
             get_rendering_mode,
             set_rendering_mode,
+            get_raytrace_mode,
             set_raytrace_mode,
             benchmark_raytrace,
             get_orthographic,

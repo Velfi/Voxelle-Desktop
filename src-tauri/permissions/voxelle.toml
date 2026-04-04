@@ -153,6 +153,7 @@ commands.allow = [
   "set_active_object",
   "set_object_visible",
   "create_scene_object",
+  "get_raytrace_mode",
   "set_raytrace_mode",
   "mascot_load",
   "mascot_load_embedded",

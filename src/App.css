@@ -2145,6 +2145,31 @@ body,
   text-shadow: none;
 }
 
+.status-bar-rt-btn {
+  flex: 0 0 auto;
+  padding: 0.15rem 0.45rem;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-family: ui-monospace, monospace;
+  font-weight: 600;
+  color: var(--app-text-muted);
+  cursor: pointer;
+  letter-spacing: 0.04em;
+}
+
+.status-bar-rt-btn:hover {
+  background: rgba(0, 0, 0, 0.5);
+  color: var(--app-text-strong);
+}
+
+.status-bar-rt-btn.is-active {
+  background: rgb(var(--theme-accent-rgb) / 0.28);
+  color: var(--app-text-strong);
+  border-color: rgb(var(--theme-accent-rgb) / 0.45);
+}
+
 .fps-counter {
   padding: 0.2rem 0.45rem;
   background: rgba(0, 0, 0, 0.35);
@@ -2152,6 +2177,9 @@ body,
   font-size: 0.85rem;
   font-family: ui-monospace, monospace;
   color: var(--app-text-strong);
+  width: 7ch;
+  text-align: right;
+  box-sizing: content-box;
 }
 
 .toolbar-btn.is-active {

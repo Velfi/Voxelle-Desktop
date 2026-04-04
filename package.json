@@ -11,7 +11,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "changelog:preview": "node scripts/preview-changelog.mjs",
+    "changelog:compile": "node scripts/compile-changelog.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

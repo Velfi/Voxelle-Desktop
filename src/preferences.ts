@@ -107,6 +107,8 @@ export type VoxelleDesktopPreferences = {
   newProjectDefaultShape: StartShape;
   /** Avatar name shown to other collab peers. Empty string = default glowing dot. */
   collabAvatarName: string;
+  /** Silently check for app updates on launch and prompt if one is found. */
+  autoCheckUpdates: boolean;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -135,6 +137,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   newProjectDefaultSize: 32,
   newProjectDefaultShape: "circle",
   collabAvatarName: "",
+  autoCheckUpdates: true,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -324,6 +327,8 @@ export function loadPreferences(): VoxelleDesktopPreferences {
         typeof o.collabAvatarName === "string"
           ? o.collabAvatarName.trim().slice(0, 64)
           : DEFAULTS.collabAvatarName,
+      autoCheckUpdates:
+        typeof o.autoCheckUpdates === "boolean" ? o.autoCheckUpdates : DEFAULTS.autoCheckUpdates,
     };
   } catch {
     return { ...DEFAULTS };
@@ -368,6 +373,7 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.gizmoOnTop = prefs.gizmoOnTop;
     merged.newProjectDefaultSize = prefs.newProjectDefaultSize;
     merged.newProjectDefaultShape = prefs.newProjectDefaultShape;
+    merged.autoCheckUpdates = prefs.autoCheckUpdates;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

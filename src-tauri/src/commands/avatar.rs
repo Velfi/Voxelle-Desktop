@@ -292,9 +292,11 @@ fn avatar_voxel_centroid(voxels: &[voxelle::Voxel]) -> glam::Vec3 {
     if voxels.is_empty() {
         return glam::Vec3::ZERO;
     }
+    // Use voxel center positions (corner + 0.5) so the centroid matches the
+    // visual center of mass rather than the corner-based grid origin.
     let sum: glam::Vec3 = voxels
         .iter()
-        .map(|v| glam::Vec3::new(v.x as f32, v.y as f32, v.z as f32))
+        .map(|v| glam::Vec3::new(v.x as f32 + 0.5, v.y as f32 + 0.5, v.z as f32 + 0.5))
         .sum();
     sum / voxels.len() as f32
 }

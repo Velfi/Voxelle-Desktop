@@ -400,6 +400,38 @@ fn soft_shadow(world_pos: vec3<f32>, n: vec3<f32>, seed: u32) -> f32 {
     return lit / f32(NUM_SAMPLES);
 }
 
+/// Irradiance from nearby glow voxels onto a surface point.
+/// Casts short hemisphere rays (Vogel-disk cosine-weighted) and collects
+/// glow hits — smooth falloff, no voxel-grid blockiness.
+const SURFACE_GLOW_STRENGTH: f32 = 5.0;
+const GLOW_REACH: f32            = 64.0;
+
+fn surface_glow_at(p: vec3<f32>, n: vec3<f32>, seed: u32) -> vec3<f32> {
+    let NUM_RAYS = select(12u, 4u, rt.fast_preview != 0u);
+    let phi      = rand_f(seed ^ 0xE41Au) * 6.28318;
+    let basis    = tangent_basis(n);
+    let origin   = p + n * 0.06;
+    var acc      = vec3<f32>(0.0);
+
+    for (var i = 0u; i < NUM_RAYS; i++) {
+        // Cosine-weighted hemisphere sample via Vogel disk.
+        let d2        = vogel_disk(i, NUM_RAYS, phi);
+        let cos_theta = sqrt(1.0 - dot(d2, d2));
+        let local_dir = vec3<f32>(d2.x, d2.y, cos_theta);
+        let dir       = normalize(basis * local_dir);
+
+        let hit = dda(origin, dir, GLOW_REACH, false, select(512, 96, rt.fast_preview != 0u));
+        if (hit.hit && unpack_mat(hit.packed) == MAT_GLOW) {
+            let gc  = unpack_rgb(hit.packed);
+            // Smooth quadratic falloff: full brightness at contact, zero at GLOW_REACH.
+            let norm_t = hit.t / GLOW_REACH;
+            let att    = (1.0 - norm_t) * (1.0 - norm_t);
+            acc       += gc * att * SURFACE_GLOW_STRENGTH;
+        }
+    }
+    return acc / f32(NUM_RAYS);
+}
+
 /// Shade a diffuse (plastic / rubber) surface.
 fn shade_diffuse(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>, seed: u32) -> vec3<f32> {
     let amb     = g.light_params.x;
@@ -411,7 +443,8 @@ fn shade_diffuse(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>, seed: u32
     let shadow  = soft_shadow(world_pos, n, seed);
     let ambient = hemisphere_ambient(n) * amb * 0.28;
     let direct  = sc * ndl * shadow * sun_lvl * 0.9;
-    return color * (ambient + direct);
+    let glow    = surface_glow_at(world_pos, n, seed ^ 0xE10Bu);
+    return color * (ambient + direct + glow);
 }
 
 /// Schlick Fresnel.
@@ -443,7 +476,7 @@ fn shade_secondary(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
     let color = unpack_rgb(h.packed);
     let wp    = origin + dir * h.t;
 
-    if (mat == MAT_GLOW) { return color * 4.0; }
+    if (mat == MAT_GLOW) { return color * 8.0; }
 
     if (mat == MAT_METAL) {
         // Reflect to sky — no further DDA
@@ -478,7 +511,7 @@ fn shade_secondary(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
             if (hit2.hit) {
                 let hmat = unpack_mat(hit2.packed);
                 if (hmat == MAT_GLOW) {
-                    refr_col = unpack_rgb(hit2.packed) * 4.0;
+                    refr_col = unpack_rgb(hit2.packed) * 8.0;
                 } else {
                     let hw = enter + refr_dir * hit2.t;
                     refr_col = shade_diffuse(hw, hit2.normal, unpack_rgb(hit2.packed), seed ^ 0x7777u);
@@ -1008,7 +1041,7 @@ fn shade_transmissive(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
             let hmat = unpack_mat(thr.packed);
             let hw   = enter + refr_dir * thr.t;
             if (hmat == MAT_GLOW) {
-                refr_col = unpack_rgb(thr.packed) * 4.0;
+                refr_col = unpack_rgb(thr.packed) * 8.0;
             } else {
                 refr_col = shade_diffuse(hw, thr.normal, unpack_rgb(thr.packed), seed ^ 0x9F2Bu);
             }
@@ -1050,7 +1083,7 @@ fn shade(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
         let wp    = origin + dir * h.t;
 
         if (mat == MAT_GLOW) {
-            rgb = color * 4.0;
+            rgb = color * 8.0;
         } else if (mat == MAT_METAL) {
             rgb = shade_metal(wp, h.normal, color, dir, seed);
         } else if (is_transmissive(mat)) {

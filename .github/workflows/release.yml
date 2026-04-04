@@ -27,6 +27,15 @@ jobs:
         shell: bash
         run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Extract release notes
+        shell: bash
+        run: node scripts/extract-release-notes.mjs "${{ steps.tag.outputs.tag }}" > release-notes.md
+
       - name: Create GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -34,7 +43,7 @@ jobs:
         run: |
           gh release create "${{ steps.tag.outputs.tag }}" \
             --title "Voxelle Desktop ${{ steps.tag.outputs.tag }}" \
-            --generate-notes \
+            --notes-file release-notes.md \
           || echo "Release already exists — continuing"
 
   build:
@@ -265,7 +274,7 @@ jobs:
           gh release download "$RELEASE_TAG" --pattern "*.sig" --dir sigs --clobber
 
           python3 - <<'EOF'
-          import json, os
+          import json, os, re
           from datetime import datetime, timezone
 
           tag = os.environ['RELEASE_TAG']
@@ -290,9 +299,21 @@ jobs:
                   platforms['windows-x86_64'] = {'url': asset_url, 'signature': sig}
 
           version = tag.lstrip('v')
+
+          # Extract release notes from CHANGELOG.md
+          notes_text = ''
+          try:
+              changelog = open('CHANGELOG.md').read()
+              escaped = re.escape(version)
+              match = re.search(rf'^## {escaped} [^\n]*\n(.*?)(?=\n## |\Z)', changelog, re.DOTALL)
+              if match:
+                  notes_text = match.group(1).strip()
+          except FileNotFoundError:
+              pass
+
           manifest = {
               'version': version,
-              'notes': '',
+              'notes': notes_text,
               'pub_date': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
               'platforms': platforms,
           }

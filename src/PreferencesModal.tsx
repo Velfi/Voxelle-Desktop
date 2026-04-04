@@ -135,6 +135,12 @@ export function PreferencesModal({
     savePreferences(next);
   };
 
+  const onAutoCheckUpdates = (checked: boolean) => {
+    const next = { ...prefs, autoCheckUpdates: checked };
+    setPrefs(next);
+    savePreferences(next);
+  };
+
   const onNewProjectDefaultSize = (raw: number) => {
     const v = Math.max(1, Math.min(256, Math.floor(raw)));
     const next = { ...prefs, newProjectDefaultSize: Number.isFinite(v) ? v : 32 };
@@ -340,6 +346,14 @@ export function PreferencesModal({
                 onChange={(e) => onReopenLastProject(e.target.checked)}
               />
               Automatically reopen last project on startup
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.autoCheckUpdates}
+                onChange={(e) => onAutoCheckUpdates(e.target.checked)}
+              />
+              Check for updates on startup
             </label>
             <label className="prefs-select-label">
               <span className="prefs-select-label-text">Default new project size</span>

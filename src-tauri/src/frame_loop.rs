@@ -660,11 +660,13 @@ pub(crate) fn sync_collab_peer_avatars(viewer: &mut WgpuViewer, state: &Arc<View
         };
         let right = forward.cross(ref_up).normalize();
         let up = right.cross(forward);
-        // Columns [right, up, -forward] rotated 90° CCW around Y → [forward, up, right].
+        // Columns [right, up, -forward]: local +Z maps to -forward so the avatar faces
+        // away from the peer's look target (toward the viewer).  det=+1 preserves CCW
+        // winding of the greedy mesh, keeping normals pointing outward.
         let rot = glam::Mat4::from_cols(
-            forward.extend(0.0),
-            up.extend(0.0),
             right.extend(0.0),
+            up.extend(0.0),
+            (-forward).extend(0.0),
             glam::Vec4::W,
         );
 
@@ -683,11 +685,11 @@ pub(crate) fn sync_collab_peer_avatars(viewer: &mut WgpuViewer, state: &Arc<View
         let mvp = vp * model;
 
         // Extract rotation columns for the normal matrix (std140: each column padded to vec4).
-        // Columns match the rot matrix: [forward, up, right].
+        // Columns match the rot matrix: [right, up, -forward].
         let rot_cols = [
-            [forward.x, forward.y, forward.z, 0.0],
-            [up.x,      up.y,      up.z,      0.0],
-            [right.x,   right.y,   right.z,   0.0],
+            [right.x,    right.y,    right.z,    0.0],
+            [up.x,       up.y,       up.z,       0.0],
+            [-forward.x, -forward.y, -forward.z, 0.0],
         ];
 
         viewer.update_avatar_peer(pid, avatar_name.clone(), mvp.to_cols_array_2d(), tint, rot_cols);

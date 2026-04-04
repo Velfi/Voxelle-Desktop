@@ -403,10 +403,6 @@ pub(crate) fn apply_rendering_mode(
     mode: RenderingMode,
 ) -> Result<(), String> {
     *state.rendering_mode.lock() = mode;
-    // Ray mode drives the GPU path tracer directly.
-    if let Some(viewer) = state.viewer.lock().as_mut() {
-        viewer.set_raytrace_mode(matches!(mode, RenderingMode::Ray));
-    }
     // On the start screen, bump the overlay generation so in-flight smooth-mesh
     // builds are cancelled, then tell the frontend to reload logo + mascots.
     if !state.active_project.load(std::sync::atomic::Ordering::Relaxed) {
@@ -470,11 +466,16 @@ pub(crate) fn set_rendering_mode(
         let _ = sel
             .render_dual
             .set_checked(matches!(mode, RenderingMode::DualContour));
-        let _ = sel
-            .render_ray
-            .set_checked(matches!(mode, RenderingMode::Ray));
     }
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn get_raytrace_mode(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<bool, String> {
+    let v = state.viewer.lock();
+    Ok(v.as_ref().map_or(false, |viewer| viewer.raytrace_enabled))
 }
 
 #[tauri::command]
@@ -488,6 +489,15 @@ pub(crate) fn set_raytrace_mode(
     viewer.set_raytrace_mode(enabled);
     drop(v);
     wake_viewport_loop(&app);
+    #[cfg(desktop)]
+    if let Some(sel) = app.try_state::<SelectionMenuState>() {
+        let _ = sel.render_ray.set_checked(enabled);
+    }
+    let _ = app.emit_to(
+        tauri::EventTarget::webview_window("main"),
+        "voxelle-raytrace-changed",
+        enabled,
+    );
     Ok(())
 }
 

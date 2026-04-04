@@ -1,6 +1,9 @@
 // ── Status bar (footer) ──────────────────────────────────────────────
 // Extracted from App.tsx.
 
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { RosterEntry } from "./types";
 
 export interface StatusBarProps {
@@ -39,6 +42,21 @@ export function StatusBar(props: StatusBarProps) {
     showPingLatency,
     pingMs,
   } = props;
+
+  const [rtActive, setRtActive] = useState(false);
+
+  useEffect(() => {
+    void invoke<boolean>("get_raytrace_mode").then(setRtActive).catch(() => {});
+    const unlisten = listen<boolean>("voxelle-raytrace-changed", (e) => {
+      setRtActive(e.payload);
+    });
+    return () => { void unlisten.then((f) => f()); };
+  }, []);
+
+  const toggleRt = () => {
+    const next = !rtActive;
+    void invoke("set_raytrace_mode", { enabled: next }).catch(() => {});
+  };
 
   return (
     <footer
@@ -92,6 +110,16 @@ export function StatusBar(props: StatusBarProps) {
           </button>
         ) : null}
       </div>
+      {showEditorChrome ? (
+        <button
+          type="button"
+          className={`status-bar-rt-btn${rtActive ? " is-active" : ""}`}
+          onClick={toggleRt}
+          title={rtActive ? "Disable ray tracing" : "Enable ray tracing"}
+        >
+          RT
+        </button>
+      ) : null}
       {showFpsCounter && showEditorChrome ? (
         <div className="fps-counter" role="status" aria-live="polite">
           {fpsDisplayed} FPS

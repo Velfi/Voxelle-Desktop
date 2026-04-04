@@ -210,13 +210,60 @@ fn canonical_vertex_ao(
 const EMISSION_RADIUS: f32 = 12.0;
 /// Emission intensity scalar. Higher = brighter indirect glow on nearby surfaces.
 const EMISSION_STRENGTH: f32 = 6.0;
+/// Grid cell size for spatial hashing of glow sources. Must be >= EMISSION_RADIUS.
+const GLOW_GRID_CELL: i32 = 12;
 
-/// Accumulate point-light irradiance from `glow_sources` at vertex `pos` with `normal`.
-/// `glow_sources` is `(voxel_center_in_voxel_coords, linear_rgb_color)`.
-fn accumulate_emission(glow_sources: &[(IVec3, Vec3)], pos: Vec3, normal: Vec3) -> Vec3 {
+/// Spatial hash grid for fast glow-source lookups. Each cell holds indices into
+/// the flat `glow_sources` slice, so only nearby sources are checked per vertex.
+struct GlowGrid {
+    cells: AHashMap<(i32, i32, i32), Vec<usize>>,
+}
+
+impl GlowGrid {
+    fn build(sources: &[(IVec3, Vec3)]) -> Self {
+        let mut cells: AHashMap<(i32, i32, i32), Vec<usize>> = AHashMap::new();
+        for (i, &((sx, sy, sz), _)) in sources.iter().enumerate() {
+            let key = (
+                sx.div_euclid(GLOW_GRID_CELL),
+                sy.div_euclid(GLOW_GRID_CELL),
+                sz.div_euclid(GLOW_GRID_CELL),
+            );
+            cells.entry(key).or_default().push(i);
+        }
+        GlowGrid { cells }
+    }
+
+    /// Iterate over glow source indices in the 3×3×3 neighbourhood around `pos`.
+    fn nearby_indices(&self, pos: Vec3) -> impl Iterator<Item = usize> + '_ {
+        let cx = (pos.x as i32).div_euclid(GLOW_GRID_CELL);
+        let cy = (pos.y as i32).div_euclid(GLOW_GRID_CELL);
+        let cz = (pos.z as i32).div_euclid(GLOW_GRID_CELL);
+        (-1..=1).flat_map(move |dx| {
+            (-1..=1).flat_map(move |dy| {
+                (-1..=1).flat_map(move |dz| {
+                    self.cells
+                        .get(&(cx + dx, cy + dy, cz + dz))
+                        .map(|v| v.as_slice())
+                        .unwrap_or(&[])
+                        .iter()
+                        .copied()
+                })
+            })
+        })
+    }
+}
+
+/// Accumulate point-light irradiance from nearby glow sources at vertex `pos` with `normal`.
+fn accumulate_emission(
+    glow_sources: &[(IVec3, Vec3)],
+    grid: &GlowGrid,
+    pos: Vec3,
+    normal: Vec3,
+) -> Vec3 {
     let r2 = EMISSION_RADIUS * EMISSION_RADIUS;
     let mut acc = Vec3::ZERO;
-    for &((sx, sy, sz), color) in glow_sources {
+    for idx in grid.nearby_indices(pos) {
+        let ((sx, sy, sz), color) = glow_sources[idx];
         let dx = sx as f32 - pos.x;
         let dy = sy as f32 - pos.y;
         let dz = sz as f32 - pos.z;
@@ -1268,6 +1315,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
     } else {
         vec![]
     };
+    let glow_grid = GlowGrid::build(&glow_sources);
 
     let mut buckets: AHashMap<(u32, u8), Vec<IVec3>> = AHashMap::new();
     for v in emit {
@@ -1363,14 +1411,15 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                              mat_k: f32,
                              ccw: bool,
                              is_glow_face: bool,
-                             glow_sources: &[(IVec3, Vec3)]| {
+                             glow_sources: &[(IVec3, Vec3)],
+                             glow_grid: &GlowGrid| {
                 let base = (out.positions.len() / 3) as u32;
                 let [(_p00, ao00), (_p10, ao10), (_p11, ao11), (_p01, ao01)] = positions;
                 for &(p, ao_v) in &positions {
                     let em = if is_glow_face || glow_sources.is_empty() {
                         Vec3::ZERO
                     } else {
-                        accumulate_emission(glow_sources, p, n)
+                        accumulate_emission(glow_sources, glow_grid, p, n)
                     };
                     out.positions.extend_from_slice(&p.to_array());
                     out.normals.extend_from_slice(&n.to_array());
@@ -1442,6 +1491,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                     ccw,
                     is_glow_face,
                     &glow_sources,
+                    &glow_grid,
                 );
             }
 
@@ -1465,6 +1515,7 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
                     ccw,
                     is_glow_face,
                     &glow_sources,
+                    &glow_grid,
                 );
             }
         }

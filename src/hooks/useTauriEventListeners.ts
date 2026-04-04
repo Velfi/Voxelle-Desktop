@@ -463,7 +463,7 @@ export function useTauriEventListeners(params: UseTauriEventListenersParams): vo
       }),
       listen<string>("voxelle-rendering-mode-changed", (e) => {
         const m = e.payload;
-        if (m === "greedy" || m === "marchingCubes" || m === "dualContour" || m === "ray") {
+        if (m === "greedy" || m === "marchingCubes" || m === "dualContour") {
           localStorage.setItem(LS_RENDERING_MODE, m);
         }
       }),
@@ -563,4 +563,23 @@ export function useTauriEventListeners(params: UseTauriEventListenersParams): vo
       });
     };
   }, [sendResize, refreshSceneObjects]);
+
+  useEffect(() => {
+    if (!loadPreferences().autoCheckUpdates) return;
+    void (async () => {
+      try {
+        const update = await check();
+        if (!update) return;
+        const ok = await invoke<boolean>("confirm_app_update_dialog", {
+          message: `Download and install Voxelle Desktop ${update.version}?`,
+          title: "Update available",
+        });
+        if (!ok) return;
+        await update.downloadAndInstall();
+        await relaunch();
+      } catch {
+        /* silently ignore startup check failures */
+      }
+    })();
+  }, []);
 }

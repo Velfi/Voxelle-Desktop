@@ -334,6 +334,7 @@ pub(crate) fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuS
         matches!(current_mode, RenderingMode::DualContour),
         None::<&str>,
     )?;
+    let sep_before_ray = PredefinedMenuItem::separator(app)?;
     let view_render_ray = CheckMenuItem::with_id(
         app,
         "menu_view_render_ray",
@@ -350,6 +351,7 @@ pub(crate) fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuS
             &view_render_greedy,
             &view_render_marching,
             &view_render_dual,
+            &sep_before_ray,
             &view_render_ray,
         ],
     )?;
