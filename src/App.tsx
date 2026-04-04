@@ -12,9 +12,6 @@ import {
   useGrassGenerator,
   useAshlarGenerator,
   useFloraGenerator,
-  usePiscinaGenerator,
-  useInsectaGenerator,
-  useFaunaGenerator,
   useRopeClothGenerator,
   useRoofGenerator,
 } from "./hooks/useGeneratorState";
@@ -424,6 +421,7 @@ function App() {
   const [logoLightControlsVisible, setLogoLightControlsVisible] = useState(false);
   const [logoLightAzimuth, setLogoLightAzimuth] = useState(0);
   const [logoLightElevation, setLogoLightElevation] = useState(30);
+  const [logoLightIntensity, setLogoLightIntensity] = useState(3.0);
   const [logoCamAzimuth, setLogoCamAzimuth] = useState(62);
   const [logoCamElevation, setLogoCamElevation] = useState(12);
   const [logoCamDist, setLogoCamDist] = useState(2.2);
@@ -1227,96 +1225,6 @@ function App() {
     floraCanopy, setFloraCanopy,
     floraPreviewSeedRef, floraPhase,
   } = flora;
-  const piscina = usePiscinaGenerator({ activeColorRef, activeMaterialRef });
-  const {
-    piscinaSpecies, setPiscinaSpecies,
-    piscinaLength, setPiscinaLength,
-    piscinaWidth, setPiscinaWidth,
-    piscinaThickness, setPiscinaThickness,
-    piscinaSpineBend, setPiscinaSpineBend,
-    piscinaSpineSCurve, setPiscinaSpineSCurve,
-    piscinaShowFinDorsal, setPiscinaShowFinDorsal,
-    piscinaFinDorsal, setPiscinaFinDorsal,
-    piscinaShowFinAnal, setPiscinaShowFinAnal,
-    piscinaFinAnal, setPiscinaFinAnal,
-    piscinaShowFinCaudal, setPiscinaShowFinCaudal,
-    piscinaFinCaudal, setPiscinaFinCaudal,
-    piscinaShowFinPectoral, setPiscinaShowFinPectoral,
-    piscinaFinPectoral, setPiscinaFinPectoral,
-    piscinaShowFinPelvic, setPiscinaShowFinPelvic,
-    piscinaFinPelvic, setPiscinaFinPelvic,
-    piscinaShowFinAdipose, setPiscinaShowFinAdipose,
-    piscinaFinAdipose, setPiscinaFinAdipose,
-    piscinaAnchorU, setPiscinaAnchorU,
-    piscinaAnchorV, setPiscinaAnchorV,
-    piscinaPreviewSeedRef, piscinaPhase,
-  } = piscina;
-  const insecta = useInsectaGenerator({ activeColorRef, activeMaterialRef });
-  const {
-    insectaSpecies, setInsectaSpecies,
-    insectaTotalLength, setInsectaTotalLength,
-    insectaHeadRatio, setInsectaHeadRatio,
-    insectaThoraxRatio, setInsectaThoraxRatio,
-    insectaAbdomenRatio, setInsectaAbdomenRatio,
-    insectaBodyHalfWidth, setInsectaBodyHalfWidth,
-    insectaBodyHalfHeight, setInsectaBodyHalfHeight,
-    insectaAbdomenTaper, setInsectaAbdomenTaper,
-    insectaHeadShape, setInsectaHeadShape,
-    insectaBodyYawDeg, setInsectaBodyYawDeg,
-    insectaBodyArch, setInsectaBodyArch,
-    insectaAnchorU, setInsectaAnchorU,
-    insectaAnchorV, setInsectaAnchorV,
-    insectaAntennaLength, setInsectaAntennaLength,
-    insectaAntennaSpread, setInsectaAntennaSpread,
-    insectaAntennaPitch, setInsectaAntennaPitch,
-    insectaAntennaRoot, setInsectaAntennaRoot,
-    insectaMandibleLength, setInsectaMandibleLength,
-    insectaMandibleSpread, setInsectaMandibleSpread,
-    insectaMandibleForward, setInsectaMandibleForward,
-    insectaWingShape, setInsectaWingShape,
-    insectaShowWingFore, setInsectaShowWingFore,
-    insectaWingForeLength, setInsectaWingForeLength,
-    insectaWingForeWidth, setInsectaWingForeWidth,
-    insectaWingForeSpread, setInsectaWingForeSpread,
-    insectaWingForePitch, setInsectaWingForePitch,
-    insectaWingForeOffset, setInsectaWingForeOffset,
-    insectaWingForeForwardCant, setInsectaWingForeForwardCant,
-    insectaShowWingHind, setInsectaShowWingHind,
-    insectaWingHindLength, setInsectaWingHindLength,
-    insectaWingHindWidth, setInsectaWingHindWidth,
-    insectaWingHindSpread, setInsectaWingHindSpread,
-    insectaWingHindPitch, setInsectaWingHindPitch,
-    insectaWingHindOffset, setInsectaWingHindOffset,
-    insectaPhase,
-  } = insecta;
-  const fauna = useFaunaGenerator({ activeColorRef, activeMaterialRef });
-  const {
-    faunaStance, setFaunaStance,
-    faunaArchetype, setFaunaArchetype,
-    faunaBodyYawDeg, setFaunaBodyYawDeg,
-    faunaBodyArch, setFaunaBodyArch,
-    faunaSpineSegments, setFaunaSpineSegments,
-    faunaBodyLength, setFaunaBodyLength,
-    faunaBodyHalfWidth, setFaunaBodyHalfWidth,
-    faunaBodyHalfHeight, setFaunaBodyHalfHeight,
-    faunaNeckLength, setFaunaNeckLength,
-    faunaNeckHalfWidth, setFaunaNeckHalfWidth,
-    faunaNeckHalfHeight, setFaunaNeckHalfHeight,
-    faunaHeadLength, setFaunaHeadLength,
-    faunaHeadHalfWidth, setFaunaHeadHalfWidth,
-    faunaHeadHalfHeight, setFaunaHeadHalfHeight,
-    faunaTailLength, setFaunaTailLength,
-    faunaShoulderOffsetForward, setFaunaShoulderOffsetForward,
-    faunaHipOffsetForward, setFaunaHipOffsetForward,
-    faunaFrontUpperLength, setFaunaFrontUpperLength,
-    faunaFrontLowerLength, setFaunaFrontLowerLength,
-    faunaHindUpperLength, setFaunaHindUpperLength,
-    faunaHindLowerLength, setFaunaHindLowerLength,
-    faunaAnchorU, setFaunaAnchorU,
-    faunaAnchorV, setFaunaAnchorV,
-    faunaAutoFootPlacement, setFaunaAutoFootPlacement,
-    faunaPhase,
-  } = fauna;
   const ropeCloth = useRopeClothGenerator({
     activeColorRef,
     activeMaterialRef,
@@ -1724,10 +1632,7 @@ function App() {
       rocksPhase.ref.current ??
       grassPhase.ref.current ??
       ashlarPhase.ref.current ??
-      floraPhase.ref.current ??
-      piscinaPhase.ref.current ??
-      insectaPhase.ref.current ??
-      faunaPhase.ref.current;
+      floraPhase.ref.current;
     const nx = rSnap ? rSnap.data.nx2 : genSnap ? genSnap.data.nx : _nx;
     const ny = rSnap ? rSnap.data.ny2 : genSnap ? genSnap.data.ny : _ny;
     const im = interactionModeRef.current;
@@ -1829,89 +1734,6 @@ function App() {
             generatorFloraBraidStrands: floraBraidStrands,
             generatorFloraBraidTwist: floraBraidTwist,
             generatorFloraCanopy: floraCanopy,
-            // Insecta
-            generatorInsectaSpecies: insectaSpecies,
-            generatorInsectaTotalLength: insectaTotalLength,
-            generatorInsectaHeadRatio: insectaHeadRatio,
-            generatorInsectaThoraxRatio: insectaThoraxRatio,
-            generatorInsectaAbdomenRatio: insectaAbdomenRatio,
-            generatorInsectaBodyHalfWidth: insectaBodyHalfWidth,
-            generatorInsectaBodyHalfHeight: insectaBodyHalfHeight,
-            generatorInsectaAbdomenTaper: insectaAbdomenTaper,
-            generatorInsectaHeadShape: insectaHeadShape,
-            generatorInsectaAnchorOffsetU: insectaAnchorU,
-            generatorInsectaAnchorOffsetV: insectaAnchorV,
-            generatorInsectaBodyYaw: insectaBodyYawDeg * (Math.PI / 180),
-            generatorInsectaBodyArch: insectaBodyArch,
-            generatorInsectaAntennaLength: insectaAntennaLength,
-            generatorInsectaAntennaSpread: insectaAntennaSpread,
-            generatorInsectaAntennaPitch: insectaAntennaPitch,
-            generatorInsectaAntennaRoot: insectaAntennaRoot,
-            generatorInsectaMandibleLength: insectaMandibleLength,
-            generatorInsectaMandibleSpread: insectaMandibleSpread,
-            generatorInsectaMandibleForward: insectaMandibleForward,
-            generatorInsectaWingShape: insectaWingShape,
-            generatorInsectaShowWingFore: insectaShowWingFore,
-            generatorInsectaWingForeLength: insectaWingForeLength,
-            generatorInsectaWingForeWidth: insectaWingForeWidth,
-            generatorInsectaWingForeSpread: insectaWingForeSpread,
-            generatorInsectaWingForePitch: insectaWingForePitch,
-            generatorInsectaWingForeOffset: insectaWingForeOffset,
-            generatorInsectaWingForeForwardCant: insectaWingForeForwardCant,
-            generatorInsectaShowWingHind: insectaShowWingHind,
-            generatorInsectaWingHindLength: insectaWingHindLength,
-            generatorInsectaWingHindWidth: insectaWingHindWidth,
-            generatorInsectaWingHindSpread: insectaWingHindSpread,
-            generatorInsectaWingHindPitch: insectaWingHindPitch,
-            generatorInsectaWingHindOffset: insectaWingHindOffset,
-            // Fauna
-            generatorFaunaStance: faunaStance,
-            generatorFaunaArchetype: faunaArchetype,
-            generatorFaunaAnchorOffsetU: faunaAnchorU,
-            generatorFaunaAnchorOffsetV: faunaAnchorV,
-            generatorFaunaBodyYaw: faunaBodyYawDeg * (Math.PI / 180),
-            generatorFaunaBodyArch: faunaBodyArch,
-            generatorFaunaSpineSegments: faunaSpineSegments,
-            generatorFaunaBodyLength: faunaBodyLength,
-            generatorFaunaBodyHalfWidth: faunaBodyHalfWidth,
-            generatorFaunaBodyHalfHeight: faunaBodyHalfHeight,
-            generatorFaunaNeckLength: faunaNeckLength,
-            generatorFaunaNeckHalfWidth: faunaNeckHalfWidth,
-            generatorFaunaNeckHalfHeight: faunaNeckHalfHeight,
-            generatorFaunaHeadLength: faunaHeadLength,
-            generatorFaunaHeadHalfWidth: faunaHeadHalfWidth,
-            generatorFaunaHeadHalfHeight: faunaHeadHalfHeight,
-            generatorFaunaTailLength: faunaTailLength,
-            generatorFaunaShoulderOffsetForward: faunaShoulderOffsetForward,
-            generatorFaunaHipOffsetForward: faunaHipOffsetForward,
-            generatorFaunaFrontUpperLength: faunaFrontUpperLength,
-            generatorFaunaFrontLowerLength: faunaFrontLowerLength,
-            generatorFaunaHindUpperLength: faunaHindUpperLength,
-            generatorFaunaHindLowerLength: faunaHindLowerLength,
-            generatorFaunaAutoFootPlacement: faunaAutoFootPlacement,
-            // Piscina
-            generatorPiscinaSeed:
-              piscinaPhase.ref.current?.data.seed ?? piscinaPreviewSeedRef.current,
-            generatorPiscinaSpecies: piscinaSpecies,
-            generatorPiscinaLength: piscinaLength,
-            generatorPiscinaWidth: piscinaWidth,
-            generatorPiscinaThickness: piscinaThickness,
-            generatorPiscinaSpineBend: piscinaSpineBend,
-            generatorPiscinaSpineSCurve: piscinaSpineSCurve,
-            generatorPiscinaFinDorsal: piscinaFinDorsal,
-            generatorPiscinaFinAnal: piscinaFinAnal,
-            generatorPiscinaFinCaudal: piscinaFinCaudal,
-            generatorPiscinaFinPectoral: piscinaFinPectoral,
-            generatorPiscinaFinPelvic: piscinaFinPelvic,
-            generatorPiscinaFinAdipose: piscinaFinAdipose,
-            generatorPiscinaShowFinDorsal: piscinaShowFinDorsal,
-            generatorPiscinaShowFinAnal: piscinaShowFinAnal,
-            generatorPiscinaShowFinCaudal: piscinaShowFinCaudal,
-            generatorPiscinaShowFinPectoral: piscinaShowFinPectoral,
-            generatorPiscinaShowFinPelvic: piscinaShowFinPelvic,
-            generatorPiscinaShowFinAdipose: piscinaShowFinAdipose,
-            generatorPiscinaAnchorOffsetU: piscinaAnchorU,
-            generatorPiscinaAnchorOffsetV: piscinaAnchorV,
           }
         : {}),
       stampOriginX: stampOriginXRef.current,
@@ -2159,9 +1981,6 @@ function App() {
       grassPhase.cancel();
       ashlarPhase.cancel();
       floraPhase.cancel();
-      piscinaPhase.cancel();
-      insectaPhase.cancel();
-      faunaPhase.cancel();
     }
   }, [interactionMode]);
 
@@ -2704,7 +2523,6 @@ function App() {
     onPointerUpRef,
     paintColorDistribRef,
     pendingPointerUpRef,
-    piscinaPreviewSeedRef,
     planeAxisRef,
     pointerStartRef,
     probingRef,
@@ -2780,11 +2598,8 @@ function App() {
     cuboidPhase,
     cylinderPhase,
     extrudePhase,
-    faunaPhase,
     floraPhase,
     grassPhase,
-    insectaPhase,
-    piscinaPhase,
     rocksPhase,
     ropePhase,
     squishyPhase,
@@ -3115,9 +2930,6 @@ function App() {
       grassPhase.active ||
       ashlarPhase.active ||
       floraPhase.active ||
-      piscinaPhase.active ||
-      insectaPhase.active ||
-      faunaPhase.active ||
       (generatorKind === "cloth" && clothPins.length > 0) ||
       (generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null)) ||
       showPolygonPhaseHud ||
@@ -3204,9 +3016,6 @@ function App() {
           grassPhase={grassPhase}
           ashlarPhase={ashlarPhase}
           floraPhase={floraPhase}
-          piscinaPhase={piscinaPhase}
-          insectaPhase={insectaPhase}
-          faunaPhase={faunaPhase}
           ropeFirstScreen={ropeFirstScreen}
           setRopeFirstScreen={setRopeFirstScreen}
           setClothPins={setClothPins}
@@ -4040,84 +3849,6 @@ function App() {
                       type="button"
                       className="tool-options-shape-btn"
                       onClick={() => floraPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {piscinaPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Piscina settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Fish</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => piscinaPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => piscinaPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {insectaPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Insecta settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Insect</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => insectaPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => insectaPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {faunaPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Fauna settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Fauna</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => faunaPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => faunaPhase.commit()}
                     >
                       Done
                     </button>
@@ -5198,162 +4929,6 @@ function App() {
                   setRoofHeight={setRoofHeight}
                   roofHollow={roofHollow}
                   setRoofHollow={setRoofHollow}
-                  piscinaSpecies={piscinaSpecies}
-                  setPiscinaSpecies={setPiscinaSpecies}
-                  piscinaLength={piscinaLength}
-                  setPiscinaLength={setPiscinaLength}
-                  piscinaWidth={piscinaWidth}
-                  setPiscinaWidth={setPiscinaWidth}
-                  piscinaThickness={piscinaThickness}
-                  setPiscinaThickness={setPiscinaThickness}
-                  piscinaSpineBend={piscinaSpineBend}
-                  setPiscinaSpineBend={setPiscinaSpineBend}
-                  piscinaSpineSCurve={piscinaSpineSCurve}
-                  setPiscinaSpineSCurve={setPiscinaSpineSCurve}
-                  piscinaAnchorU={piscinaAnchorU}
-                  setPiscinaAnchorU={setPiscinaAnchorU}
-                  piscinaAnchorV={piscinaAnchorV}
-                  setPiscinaAnchorV={setPiscinaAnchorV}
-                  piscinaShowFinDorsal={piscinaShowFinDorsal}
-                  setPiscinaShowFinDorsal={setPiscinaShowFinDorsal}
-                  piscinaFinDorsal={piscinaFinDorsal}
-                  setPiscinaFinDorsal={setPiscinaFinDorsal}
-                  piscinaShowFinAnal={piscinaShowFinAnal}
-                  setPiscinaShowFinAnal={setPiscinaShowFinAnal}
-                  piscinaFinAnal={piscinaFinAnal}
-                  setPiscinaFinAnal={setPiscinaFinAnal}
-                  piscinaShowFinCaudal={piscinaShowFinCaudal}
-                  setPiscinaShowFinCaudal={setPiscinaShowFinCaudal}
-                  piscinaFinCaudal={piscinaFinCaudal}
-                  setPiscinaFinCaudal={setPiscinaFinCaudal}
-                  piscinaShowFinPectoral={piscinaShowFinPectoral}
-                  setPiscinaShowFinPectoral={setPiscinaShowFinPectoral}
-                  piscinaFinPectoral={piscinaFinPectoral}
-                  setPiscinaFinPectoral={setPiscinaFinPectoral}
-                  piscinaShowFinPelvic={piscinaShowFinPelvic}
-                  setPiscinaShowFinPelvic={setPiscinaShowFinPelvic}
-                  piscinaFinPelvic={piscinaFinPelvic}
-                  setPiscinaFinPelvic={setPiscinaFinPelvic}
-                  piscinaShowFinAdipose={piscinaShowFinAdipose}
-                  setPiscinaShowFinAdipose={setPiscinaShowFinAdipose}
-                  piscinaFinAdipose={piscinaFinAdipose}
-                  setPiscinaFinAdipose={setPiscinaFinAdipose}
-                  insectaSpecies={insectaSpecies}
-                  setInsectaSpecies={setInsectaSpecies}
-                  insectaTotalLength={insectaTotalLength}
-                  setInsectaTotalLength={setInsectaTotalLength}
-                  insectaHeadRatio={insectaHeadRatio}
-                  setInsectaHeadRatio={setInsectaHeadRatio}
-                  insectaThoraxRatio={insectaThoraxRatio}
-                  setInsectaThoraxRatio={setInsectaThoraxRatio}
-                  insectaAbdomenRatio={insectaAbdomenRatio}
-                  setInsectaAbdomenRatio={setInsectaAbdomenRatio}
-                  insectaBodyHalfWidth={insectaBodyHalfWidth}
-                  setInsectaBodyHalfWidth={setInsectaBodyHalfWidth}
-                  insectaBodyHalfHeight={insectaBodyHalfHeight}
-                  setInsectaBodyHalfHeight={setInsectaBodyHalfHeight}
-                  insectaAbdomenTaper={insectaAbdomenTaper}
-                  setInsectaAbdomenTaper={setInsectaAbdomenTaper}
-                  insectaHeadShape={insectaHeadShape}
-                  setInsectaHeadShape={setInsectaHeadShape}
-                  insectaBodyYawDeg={insectaBodyYawDeg}
-                  setInsectaBodyYawDeg={setInsectaBodyYawDeg}
-                  insectaBodyArch={insectaBodyArch}
-                  setInsectaBodyArch={setInsectaBodyArch}
-                  insectaAnchorU={insectaAnchorU}
-                  setInsectaAnchorU={setInsectaAnchorU}
-                  insectaAnchorV={insectaAnchorV}
-                  setInsectaAnchorV={setInsectaAnchorV}
-                  insectaAntennaLength={insectaAntennaLength}
-                  setInsectaAntennaLength={setInsectaAntennaLength}
-                  insectaAntennaSpread={insectaAntennaSpread}
-                  setInsectaAntennaSpread={setInsectaAntennaSpread}
-                  insectaAntennaPitch={insectaAntennaPitch}
-                  setInsectaAntennaPitch={setInsectaAntennaPitch}
-                  insectaAntennaRoot={insectaAntennaRoot}
-                  setInsectaAntennaRoot={setInsectaAntennaRoot}
-                  insectaMandibleLength={insectaMandibleLength}
-                  setInsectaMandibleLength={setInsectaMandibleLength}
-                  insectaMandibleSpread={insectaMandibleSpread}
-                  setInsectaMandibleSpread={setInsectaMandibleSpread}
-                  insectaMandibleForward={insectaMandibleForward}
-                  setInsectaMandibleForward={setInsectaMandibleForward}
-                  insectaWingShape={insectaWingShape}
-                  setInsectaWingShape={setInsectaWingShape}
-                  insectaShowWingFore={insectaShowWingFore}
-                  setInsectaShowWingFore={setInsectaShowWingFore}
-                  insectaWingForeLength={insectaWingForeLength}
-                  setInsectaWingForeLength={setInsectaWingForeLength}
-                  insectaWingForeWidth={insectaWingForeWidth}
-                  setInsectaWingForeWidth={setInsectaWingForeWidth}
-                  insectaWingForeSpread={insectaWingForeSpread}
-                  setInsectaWingForeSpread={setInsectaWingForeSpread}
-                  insectaWingForePitch={insectaWingForePitch}
-                  setInsectaWingForePitch={setInsectaWingForePitch}
-                  insectaWingForeOffset={insectaWingForeOffset}
-                  setInsectaWingForeOffset={setInsectaWingForeOffset}
-                  insectaWingForeForwardCant={insectaWingForeForwardCant}
-                  setInsectaWingForeForwardCant={setInsectaWingForeForwardCant}
-                  insectaShowWingHind={insectaShowWingHind}
-                  setInsectaShowWingHind={setInsectaShowWingHind}
-                  insectaWingHindLength={insectaWingHindLength}
-                  setInsectaWingHindLength={setInsectaWingHindLength}
-                  insectaWingHindWidth={insectaWingHindWidth}
-                  setInsectaWingHindWidth={setInsectaWingHindWidth}
-                  insectaWingHindSpread={insectaWingHindSpread}
-                  setInsectaWingHindSpread={setInsectaWingHindSpread}
-                  insectaWingHindPitch={insectaWingHindPitch}
-                  setInsectaWingHindPitch={setInsectaWingHindPitch}
-                  insectaWingHindOffset={insectaWingHindOffset}
-                  setInsectaWingHindOffset={setInsectaWingHindOffset}
-                  faunaStance={faunaStance}
-                  setFaunaStance={setFaunaStance}
-                  faunaArchetype={faunaArchetype}
-                  setFaunaArchetype={setFaunaArchetype}
-                  faunaBodyYawDeg={faunaBodyYawDeg}
-                  setFaunaBodyYawDeg={setFaunaBodyYawDeg}
-                  faunaBodyArch={faunaBodyArch}
-                  setFaunaBodyArch={setFaunaBodyArch}
-                  faunaSpineSegments={faunaSpineSegments}
-                  setFaunaSpineSegments={setFaunaSpineSegments}
-                  faunaBodyLength={faunaBodyLength}
-                  setFaunaBodyLength={setFaunaBodyLength}
-                  faunaBodyHalfWidth={faunaBodyHalfWidth}
-                  setFaunaBodyHalfWidth={setFaunaBodyHalfWidth}
-                  faunaBodyHalfHeight={faunaBodyHalfHeight}
-                  setFaunaBodyHalfHeight={setFaunaBodyHalfHeight}
-                  faunaNeckLength={faunaNeckLength}
-                  setFaunaNeckLength={setFaunaNeckLength}
-                  faunaNeckHalfWidth={faunaNeckHalfWidth}
-                  setFaunaNeckHalfWidth={setFaunaNeckHalfWidth}
-                  faunaNeckHalfHeight={faunaNeckHalfHeight}
-                  setFaunaNeckHalfHeight={setFaunaNeckHalfHeight}
-                  faunaHeadLength={faunaHeadLength}
-                  setFaunaHeadLength={setFaunaHeadLength}
-                  faunaHeadHalfWidth={faunaHeadHalfWidth}
-                  setFaunaHeadHalfWidth={setFaunaHeadHalfWidth}
-                  faunaHeadHalfHeight={faunaHeadHalfHeight}
-                  setFaunaHeadHalfHeight={setFaunaHeadHalfHeight}
-                  faunaTailLength={faunaTailLength}
-                  setFaunaTailLength={setFaunaTailLength}
-                  faunaShoulderOffsetForward={faunaShoulderOffsetForward}
-                  setFaunaShoulderOffsetForward={setFaunaShoulderOffsetForward}
-                  faunaHipOffsetForward={faunaHipOffsetForward}
-                  setFaunaHipOffsetForward={setFaunaHipOffsetForward}
-                  faunaFrontUpperLength={faunaFrontUpperLength}
-                  setFaunaFrontUpperLength={setFaunaFrontUpperLength}
-                  faunaFrontLowerLength={faunaFrontLowerLength}
-                  setFaunaFrontLowerLength={setFaunaFrontLowerLength}
-                  faunaHindUpperLength={faunaHindUpperLength}
-                  setFaunaHindUpperLength={setFaunaHindUpperLength}
-                  faunaHindLowerLength={faunaHindLowerLength}
-                  setFaunaHindLowerLength={setFaunaHindLowerLength}
-                  faunaAnchorU={faunaAnchorU}
-                  setFaunaAnchorU={setFaunaAnchorU}
-                  faunaAnchorV={faunaAnchorV}
-                  setFaunaAnchorV={setFaunaAnchorV}
-                  faunaAutoFootPlacement={faunaAutoFootPlacement}
-                  setFaunaAutoFootPlacement={setFaunaAutoFootPlacement}
                 />
               ) : null}
               {toolsPane === "squishy" && interactionMode === "squishy" ? (
@@ -6550,6 +6125,25 @@ function App() {
                 />
                 <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
                   {Math.round(logoLightElevation)}°
+                </span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 60 }}>Intensity</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={5}
+                  step={0.01}
+                  value={logoLightIntensity}
+                  style={{ flex: 1 }}
+                  onChange={(e) => {
+                    const val = Number(e.target.value);
+                    setLogoLightIntensity(val);
+                    void invoke("logo_set_light_intensity", { intensity: val });
+                  }}
+                />
+                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                  {logoLightIntensity.toFixed(2)}
                 </span>
               </label>
             </div>

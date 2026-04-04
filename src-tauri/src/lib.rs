@@ -1321,6 +1321,7 @@ pub fn run() {
             mascot_set_screen_rect,
             mascot_set_visible,
             logo_set_light_dir,
+            logo_set_light_intensity,
             logo_set_camera_angle,
             logo_set_camera_dist,
             avatar_list_embedded,

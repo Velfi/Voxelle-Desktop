@@ -315,10 +315,14 @@ fn greedy_merge(cells: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
     quads
 }
 
+fn srgb_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+}
+
 fn color_rgb(color: u32) -> glam::Vec3 {
-    let r = ((color >> 16) & 0xff) as f32 / 255.0;
-    let g = ((color >> 8) & 0xff) as f32 / 255.0;
-    let b = (color & 0xff) as f32 / 255.0;
+    let r = srgb_to_linear(((color >> 16) & 0xff) as f32 / 255.0);
+    let g = srgb_to_linear(((color >> 8) & 0xff) as f32 / 255.0);
+    let b = srgb_to_linear((color & 0xff) as f32 / 255.0);
     glam::Vec3::new(r, g, b)
 }
 
@@ -1305,6 +1309,16 @@ mod chunk_tests {
 /// Greedy mesh for `emit` voxels only, using `map` for neighbor occlusion (include a 1-voxel halo around each chunk).
 /// `mat_kind` per vertex: 0 plastic/rubber, 0.5 metal, 1 glow, 2 glass, 2.5 water.
 pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>) -> MeshBuffers {
+    build_mesh_mapped_inner(emit, map, true)
+}
+
+/// Like [`build_greedy_mesh_mapped`] but emits every face as a 1×1 quad (no merging).
+/// Used for the logo overlay so the explode shader can displace individual voxel faces.
+pub fn build_naive_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>) -> MeshBuffers {
+    build_mesh_mapped_inner(emit, map, false)
+}
+
+fn build_mesh_mapped_inner(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>, greedy: bool) -> MeshBuffers {
     // Collect glow voxel positions/colors once; used for per-vertex emission baking.
     // Skip collection entirely when the preference is disabled.
     let glow_sources: Vec<(IVec3, Vec3)> = if EMISSION_ENABLED.load(Ordering::Relaxed) {
@@ -1380,18 +1394,25 @@ pub fn build_greedy_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel
             // AO-aware merge: only merge cells whose 4 vertex AO values are
             // all fully lit (1.0).  Cells near edges/blocks keep per-voxel
             // detail and are emitted as 1×1 quads.
+            // When `greedy` is false (naive mode), skip merging entirely —
+            // every cell is emitted as a 1×1 quad so the explode shader can
+            // displace individual voxel faces independently.
             let mut mergeable: Vec<(i32, i32)> = Vec::new();
             let mut individual: Vec<(i32, i32)> = Vec::new();
-            for &(cu, cv) in &cells {
-                let a00 = canonical_vertex_ao(map, axis, sign, depth, cu, cv, src_oid);
-                let a10 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv, src_oid);
-                let a11 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv + 1, src_oid);
-                let a01 = canonical_vertex_ao(map, axis, sign, depth, cu, cv + 1, src_oid);
-                if a00 >= 1.0 && a10 >= 1.0 && a11 >= 1.0 && a01 >= 1.0 {
-                    mergeable.push((cu, cv));
-                } else {
-                    individual.push((cu, cv));
+            if greedy {
+                for &(cu, cv) in &cells {
+                    let a00 = canonical_vertex_ao(map, axis, sign, depth, cu, cv, src_oid);
+                    let a10 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv, src_oid);
+                    let a11 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv + 1, src_oid);
+                    let a01 = canonical_vertex_ao(map, axis, sign, depth, cu, cv + 1, src_oid);
+                    if a00 >= 1.0 && a10 >= 1.0 && a11 >= 1.0 && a01 >= 1.0 {
+                        mergeable.push((cu, cv));
+                    } else {
+                        individual.push((cu, cv));
+                    }
                 }
+            } else {
+                individual = cells;
             }
 
             let merged = greedy_merge(&mergeable);
@@ -2258,6 +2279,34 @@ pub fn mesh_bounds_from_voxels_world(
     Some(MeshBounds { min, max })
 }
 
+/// Like [`append_object_meshes_sorted`] but uses naive (1×1) meshing.
+fn append_naive_object_meshes_sorted(
+    voxels: &[Voxel],
+    map: &AHashMap<VoxelCoord, Voxel>,
+    objects: &[SceneObject],
+    dst: &mut MeshBuffers,
+) {
+    let mut order: Vec<(i32, u32)> = objects.iter().map(|o| (o.sort_order, o.id)).collect();
+    order.sort_by_key(|(s, id)| (*s, *id));
+    for (_, oid) in order {
+        if !crate::voxelle::scene::is_object_visible(objects, oid) {
+            continue;
+        }
+        let emit: Vec<Voxel> = voxels
+            .iter()
+            .filter(|v| v.object_id == oid)
+            .cloned()
+            .collect();
+        if emit.is_empty() {
+            continue;
+        }
+        let mut part = build_naive_mesh_mapped(&emit, map);
+        let m = crate::voxelle::object_world_matrix(objects, oid);
+        transform_mesh_buffers(&mut part, m);
+        append_mesh_buffers(dst, part);
+    }
+}
+
 fn append_object_meshes_sorted(
     voxels: &[Voxel],
     map: &AHashMap<VoxelCoord, Voxel>,
@@ -2296,6 +2345,27 @@ pub fn build_greedy_mesh(voxels: &[Voxel], objects: &[SceneObject]) -> (MeshBuff
     let map = voxel_map(voxels);
     let mut combined = MeshBuffers::default();
     append_object_meshes_sorted(voxels, &map, objs, &mut combined);
+    let bounds = mesh_bounds_from_voxels_world(voxels, objs)
+        .or_else(|| mesh_bounds_from_voxels(voxels))
+        .unwrap_or_else(|| MeshBounds {
+            min: glam::Vec3::ZERO,
+            max: glam::Vec3::ZERO,
+        });
+    (combined, bounds)
+}
+
+/// Like [`build_greedy_mesh`] but emits every face as a 1×1 quad (no merging).
+/// Used for the logo overlay so the explode shader can displace individual voxel faces.
+pub fn build_naive_mesh(voxels: &[Voxel], objects: &[SceneObject]) -> (MeshBuffers, MeshBounds) {
+    let default_objs = crate::voxelle::default_scene_objects();
+    let objs: &[SceneObject] = if objects.is_empty() {
+        default_objs.as_slice()
+    } else {
+        objects
+    };
+    let map = voxel_map(voxels);
+    let mut combined = MeshBuffers::default();
+    append_naive_object_meshes_sorted(voxels, &map, objs, &mut combined);
     let bounds = mesh_bounds_from_voxels_world(voxels, objs)
         .or_else(|| mesh_bounds_from_voxels(voxels))
         .unwrap_or_else(|| MeshBounds {

@@ -1870,7 +1870,7 @@ pub(crate) fn create_mascot_pipeline(
         vertex: wgpu::VertexState {
             module: &shader_mascot,
             entry_point: Some("vs_mascot"),
-            buffers: &[vertex_layout()],
+            buffers: &[mascot_vertex_layout()],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {

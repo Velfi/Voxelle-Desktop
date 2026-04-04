@@ -382,7 +382,7 @@ impl Default for LightingSettings {
     fn default() -> Self {
         Self {
             ambient_intensity: 1.0,
-            sunlight_intensity: 1.0,
+            sunlight_intensity: 2.0,
             light_color: "#ffffff".to_string(),
             light_angle_deg: 45.0,
             light_elevation_deg: 45.0,

@@ -436,7 +436,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         // ── Wrap diffuse ────────────────────────────────────────────────
         let wax_wrap = 0.55;
         let ndl_wrap = max((dot(n, l) + wax_wrap) / (1.0 + wax_wrap), 0.0);
-        let diffuse = base * (hemi * 0.24 * ao_h * amb + ndl_wrap * 0.60 * sh * sun * sc);
+        let diffuse = base * (hemi * 0.30 * ao_h * amb + ndl_wrap * 0.60 * sh * sun * sc);
 
         // ── Per-channel SSS (spectral absorption) ───────────────────────
         // March toward the light to estimate thickness.
@@ -470,13 +470,13 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         let spec_power = pow(ndh, 96.0);
         let spec = fresnel * spec_power * 1.8 * sh * sun;
         // Metallic diffuse is minimal (energy absorbed); ambient reflections via hemi.
-        let ambient_refl = base * hemi * 0.72 * ao_h * amb;
+        let ambient_refl = base * hemi * 0.88 * ao_h * amb;
         let direct = base * 0.15 * ndl * sh * sun * sc;
         rgb = ambient_refl + direct + spec * sc;
     } else if (is_glow) {
         // Self-illuminated: emissive color + subtle ambient for shape readability.
         let emissive = base * 4.0;
-        let shape = base * (hemi * 0.12 * ao_h * amb + 0.18 * ndl * sh * sun * sc);
+        let shape = base * (hemi * 0.15 * ao_h * amb + 0.18 * ndl * sh * sun * sc);
         let spec_glow = pow(ndh, 24.0) * 0.06 * sh * sun;
         rgb = emissive + shape + sc * spec_glow;
         glow_mask = 1.0;
@@ -506,7 +506,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         let rim_color = mix(base, min(base * 1.5 + vec3<f32>(0.06), vec3<f32>(1.0)), rim2 * 0.55);
 
         // Combine: soft wrapped diffuse + rim glow + anisotropic sheen.
-        let diffuse = rim_color * (hemi * 0.28 * ao_h * amb + ndl_wrap * 0.62 * sh * sun * sc);
+        let diffuse = rim_color * (hemi * 0.35 * ao_h * amb + ndl_wrap * 0.62 * sh * sun * sc);
         let rim_light = rim_color * rim2 * 0.38 * (amb * 0.6 + sh * sun * 0.4);
         let sheen_contrib = sc * sheen * sh * sun * ndl_wrap;
         rgb = diffuse + rim_light + sheen_contrib;
@@ -575,14 +575,14 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         let spec = holo_fresnel * spec_power * 2.0 * sh * sun;
 
         // ── Ambient + diffuse ───────────────────────────────────────────────
-        let ambient_refl = spectral * base * hemi * 0.55 * ao_h * amb;
+        let ambient_refl = spectral * base * hemi * 0.68 * ao_h * amb;
         let direct = base * spectral * 0.20 * ndl * sh * sun * sc;
 
         rgb = ambient_refl + direct + spec * sc;
     } else {
         // Plastic / rubber.
         let spec_blinn = pow(ndh, 32.0) * 0.12 * sh * sun;
-        rgb = base * (hemi * 0.30 * ao_h * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
+        rgb = base * (hemi * 0.38 * ao_h * amb + 0.78 * ndl * sh * sun * sc) + sc * spec_blinn;
     }
 
     // Add baked emission irradiance from nearby glow voxels (non-emissive surfaces only).

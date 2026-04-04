@@ -125,8 +125,11 @@ fn brick_fetch(ix: vec3<i32>) -> u32 {
 fn is_occupied(packed: u32) -> bool { return (packed >> 31u) != 0u; }
 fn unpack_mat(packed: u32) -> u32   { return (packed >> 24u) & 0xFu; }
 
-// Approximate sRGB → linear (gamma 2.2)
-fn srgb_to_linear(c: f32) -> f32 { return c * c; }
+// Proper sRGB → linear (piecewise curve)
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) { return c / 12.92; }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
 
 fn unpack_rgb(packed: u32) -> vec3<f32> {
     let r = f32( packed        & 0xFFu) / 255.0;

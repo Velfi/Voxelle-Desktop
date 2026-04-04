@@ -385,15 +385,9 @@ pub(crate) fn load_start_screen_logo(
                     return;
                 }
             };
-            let mode = *state.rendering_mode.lock();
-            let is_stale = {
-                let st = Arc::clone(&state);
-                move || st.overlay_mesh_generation.load(Ordering::Relaxed) != token
-            };
-            let Some((mesh, bounds)) = build_mesh_for_mode(&file, mode, is_stale) else {
-                log::info!(target: "voxelle_load", "logo mesh build cancelled (stale)");
-                return;
-            };
+            // Use naive (1×1 quad) meshing for the logo so the explode shader
+            // can displace individual voxel faces independently.
+            let (mesh, bounds) = greedy_mesh::build_naive_mesh(&file.voxels, &file.objects);
             let app_main = app_err.clone();
             let state_up = Arc::clone(&state);
             let _ = app_err.run_on_main_thread(move || {
@@ -618,6 +612,24 @@ pub(crate) fn logo_set_light_dir(
             logo.light_dir = dir.to_array();
             logo.light_azimuth_deg = azimuth;
             logo.light_elevation_deg = elevation;
+        }
+    }
+    drop(v);
+    wake_viewport_loop(&app);
+    Ok(())
+}
+
+/// Set the logo overlay sun/direct light intensity (0.0–2.0).
+#[tauri::command]
+pub(crate) fn logo_set_light_intensity(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    intensity: f32,
+) -> Result<(), String> {
+    let mut v = state.viewer.lock();
+    if let Some(viewer) = v.as_mut() {
+        if let Some(logo) = viewer.logo_overlay.as_mut() {
+            logo.light_intensity = intensity.clamp(0.0, 5.0);
         }
     }
     drop(v);

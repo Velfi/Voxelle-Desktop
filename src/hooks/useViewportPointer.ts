@@ -81,7 +81,6 @@ export function useViewportPointer(
     onPointerUpRef,
     paintColorDistribRef,
     pendingPointerUpRef,
-    piscinaPreviewSeedRef,
     planeAxisRef,
     pointerStartRef,
     probingRef,
@@ -157,11 +156,8 @@ export function useViewportPointer(
     cuboidPhase,
     cylinderPhase,
     extrudePhase,
-    faunaPhase,
     floraPhase,
     grassPhase,
-    insectaPhase,
-    piscinaPhase,
     rocksPhase,
     ropePhase,
     squishyPhase,
@@ -503,7 +499,6 @@ const onPointerDown = async (e: React.PointerEvent) => {
     rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
     ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
     floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-    piscinaPreviewSeedRef.current = (Math.random() * 1e9) | 0;
     // Trigger a preview sync so the new seed is sent to Rust
     const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
     void invoke("sync_preview_input", {
@@ -945,10 +940,7 @@ const onPointerMove = (e: React.PointerEvent) => {
     rocksPhase.active ||
     grassPhase.active ||
     ashlarPhase.active ||
-    floraPhase.active ||
-    piscinaPhase.active ||
-    insectaPhase.active ||
-    faunaPhase.active;
+    floraPhase.active;
   if (
     !overGizmo &&
     !probingRef.current &&
@@ -1572,21 +1564,6 @@ const onPointerUp = (e: React.PointerEvent) => {
                 });
               })
               .catch(() => {});
-          }
-        } else if (gk === "piscina") {
-          if (!piscinaPhase.active) {
-            void invoke("lock_generator_preview_camera").catch(() => {});
-            piscinaPhase.enter("settings", { nx, ny, seed: piscinaPreviewSeedRef.current });
-          }
-        } else if (gk === "insecta") {
-          if (!insectaPhase.active) {
-            void invoke("lock_generator_preview_camera").catch(() => {});
-            insectaPhase.enter("settings", { nx, ny });
-          }
-        } else if (gk === "fauna") {
-          if (!faunaPhase.active) {
-            void invoke("lock_generator_preview_camera").catch(() => {});
-            faunaPhase.enter("settings", { nx, ny });
           }
         }
       } else if (m === "squishy") {

@@ -18,6 +18,8 @@ pub struct LogoOverlay {
     pub light_azimuth_deg: f32,
     /// Elevation in degrees (5-90, above XZ plane).
     pub light_elevation_deg: f32,
+    /// Sun/direct light intensity (default 0.7).
+    pub light_intensity: f32,
     /// Camera distance from origin.
     pub cam_dist: f32,
     /// Current orbit angles.
@@ -147,10 +149,69 @@ pub struct MascotEntry {
 }
 
 impl WgpuViewer {
+    /// Interleave mesh buffers for the mascot/logo pipeline (17 floats per vertex).
+    /// Appends `voxel_center` (vec3) after the standard 14-float opaque layout.
+    /// The voxel center is derived from each quad's geometry: the face center
+    /// offset inward by half the normal, so all faces of the same voxel share it.
+    fn interleaved_for_mascot(mesh: &MeshBuffers) -> Vec<f32> {
+        let n = mesh.positions.len() / 3;
+        // Pre-compute per-vertex voxel center from quad geometry (groups of 4 vertices).
+        let mut voxel_centers = vec![[0.0f32; 3]; n];
+        let quads = n / 4;
+        for q in 0..quads {
+            let base = q * 4;
+            // Face center = average of the 4 corner positions.
+            let mut cx = 0.0f32;
+            let mut cy = 0.0f32;
+            let mut cz = 0.0f32;
+            for k in 0..4 {
+                let i = (base + k) * 3;
+                cx += mesh.positions[i];
+                cy += mesh.positions[i + 1];
+                cz += mesh.positions[i + 2];
+            }
+            cx *= 0.25;
+            cy *= 0.25;
+            cz *= 0.25;
+            // Offset by -0.5 * normal to get the voxel center.
+            let ni = base * 3;
+            let nx = mesh.normals[ni];
+            let ny = mesh.normals[ni + 1];
+            let nz = mesh.normals[ni + 2];
+            let vc = [cx - 0.5 * nx, cy - 0.5 * ny, cz - 0.5 * nz];
+            for k in 0..4 {
+                voxel_centers[base + k] = vc;
+            }
+        }
+
+        let mut interleaved: Vec<f32> = Vec::with_capacity(n * 17);
+        for i in 0..n {
+            interleaved.push(mesh.positions[i * 3]);
+            interleaved.push(mesh.positions[i * 3 + 1]);
+            interleaved.push(mesh.positions[i * 3 + 2]);
+            interleaved.push(mesh.normals[i * 3]);
+            interleaved.push(mesh.normals[i * 3 + 1]);
+            interleaved.push(mesh.normals[i * 3 + 2]);
+            interleaved.push(mesh.colors[i * 3]);
+            interleaved.push(mesh.colors[i * 3 + 1]);
+            interleaved.push(mesh.colors[i * 3 + 2]);
+            interleaved.push(mesh.mat_kind[i]);
+            interleaved.push(mesh.ao.get(i).copied().unwrap_or(1.0));
+            let ei = i * 3;
+            interleaved.push(mesh.emission_tint.get(ei).copied().unwrap_or(0.0));
+            interleaved.push(mesh.emission_tint.get(ei + 1).copied().unwrap_or(0.0));
+            interleaved.push(mesh.emission_tint.get(ei + 2).copied().unwrap_or(0.0));
+            interleaved.push(voxel_centers[i][0]);
+            interleaved.push(voxel_centers[i][1]);
+            interleaved.push(voxel_centers[i][2]);
+        }
+        interleaved
+    }
+
     /// Load (or replace) the voxel mesh for mascot `id`.
     /// Creates the slot if it does not yet exist.
     pub fn load_mascot_mesh(&mut self, id: u32, mesh: &MeshBuffers, bounds: MeshBounds) {
-        let interleaved = Self::interleaved_from_mesh(mesh);
+        let interleaved = Self::interleaved_for_mascot(mesh);
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -242,8 +303,8 @@ impl WgpuViewer {
             MascotUniforms {
                 mvp: (proj * view * model).to_cols_array_2d(),
                 light_dir: [0.6, 0.8, 0.5, 0.0],
-                ambient: 0.55,
-                sun: 0.7,
+                ambient: 0.70,
+                sun: 2.0,
                 explode_radius: 0.0,
                 explode_strength: 0.0,
                 mouse_ndc: [99.0, 99.0],
@@ -254,8 +315,8 @@ impl WgpuViewer {
             MascotUniforms {
                 mvp: Mat4::IDENTITY.to_cols_array_2d(),
                 light_dir: [0.6, 0.8, 0.5, 0.0],
-                ambient: 0.55,
-                sun: 0.7,
+                ambient: 0.70,
+                sun: 2.0,
                 explode_radius: 0.0,
                 explode_strength: 0.0,
                 mouse_ndc: [99.0, 99.0],
@@ -353,7 +414,7 @@ impl WgpuViewer {
 
     /// Load (or replace) the start-screen logo mesh as an overlay.
     pub fn load_logo_mesh(&mut self, mesh: &MeshBuffers, bounds: MeshBounds) {
-        let interleaved = Self::interleaved_from_mesh(mesh);
+        let interleaved = Self::interleaved_for_mascot(mesh);
         let vertex_buffer = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -410,6 +471,7 @@ impl WgpuViewer {
                 light_dir: light_dir_from_azimuth_elevation_deg(0.0, 30.0).to_array(),
                 light_azimuth_deg: 0.0,
                 light_elevation_deg: 30.0,
+                light_intensity: 3.0,
                 cam_dist: 2.4,
                 theta: rest_theta,
                 phi: rest_phi,
@@ -449,8 +511,8 @@ impl WgpuViewer {
             MascotUniforms {
                 mvp: (proj * view * model).to_cols_array_2d(),
                 light_dir: [ld[0], ld[1], ld[2], 0.0],
-                ambient: 0.55,
-                sun: 0.7,
+                ambient: 0.70,
+                sun: logo.light_intensity,
                 explode_radius: 0.25,
                 explode_strength: 5.0,
                 mouse_ndc: [logo.mouse_ndc_x, logo.mouse_ndc_y],
@@ -462,8 +524,8 @@ impl WgpuViewer {
             MascotUniforms {
                 mvp: Mat4::IDENTITY.to_cols_array_2d(),
                 light_dir: [ld[0], ld[1], ld[2], 0.0],
-                ambient: 0.55,
-                sun: 0.7,
+                ambient: 0.70,
+                sun: logo.light_intensity,
                 explode_radius: 0.0,
                 explode_strength: 0.0,
                 mouse_ndc: [99.0, 99.0],

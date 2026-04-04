@@ -577,9 +577,6 @@ export interface ToolsSidebarProps {
   grassPhase: SidebarPhaseHandle;
   ashlarPhase: SidebarPhaseHandle;
   floraPhase: SidebarPhaseHandle;
-  piscinaPhase: SidebarPhaseHandle;
-  insectaPhase: SidebarPhaseHandle;
-  faunaPhase: SidebarPhaseHandle;
 
   // Rope / cloth state
   ropeFirstScreen: { nx: number; ny: number } | null;
@@ -642,9 +639,6 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
     grassPhase,
     ashlarPhase,
     floraPhase,
-    piscinaPhase,
-    insectaPhase,
-    faunaPhase,
     ropeFirstScreen,
     setRopeFirstScreen,
     setClothPins,
@@ -1356,9 +1350,6 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                               ["ashlar", "Ashlar"],
                               ["flora", "Flora"],
                               ["roof", "Roof"],
-                              ["piscina", "Fish"],
-                              ["insecta", "Insect"],
-                              ["fauna", "Creature"],
                             ] as const
                           ).map(([id, label]) => (
                             <button
@@ -1383,9 +1374,6 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                                 grassPhase.cancel();
                                 ashlarPhase.cancel();
                                 floraPhase.cancel();
-                                piscinaPhase.cancel();
-                                insectaPhase.cancel();
-                                faunaPhase.cancel();
                               }}
                             >
                               <span className="sidebar-mode-label">{label}</span>
@@ -1688,9 +1676,6 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                           ["ashlar", "Ashlar"],
                           ["flora", "Flora"],
                           ["roof", "Roof"],
-                          ["piscina", "Fish"],
-                          ["insecta", "Insect"],
-                          ["fauna", "Creature"],
                         ] as const
                       ).map(([id, label]) => (
                         <button
@@ -1711,9 +1696,6 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                             grassPhase.cancel();
                             ashlarPhase.cancel();
                             floraPhase.cancel();
-                            piscinaPhase.cancel();
-                            insectaPhase.cancel();
-                            faunaPhase.cancel();
                           }}
                         >
                           {label}

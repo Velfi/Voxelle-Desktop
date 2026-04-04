@@ -267,10 +267,7 @@ export type GeneratorKindId =
   | "cloth"
   | "ashlar"
   | "flora"
-  | "roof"
-  | "piscina"
-  | "insecta"
-  | "fauna";
+  | "roof";
 export type ClothGravityDirectionId = "down" | "up" | "left" | "right" | "forward" | "back";
 
 export type BrushShape = "sphere" | "cube" | "pyramid" | "square" | "circle";

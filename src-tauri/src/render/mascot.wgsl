@@ -25,6 +25,8 @@ struct VertexInput {
     @location(3) mat_kind: f32,
     @location(4) vertex_ao: f32,
     @location(5) emission_tint: vec3<f32>,
+    /// Center of the voxel this face belongs to (all faces of the same voxel share this value).
+    @location(6) voxel_center: vec3<f32>,
 }
 
 struct VertexOut {
@@ -57,12 +59,14 @@ fn vs_mascot(v: VertexInput) -> VertexOut {
     // 3) Smooth falloff: 1.0 at mouse, 0.0 at radius edge.
     let t = smoothstep(u.explode_radius, 0.0, d) * u.mouse_active;
 
-    // 4) Displacement: along normal + hash-based scatter for a chaotic look.
-    let seed = hash_pos(v.position);
-    let scatter_dir = normalize(v.normal + vec3<f32>(
-        sin(seed * 6.283) * 0.4,
-        cos(seed * 4.17) * 0.3,
-        sin(seed * 2.91 + 1.0) * 0.4,
+    // 4) Displacement: hash-based scatter derived from voxel center so that
+    //    every face of the same voxel gets the same seed, direction, and
+    //    magnitude → whole voxels move as rigid cubes.
+    let seed = hash_pos(v.voxel_center);
+    let scatter_dir = normalize(vec3<f32>(
+        sin(seed * 6.283),
+        cos(seed * 4.17),
+        sin(seed * 2.91 + 1.0),
     ));
     // Gentle wobble while hovering so fragments feel alive.
     let wobble = 1.0 + 0.08 * sin(u.time_seconds * 4.0 + seed * 6.283);

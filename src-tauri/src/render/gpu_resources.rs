@@ -4,6 +4,9 @@ pub(crate) const BLOOM_LEVELS: usize = 5;
 /// Opaque mesh vertex: `vec3 pos, vec3 n, vec3 color, mat_kind, ao, vec3 emission_tint` → 14×`f32`.
 pub(crate) const OPAQUE_VERTEX_STRIDE: u64 = 56;
 
+/// Mascot/logo vertex: same as opaque + `vec3 voxel_center` → 17×`f32`.
+pub(crate) const MASCOT_VERTEX_STRIDE: u64 = 68;
+
 /// [`Maintain::Wait`] can starve other threads while the GPU drains; use a short [`Maintain::Poll`]
 /// loop with yields during heavy mesh rebuild so the app stays responsive.
 #[inline]
@@ -78,6 +81,51 @@ pub(crate) fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
             wgpu::VertexAttribute {
                 offset: 44,
                 shader_location: 5,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+        ],
+    }
+}
+
+/// Mascot/logo vertex layout: same as [`vertex_layout`] + `vec3 voxel_center` at location 6.
+pub(crate) fn mascot_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: MASCOT_VERTEX_STRIDE,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 12,
+                shader_location: 1,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 24,
+                shader_location: 2,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 36,
+                shader_location: 3,
+                format: wgpu::VertexFormat::Float32,
+            },
+            wgpu::VertexAttribute {
+                offset: 40,
+                shader_location: 4,
+                format: wgpu::VertexFormat::Float32,
+            },
+            wgpu::VertexAttribute {
+                offset: 44,
+                shader_location: 5,
+                format: wgpu::VertexFormat::Float32x3,
+            },
+            wgpu::VertexAttribute {
+                offset: 56,
+                shader_location: 6,
                 format: wgpu::VertexFormat::Float32x3,
             },
         ],
