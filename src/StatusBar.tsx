@@ -1,0 +1,107 @@
+// ── Status bar (footer) ──────────────────────────────────────────────
+// Extracted from App.tsx.
+
+import type { RosterEntry } from "./types";
+
+export interface StatusBarProps {
+  showStartScreen: boolean;
+  statusBarMessage: string;
+  pathLabel: string;
+  collabActive: boolean;
+  hostWsUrl: string | null;
+  hostingCopied: boolean;
+  copyHostingJoinAddress: () => void;
+  roster: RosterEntry[];
+  setLeaveConfirmOpen: (v: boolean) => void;
+  startHost: () => void;
+  showFpsCounter: boolean;
+  showEditorChrome: boolean;
+  fpsDisplayed: number;
+  showPingLatency: boolean;
+  pingMs: number | null;
+}
+
+export function StatusBar(props: StatusBarProps) {
+  const {
+    showStartScreen,
+    statusBarMessage,
+    pathLabel,
+    collabActive,
+    hostWsUrl,
+    hostingCopied,
+    copyHostingJoinAddress,
+    roster,
+    setLeaveConfirmOpen,
+    startHost,
+    showFpsCounter,
+    showEditorChrome,
+    fpsDisplayed,
+    showPingLatency,
+    pingMs,
+  } = props;
+
+  return (
+    <footer
+      className={`app-status-bar${showStartScreen ? " is-start-screen" : ""}`}
+      role="contentinfo"
+    >
+      <div className="status-bar-main">
+        <div
+          className="status-bar-message"
+          role="status"
+          aria-live="polite"
+          title={pathLabel || statusBarMessage}
+        >
+          {statusBarMessage}
+        </div>
+        {collabActive ? (
+          <>
+            {hostWsUrl ? (
+              <button
+                type="button"
+                className="status-bar-hosting-btn"
+                onClick={copyHostingJoinAddress}
+                title={hostingCopied ? "Copied" : "Copy invite link"}
+              >
+                {hostingCopied
+                  ? "Copied invite link"
+                  : `Hosting \u00b7 ${roster.length} ${roster.length === 1 ? "person" : "people"}`}
+              </button>
+            ) : (
+              <span className="status-bar-hosting-btn is-guest">
+                {`In session \u00b7 ${roster.length} ${roster.length === 1 ? "person" : "people"}`}
+              </span>
+            )}
+            <button
+              type="button"
+              className="status-bar-hosting-btn is-leave"
+              onClick={() => setLeaveConfirmOpen(true)}
+              title={hostWsUrl ? "End session" : "Leave session"}
+            >
+              {hostWsUrl ? "End" : "Leave"}
+            </button>
+          </>
+        ) : !showStartScreen ? (
+          <button
+            type="button"
+            className="status-bar-hosting-btn"
+            onClick={startHost}
+            title="Start a new session"
+          >
+            Start Session
+          </button>
+        ) : null}
+      </div>
+      {showFpsCounter && showEditorChrome ? (
+        <div className="fps-counter" role="status" aria-live="polite">
+          {fpsDisplayed} FPS
+        </div>
+      ) : null}
+      {showPingLatency && collabActive && pingMs !== null && showEditorChrome ? (
+        <div className="fps-counter" role="status" aria-live="polite">
+          {pingMs} ms
+        </div>
+      ) : null}
+    </footer>
+  );
+}

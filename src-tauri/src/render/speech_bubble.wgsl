@@ -95,12 +95,49 @@ fn fs_bubble(in: VOut) -> @location(0) vec4<f32> {
     // Body SDF.
     let body_d = sdf_round_rect(px - center, half, u.corner_r);
 
-    // Tail: two base points on the bottom-left of the bubble body, tip at anchor.
-    let tail_cx = bx + bw * 0.22;        // 22 % from left edge
-    let tail_by  = by + bh - 1.0;         // just inside the bottom edge
-    let t_a = vec2<f32>(tail_cx - 9.0, tail_by);
-    let t_b = vec2<f32>(tail_cx + 9.0, tail_by);
-    let tail_d = sdf_triangle(px, t_a, t_b, u.tail_tip);
+    // Tail: wedge from the bubble edge toward the anchor point.
+    // The CPU already clamps the tip to MAX_TAIL_LEN beyond the body edge,
+    // so we just use the uniform value directly.
+    let tip = u.tail_tip;
+
+    // Signed distances from tip to each edge (positive = outside).
+    let d_left   = bx - tip.x;
+    let d_right  = tip.x - (bx + bw);
+    let d_top    = by - tip.y;
+    let d_bottom = tip.y - (by + bh);
+
+    // Pick the edge closest to the tail tip.
+    let max_h = max(d_left, d_right);
+    let max_v = max(d_top, d_bottom);
+
+    var t_a: vec2<f32>;
+    var t_b: vec2<f32>;
+
+    // Unshaken body x for stable tail length (so base width doesn't jitter with sway/shake).
+    let rest_bx = bx - u.shake_x;
+
+    if max_h > max_v {
+        // Tail exits left or right — base runs vertically.
+        let edge_y = clamp(tip.y, by + u.corner_r, by + bh - u.corner_r);
+        let is_left = f32(d_left > d_right);
+        let edge_x = bx * is_left + (bx + bw) * (1.0 - is_left);
+        let rest_edge_x = rest_bx * is_left + (rest_bx + bw) * (1.0 - is_left);
+        let tail_len = abs(tip.x - rest_edge_x);
+        let base_half = clamp(tail_len * 0.35, 8.0, 28.0);
+        t_a = vec2<f32>(edge_x, edge_y - base_half);
+        t_b = vec2<f32>(edge_x, edge_y + base_half);
+    } else {
+        // Tail exits top or bottom — base runs horizontally.
+        let edge_x = clamp(tip.x, bx + u.corner_r, bx + bw - u.corner_r);
+        let is_top = f32(d_top > d_bottom);
+        let edge_y = by * is_top + (by + bh) * (1.0 - is_top);
+        let tail_len = abs(tip.y - edge_y);
+        let base_half = clamp(tail_len * 0.35, 8.0, 28.0);
+        t_a = vec2<f32>(edge_x - base_half, edge_y);
+        t_b = vec2<f32>(edge_x + base_half, edge_y);
+    }
+
+    let tail_d = sdf_triangle(px, t_a, t_b, tip);
 
     // Union of body and tail.
     let d = min(body_d, tail_d);

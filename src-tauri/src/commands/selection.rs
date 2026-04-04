@@ -37,6 +37,9 @@ pub(crate) struct SelectionStrokeAtScreen {
     /// When set, overrides the global selection_combine_mode for this stroke (e.g. shift-key → add).
     #[serde(default)]
     pub(crate) combine_mode_override: Option<SelectionCombineMode>,
+    /// When `true`, skip the large-fill confirmation gate (user already confirmed).
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 fn default_fill_respects_color() -> bool {

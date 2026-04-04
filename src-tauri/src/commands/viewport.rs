@@ -146,6 +146,7 @@ pub(crate) fn viewport_pointer(
                 match ev.kind.as_str() {
                     "down" | "move" => {
                         state.camera_dragging.store(ev.buttons != 0, Ordering::Relaxed);
+                        logo.update_mouse_ndc(x, y, vw, vh);
                         if ev.buttons & 1 != 0 && !ev.shift_key {
                             logo.rotate_drag(ev.dx, ev.dy, vh);
                         } else if ev.kind == "move" && ev.buttons & 1 == 0 {
@@ -158,6 +159,7 @@ pub(crate) fn viewport_pointer(
                     }
                     "leave" => {
                         state.camera_dragging.store(false, Ordering::Relaxed);
+                        logo.clear_mouse_ndc();
                         logo.hover_parallax(vw * 0.5, vh * 0.5, vw, vh);
                     }
                     _ => {}

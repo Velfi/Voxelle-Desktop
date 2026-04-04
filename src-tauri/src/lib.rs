@@ -1,58 +1,55 @@
 mod camera;
 mod collab;
+mod commands;
 pub mod crash_guard;
+mod edit_pipeline;
 mod export_glb;
+mod frame_loop;
 mod generators;
 mod gpu_brick;
 /// Greedy CPU meshing (public for `cargo bench`).
 pub mod greedy_mesh;
 #[cfg(desktop)]
 mod headless_server;
+mod load_pipeline;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
 #[cfg(target_os = "macos")]
 mod macos_undo;
 mod marching_tables;
+#[cfg(desktop)]
+mod native_menu;
 mod paint_color_distrib;
+mod preview;
 mod render;
 mod render_constants;
 mod sculpt_mesh_smooth;
 mod smooth_mesh;
+mod state;
 mod stroke_modes;
 mod voxel_edit;
 /// Voxel format / types (public for `cargo bench` and tests).
 pub mod voxelle;
-mod state;
-mod edit_pipeline;
-mod frame_loop;
-mod load_pipeline;
-mod preview;
-#[cfg(desktop)]
-mod native_menu;
-mod commands;
-use state::*;
-use edit_pipeline::*;
-use frame_loop::*;
-use load_pipeline::*;
-use preview::*;
 use commands::avatar::*;
 use commands::collab::*;
 use commands::edit::*;
+use commands::file_io::*;
 use commands::generators::*;
 use commands::sculpt::*;
-pub(crate) use commands::SculptStrokeAtScreenArgs;
-use commands::file_io::*;
 use commands::selection::*;
 use commands::viewport::*;
+pub(crate) use commands::SculptStrokeAtScreenArgs;
+use edit_pipeline::*;
+use frame_loop::*;
+use load_pipeline::*;
 #[cfg(desktop)]
 use native_menu::*;
+use preview::*;
+use state::*;
 
 use camera::OrbitCamera;
 use gpu_brick::BrickCellWrite;
-use render::{
-    compute_greedy_rebuild_cpu, MoodParams, PreparedGreedyRebuild,
-    WgpuViewer,
-};
+use render::{compute_greedy_rebuild_cpu, MoodParams, PreparedGreedyRebuild, WgpuViewer};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
@@ -116,7 +113,6 @@ pub(crate) fn mood_settings_to_params(m: &voxelle::MoodSettings) -> MoodParams {
 }
 
 impl PreviewMode {
-
     /// Returns the corresponding edit tool for modes that use the brush preview
     /// (Add, Remove, Paint).  All other modes are handled by dedicated early-return
     /// paths in `prepare_preview_mesh` and should never need this.
@@ -669,7 +665,7 @@ fn get_viewport_cursor_debug(
 /// stderr logger: debug builds default to `warn` + `voxelle_load=info`. Override with `RUST_LOG`, e.g. `RUST_LOG=voxelle_load=debug`.
 fn init_load_logging() {
     let default_filter = if cfg!(debug_assertions) {
-        "warn,voxelle_load=info"
+        "warn,voxelle_load=info,cosmic_text::font::system=error"
     } else {
         "warn"
     };

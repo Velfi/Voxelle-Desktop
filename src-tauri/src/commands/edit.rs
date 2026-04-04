@@ -49,6 +49,9 @@ pub(crate) struct VoxelEditAtScreen {
     /// Symmetry bitmask: bit 0 = X, bit 1 = Y, bit 2 = Z.  0 = no mirroring.
     #[serde(default)]
     pub(crate) mirror_axes: u8,
+    /// When `true`, skip the large-fill confirmation gate (user already confirmed).
+    #[serde(default)]
+    pub(crate) confirmed: bool,
 }
 
 pub(crate) fn default_fill_respects_color() -> bool {
@@ -997,6 +1000,9 @@ pub(crate) struct VoxelFillAtScreen {
     color: u32,
     material: String,
     match_material: bool,
+    /// When `true`, skip the large-fill confirmation gate (user already confirmed).
+    #[serde(default)]
+    confirmed: bool,
 }
 
 #[tauri::command]
@@ -1041,6 +1047,9 @@ fn run_voxel_fill_paint_blocking(
         Some(cancel),
     )
     .map_err(|_| String::from("fill cancelled"))?;
+    if large && !args.confirmed {
+        return Err(String::from("confirm_large_fill"));
+    }
     if large {
         emit_work_progress(app, 0.12, "Large fill — exploring… (Escape to cancel)");
     }
@@ -1139,6 +1148,9 @@ fn run_fill_deltas_blocking(
             ),
         }
         .map_err(|_| "fill cancelled".to_string())?;
+        if large && !args.confirmed {
+            return Err("confirm_large_fill".to_string());
+        }
         if large {
             emit_work_progress(app, 0.12, "Large fill — exploring… (Escape to cancel)");
         }
