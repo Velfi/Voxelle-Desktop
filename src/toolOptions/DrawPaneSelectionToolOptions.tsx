@@ -185,14 +185,14 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="range"
               min={1}
-              max={65}
-              step={2}
-              value={p.brushRadius * 2 + 1}
-              onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
+              max={33}
+              step={1}
+              value={p.brushRadius + 1}
+              onChange={(ev) => p.setBrushRadius(Number(ev.target.value) - 1)}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius * 2 + 1}
+              {p.brushRadius + 1}
             </span>
           </label>
         </div>
@@ -324,14 +324,14 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="range"
               min={1}
-              max={65}
-              step={2}
-              value={p.brushRadius * 2 + 1}
-              onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
+              max={33}
+              step={1}
+              value={p.brushRadius + 1}
+              onChange={(ev) => p.setBrushRadius(Number(ev.target.value) - 1)}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius * 2 + 1}
+              {p.brushRadius + 1}
             </span>
           </label>
           <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
@@ -508,14 +508,14 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
             <input
               type="range"
               min={1}
-              max={65}
-              step={2}
-              value={p.brushRadius * 2 + 1}
-              onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
+              max={33}
+              step={1}
+              value={p.brushRadius + 1}
+              onChange={(ev) => p.setBrushRadius(Number(ev.target.value) - 1)}
               disabled={p.loading || p.workBusy}
             />
             <span className="tool-options-range-value" aria-live="polite">
-              {p.brushRadius * 2 + 1}
+              {p.brushRadius + 1}
             </span>
           </label>
           <label className="tool-options-checkbox-row" style={{ marginTop: "0.5rem" }}>
@@ -908,10 +908,10 @@ export function DrawPaneSelectionToolOptions(p: DrawPaneSelectionToolOptionsProp
           <input
             type="range"
             min={1}
-            max={65}
-            step={2}
-            value={p.brushRadius * 2 + 1}
-            onChange={(ev) => p.setBrushRadius((Number(ev.target.value) - 1) / 2)}
+            max={33}
+            step={1}
+            value={p.brushRadius + 1}
+            onChange={(ev) => p.setBrushRadius(Number(ev.target.value) - 1)}
             disabled={p.loading || p.workBusy}
           />
         </label>

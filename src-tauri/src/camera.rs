@@ -5,12 +5,6 @@ use glam::{Mat4, Quat, Vec3};
 const DAMPING: f32 = 0.05;
 /// Damping for orbit/pan mode only; fly mode skips damping for responsive FPS feel.
 const FLY_MODE_DAMPING: f32 = 0.0;
-/// Logo splash: max deviation from rest for drag + hover (±75°).
-fn logo_splash_orbit_half_span_rad() -> f32 {
-    75.0_f32.to_radians()
-}
-/// Subtle cursor parallax on cold-start logo (radians at viewport edges).
-const LOGO_SPLASH_HOVER_MAX_RAD: f32 = 0.038;
 /// Same defaults as Three.js `OrbitControls` (`rotateSpeed`, `panSpeed`, `zoomSpeed`).
 const ROTATE_SPEED: f32 = 1.0;
 /// Scales [`Self::fly_look_rotate_screen`] only (orbit drag uses unscaled `TAU/h`).
@@ -84,8 +78,6 @@ pub struct OrbitCamera {
     /// Smoothed spherical + target (damping).
     pub smooth_target: Vec3,
     pub smooth_spherical: Spherical,
-    /// Cold-start logo splash: rest pose after [`Self::configure_logo_splash_after_fit`]; orbit is clamped and snaps back on release.
-    pub logo_splash_rest: Option<Spherical>,
     pub min_radius: f32,
     pub max_radius: f32,
     pub min_polar: f32,
@@ -114,7 +106,6 @@ impl OrbitCamera {
             spherical: s,
             smooth_target: Vec3::ZERO,
             smooth_spherical: s,
-            logo_splash_rest: None,
             min_radius: 0.5,
             max_radius: 1e6,
             min_polar: 0.01,
@@ -173,85 +164,6 @@ impl OrbitCamera {
         self.spherical.theta -= dx * k;
         self.spherical.phi -= dy * k;
         self.spherical.phi = self.spherical.phi.clamp(self.min_polar, self.max_polar);
-    }
-
-    /// After [`Self::fit_sphere`], apply splash offsets (theta −1 rad, phi +0 vs previous phi −1) and record rest for clamped orbit + release reset.
-    pub fn configure_logo_splash_after_fit(&mut self) {
-        const TH_OFF: f32 = -1.0;
-        const PH_OFF: f32 = 0.0;
-        self.spherical.theta += TH_OFF;
-        self.spherical.phi += PH_OFF;
-        self.spherical.phi = self.spherical.phi.clamp(self.min_polar, self.max_polar);
-        self.smooth_target = self.target;
-        self.smooth_spherical = self.spherical;
-        self.logo_splash_rest = Some(self.spherical);
-    }
-
-    /// Logo splash drag: same as [`Self::rotate_screen`], then clamp ±75° from rest on theta and phi.
-    pub fn rotate_screen_logo_splash(&mut self, dx: f32, dy: f32, viewport_height_px: f32) {
-        let Some(rest) = self.logo_splash_rest else {
-            self.rotate_screen(dx, dy, viewport_height_px);
-            return;
-        };
-        let h = viewport_height_px.max(1.0);
-        let k = std::f32::consts::TAU * ROTATE_SPEED / h;
-        self.spherical.theta -= dx * k;
-        self.spherical.phi -= dy * k;
-        let half_span = logo_splash_orbit_half_span_rad();
-        self.spherical.theta =
-            Self::clamp_theta_near_rest(self.spherical.theta, rest.theta, half_span);
-        self.spherical.phi = (self.spherical.phi)
-            .clamp(rest.phi - half_span, rest.phi + half_span)
-            .clamp(self.min_polar, self.max_polar);
-    }
-
-    /// No-button move: nudge orbit slightly from [`Self::logo_splash_rest`] from normalized viewport position.
-    pub fn set_logo_splash_hover_from_viewport_px(
-        &mut self,
-        x_px: f32,
-        y_px: f32,
-        viewport_w: f32,
-        viewport_h: f32,
-    ) {
-        let Some(rest) = self.logo_splash_rest else {
-            return;
-        };
-        let vw = viewport_w.max(1.0);
-        let vh = viewport_h.max(1.0);
-        let nx = ((x_px / vw) - 0.5) * 2.0;
-        let ny = -(((y_px / vh) - 0.5) * 2.0);
-        let nx = nx.clamp(-1.0, 1.0);
-        let ny = ny.clamp(-1.0, 1.0);
-
-        let half_span = logo_splash_orbit_half_span_rad();
-        let theta_t = rest.theta + nx * LOGO_SPLASH_HOVER_MAX_RAD;
-        let phi_t = rest.phi + ny * LOGO_SPLASH_HOVER_MAX_RAD;
-        self.spherical.theta = Self::clamp_theta_near_rest(theta_t, rest.theta, half_span);
-        self.spherical.phi = phi_t
-            .clamp(rest.phi - half_span, rest.phi + half_span)
-            .clamp(self.min_polar, self.max_polar);
-        self.smooth_spherical.theta = self.spherical.theta;
-        self.smooth_spherical.phi = self.spherical.phi;
-    }
-
-    fn clamp_theta_near_rest(theta: f32, rest: f32, half_span: f32) -> f32 {
-        const PI: f32 = std::f32::consts::PI;
-        const TAU: f32 = std::f32::consts::TAU;
-        let mut d = theta - rest;
-        while d > PI {
-            d -= TAU;
-        }
-        while d < -PI {
-            d += TAU;
-        }
-        rest + d.clamp(-half_span, half_span)
-    }
-
-    /// Pointer released: damp back to [`Self::logo_splash_rest`].
-    pub fn reset_logo_splash_orbit(&mut self) {
-        if let Some(rest) = self.logo_splash_rest {
-            self.spherical = rest;
-        }
     }
 
     /// FPS-style mouse look: yaw around world +Y, then pitch around camera right — pivot at **eye**,

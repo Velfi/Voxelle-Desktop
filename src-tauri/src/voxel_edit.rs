@@ -1581,6 +1581,37 @@ pub fn pick_voxel_at_screen(
     Some(file.voxels[idx])
 }
 
+/// Flip a coordinate tuple by an axis-flip mask (bit 0 = X, bit 1 = Y, bit 2 = Z).
+#[inline]
+fn flip_coord(x: i32, y: i32, z: i32, flip_mask: u8) -> (i32, i32, i32) {
+    (
+        if flip_mask & 1 != 0 { -x } else { x },
+        if flip_mask & 2 != 0 { -y } else { y },
+        if flip_mask & 4 != 0 { -z } else { z },
+    )
+}
+
+/// Extends `targets` with mirrored copies for each enabled axis subset in `mirror_axes`
+/// (bit 0 = X, bit 1 = Y, bit 2 = Z).  Used by hover-preview to show the symmetric footprint.
+pub fn extend_with_mirror_targets(targets: &mut Vec<VoxelCoord>, mirror_axes: u8) {
+    if mirror_axes == 0 {
+        return;
+    }
+    let original: Vec<VoxelCoord> = targets.clone();
+    let mut seen: HashSet<VoxelCoord> = original.iter().copied().collect();
+    for flip_mask in 1u8..=7u8 {
+        if flip_mask & mirror_axes != flip_mask {
+            continue;
+        }
+        for &(x, y, z) in &original {
+            let m = flip_coord(x, y, z, flip_mask);
+            if seen.insert(m) {
+                targets.push(m);
+            }
+        }
+    }
+}
+
 /// Apply add / remove / paint with optional brush; returns all atomic deltas (may be empty).
 ///
 /// `spray_density`: `0` = full brush; `(0, 1]` thins voxels deterministically per cell.
@@ -1588,6 +1619,7 @@ pub fn pick_voxel_at_screen(
 /// pointer-down and `(sx, sy)` (Stroke / line mode).
 /// `stroke_segment_prev`: when `stroke_line_start` is `None` and this is `Some`, samples along
 /// the segment from the previous screen position to `(sx, sy)` (Brush path / web spray-style drag).
+/// `mirror_axes`: symmetry bitmask (bit 0 = X, bit 1 = Y, bit 2 = Z); 0 = no mirroring.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_edit(
     file: &mut VoxelleFile,
@@ -1609,6 +1641,7 @@ pub fn apply_edit(
     plane_axis: PlaneAxis,
     stroke_aux: &StrokeAux,
     spray_constraint_plane: Option<(Vec3, Vec3)>,
+    mirror_axes: u8,
 ) -> Result<Vec<VoxelEditDelta>, String> {
     let brush_radius = brush_radius_for_area_polygon_stroke(stroke_mode, brush_radius);
     let clip_half = brush_clip_half_normal_from_screen(
@@ -1844,6 +1877,98 @@ pub fn apply_edit(
                     };
                     file.voxels[idx] = after;
                     out.push(VoxelEditDelta::Painted { before, after });
+                }
+            }
+        }
+    }
+
+    // Symmetry pass: replicate every delta across the enabled mirror axes.
+    if mirror_axes != 0 {
+        let base_deltas = out.clone();
+        let mut mirror_seen: HashSet<(i32, i32, i32)> = HashSet::new();
+        for flip_mask in 1u8..=7u8 {
+            if flip_mask & mirror_axes != flip_mask {
+                continue;
+            }
+            match tool {
+                EditTool::Add => {
+                    for delta in &base_deltas {
+                        let VoxelEditDelta::Added(v) = delta else {
+                            continue;
+                        };
+                        let (mx, my, mz) = flip_coord(v.x, v.y, v.z, flip_mask);
+                        if !in_grid(mx, my, mz, grid_size) {
+                            continue;
+                        }
+                        if !mirror_seen.insert((mx, my, mz)) {
+                            continue;
+                        }
+                        if voxel_map.contains_key(&(mx, my, mz)) {
+                            continue;
+                        }
+                        let nv = Voxel {
+                            x: mx,
+                            y: my,
+                            z: mz,
+                            color: color_resolver(mx, my, mz),
+                            material,
+                            object_id: file.active_object_id,
+                        };
+                        let idx = file.voxels.len();
+                        file.voxels.push(nv);
+                        voxel_map.insert((mx, my, mz), idx);
+                        out.push(VoxelEditDelta::Added(nv));
+                    }
+                }
+                EditTool::Remove => {
+                    for delta in &base_deltas {
+                        let VoxelEditDelta::Removed { voxel: v } = delta else {
+                            continue;
+                        };
+                        let (mx, my, mz) = flip_coord(v.x, v.y, v.z, flip_mask);
+                        if !mirror_seen.insert((mx, my, mz)) {
+                            continue;
+                        }
+                        let Some(&remove_idx) = voxel_map.get(&(mx, my, mz)) else {
+                            continue;
+                        };
+                        let removed_voxel = file.voxels[remove_idx];
+                        let last = file.voxels.len() - 1;
+                        if remove_idx != last {
+                            file.voxels.swap(remove_idx, last);
+                            let moved = file.voxels[remove_idx];
+                            voxel_map.insert((moved.x, moved.y, moved.z), remove_idx);
+                        }
+                        file.voxels.pop();
+                        voxel_map.remove(&(mx, my, mz));
+                        out.push(VoxelEditDelta::Removed { voxel: removed_voxel });
+                    }
+                }
+                EditTool::Paint => {
+                    for delta in &base_deltas {
+                        let VoxelEditDelta::Painted { after: v, .. } = delta else {
+                            continue;
+                        };
+                        let (mx, my, mz) = flip_coord(v.x, v.y, v.z, flip_mask);
+                        if !mirror_seen.insert((mx, my, mz)) {
+                            continue;
+                        }
+                        let Some(&idx) = voxel_map.get(&(mx, my, mz)) else {
+                            continue;
+                        };
+                        let before = file.voxels[idx];
+                        let resolved_color = color_resolver(mx, my, mz);
+                        if before.color == resolved_color && before.material == material {
+                            continue;
+                        }
+                        let after = Voxel {
+                            color: resolved_color,
+                            material,
+                            ..before
+                        };
+                        file.voxels[idx] = after;
+                        out.push(VoxelEditDelta::Painted { before, after });
+                    }
                 }
             }
         }

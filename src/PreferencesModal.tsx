@@ -170,10 +170,12 @@ export function PreferencesModal({
 
   const onCollabName = (raw: string) => {
     const clipped = raw.slice(0, 32);
+    // Store the raw value so the user can freely clear the field.
+    // Normalize only for persistence and collab broadcast.
     const toSave = preferencesWithCollabIdentity(prefs, clipped, prefs.collabAccentColor);
     setPrefs({
       ...prefs,
-      collabDisplayName: toSave.collabDisplayName,
+      collabDisplayName: clipped,
       collabAccentColor: toSave.collabAccentColor,
     });
     savePreferences(toSave);
@@ -434,6 +436,7 @@ export function PreferencesModal({
                 type="text"
                 className="prefs-text-input"
                 value={prefs.collabDisplayName}
+                placeholder="Artist"
                 maxLength={32}
                 onChange={(e) => onCollabName(e.target.value)}
               />

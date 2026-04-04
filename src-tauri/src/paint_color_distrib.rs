@@ -352,15 +352,15 @@ impl PaintColorDistrib {
                 color_from_t(palette, t, self.gradient.quantized)
             }
             PaintColorMode::Dither => {
-                let seed = self.fbm.noise_seed ^ 0xabc;
-                let t_raw = hash3_f(seed, x, y, z);
-                let t = ordered_dither_t(
-                    t_raw,
-                    x,
-                    y,
-                    self.dither.ordered_size.clamp(2, 8),
-                    self.dither.ordered_strength,
-                );
+                let size = self.dither.ordered_size.clamp(2, 8);
+                let bayer_t = bayer_threshold(size, x, y);
+                let t = if self.dither.ordered_strength > 0.0 {
+                    let seed = self.fbm.noise_seed ^ 0xabc;
+                    let noise = hash3_f(seed, x, y, z);
+                    (bayer_t + (noise - 0.5) * self.dither.ordered_strength).clamp(0.0, 1.0)
+                } else {
+                    bayer_t
+                };
                 color_from_t(palette, t, true)
             }
         }

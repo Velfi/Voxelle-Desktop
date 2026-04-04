@@ -47,6 +47,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let is_metal = in.mat_kind > 0.25 && in.mat_kind < 0.75;
     let is_glow  = in.mat_kind > 0.75 && in.mat_kind < 1.25;
+    let is_holo  = in.mat_kind > 1.55 && in.mat_kind < 1.95;
 
     var rgb: vec3<f32>;
     if (is_metal) {
@@ -59,7 +60,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let emissive = base * 2.8;
         let shape = base * (amb * 0.12 + 0.18 * ndl);
         rgb = emissive + shape;
-    } else if (in.mat_kind > 1.5) {
+    } else if (is_holo) {
+        // Simplified thin-film iridescence for fallback shader.
+        let cos_i = ndv;
+        let opd = 2.0 * 1.38 * 550.0 * sqrt(max(1.0 - (1.0 - cos_i * cos_i) / (1.38 * 1.38), 0.0));
+        let irid = vec3<f32>(
+            0.5 + 0.5 * cos(opd / 630.0 * 6.28318530),
+            0.5 + 0.5 * cos(opd / 530.0 * 6.28318530),
+            0.5 + 0.5 * cos(opd / 460.0 * 6.28318530),
+        );
+        let spec = pow(ndh, 64.0) * 1.5;
+        rgb = base * irid * (amb + ndl * 0.60) + irid * spec;
+    } else if (in.mat_kind > 1.95) {
         let spec = pow(ndh, 32.0) * 0.35;
         let tinted = mix(base, vec3<f32>(1.0), 0.15);
         rgb = tinted * (amb + ndl * 0.72) + vec3<f32>(spec);

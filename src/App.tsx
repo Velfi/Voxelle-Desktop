@@ -40,6 +40,9 @@ import { MATERIAL_BUILTIN_PALETTE_HEX } from "./materialBuiltinPalette";
 import { ViewportCameraHud } from "./ViewportCameraHud";
 import { useStrokePhase } from "./useStrokePhase";
 import { SelectionGizmo, type SelectionGizmoRef } from "./SelectionGizmo";
+import { ExtrudeGizmo, type ExtrudeGizmoRef } from "./ExtrudeGizmo";
+import RadialPingMenu, { RADIAL_HOLD_MS } from "./RadialPingMenu";
+import { PingArrowIndicator } from "./PingArrowIndicator";
 
 /** Frozen world-space geometry from `query_cuboid_plane_geometry`. */
 interface CuboidPlaneGeo {
@@ -805,7 +808,7 @@ type ChatToast = { id: number; text: string };
 
 const CHAT_TOAST_CAP = 5;
 
-const PING_HUD_MS = 2800;
+const PING_HUD_MS = 7000;
 const PING_MP3_URL = `${import.meta.env.BASE_URL}ping.mp3`;
 
 function playPingSound() {
@@ -946,6 +949,9 @@ const MATERIAL_OPTIONS: { id: string; label: string }[] = [
   { id: "glass", label: "Glass" },
   { id: "water", label: "Water" },
   { id: "glow", label: "Glow" },
+  { id: "velvet", label: "Velvet" },
+  { id: "wax", label: "Wax" },
+  { id: "holographic", label: "Holographic" },
 ];
 
 /** Multi-color paint distribution settings panel (shown when ≥2 palette colors selected). */
@@ -1308,6 +1314,12 @@ function SymmetryColorSidebarSections(props: {
   setPaintColorDistrib: (d: PaintColorDistrib) => void;
   interactionMode: InteractionMode;
   setInteractionMode: (m: InteractionMode) => void;
+  mirrorX: boolean;
+  setMirrorX: (v: boolean) => void;
+  mirrorY: boolean;
+  setMirrorY: (v: boolean) => void;
+  mirrorZ: boolean;
+  setMirrorZ: (v: boolean) => void;
 }) {
   const {
     loading,
@@ -1320,18 +1332,39 @@ function SymmetryColorSidebarSections(props: {
     setPaintColorDistrib,
     interactionMode,
     setInteractionMode,
+    mirrorX,
+    setMirrorX,
+    mirrorY,
+    setMirrorY,
+    mirrorZ,
+    setMirrorZ,
   } = props;
   return (
     <div className="sidebar-symmetry-color-panel">
       <div className="sidebar-section-label">Symmetry</div>
       <div className="sidebar-mode-grid sidebar-mode-grid-3">
-        <button type="button" className="sidebar-mode-btn" disabled>
+        <button
+          type="button"
+          className={mirrorX ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+          onClick={() => setMirrorX(!mirrorX)}
+          title="Mirror across X axis"
+        >
           <span className="sidebar-mode-label">X</span>
         </button>
-        <button type="button" className="sidebar-mode-btn" disabled>
+        <button
+          type="button"
+          className={mirrorY ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+          onClick={() => setMirrorY(!mirrorY)}
+          title="Mirror across Y axis"
+        >
           <span className="sidebar-mode-label">Y</span>
         </button>
-        <button type="button" className="sidebar-mode-btn" disabled>
+        <button
+          type="button"
+          className={mirrorZ ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+          onClick={() => setMirrorZ(!mirrorZ)}
+          title="Mirror across Z axis"
+        >
           <span className="sidebar-mode-label">Z</span>
         </button>
       </div>
@@ -1397,6 +1430,7 @@ function SymmetryColorSidebarSections(props: {
 function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
   const gizmoRef = useRef<SelectionGizmoRef>(null);
+  const extrudeGizmoRef = useRef<ExtrudeGizmoRef>(null);
   const gizmoHoverRef = useRef(false);
   /** Viewport render target in physical pixels (matches projection / picking); from Rust. */
   const viewportPhysRef = useRef({ w: 0, h: 0 });
@@ -1412,7 +1446,7 @@ function App() {
   /** After pick probe: camera orbit/pan/dolly vs voxel click-to-edit (matches web: no hit → camera). */
   const gestureRef = useRef<{
     pointerId: number;
-    mode: "camera" | "voxel" | "squishyGizmo" | "selectionGizmo";
+    mode: "camera" | "voxel" | "squishyGizmo" | "selectionGizmo" | "extrudeGizmo";
   } | null>(null);
   const probingRef = useRef(false);
   /** Pointer-up event that arrived while a pick probe was in-flight; replayed after the probe resolves. */
@@ -1502,6 +1536,13 @@ function App() {
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
   /** Brush: clip to half-space along the face outward normal from the pick (see Rust `brush_clip_half_normal_from_screen`). */
   const [brushClipBottomHalf, setBrushClipBottomHalf] = useState(false);
+  /** Mirror / symmetry axes for draw tools (bit 0 = X, bit 1 = Y, bit 2 = Z). */
+  const [mirrorX, setMirrorX] = useState(false);
+  const [mirrorY, setMirrorY] = useState(false);
+  const [mirrorZ, setMirrorZ] = useState(false);
+  const mirrorXRef = useRef(false);
+  const mirrorYRef = useRef(false);
+  const mirrorZRef = useRef(false);
   const [strokeDrawStyle, setStrokeDrawStyle] = useState<StrokeDrawStyle>("line");
   const [strokeFamilyVariant, setStrokeFamilyVariant] = useState<StrokeFamilyVariant>("stroke");
   const strokeFamilyVariantRef = useRef<StrokeFamilyVariant>("stroke");
@@ -1631,10 +1672,12 @@ function App() {
   }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       setRopeFirstScreen(null);
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx1, ny1, nx2, ny2 } = snap.data;
       void invoke("generator_rope_at_screen", {
         args: {
@@ -1702,9 +1745,11 @@ function App() {
   const rocksPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny, seed } = snap.data;
       void invoke("generator_rocks_at_screen", {
         args: {
@@ -1732,9 +1777,11 @@ function App() {
   const grassPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny, seed } = snap.data;
       void invoke("generator_grass_at_screen", {
         args: {
@@ -1754,9 +1801,11 @@ function App() {
   const ashlarPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny, seed } = snap.data;
       void invoke("generator_ashlar_at_screen", {
         args: {
@@ -1778,9 +1827,11 @@ function App() {
   const floraPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny, seed } = snap.data;
       void invoke("generator_flora_at_screen", {
         args: {
@@ -1810,9 +1861,11 @@ function App() {
   const piscinaPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny, seed } = snap.data;
       void invoke("generator_piscina_at_screen", {
         args: {
@@ -1849,9 +1902,11 @@ function App() {
   const insectaPhase = useStrokePhase<{ nx: number; ny: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny } = snap.data;
       void invoke("generator_insecta_at_screen", {
         args: {
@@ -1900,9 +1955,11 @@ function App() {
   const faunaPhase = useStrokePhase<{ nx: number; ny: number }>({
     phases: ["settings"],
     onCancel: () => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
+      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny } = snap.data;
       void invoke("generator_fauna_at_screen", {
         args: {
@@ -1951,6 +2008,26 @@ function App() {
           material: activeMaterialRef.current,
         },
       }).catch(() => {});
+    },
+  });
+  /** Squishy (metaball) session phase: Enter commits, Escape cancels. */
+  const squishyPhase = useStrokePhase<Record<string, never>>({
+    phases: ["settings"],
+    onCancel: () => {
+      void invoke("squishy_session_clear")
+        .then(() => setSquishyBallCount(0))
+        .catch(() => {});
+    },
+    onCommit: () => {
+      void invoke("squishy_session_commit", {
+        args: {
+          color: activeColorRef.current,
+          material: activeMaterialRef.current,
+        },
+      })
+        .then(() => invoke("squishy_session_clear"))
+        .then(() => setSquishyBallCount(0))
+        .catch(() => {});
     },
   });
   const [rockRoughness, setRockRoughness] = useState(0.4);
@@ -2129,6 +2206,12 @@ function App() {
   /** Cold-start title mesh from `Logo.voxelle`; enables bottom menu layout and viewport orbit. */
   const [startScreenLogoLoaded, setStartScreenLogoLoaded] = useState(false);
   const startScreenLogoLoadedRef = useRef(false);
+  const [logoLightControlsVisible, setLogoLightControlsVisible] = useState(false);
+  const [logoLightAzimuth, setLogoLightAzimuth] = useState(0);
+  const [logoLightElevation, setLogoLightElevation] = useState(30);
+  const [logoCamAzimuth, setLogoCamAzimuth] = useState(62);
+  const [logoCamElevation, setLogoCamElevation] = useState(12);
+  const [logoCamDist, setLogoCamDist] = useState(2.2);
   const [loadError, setLoadError] = useState<string | null>(null);
   /** Session ended (leave, lost connection, or kicked); cleared on dismiss or new load/join. */
   const [collabBanner, setCollabBanner] = useState<{
@@ -2155,7 +2238,9 @@ function App() {
   const [preferencesOpen, setPreferencesOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [newGridSize, setNewGridSize] = useState(() => loadPreferences().newProjectDefaultSize);
-  const [newGridShape, setNewGridShape] = useState<StartShape>(() => loadPreferences().newProjectDefaultShape);
+  const [newGridShape, setNewGridShape] = useState<StartShape>(
+    () => loadPreferences().newProjectDefaultShape,
+  );
   const [rotateDialogOpen, setRotateDialogOpen] = useState(false);
   const [rotateDialogAxis, setRotateDialogAxis] = useState<0 | 1 | 2>(1);
   const [rotateDialogDegrees, setRotateDialogDegrees] = useState(90);
@@ -2279,8 +2364,20 @@ function App() {
     wy: number;
     wz: number;
     until: number;
+    emoji?: string;
   } | null>(null);
   const [pingHudTick, setPingHudTick] = useState(0);
+  // Radial emoji-ping menu state
+  const [radialMenu, setRadialMenu] = useState<{ x: number; y: number; visible: boolean }>({
+    x: 0,
+    y: 0,
+    visible: false,
+  });
+  const radialHoldTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Stash the normalized pick coords on Z-down so the keyup/radial-select path can use them. */
+  const pendingPingRef = useRef<{ nx: number; ny: number } | null>(null);
+  /** Last known cursor screen position (updated on every pointermove). */
+  const lastCursorScreenRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const collabActiveRef = useRef(false);
   const localPeerIdRef = useRef(0);
   const [hostPort, setHostPort] = useState(() => loadPreferences().collabHostPort);
@@ -2511,6 +2608,12 @@ function App() {
           setWorkBusy(true);
         }
       }),
+      listen<unknown>("logo-loaded", () => {
+        setStartScreenLogoLoaded(true);
+      }),
+      listen<boolean>("voxelle-debug-logo-light-controls", (e) => {
+        setLogoLightControlsVisible(e.payload);
+      }),
       listen<unknown>("voxelle-loaded", (e) => {
         setLoadError(null);
         const p = e.payload;
@@ -2520,16 +2623,10 @@ function App() {
         } else if (p && typeof p === "object" && "path" in p) {
           const o = p as {
             path: string;
-            startScreenLogo?: boolean;
             mood?: Partial<MoodState>;
           };
-          if (o.startScreenLogo) {
-            setPathLabel("");
-            setStartScreenLogoLoaded(true);
-          } else {
-            setPathLabel(o.path);
-            setStartScreenLogoLoaded(false);
-          }
+          setPathLabel(o.path);
+          setStartScreenLogoLoaded(false);
           if (o.mood) {
             setMood(moodWith(defaultMoodState(), o.mood));
           } else {
@@ -2594,6 +2691,7 @@ function App() {
             x?: number;
             y?: number;
             z?: number;
+            emoji?: string;
           };
           const name = j.displayName ?? j.display_name ?? "?";
           const vx = j.x ?? 0;
@@ -2605,6 +2703,7 @@ function App() {
             wy: vy + 0.5,
             wz: vz + 0.5,
             until: Date.now() + PING_HUD_MS,
+            emoji: j.emoji || undefined,
           };
           setPingHudTick((n) => n + 1);
           playPingSound();
@@ -2932,9 +3031,13 @@ function App() {
     interactionModeRef.current = interactionMode;
     // Clear squishy session when leaving squishy mode
     if (prev === "squishy" && interactionMode !== "squishy") {
-      void invoke("squishy_session_clear")
-        .then(() => setSquishyBallCount(0))
-        .catch(() => {});
+      if (squishyPhase.active) {
+        squishyPhase.cancel();
+      } else {
+        void invoke("squishy_session_clear")
+          .then(() => setSquishyBallCount(0))
+          .catch(() => {});
+      }
     }
   }, [interactionMode]);
 
@@ -2985,8 +3088,12 @@ function App() {
     for (const b of speechBubbles) {
       void invoke("speech_bubble_reposition", {
         id: b.id,
-        rx: bubbleX * dpr, ry: bubbleY * dpr, rw: BUBBLE_W * dpr, rh: b.height * dpr,
-        tx: tailX * dpr,   ty: tailY * dpr,
+        rx: bubbleX * dpr,
+        ry: bubbleY * dpr,
+        rw: BUBBLE_W * dpr,
+        rh: b.height * dpr,
+        tx: tailX * dpr,
+        ty: tailY * dpr,
       });
     }
     setSpeechBubbles((prev) =>
@@ -3004,7 +3111,10 @@ function App() {
       unlisten = await listen<number>("mascot-loaded", (ev) => {
         if (ev.payload === 0) setMascotsLoaded(true);
       });
-      if (cancelled) { unlisten(); return; }
+      if (cancelled) {
+        unlisten();
+        return;
+      }
       void invoke("mascot_load_embedded", { id: 0, name: "seagull" }).catch((e) =>
         console.error("[voxelle] mascot load error", e),
       );
@@ -3020,8 +3130,12 @@ function App() {
     let unlisten: (() => void) | null = null;
     void listen<number>("speech-bubble-dismissed", (ev) => {
       setSpeechBubbles((prev) => prev.filter((b) => b.id !== ev.payload));
-    }).then((fn) => { unlisten = fn; });
-    return () => { unlisten?.(); };
+    }).then((fn) => {
+      unlisten = fn;
+    });
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   /** Show or advance the mascot's greeting speech bubble. */
@@ -3121,6 +3235,15 @@ function App() {
   useEffect(() => {
     brushShapeRef.current = brushShape;
   }, [brushShape]);
+  useEffect(() => {
+    mirrorXRef.current = mirrorX;
+  }, [mirrorX]);
+  useEffect(() => {
+    mirrorYRef.current = mirrorY;
+  }, [mirrorY]);
+  useEffect(() => {
+    mirrorZRef.current = mirrorZ;
+  }, [mirrorZ]);
   useEffect(() => {
     brushClipBottomHalfRef.current = brushClipBottomHalf;
   }, [brushClipBottomHalf]);
@@ -3469,86 +3592,71 @@ function App() {
     cylinderDepthRef.current = cylinderDepthUi;
   }, [cylinderDepthUi]);
 
-  // Cuboid depth preview: re-invoke when phase data or depth changes.
-  useEffect(() => {
-    const snap = cuboidPhase.snapshot;
-    if (!snap || loading || workBusy) return;
+  function runDepthPhasePreview(
+    endNorm: { nx: number; ny: number },
+    lineStart: { nx: number; ny: number } | null,
+    strokeMode: string,
+    extraAux: Record<string, unknown> = {},
+  ) {
     const im = interactionModeRef.current;
-    if (im !== "add" && im !== "remove" && im !== "paint") return;
-    const { lineStart, endNorm } = snap.data;
-    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
+    const dispatch = getStrokeDispatch(im);
+    if (!dispatch) return;
+    if (dispatch.kind === "selection") {
+      void runStrokeAtScreen(
+        endNorm.nx,
+        endNorm.ny,
+        extraAux,
+        lineStart ? { lineStart } : undefined,
+      );
+      return;
+    }
     void invoke("voxel_stroke_preview_at_screen", {
       args: {
         nx: endNorm.nx,
         ny: endNorm.ny,
-        tool,
+        tool: dispatch.tool,
         color: activeColorRef.current,
         material: activeMaterialRef.current,
         brushRadius: brushRadiusRef.current,
         brushShape: brushShapeRef.current,
         sprayDensity: sprayDensityRef.current,
-        strokeMode: "cuboid",
+        strokeMode,
         planeAxis: planeAxisRef.current,
-        strokeAux: mergedStrokeAux({}),
+        strokeAux: mergedStrokeAux(extraAux),
         matchMaterial: matchMaterialSelectColorRef.current,
-        strokeLineStartNx: lineStart.nx,
-        strokeLineStartNy: lineStart.ny,
+        mirrorAxes:
+          (mirrorXRef.current ? 1 : 0) |
+          (mirrorYRef.current ? 2 : 0) |
+          (mirrorZRef.current ? 4 : 0),
+        ...(lineStart ? { strokeLineStartNx: lineStart.nx, strokeLineStartNy: lineStart.ny } : {}),
       },
     }).catch(() => {});
+  }
+
+  // Cuboid depth preview: re-invoke when phase data or depth changes.
+  useEffect(() => {
+    const snap = cuboidPhase.snapshot;
+    if (!snap || loading || workBusy) return;
+    const { lineStart, endNorm } = snap.data;
+    runDepthPhasePreview(endNorm, lineStart, "cuboid");
   }, [cuboidPhase.snapshot, cuboidDepthUi, loading, workBusy, interactionMode]);
 
   // Cylinder depth preview: re-invoke when phase data or depth changes.
   useEffect(() => {
     const snap = cylinderPhase.snapshot;
     if (!snap || loading || workBusy) return;
-    const im = interactionModeRef.current;
-    if (im !== "add" && im !== "remove" && im !== "paint") return;
     const { lineStart, endNorm } = snap.data;
-    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
-    void invoke("voxel_stroke_preview_at_screen", {
-      args: {
-        nx: endNorm.nx,
-        ny: endNorm.ny,
-        tool,
-        color: activeColorRef.current,
-        material: activeMaterialRef.current,
-        brushRadius: brushRadiusRef.current,
-        brushShape: brushShapeRef.current,
-        sprayDensity: sprayDensityRef.current,
-        strokeMode: "cylinder",
-        planeAxis: planeAxisRef.current,
-        strokeAux: mergedStrokeAux({}),
-        matchMaterial: matchMaterialSelectColorRef.current,
-        strokeLineStartNx: lineStart.nx,
-        strokeLineStartNy: lineStart.ny,
-      },
-    }).catch(() => {});
+    runDepthPhasePreview(endNorm, lineStart, "cylinder");
   }, [cylinderPhase.snapshot, cylinderDepthUi, loading, workBusy, interactionMode]);
 
   // Polygon solid depth preview: re-invoke when phase data or depth changes.
   useEffect(() => {
     const snap = polygonPhase.snapshot;
     if (!snap || loading || workBusy) return;
-    const im = interactionModeRef.current;
-    if (im !== "add" && im !== "remove" && im !== "paint") return;
     const { endNorm } = snap.data;
-    const tool = im === "add" ? "add" : im === "remove" ? "remove" : "paint";
-    void invoke("voxel_stroke_preview_at_screen", {
-      args: {
-        nx: endNorm.nx,
-        ny: endNorm.ny,
-        tool,
-        color: activeColorRef.current,
-        material: activeMaterialRef.current,
-        brushRadius: brushRadiusRef.current,
-        brushShape: brushShapeRef.current,
-        sprayDensity: sprayDensityRef.current,
-        strokeMode: drawStrokeModeRef.current,
-        planeAxis: planeAxisRef.current,
-        strokeAux: mergedStrokeAux({ polygonDepth: polygonDepthRef.current }),
-        matchMaterial: matchMaterialSelectColorRef.current,
-      },
-    }).catch(() => {});
+    runDepthPhasePreview(endNorm, null, drawStrokeModeRef.current, {
+      polygonDepth: polygonDepthRef.current,
+    });
   }, [polygonPhase.snapshot, polygonDepthUi, loading, workBusy, interactionMode]);
 
   // Cancel extrude phase if interaction mode changes
@@ -3610,7 +3718,9 @@ function App() {
     const snap = phase.ref.current;
     if (!snap) return;
     const { lineStart, endNorm } = snap.data;
-    runStrokeAtScreen(endNorm.nx, endNorm.ny, {}, { lineStart });
+    const depth = shape === "cuboid" ? cuboidDepthRef.current : cylinderDepthRef.current;
+    const depthKey = shape === "cuboid" ? "cuboidDepth" : "cylinderDepth";
+    runStrokeAtScreen(endNorm.nx, endNorm.ny, { [depthKey]: depth }, { lineStart });
     phase.cancel();
   }
 
@@ -3672,6 +3782,8 @@ function App() {
       : isGenerator
         ? sculptBrushShapeToRust(ropeBrushShapeUiRef.current)
         : brushShapeRef.current;
+    const mirrorAxes =
+      (mirrorXRef.current ? 1 : 0) | (mirrorYRef.current ? 2 : 0) | (mirrorZRef.current ? 4 : 0);
     return {
       nx,
       ny,
@@ -3683,6 +3795,7 @@ function App() {
       planeAxis: isSculpt ? "auto" : planeAxisRef.current,
       strokeAux: mergedStrokeAux({}),
       color: activeColorRef.current,
+      mirrorAxes,
       ...(() => {
         const pal = selectedColorsRef.current;
         return pal.length > 1
@@ -3859,6 +3972,8 @@ function App() {
     const brushPrev = opts?.brushPrev;
     const isFill = drawStrokeModeRef.current === "fill";
     if (isFill) beginFillOperation();
+    const mirrorAxes =
+      (mirrorXRef.current ? 1 : 0) | (mirrorYRef.current ? 2 : 0) | (mirrorZRef.current ? 4 : 0);
     const sharedArgs: Record<string, unknown> = {
       nx,
       ny,
@@ -3871,6 +3986,7 @@ function App() {
       matchMaterial: matchMaterialSelectColorRef.current,
       fillSelectDiagonals: fillSelectDiagonalsRef.current,
       fillRespectsColor: fillRespectsColorRef.current,
+      mirrorAxes,
       ...(lineStart
         ? {
             strokeLineStartNx: lineStart.nx,
@@ -4185,6 +4301,7 @@ function App() {
     ) {
       return "select";
     }
+    if (m === "selectExtrude") return "selectExtrude";
     return "navigate";
   };
 
@@ -4411,8 +4528,59 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [chatPanelOpen]);
 
+  // Fire a ping at the given normalized viewport coords with an optional emoji.
+  const firePing = useCallback(
+    (p: { nx: number; ny: number }, emoji?: string) => {
+      const dn = loadPreferences().collabDisplayName.trim();
+      void invoke<{
+        ok: boolean;
+        x?: number;
+        y?: number;
+        z?: number;
+      }>("ping_cursor_pick", {
+        args: { nx: p.nx, ny: p.ny, displayName: dn, emoji: emoji ?? "" },
+      })
+        .then((r) => {
+          if (!r?.ok || r.x == null || r.y == null || r.z == null) return;
+          const name = dn.length > 0 ? dn : "You";
+          pingHudRef.current = {
+            name,
+            wx: r.x + 0.5,
+            wy: r.y + 0.5,
+            wz: r.z + 0.5,
+            until: Date.now() + PING_HUD_MS,
+            emoji: emoji || undefined,
+          };
+          setPingHudTick((n) => n + 1);
+          playPingSound();
+          void invoke("collab_send_ping", {
+            x: r.x,
+            y: r.y,
+            z: r.z,
+            emoji: emoji ?? "",
+          }).catch(() => {});
+        })
+        .catch(() => {});
+    },
+    [],
+  );
+
+  // Handle radial menu selection (emoji chosen or null = cancelled)
+  const onRadialSelect = useCallback(
+    (emoji: string | null) => {
+      setRadialMenu((m) => ({ ...m, visible: false }));
+      const p = pendingPingRef.current;
+      if (!p) return;
+      pendingPingRef.current = null;
+      if (emoji) {
+        firePing(p, emoji);
+      }
+    },
+    [firePing],
+  );
+
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onKeyDown = (e: KeyboardEvent) => {
       const meta = e.metaKey || e.ctrlKey;
       if (meta && e.key === "z") {
         e.preventDefault();
@@ -4442,38 +4610,41 @@ function App() {
       const p = lastViewportPickNormRef.current;
       if (!p) return;
       e.preventDefault();
-      const dn = loadPreferences().collabDisplayName.trim();
-      void invoke<{
-        ok: boolean;
-        x?: number;
-        y?: number;
-        z?: number;
-      }>("ping_cursor_pick", {
-        args: { nx: p.nx, ny: p.ny, displayName: dn },
-      })
-        .then((r) => {
-          if (!r?.ok || r.x == null || r.y == null || r.z == null) return;
-          const name = dn.length > 0 ? dn : "You";
-          pingHudRef.current = {
-            name,
-            wx: r.x + 0.5,
-            wy: r.y + 0.5,
-            wz: r.z + 0.5,
-            until: Date.now() + PING_HUD_MS,
-          };
-          setPingHudTick((n) => n + 1);
-          playPingSound();
-          void invoke("collab_send_ping", {
-            x: r.x,
-            y: r.y,
-            z: r.z,
-          }).catch(() => {});
-        })
-        .catch(() => {});
+      // Stash the pick coords for the radial menu / quick-tap path
+      pendingPingRef.current = { nx: p.nx, ny: p.ny };
+      const scr = lastCursorScreenRef.current;
+      // Start hold timer — if Z is held long enough, show radial menu
+      if (radialHoldTimerRef.current) clearTimeout(radialHoldTimerRef.current);
+      radialHoldTimerRef.current = setTimeout(() => {
+        radialHoldTimerRef.current = null;
+        setRadialMenu({ x: scr.x, y: scr.y, visible: true });
+      }, RADIAL_HOLD_MS);
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [preferencesOpen, stampBookOpen, joinModalOpen, newProjectOpen, collabJoinPending]);
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== "z" && e.key !== "Z") return;
+      // If the hold timer is still pending, it was a quick tap → fire normal ping
+      if (radialHoldTimerRef.current) {
+        clearTimeout(radialHoldTimerRef.current);
+        radialHoldTimerRef.current = null;
+        const p = pendingPingRef.current;
+        pendingPingRef.current = null;
+        if (p) firePing(p);
+      }
+      // If radial menu is visible, RadialPingMenu handles keyup via onSelect
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      if (radialHoldTimerRef.current) {
+        clearTimeout(radialHoldTimerRef.current);
+        radialHoldTimerRef.current = null;
+      }
+    };
+  }, [preferencesOpen, stampBookOpen, joinModalOpen, newProjectOpen, collabJoinPending, firePing]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -5219,8 +5390,13 @@ function App() {
       probingRef.current = false;
       return;
     }
-    // Cancel extrude phase on any other click.
-    if (extrudePhase.ref.current) {
+    // Cancel extrude phase on left-click — but NOT for selectExtrude, where
+    // we defer to the gizmo hit-test below so re-clicking a handle doesn't commit.
+    if (
+      extrudePhase.ref.current &&
+      e.button === 0 &&
+      interactionModeRef.current !== "selectExtrude"
+    ) {
       extrudePhase.cancel();
     }
 
@@ -5272,14 +5448,43 @@ function App() {
       }
     }
 
-    // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
+    // Extrude gizmo: check in selectExtrude mode before falling through to camera.
     if (
       e.button === 0 &&
       !loading &&
       !workBusy &&
       !logoSplashPointer &&
       !navigate &&
-      !forceCamera
+      !forceCamera &&
+      mode === "selectExtrude"
+    ) {
+      try {
+        const hit = await extrudeGizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
+        if (hit) {
+          probingRef.current = false;
+          gestureRef.current = { pointerId, mode: "extrudeGizmo" };
+          lastRef.current = { x: e.clientX, y: e.clientY };
+          return;
+        }
+      } catch {
+        /* fall through */
+      }
+      // Gizmo wasn't hit — cancel the settings phase if active.
+      if (extrudePhase.ref.current) {
+        extrudePhase.cancel();
+      }
+    }
+
+    // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
+    // Exclude selectExtrude — in that mode we use the extrude gizmo instead.
+    if (
+      e.button === 0 &&
+      !loading &&
+      !workBusy &&
+      !logoSplashPointer &&
+      !navigate &&
+      !forceCamera &&
+      mode !== "selectExtrude"
     ) {
       try {
         const hit = await gizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
@@ -5562,6 +5767,7 @@ function App() {
   const onPointerMove = (e: React.PointerEvent) => {
     const { nx: px, ny: py } = clientToViewportNormalized(e);
     lastViewportPickNormRef.current = { nx: px, ny: py };
+    lastCursorScreenRef.current = { x: e.clientX, y: e.clientY };
     if (viewportCursorDebugEnabled) {
       const el = viewportRef.current;
       const rect = el?.getBoundingClientRect();
@@ -5703,15 +5909,45 @@ function App() {
       lastRef.current = { x: cx, y: cy };
       return;
     }
+    if (
+      gestureRef.current?.mode === "extrudeGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      const last = lastRef.current;
+      const cx = e.clientX;
+      const cy = e.clientY;
+      extrudeGizmoRef.current?.pointerMove(
+        cx,
+        cy,
+        last.x,
+        last.y,
+        activeColorRef.current,
+        activeMaterialRef.current,
+      );
+      dragDidEditRef.current = true;
+      lastRef.current = { x: cx, y: cy };
+      return;
+    }
     if (!gestureRef.current) {
-      gizmoRef.current
-        ?.updateHover(e.clientX, e.clientY)
-        .then((h) => {
-          gizmoHoverRef.current = h ?? false;
-        })
-        .catch(() => {
-          gizmoHoverRef.current = false;
-        });
+      if (interactionModeRef.current === "selectExtrude") {
+        extrudeGizmoRef.current
+          ?.updateHover(e.clientX, e.clientY)
+          .then((h) => {
+            gizmoHoverRef.current = h ?? false;
+          })
+          .catch(() => {
+            gizmoHoverRef.current = false;
+          });
+      } else {
+        gizmoRef.current
+          ?.updateHover(e.clientX, e.clientY)
+          .then((h) => {
+            gizmoHoverRef.current = h ?? false;
+          })
+          .catch(() => {
+            gizmoHoverRef.current = false;
+          });
+      }
     } else {
       gizmoHoverRef.current = false;
     }
@@ -5738,7 +5974,8 @@ function App() {
         interactionModeRef.current === "squishy" ||
         interactionModeRef.current === "generator" ||
         interactionModeRef.current === "stamp" ||
-        interactionModeRef.current === "punch") &&
+        interactionModeRef.current === "punch" ||
+        interactionModeRef.current === "selectExtrude") &&
       !interactionBlockedRef.current &&
       !anyGenPhaseActive
     ) {
@@ -5747,8 +5984,12 @@ function App() {
         args: buildSyncPreviewPayload(px, py, m),
       }).catch(() => {});
     } else if (overGizmo) {
+      // Preserve selectExtrude mode when hovering the extrude gizmo so the
+      // GPU gizmo continues rendering in extrude style (balls, no rings).
+      const hoverMode =
+        interactionModeRef.current === "selectExtrude" ? "selectExtrude" : "navigate";
       void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, "navigate"),
+        args: buildSyncPreviewPayload(-1, 0, hoverMode),
       }).catch(() => {});
     }
 
@@ -5915,6 +6156,10 @@ function App() {
                   planeAxis: planeAxisRef.current,
                   strokeAux: mergedStrokeAux({}),
                   matchMaterial: matchMaterialSelectColorRef.current,
+                  mirrorAxes:
+                    (mirrorXRef.current ? 1 : 0) |
+                    (mirrorYRef.current ? 2 : 0) |
+                    (mirrorZRef.current ? 4 : 0),
                   ...(lineStart
                     ? {
                         strokeLineStartNx: lineStart.nx,
@@ -6204,6 +6449,25 @@ function App() {
       resetPointerGesture("selection-gizmo-up", e);
       return;
     }
+    if (
+      gestureRef.current?.mode === "extrudeGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      extrudeGizmoRef.current?.pointerUp();
+      // Restore selectExtrude preview_mode so the GPU gizmo keeps its extrude style.
+      void invoke("sync_preview_input", {
+        args: buildSyncPreviewPayload(-1, 0, "selectExtrude"),
+      }).catch(() => {});
+      if (dragDidEditRef.current) {
+        extrudePhase.enter("settings", {} as Record<string, never>);
+        lastStrokeNormRef.current = null;
+      } else {
+        void invoke("voxel_stroke_preview_reset").catch(() => {});
+        lastStrokeNormRef.current = null;
+      }
+      resetPointerGesture("extrude-gizmo-up", e);
+      return;
+    }
 
     const g = gestureRef.current;
     const start = pointerStartRef.current;
@@ -6259,10 +6523,12 @@ function App() {
           const gk = generatorKindRef.current;
           if (gk === "rocks") {
             if (!rocksPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               rocksPhase.enter("settings", { nx, ny, seed: rockPreviewSeedRef.current });
             }
           } else if (gk === "grass") {
             if (!grassPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               grassPhase.enter("settings", { nx, ny, seed: grassPreviewSeedRef.current });
             }
           } else if (gk === "cloth") {
@@ -6276,6 +6542,7 @@ function App() {
               setRopeFirstScreen({ nx, ny });
             } else {
               // Enter settings phase instead of immediately generating
+              void invoke("lock_generator_preview_camera").catch(() => {});
               ropePhase.enter("settings", {
                 nx1: ropeFirstScreen.nx,
                 ny1: ropeFirstScreen.ny,
@@ -6285,10 +6552,12 @@ function App() {
             }
           } else if (gk === "ashlar") {
             if (!ashlarPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               ashlarPhase.enter("settings", { nx, ny, seed: ashlarPreviewSeedRef.current });
             }
           } else if (gk === "flora") {
             if (!floraPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               floraPhase.enter("settings", { nx, ny, seed: floraPreviewSeedRef.current });
             }
           } else if (gk === "roof") {
@@ -6317,18 +6586,24 @@ function App() {
             }
           } else if (gk === "piscina") {
             if (!piscinaPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               piscinaPhase.enter("settings", { nx, ny, seed: piscinaPreviewSeedRef.current });
             }
           } else if (gk === "insecta") {
             if (!insectaPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               insectaPhase.enter("settings", { nx, ny });
             }
           } else if (gk === "fauna") {
             if (!faunaPhase.active) {
+              void invoke("lock_generator_preview_camera").catch(() => {});
               faunaPhase.enter("settings", { nx, ny });
             }
           }
         } else if (m === "squishy") {
+          if (!squishyPhase.active) {
+            squishyPhase.enter("settings", {});
+          }
           const mode = squishyModeRef.current;
           void invoke("squishy_session_set_mode", { args: { mode } })
             .then(() => {
@@ -7361,6 +7636,12 @@ function App() {
                           setSelectedColors={setSelectedColors}
                           paintColorDistrib={paintColorDistrib}
                           setPaintColorDistrib={setPaintColorDistrib}
+                          mirrorX={mirrorX}
+                          setMirrorX={setMirrorX}
+                          mirrorY={mirrorY}
+                          setMirrorY={setMirrorY}
+                          mirrorZ={mirrorZ}
+                          setMirrorZ={setMirrorZ}
                         />
 
                         <div className="sidebar-section-label">Material</div>
@@ -7584,6 +7865,12 @@ function App() {
                           setSelectedColors={setSelectedColors}
                           paintColorDistrib={paintColorDistrib}
                           setPaintColorDistrib={setPaintColorDistrib}
+                          mirrorX={mirrorX}
+                          setMirrorX={setMirrorX}
+                          mirrorY={mirrorY}
+                          setMirrorY={setMirrorY}
+                          mirrorZ={mirrorZ}
+                          setMirrorZ={setMirrorZ}
                         />
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
                           Brush and terrain options are in the tool options panel.
@@ -7651,6 +7938,12 @@ function App() {
                           setSelectedColors={setSelectedColors}
                           paintColorDistrib={paintColorDistrib}
                           setPaintColorDistrib={setPaintColorDistrib}
+                          mirrorX={mirrorX}
+                          setMirrorX={setMirrorX}
+                          mirrorY={mirrorY}
+                          setMirrorY={setMirrorY}
+                          mirrorZ={mirrorZ}
+                          setMirrorZ={setMirrorZ}
                         />
                         {generatorKind === "rope" && ropeFirstScreen && !ropePhase.active ? (
                           <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
@@ -7711,6 +8004,12 @@ function App() {
                           setSelectedColors={setSelectedColors}
                           paintColorDistrib={paintColorDistrib}
                           setPaintColorDistrib={setPaintColorDistrib}
+                          mirrorX={mirrorX}
+                          setMirrorX={setMirrorX}
+                          mirrorY={mirrorY}
+                          setMirrorY={setMirrorY}
+                          mirrorZ={mirrorZ}
+                          setMirrorZ={setMirrorZ}
                         />
                         <p className="sidebar-pane-hint sidebar-toolpanel-hint">
                           Add / pick / delete blobs in the viewport; commit in tool options.
@@ -8898,6 +9197,32 @@ function App() {
                     </button>
                   </div>
                 ) : null}
+                {squishyPhase.active ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Squishy session"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Squishy</span>
+                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
+                      Adjust in sidebar — Enter to commit, Esc to cancel
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => squishyPhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => squishyPhase.commit()}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ) : null}
                 {showWallSculptPolygonHud ? (
                   <div
                     className="viewport-polygon-phase-bar"
@@ -8974,6 +9299,7 @@ function App() {
               stampOrPunch={interactionMode === "stamp" || interactionMode === "punch"}
               viewportEl={viewportRef.current}
             />
+            <ExtrudeGizmo ref={extrudeGizmoRef} viewportEl={viewportRef.current} />
           </div>
           {showEditorChrome ? (
             <ViewportCameraHud
@@ -11619,15 +11945,19 @@ function App() {
                       className="tool-options-shape-btn"
                       disabled={loading || workBusy}
                       onClick={() => {
-                        void invoke("squishy_session_commit", {
-                          args: {
-                            color: activeColorRef.current,
-                            material: activeMaterialRef.current,
-                          },
-                        })
-                          .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
-                          .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-                          .catch(() => {});
+                        if (squishyPhase.active) {
+                          squishyPhase.commit();
+                        } else {
+                          void invoke("squishy_session_commit", {
+                            args: {
+                              color: activeColorRef.current,
+                              material: activeMaterialRef.current,
+                            },
+                          })
+                            .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
+                            .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
+                            .catch(() => {});
+                        }
                       }}
                     >
                       Commit to voxels
@@ -11637,9 +11967,13 @@ function App() {
                       className="tool-options-shape-btn"
                       disabled={loading || workBusy}
                       onClick={() => {
-                        void invoke("squishy_session_clear")
-                          .then(() => setSquishyBallCount(0))
-                          .catch(() => {});
+                        if (squishyPhase.active) {
+                          squishyPhase.cancel();
+                        } else {
+                          void invoke("squishy_session_clear")
+                            .then(() => setSquishyBallCount(0))
+                            .catch(() => {});
+                        }
                       }}
                     >
                       Clear session
@@ -12521,18 +12855,16 @@ function App() {
                       </button>
                     </div>
                   </div>
-                ) : (
-                  lastSessionReady ? (
-                    <button
-                      type="button"
-                      className="viewport-empty-open-btn"
-                      onClick={() => setNewProjectOpen(true)}
-                      disabled={loading || workBusy}
-                    >
-                      New Project
-                    </button>
-                  ) : null
-                )}
+                ) : lastSessionReady ? (
+                  <button
+                    type="button"
+                    className="viewport-empty-open-btn"
+                    onClick={() => setNewProjectOpen(true)}
+                    disabled={loading || workBusy}
+                  >
+                    New Project
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="viewport-empty-open-btn is-secondary"
@@ -12566,6 +12898,135 @@ function App() {
                   </button>
                 </div>
               </div>
+            </div>
+          ) : null}
+          {/* Debug: Logo light controls (toggle via Debug menu) */}
+          {showStartScreen && startScreenLogoLoaded && logoLightControlsVisible ? (
+            <div
+              style={{
+                position: "absolute",
+                bottom: 12,
+                right: 12,
+                zIndex: 20,
+                background: "rgba(0,0,0,0.75)",
+                color: "#fff",
+                padding: "10px 14px",
+                borderRadius: 8,
+                fontSize: 12,
+                fontFamily: "system-ui, sans-serif",
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                minWidth: 220,
+              }}
+            >
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>Camera</div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 60 }}>Angle</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={360}
+                  step={1}
+                  value={logoCamAzimuth}
+                  style={{ flex: 1 }}
+                  onChange={(e) => {
+                    const az = Number(e.target.value);
+                    setLogoCamAzimuth(az);
+                    void invoke("logo_set_camera_angle", {
+                      azimuth: az,
+                      elevation: logoCamElevation,
+                    });
+                  }}
+                />
+                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                  {Math.round(logoCamAzimuth)}°
+                </span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 60 }}>Elevation</span>
+                <input
+                  type="range"
+                  min={-85}
+                  max={85}
+                  step={1}
+                  value={logoCamElevation}
+                  style={{ flex: 1 }}
+                  onChange={(e) => {
+                    const el = Number(e.target.value);
+                    setLogoCamElevation(el);
+                    void invoke("logo_set_camera_angle", {
+                      azimuth: logoCamAzimuth,
+                      elevation: el,
+                    });
+                  }}
+                />
+                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                  {Math.round(logoCamElevation)}°
+                </span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 60 }}>Zoom</span>
+                <input
+                  type="range"
+                  min={1.0}
+                  max={8.0}
+                  step={0.1}
+                  value={logoCamDist}
+                  style={{ flex: 1 }}
+                  onChange={(e) => {
+                    const d = Number(e.target.value);
+                    setLogoCamDist(d);
+                    void invoke("logo_set_camera_dist", { dist: d });
+                  }}
+                />
+                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                  {logoCamDist.toFixed(1)}
+                </span>
+              </label>
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.15)", margin: "4px 0" }} />
+              <div style={{ fontWeight: 600, marginBottom: 2 }}>Light</div>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 60 }}>Angle</span>
+                <input
+                  type="range"
+                  min={0}
+                  max={360}
+                  step={1}
+                  value={logoLightAzimuth}
+                  style={{ flex: 1 }}
+                  onChange={(e) => {
+                    const az = Number(e.target.value);
+                    setLogoLightAzimuth(az);
+                    void invoke("logo_set_light_dir", {
+                      azimuth: az,
+                      elevation: logoLightElevation,
+                    });
+                  }}
+                />
+                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                  {Math.round(logoLightAzimuth)}°
+                </span>
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ width: 60 }}>Elevation</span>
+                <input
+                  type="range"
+                  min={5}
+                  max={90}
+                  step={1}
+                  value={logoLightElevation}
+                  style={{ flex: 1 }}
+                  onChange={(e) => {
+                    const el = Number(e.target.value);
+                    setLogoLightElevation(el);
+                    void invoke("logo_set_light_dir", { azimuth: logoLightAzimuth, elevation: el });
+                  }}
+                />
+                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                  {Math.round(logoLightElevation)}°
+                </span>
+              </label>
             </div>
           ) : null}
           {loadError ? (
@@ -13146,6 +13607,31 @@ function App() {
       {/* ── Speech bubble click-capture overlays ─────────────────────────────
            GPU renders the actual bubble shapes; these divs only capture clicks. */}
       <SpeechBubbleOverlay bubbles={speechBubbles} />
+
+      {/* ── Radial emoji-ping menu (hold Z) ──────────────────────────────── */}
+      <RadialPingMenu
+        x={radialMenu.x}
+        y={radialMenu.y}
+        visible={radialMenu.visible}
+        onSelect={onRadialSelect}
+      />
+
+      {/* ── Off-screen ping arrow indicator ────────────────────────────── */}
+      {(() => {
+        const p = pingHudRef.current;
+        // pingHudTick is read to subscribe to re-renders
+        void pingHudTick;
+        const isActive = !!p && Date.now() < p.until;
+        return (
+          <PingArrowIndicator
+            wx={p?.wx ?? 0}
+            wy={p?.wy ?? 0}
+            wz={p?.wz ?? 0}
+            active={isActive}
+            emoji={p?.emoji}
+          />
+        );
+      })()}
     </div>
   );
 }

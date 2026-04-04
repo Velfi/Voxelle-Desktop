@@ -57,7 +57,7 @@ fn generate_avatar_module() {
     code.push('\n');
 
     // embedded_avatar_bytes()
-    code.push_str("fn embedded_avatar_bytes(name: &str) -> Option<&'static [u8]> {\n");
+    code.push_str("pub(crate) fn embedded_avatar_bytes(name: &str) -> Option<&'static [u8]> {\n");
     code.push_str("    match name {\n");
     for name in &names {
         let const_name = avatar_const_name(name);

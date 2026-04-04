@@ -7,13 +7,13 @@
 use crate::voxelle::{MaterialId, Voxel};
 use glam::IVec3;
 
-/// Bit layout: occupied (31), reserved (27-30), mat (24-26), B (16-23), G (8-15), R (0-7).
+/// Bit layout: occupied (31), reserved (28-30), mat (24-27), B (16-23), G (8-15), R (0-7).
 #[inline]
 pub fn pack_cell(rgb: u32, material: MaterialId) -> u32 {
     let r = (rgb >> 16) & 0xff;
     let g = (rgb >> 8) & 0xff;
     let b = rgb & 0xff;
-    let mat = material_to_u3(material);
+    let mat = material_to_u4(material);
     r | (g << 8) | (b << 16) | (mat << 24) | (1u32 << 31)
 }
 
@@ -23,7 +23,7 @@ pub fn pack_empty() -> u32 {
 }
 
 #[inline]
-fn material_to_u3(m: MaterialId) -> u32 {
+fn material_to_u4(m: MaterialId) -> u32 {
     match m {
         MaterialId::Plastic => 0,
         MaterialId::Metal => 1,
@@ -31,6 +31,9 @@ fn material_to_u3(m: MaterialId) -> u32 {
         MaterialId::Glass => 3,
         MaterialId::Water => 4,
         MaterialId::Glow => 5,
+        MaterialId::Velvet => 6,
+        MaterialId::Wax => 7,
+        MaterialId::Holographic => 8,
     }
 }
 
@@ -161,7 +164,7 @@ mod tests {
         assert_eq!(c & 0xff, 0xff);
         assert_eq!((c >> 8) & 0xff, 0x80);
         assert_eq!((c >> 16) & 0xff, 0x40);
-        assert_eq!((c >> 24) & 7, 3);
+        assert_eq!((c >> 24) & 0xF, 3);
     }
 
     #[test]

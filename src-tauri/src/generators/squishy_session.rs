@@ -1,14 +1,60 @@
 //! Multi-metaball editor session (web `squishy/state.ts` parity).
 
 use crate::camera::OrbitCamera;
-use crate::generators::squishy_gen::field_strength;
 use crate::greedy_mesh::VoxelCoord;
 use crate::voxel_edit::{in_grid, preview_add_cell, VoxelEditDelta};
 use crate::voxelle::{MaterialId, Voxel, VoxelleFile};
 use ahash::AHashMap;
+use rayon::prelude::*;
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const FIELD_THRESHOLD: f32 = 1.15;
+
+/// Minimum grid size needed to contain all metaballs' influence regions
+/// without clipping.  Returns `max(current_gs, needed)`.
+pub fn min_grid_size_for_balls(balls: &[Metaball], current_gs: i32) -> i32 {
+    let mut max_abs = 0i32;
+    for b in balls {
+        let r_pad = (b.radius * 3.0).max(4.0).ceil() as i32 + 2;
+        max_abs = max_abs
+            .max((b.x - r_pad).abs())
+            .max((b.x + r_pad).abs())
+            .max((b.y - r_pad).abs())
+            .max((b.y + r_pad).abs())
+            .max((b.z - r_pad).abs())
+            .max((b.z + r_pad).abs());
+    }
+    let need = (2 * (max_abs + 1)).max(1);
+    current_gs.max(1).max(need).min(crate::voxel_edit::MAX_GRID_SIZE)
+}
+
+/// Compute the scan bounding box as the union of per-ball influence regions,
+/// clamped to the grid.  Each ball's pad is proportional to its own radius,
+/// so distant small balls don't inflate the box for large ones (and vice-versa).
+fn scan_bbox(balls: &[Metaball], gs: i32) -> (i32, i32, i32, i32, i32, i32) {
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX;
+    let mut max_z = i32::MIN;
+    for b in balls {
+        let r_pad = (b.radius * 3.0).max(4.0).ceil() as i32 + 2;
+        min_x = min_x.min(b.x - r_pad);
+        max_x = max_x.max(b.x + r_pad);
+        min_y = min_y.min(b.y - r_pad);
+        max_y = max_y.max(b.y + r_pad);
+        min_z = min_z.min(b.z - r_pad);
+        max_z = max_z.max(b.z + r_pad);
+    }
+    let (gx0, gx1) = crate::voxel_edit::grid_valid_range(gs);
+    (
+        min_x.max(gx0), max_x.min(gx1),
+        min_y.max(gx0), max_y.min(gx1),
+        min_z.max(gx0), max_z.min(gx1),
+    )
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,7 +162,21 @@ impl SquishySession {
             let cy = b.y as f32 + 0.5;
             let cz = b.z as f32 + 0.5;
             let r = b.radius.max(0.5);
-            s += field_strength(cx, cy, cz, px, py, pz, r);
+            let dx = px as f32 - cx;
+            let dy = py as f32 - cy;
+            let dz = pz as f32 - cz;
+            let d2 = dx * dx + dy * dy + dz * dz;
+            // Skip balls whose contribution is < 0.0001 (d² > r² × 10 000).
+            // Max accumulated error with 50 balls ≈ 0.005, negligible vs threshold 1.15.
+            if d2 > r * r * 10_000.0 {
+                continue;
+            }
+            s += r * r / d2.max(0.25);
+            // Early exit: field_strength is non-negative, so once we exceed the
+            // threshold the result can only grow.  The caller only tests ≥ threshold.
+            if s >= FIELD_THRESHOLD {
+                return s;
+            }
         }
         s
     }
@@ -140,51 +200,27 @@ pub fn voxel_coords_for_session(session: &SquishySession, grid_size: i32) -> Vec
         return Vec::new();
     }
     let gs = grid_size.max(1);
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut min_y = i32::MAX;
-    let mut max_y = i32::MIN;
-    let mut min_z = i32::MAX;
-    let mut max_z = i32::MIN;
-    let mut max_r = 4.0_f32;
-    for b in &session.balls {
-        max_r = max_r.max(b.radius * 3.0);
-        min_x = min_x.min(b.x);
-        max_x = max_x.max(b.x);
-        min_y = min_y.min(b.y);
-        max_y = max_y.max(b.y);
-        min_z = min_z.min(b.z);
-        max_z = max_z.max(b.z);
-    }
-    let pad = max_r.ceil() as i32 + 4;
-    min_x -= pad;
-    max_x += pad;
-    min_y -= pad;
-    max_y += pad;
-    min_z -= pad;
-    max_z += pad;
+    let (min_x, max_x, min_y, max_y, min_z, max_z) = scan_bbox(&session.balls, gs);
 
-    let (gx0, gx1) = crate::voxel_edit::grid_valid_range(gs);
-    min_x = min_x.max(gx0);
-    max_x = max_x.min(gx1);
-    min_y = min_y.max(gx0);
-    max_y = max_y.min(gx1);
-    min_z = min_z.max(gx0);
-    max_z = max_z.min(gx1);
-
-    let mut solid: HashSet<VoxelCoord> = HashSet::new();
-    for x in min_x..=max_x {
-        for y in min_y..=max_y {
-            for z in min_z..=max_z {
-                if !in_grid(x, y, z, gs) {
-                    continue;
-                }
-                if session.field_sum_at(x, y, z) >= FIELD_THRESHOLD {
-                    solid.insert((x, y, z));
+    let mut solid: HashSet<VoxelCoord> = (min_x..=max_x)
+        .into_par_iter()
+        .flat_map(|x| {
+            let mut local = Vec::new();
+            for y in min_y..=max_y {
+                for z in min_z..=max_z {
+                    if !in_grid(x, y, z, gs) {
+                        continue;
+                    }
+                    if session.field_sum_at(x, y, z) >= FIELD_THRESHOLD {
+                        local.push((x, y, z));
+                    }
                 }
             }
-        }
-    }
+            local
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .collect();
 
     if session.hollow {
         let wt = session.wall_thickness.max(1);
@@ -204,56 +240,35 @@ pub fn voxel_coords_for_session_with_limit(
         return Vec::new();
     }
     let gs = grid_size.max(1);
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut min_y = i32::MAX;
-    let mut max_y = i32::MIN;
-    let mut min_z = i32::MAX;
-    let mut max_z = i32::MIN;
-    let mut max_r = 4.0_f32;
-    for b in &session.balls {
-        max_r = max_r.max(b.radius * 3.0);
-        min_x = min_x.min(b.x);
-        max_x = max_x.max(b.x);
-        min_y = min_y.min(b.y);
-        max_y = max_y.max(b.y);
-        min_z = min_z.min(b.z);
-        max_z = max_z.max(b.z);
-    }
-    let pad = max_r.ceil() as i32 + 4;
-    min_x -= pad;
-    max_x += pad;
-    min_y -= pad;
-    max_y += pad;
-    min_z -= pad;
-    max_z += pad;
+    let (min_x, max_x, min_y, max_y, min_z, max_z) = scan_bbox(&session.balls, gs);
 
-    let (gx0, gx1) = crate::voxel_edit::grid_valid_range(gs);
-    min_x = min_x.max(gx0);
-    max_x = max_x.min(gx1);
-    min_y = min_y.max(gx0);
-    max_y = max_y.min(gx1);
-    min_z = min_z.max(gx0);
-    max_z = max_z.min(gx1);
-
-    let mut solid: HashSet<VoxelCoord> = HashSet::new();
-    'scan: for x in min_x..=max_x {
-        for y in min_y..=max_y {
-            for z in min_z..=max_z {
-                if solid.len() >= max_voxels {
-                    break 'scan;
+    let count = AtomicUsize::new(0);
+    let results: Vec<VoxelCoord> = (min_x..=max_x)
+        .into_par_iter()
+        .flat_map(|x| {
+            let mut local = Vec::new();
+            for y in min_y..=max_y {
+                if count.load(Ordering::Relaxed) >= max_voxels {
+                    break;
                 }
-                if !in_grid(x, y, z, gs) {
-                    continue;
-                }
-                if session.field_sum_at(x, y, z) >= FIELD_THRESHOLD {
-                    solid.insert((x, y, z));
+                for z in min_z..=max_z {
+                    if count.load(Ordering::Relaxed) >= max_voxels {
+                        break;
+                    }
+                    if !in_grid(x, y, z, gs) {
+                        continue;
+                    }
+                    if session.field_sum_at(x, y, z) >= FIELD_THRESHOLD {
+                        local.push((x, y, z));
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
-        }
-    }
+            local
+        })
+        .collect();
 
-    solid.into_iter().take(max_voxels).collect()
+    results.into_iter().take(max_voxels).collect()
 }
 
 /// Outer `wall_thickness` layers: peel boundary repeatedly and union those layers (web hollow shell).
@@ -362,7 +377,9 @@ pub fn squishy_commit_session(
     color: u32,
     material: MaterialId,
 ) -> Result<Vec<VoxelEditDelta>, String> {
-    let grid_size = file.grid_size.max(1);
+    // Grow the grid so metaballs near the edge aren't clipped.
+    let grid_size = min_grid_size_for_balls(&session.balls, file.grid_size);
+    file.grid_size = grid_size;
     let coords = voxel_coords_for_session(session, grid_size);
     let mut out = Vec::new();
     for (x, y, z) in coords {

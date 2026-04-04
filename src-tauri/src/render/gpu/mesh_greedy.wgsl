@@ -99,7 +99,7 @@ fn brick_cell_at(ix: vec3<i32>) -> u32 {
 }
 
 fn unpack_mat(packed: u32) -> u32 {
-    return (packed >> 24u) & 7u;
+    return (packed >> 24u) & 0xFu;
 }
 
 /// Non-transmissive solid occludes AO. CPU also requires same `object_id`; the brick buffer has no per-voxel object id, so GPU only excludes glass/water (parity for materials, not object seams).

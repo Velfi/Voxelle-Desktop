@@ -50,6 +50,9 @@ pub enum MaterialId {
     Glass,
     Water,
     Glow,
+    Velvet,
+    Wax,
+    Holographic,
 }
 
 impl MaterialId {
@@ -60,7 +63,11 @@ impl MaterialId {
             2 => MaterialId::Rubber,
             3 => MaterialId::Glass,
             4 => MaterialId::Water,
-            _ => MaterialId::Glow,
+            5 => MaterialId::Glow,
+            6 => MaterialId::Velvet,
+            7 => MaterialId::Wax,
+            8 => MaterialId::Holographic,
+            _ => MaterialId::Plastic,
         }
     }
 
@@ -72,6 +79,9 @@ impl MaterialId {
             MaterialId::Glass => 3,
             MaterialId::Water => 4,
             MaterialId::Glow => 5,
+            MaterialId::Velvet => 6,
+            MaterialId::Wax => 7,
+            MaterialId::Holographic => 8,
         }
     }
 
@@ -83,6 +93,9 @@ impl MaterialId {
             MaterialId::Glass => "glass",
             MaterialId::Water => "water",
             MaterialId::Glow => "glow",
+            MaterialId::Velvet => "velvet",
+            MaterialId::Wax => "wax",
+            MaterialId::Holographic => "holographic",
         }
     }
 
@@ -93,6 +106,9 @@ impl MaterialId {
             "glass" => MaterialId::Glass,
             "water" => MaterialId::Water,
             "glow" => MaterialId::Glow,
+            "velvet" => MaterialId::Velvet,
+            "wax" => MaterialId::Wax,
+            "holographic" => MaterialId::Holographic,
             _ => MaterialId::Plastic,
         }
     }

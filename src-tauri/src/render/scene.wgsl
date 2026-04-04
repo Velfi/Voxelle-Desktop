@@ -134,7 +134,7 @@ struct VertexOut {
 }
 
 fn unpack_mat(packed: u32) -> u32 {
-    return (packed >> 24u) & 7u;
+    return (packed >> 24u) & 0xFu;
 }
 
 fn brick_fetch(ix: vec3<i32>) -> u32 {
@@ -166,6 +166,22 @@ fn march_slab_thickness(world: vec3<f32>, outward_normal: vec3<f32>) -> f32 {
         acc += 1.0;
     }
     return max(acc, 1.0);
+}
+
+/// March through wax voxels (mat == 7) toward a given direction to estimate
+/// material thickness.  Stops at empty space or any non-wax solid.
+const MAT_WAX_RASTER: u32 = 7u;
+fn march_thickness_toward(world: vec3<f32>, dir: vec3<f32>, max_steps: i32) -> f32 {
+    var acc = 0.0;
+    for (var i = 0; i < max_steps; i++) {
+        let p = world + dir * (f32(i) + 0.5);
+        let ix = vec3<i32>(floor(p + vec3<f32>(0.5)));
+        let cell = brick_fetch(ix);
+        if (!is_occupied(cell)) { break; }
+        if (unpack_mat(cell) != MAT_WAX_RASTER) { break; }
+        acc += 1.0;
+    }
+    return acc;
 }
 
 /// World-space shadow bias (in voxel units). Converted to NDC using the light frustum depth range
@@ -381,7 +397,7 @@ struct OpaqueOut {
 
 @fragment
 fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
-    if (in.mat_kind > 1.6) {
+    if (in.mat_kind > 1.95) {
         discard;
     }
     var out: OpaqueOut;
@@ -400,13 +416,54 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let ndh = max(dot(n, h), 0.0);
     let ndv = max(dot(n, v), 0.0);
 
-    let is_metal = in.mat_kind > 0.25 && in.mat_kind < 0.75;
-    let is_glow  = in.mat_kind > 0.75 && in.mat_kind < 1.25;
+    let is_wax    = in.mat_kind > 0.05 && in.mat_kind < 0.25;
+    let is_metal  = in.mat_kind > 0.25 && in.mat_kind < 0.75;
+    let is_glow   = in.mat_kind > 0.75 && in.mat_kind < 1.25;
+    let is_velvet  = in.mat_kind > 1.25 && in.mat_kind < 1.55;
+    let is_holo   = in.mat_kind > 1.55 && in.mat_kind < 1.95;
 
     var rgb: vec3<f32>;
     var glow_mask = 0.0;
 
-    if (is_metal) {
+    if (is_wax) {
+        // Wax: subsurface scattering with spectral absorption + Fresnel sheen.
+
+        // ── Dielectric Fresnel (IOR 1.46 — paraffin wax) ────────────────
+        let wax_ior = 1.46;
+        let wax_r0  = pow((wax_ior - 1.0) / (wax_ior + 1.0), 2.0);
+        let wax_fres = wax_r0 + (1.0 - wax_r0) * pow(1.0 - ndv, 5.0);
+
+        // ── Wrap diffuse ────────────────────────────────────────────────
+        let wax_wrap = 0.55;
+        let ndl_wrap = max((dot(n, l) + wax_wrap) / (1.0 + wax_wrap), 0.0);
+        let diffuse = base * (hemi * 0.24 * ao_h * amb + ndl_wrap * 0.60 * sh * sun * sc);
+
+        // ── Per-channel SSS (spectral absorption) ───────────────────────
+        // March toward the light to estimate thickness.
+        let light_thickness = march_thickness_toward(in.world_pos, l, 16);
+        // Spectral mean free path: red penetrates deepest, blue least.
+        let mfp = vec3<f32>(2.8, 1.6, 0.9) * (base * 0.5 + vec3<f32>(0.5));
+        let sss_absorb = exp(-vec3<f32>(light_thickness) / max(mfp, vec3<f32>(0.01)));
+        // SSS strongest on back faces where light shines through.
+        let back_factor = max(-dot(n, l) + 0.2, 0.0);
+        // sss_absorb already encodes spectral character via color-dependent mfp.
+        let sss = sss_absorb * back_factor * 0.65 * sun * sc;
+
+        // Also march inward (along -n) for ambient SSS thickness.
+        let inward_thickness = march_thickness_toward(in.world_pos, -n, 12);
+        let amb_absorb = exp(-vec3<f32>(inward_thickness) / max(mfp, vec3<f32>(0.01)));
+        let sss_ambient = amb_absorb * hemi * amb * 0.12;
+
+        // ── Specular (broad, waxy highlight + Fresnel sheen) ────────────
+        // Both terms Fresnel-weighted: surface reflection scales with fres.
+        let spec_broad  = sc * pow(ndh, 16.0) * 0.10 * sh * sun;
+        let spec_narrow = sc * pow(ndh, 48.0) * 0.15 * sh * sun;
+
+        // ── Combine: Fresnel-weighted surface on top, SSS underneath ────
+        let surface = (spec_broad + spec_narrow) * wax_fres;
+        let subsurface = diffuse * 0.55 + sss * 0.30 + sss_ambient * 0.15;
+        rgb = surface + subsurface * (1.0 - wax_fres);
+    } else if (is_metal) {
         // Metallic PBR: tinted specular from base color, sharp highlight, strong Fresnel.
         let f0 = base * 0.96 + vec3<f32>(0.04);
         let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndv, 5.0);
@@ -423,6 +480,105 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         let spec_glow = pow(ndh, 24.0) * 0.06 * sh * sun;
         rgb = emissive + shape + sc * spec_glow;
         glow_mask = 1.0;
+    } else if (is_velvet) {
+        // Velvet / felt: inverse Fresnel rim lighting, wrap diffuse, anisotropic sheen.
+        let rim = 1.0 - ndv;
+        let rim2 = rim * rim;
+
+        // Wrap lighting: extends diffuse past the terminator for a soft, round look.
+        let wrap = 0.45;
+        let ndl_wrap = max((dot(n, l) + wrap) / (1.0 + wrap), 0.0);
+
+        // Anisotropic sheen: derive tangent from face axis for directional shimmer.
+        let abs_n = abs(n);
+        var tangent: vec3<f32>;
+        if (abs_n.y > max(abs_n.x, abs_n.z)) {
+            tangent = vec3<f32>(1.0, 0.0, 0.0); // Y-face: fibers along X
+        } else if (abs_n.x > abs_n.z) {
+            tangent = vec3<f32>(0.0, 1.0, 0.0); // X-face: fibers along Y
+        } else {
+            tangent = vec3<f32>(0.0, 1.0, 0.0); // Z-face: fibers along Y
+        }
+        let tdh = dot(tangent, h);
+        let sheen = pow(max(1.0 - tdh * tdh, 0.0), 4.0) * 0.35;
+
+        // Brighten color at rim for the characteristic velvet color shift.
+        let rim_color = mix(base, min(base * 1.5 + vec3<f32>(0.06), vec3<f32>(1.0)), rim2 * 0.55);
+
+        // Combine: soft wrapped diffuse + rim glow + anisotropic sheen.
+        let diffuse = rim_color * (hemi * 0.28 * ao_h * amb + ndl_wrap * 0.62 * sh * sun * sc);
+        let rim_light = rim_color * rim2 * 0.38 * (amb * 0.6 + sh * sun * 0.4);
+        let sheen_contrib = sc * sheen * sh * sun * ndl_wrap;
+        rgb = diffuse + rim_light + sheen_contrib;
+    } else if (is_holo) {
+        // Holographic / diffraction grating: thin-film interference on a metallic substrate.
+        // The optical path difference through the thin film produces wavelength-dependent
+        // constructive/destructive interference, creating angle-dependent rainbow colors.
+
+        // ── Thin-film interference ──────────────────────────────────────────
+        // Optical path difference: 2 * n_film * d * cos(theta_film)
+        // where theta_film is the refraction angle inside the film (Snell's law).
+        let n_film = 1.38;   // MgF₂-like coating IOR
+        let d_nm   = 550.0;  // film thickness (nm) — center of visible spectrum
+        let cos_i  = ndv;
+        let sin_t2 = (1.0 - cos_i * cos_i) / (n_film * n_film);
+        let cos_t  = sqrt(max(1.0 - sin_t2, 0.0));
+        let opd    = 2.0 * n_film * d_nm * cos_t; // optical path difference (nm)
+
+        // Convert OPD to spectral color via wavelength-dependent phase.
+        // Each RGB channel represents a narrow band: R≈630nm, G≈530nm, B≈460nm.
+        let phase_r = opd / 630.0 * 6.28318530;
+        let phase_g = opd / 530.0 * 6.28318530;
+        let phase_b = opd / 460.0 * 6.28318530;
+        // Reflectance from thin-film interference (simplified Airy function).
+        let r_film = 0.20; // film-interface reflectance (~MgF₂ on metal)
+        let denom = 1.0 + r_film * r_film + 2.0 * r_film;
+        let irid = vec3<f32>(
+            (r_film * r_film + r_film * 2.0 * cos(phase_r) + 1.0) / denom,
+            (r_film * r_film + r_film * 2.0 * cos(phase_g) + 1.0) / denom,
+            (r_film * r_film + r_film * 2.0 * cos(phase_b) + 1.0) / denom,
+        );
+
+        // ── Grating dispersion (adds lateral rainbow shift per face) ────────
+        // Derive a tangent direction from the face normal for grating lines.
+        let abs_n = abs(n);
+        var grating_dir: vec3<f32>;
+        if (abs_n.y > max(abs_n.x, abs_n.z)) {
+            grating_dir = vec3<f32>(1.0, 0.0, 0.0);
+        } else if (abs_n.x > abs_n.z) {
+            grating_dir = vec3<f32>(0.0, 1.0, 0.0);
+        } else {
+            grating_dir = vec3<f32>(1.0, 0.0, 0.0);
+        }
+        let grating_dot = dot(grating_dir, v);
+        // Shift the film thickness by grating angle for extra dispersion.
+        let grating_shift = grating_dot * 120.0; // nm shift from diffraction
+        let opd2 = opd + grating_shift;
+        let grating_col = vec3<f32>(
+            0.5 + 0.5 * cos(opd2 / 630.0 * 6.28318530),
+            0.5 + 0.5 * cos(opd2 / 530.0 * 6.28318530),
+            0.5 + 0.5 * cos(opd2 / 460.0 * 6.28318530),
+        );
+
+        // Blend thin-film and grating contributions.
+        let spectral = mix(irid, grating_col, 0.5);
+
+        // ── Metallic Fresnel base (tinted by voxel color) ───────────────────
+        let f0 = base * 0.75 + vec3<f32>(0.04);
+        let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndv, 5.0);
+
+        // Iridescent color replaces the metallic Fresnel tint.
+        let holo_fresnel = mix(fresnel, spectral, 0.85);
+
+        // ── Specular highlight ──────────────────────────────────────────────
+        let spec_power = pow(ndh, 64.0);
+        let spec = holo_fresnel * spec_power * 2.0 * sh * sun;
+
+        // ── Ambient + diffuse ───────────────────────────────────────────────
+        let ambient_refl = spectral * base * hemi * 0.55 * ao_h * amb;
+        let direct = base * spectral * 0.20 * ndl * sh * sun * sc;
+
+        rgb = ambient_refl + direct + spec * sc;
     } else {
         // Plastic / rubber.
         let spec_blinn = pow(ndh, 32.0) * 0.12 * sh * sun;
@@ -436,7 +592,7 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
 
     out.color = vec4<f32>(rgb, glow_mask);
     let nn = n * 0.5 + 0.5;
-    let metalness = select(0.0, 1.0, is_metal);
+    let metalness = select(0.0, 1.0, is_metal || is_holo);
     out.gbuf_n = vec4<f32>(nn, metalness);
     return out;
 }
@@ -593,7 +749,7 @@ fn fs_preview_lit_occluded_mrt(in: VertexOut) -> OpaqueOut {
 
 @fragment
 fn fs_trans(in: VertexOut) -> @location(0) vec4<f32> {
-    if (in.mat_kind < 1.6) {
+    if (in.mat_kind < 1.95) {
         discard;
     }
     let v = normalize(g.cam_pos.xyz - in.world_pos);
@@ -642,7 +798,7 @@ struct OitOut {
 
 @fragment
 fn fs_oit_accum(in: VertexOut) -> OitOut {
-    if (in.mat_kind < 1.6) {
+    if (in.mat_kind < 1.95) {
         discard;
     }
     let v = normalize(g.cam_pos.xyz - in.world_pos);

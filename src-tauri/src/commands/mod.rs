@@ -1,0 +1,9 @@
+pub(crate) mod avatar;
+pub(crate) mod collab;
+pub(crate) mod edit;
+pub(crate) mod file_io;
+pub(crate) mod generators;
+pub(crate) mod sculpt;
+pub(crate) mod selection;
+pub(crate) mod viewport;
+pub(crate) use sculpt::SculptStrokeAtScreenArgs;

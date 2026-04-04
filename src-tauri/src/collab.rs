@@ -132,6 +132,8 @@ pub struct PingFlash {
     pub until: std::time::Instant,
     pub started: std::time::Instant,
     pub display_name: String,
+    /// Optional emoji reaction shown above the ping (e.g. "👍").
+    pub emoji: String,
 }
 
 /// An edit, undo, or redo request from a guest, queued for the host's main-thread
@@ -167,6 +169,7 @@ pub fn record_ping_flash_colored(
     z: i32,
     color_rgb: u32,
     display_name: String,
+    emoji: String,
 ) {
     let now = std::time::Instant::now();
     {
@@ -176,15 +179,16 @@ pub fn record_ping_flash_colored(
             y,
             z,
             color_rgb,
-            until: now + std::time::Duration::from_secs_f32(2.8),
+            until: now + std::time::Duration::from_secs_f32(7.0),
             started: now,
             display_name,
+            emoji,
         });
     }
 }
 
 /// Resolves accent color and display name from the roster. Do **not** call while holding [`ViewerState::collab`].
-pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i32) {
+pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i32, emoji: String) {
     let (color_rgb, display_name) = {
         let c = state.collab.lock();
         c.roster.iter().find(|r| r.peer_id == peer_id).map(|r| {
@@ -199,7 +203,7 @@ pub fn record_ping_flash(state: &ViewerState, peer_id: u32, x: i32, y: i32, z: i
         })
     }
     .unwrap_or((0xffff44, "Guest".to_string()));
-    record_ping_flash_colored(state, x, y, z, color_rgb, display_name);
+    record_ping_flash_colored(state, x, y, z, color_rgb, display_name, emoji);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -221,6 +225,8 @@ pub enum ClientToHost {
         x: i32,
         y: i32,
         z: i32,
+        #[serde(default)]
+        emoji: String,
     },
     Camera {
         presence: CameraPresence,
@@ -284,6 +290,8 @@ pub enum HostToClient {
         z: i32,
         #[serde(default)]
         display_name: String,
+        #[serde(default)]
+        emoji: String,
     },
     Camera {
         peer_id: u32,
@@ -400,6 +408,18 @@ impl CollabRuntime {
 
     pub fn is_client(&self) -> bool {
         matches!(self.role, CollabRole::Client)
+    }
+
+    /// True when we are a guest with `can_edit` granted by the host.
+    /// Returns `false` when not connected as a client (solo / host).
+    pub fn client_can_edit(&self) -> bool {
+        self.is_client()
+            && self
+                .roster
+                .iter()
+                .find(|r| r.peer_id == self.local_peer_id)
+                .map(|r| r.can_edit)
+                .unwrap_or(false)
     }
 
     pub fn leave(&mut self) {
@@ -694,7 +714,7 @@ fn replace_file_on_main<R: Runtime>(
     let app_mesh = app.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     let _ = app.run_on_main_thread(move || {
-        let r = crate::apply_mesh_and_camera(&state_apply, &app_mesh, file, prepared, false);
+        let r = crate::apply_mesh_and_camera(&state_apply, &app_mesh, file, prepared);
         let _ = tx.send(r);
     });
     let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
@@ -704,7 +724,6 @@ fn replace_file_on_main<R: Runtime>(
                 &app,
                 "collab snapshot".to_string(),
                 state_emit.as_ref(),
-                false,
             );
             Ok(())
         }
@@ -1457,8 +1476,8 @@ async fn handle_host_connection<R: Runtime>(
                 collab_mtx.lock().roster = roster.clone();
                 broadcast_roster_to_guests(&app, &collab_mtx, &roster);
             }
-            ClientToHost::Ping { x, y, z } => {
-                record_ping_flash(state.as_ref(), peer_id, x, y, z);
+            ClientToHost::Ping { x, y, z, emoji } => {
+                record_ping_flash(state.as_ref(), peer_id, x, y, z, emoji.clone());
                 let display_name = roster
                     .iter()
                     .find(|r| r.peer_id == peer_id)
@@ -1471,6 +1490,7 @@ async fn handle_host_connection<R: Runtime>(
                     y,
                     z,
                     display_name,
+                    emoji,
                 };
                 let json = serde_json::to_string(&ping).unwrap();
                 let _ = app.emit("collab-ping", &json);
@@ -2059,8 +2079,9 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 y,
                                 z,
                                 display_name: _,
+                                emoji,
                             } => {
-                                record_ping_flash(st4.as_ref(), pid, x, y, z);
+                                record_ping_flash(st4.as_ref(), pid, x, y, z, emoji);
                                 let _ = app4.emit("collab-ping", t);
                             }
                             HostToClient::Camera { peer_id, presence } => {

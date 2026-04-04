@@ -34,11 +34,14 @@ fn is_transmissive(m: MaterialId) -> bool {
     matches!(m, MaterialId::Glass | MaterialId::Water)
 }
 
-/// `mat_kind` per vertex: 0 plastic/rubber, 0.5 metal, 1 glow, 2 glass, 2.5 water.
+/// `mat_kind` per vertex: 0 plastic/rubber, 0.15 wax, 0.5 metal, 1 glow, 1.4 velvet, 1.75 holographic, 2 glass, 2.5 water.
 fn mat_kind_f32(m: MaterialId) -> f32 {
     match m {
+        MaterialId::Wax => 0.15,
         MaterialId::Metal => 0.5,
         MaterialId::Glow => 1.0,
+        MaterialId::Velvet => 1.4,
+        MaterialId::Holographic => 1.75,
         MaterialId::Glass => 2.0,
         MaterialId::Water => 2.5,
         _ => 0.0, // Plastic, Rubber
@@ -94,6 +97,9 @@ fn material_tag(m: MaterialId) -> u8 {
         MaterialId::Glass => 3,
         MaterialId::Water => 4,
         MaterialId::Glow => 5,
+        MaterialId::Velvet => 6,
+        MaterialId::Wax => 7,
+        MaterialId::Holographic => 8,
     }
 }
 
@@ -385,7 +391,7 @@ pub struct MeshBuffers {
 /// Reorder `mesh.indices` so opaque faces come first and transparent faces last.
 /// Returns the number of **opaque indices** (the split point).
 /// Each face is 6 indices (two triangles per quad).  A face is transparent when
-/// the first vertex's `mat_kind > 1.6` (glass = 2.0, water = 2.5).
+/// the first vertex's `mat_kind > 1.95` (glass = 2.0, water = 2.5).
 pub fn partition_indices_by_transparency(mesh: &mut MeshBuffers) -> u32 {
     const INDICES_PER_FACE: usize = 6;
     let face_count = mesh.indices.len() / INDICES_PER_FACE;
@@ -395,7 +401,7 @@ pub fn partition_indices_by_transparency(mesh: &mut MeshBuffers) -> u32 {
         let start = f * INDICES_PER_FACE;
         let end = start + INDICES_PER_FACE;
         let first_vert = mesh.indices[start] as usize;
-        if first_vert < mesh.mat_kind.len() && mesh.mat_kind[first_vert] > 1.6 {
+        if first_vert < mesh.mat_kind.len() && mesh.mat_kind[first_vert] > 1.95 {
             trans.extend_from_slice(&mesh.indices[start..end]);
         } else {
             opaque.extend_from_slice(&mesh.indices[start..end]);

@@ -216,7 +216,11 @@ const EDGE_PAIRS: [[usize; 2]; 12] = [
 
 fn mat_kind_for_material(m: MaterialId) -> f32 {
     match m {
+        MaterialId::Wax => 0.15,
+        MaterialId::Metal => 0.5,
         MaterialId::Glow => 1.0,
+        MaterialId::Velvet => 1.4,
+        MaterialId::Holographic => 1.75,
         MaterialId::Glass => 2.0,
         MaterialId::Water => 2.5,
         _ => 0.0,
@@ -961,6 +965,9 @@ fn bucket_key_parts(v: &Voxel) -> (u32, u8) {
         MaterialId::Glass => 3,
         MaterialId::Water => 4,
         MaterialId::Glow => 5,
+        MaterialId::Velvet => 6,
+        MaterialId::Wax => 7,
+        MaterialId::Holographic => 8,
     };
     (v.color, mat_tag)
 }

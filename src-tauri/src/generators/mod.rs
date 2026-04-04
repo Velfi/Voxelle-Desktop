@@ -33,6 +33,7 @@ pub use squishy_gizmo::{
 };
 pub use squishy_pick_rings::append_squishy_metaball_pick_rings;
 pub use squishy_session::{
-    pick_metaball_at_screen, squishy_add_ball_at_screen, squishy_commit_session,
-    voxel_coords_for_session_with_limit, Metaball, SquishyMode, SquishySession,
+    min_grid_size_for_balls, pick_metaball_at_screen, squishy_add_ball_at_screen,
+    squishy_commit_session, voxel_coords_for_session_with_limit, Metaball, SquishyMode,
+    SquishySession,
 };

@@ -35,7 +35,7 @@ struct ShadowVOut {
 }
 
 fn unpack_mat(packed: u32) -> u32 {
-    return (packed >> 24u) & 7u;
+    return (packed >> 24u) & 0xFu;
 }
 
 fn brick_fetch(ix: vec3<i32>) -> u32 {
@@ -70,7 +70,7 @@ fn march_slab_thickness(world: vec3<f32>, outward_normal: vec3<f32>) -> f32 {
 }
 
 fn glass_shadow_push(world: vec3<f32>, n: vec3<f32>, mat_kind: f32) -> f32 {
-    if (mat_kind < 1.6) { return 0.0; }
+    if (mat_kind < 1.95) { return 0.0; }
     let slab = march_slab_thickness(world, n);
     let abs_v = 0.16;
     let min_tv = 0.35;
