@@ -300,12 +300,12 @@ fn dda(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, skip_trans: bool, max_s
     let inv  = vec3<f32>(1.0 / dx, 1.0 / dy, 1.0 / dz);
     let tD   = abs(inv);
 
-    var cell = vec3<i32>(i32(floor(origin.x)), i32(floor(origin.y)), i32(floor(origin.z)));
+    var cell = vec3<i32>(i32(floor(origin.x + 0.5)), i32(floor(origin.y + 0.5)), i32(floor(origin.z + 0.5)));
 
     var tMax = vec3<f32>(
-        select((f32(cell.x)   - origin.x) * inv.x, (f32(cell.x+1) - origin.x) * inv.x, dx > 0.0),
-        select((f32(cell.y)   - origin.y) * inv.y, (f32(cell.y+1) - origin.y) * inv.y, dy > 0.0),
-        select((f32(cell.z)   - origin.z) * inv.z, (f32(cell.z+1) - origin.z) * inv.z, dz > 0.0),
+        select((f32(cell.x) - 0.5 - origin.x) * inv.x, (f32(cell.x) + 0.5 - origin.x) * inv.x, dx > 0.0),
+        select((f32(cell.y) - 0.5 - origin.y) * inv.y, (f32(cell.y) + 0.5 - origin.y) * inv.y, dy > 0.0),
+        select((f32(cell.z) - 0.5 - origin.z) * inv.z, (f32(cell.z) + 0.5 - origin.z) * inv.z, dz > 0.0),
     );
 
     var t      = 0.0;
@@ -694,11 +694,11 @@ fn march_to_exit(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i3
     let inv  = vec3<f32>(1.0 / dx, 1.0 / dy, 1.0 / dz);
     let tD   = abs(inv);
 
-    var cell = vec3<i32>(i32(floor(origin.x)), i32(floor(origin.y)), i32(floor(origin.z)));
+    var cell = vec3<i32>(i32(floor(origin.x + 0.5)), i32(floor(origin.y + 0.5)), i32(floor(origin.z + 0.5)));
     var tMax = vec3<f32>(
-        select((f32(cell.x)   - origin.x) * inv.x, (f32(cell.x+1) - origin.x) * inv.x, dx > 0.0),
-        select((f32(cell.y)   - origin.y) * inv.y, (f32(cell.y+1) - origin.y) * inv.y, dy > 0.0),
-        select((f32(cell.z)   - origin.z) * inv.z, (f32(cell.z+1) - origin.z) * inv.z, dz > 0.0),
+        select((f32(cell.x) - 0.5 - origin.x) * inv.x, (f32(cell.x) + 0.5 - origin.x) * inv.x, dx > 0.0),
+        select((f32(cell.y) - 0.5 - origin.y) * inv.y, (f32(cell.y) + 0.5 - origin.y) * inv.y, dy > 0.0),
+        select((f32(cell.z) - 0.5 - origin.z) * inv.z, (f32(cell.z) + 0.5 - origin.z) * inv.z, dz > 0.0),
     );
     var t      = 0.0;
     var normal = vec3<f32>(0.0, 1.0, 0.0);
@@ -1118,7 +1118,7 @@ const GLOW_FOG_STRENGTH: f32 = 0.55;
 fn fog_glow_at(p: vec3<f32>) -> vec3<f32> {
     let radius = select(5, 3, rt.fast_preview != 0u);
     let r2     = radius * radius;
-    let cell   = vec3<i32>(i32(floor(p.x)), i32(floor(p.y)), i32(floor(p.z)));
+    let cell   = vec3<i32>(i32(floor(p.x + 0.5)), i32(floor(p.y + 0.5)), i32(floor(p.z + 0.5)));
     var acc    = vec3<f32>(0.0);
     for (var dx = -radius; dx <= radius; dx++) {
         for (var dy = -radius; dy <= radius; dy++) {

@@ -1,5 +1,47 @@
 use crate::*;
 
+/// Build a mesh from a decoded voxelle file, respecting the current rendering mode.
+/// `is_stale` is polled during expensive smooth-mesh builds; returns `None` if cancelled.
+fn build_mesh_for_mode<C: Fn() -> bool>(
+    file: &voxelle::VoxelleFile,
+    mode: RenderingMode,
+    is_stale: C,
+) -> Option<(greedy_mesh::MeshBuffers, greedy_mesh::MeshBounds)> {
+    match mode {
+        RenderingMode::Greedy | RenderingMode::Ray => {
+            Some(greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects))
+        }
+        RenderingMode::MarchingCubes => {
+            let mesh = crate::smooth_mesh::build_marching_cubes_merged_cancellable(
+                &file.voxels,
+                |_, _, _| {},
+                &is_stale,
+            );
+            if is_stale() {
+                return None;
+            }
+            let bounds = greedy_mesh::mesh_bounds_from_voxels_world(&file.voxels, &file.objects)
+                .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&file.voxels))
+                .unwrap_or(greedy_mesh::mesh_bounds_for_cube_side(file.grid_size));
+            Some((mesh, bounds))
+        }
+        RenderingMode::DualContour => {
+            let mesh = crate::smooth_mesh::build_dual_contour_merged_cancellable(
+                &file.voxels,
+                |_, _, _| {},
+                &is_stale,
+            );
+            if is_stale() {
+                return None;
+            }
+            let bounds = greedy_mesh::mesh_bounds_from_voxels_world(&file.voxels, &file.objects)
+                .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&file.voxels))
+                .unwrap_or(greedy_mesh::mesh_bounds_for_cube_side(file.grid_size));
+            Some((mesh, bounds))
+        }
+    }
+}
+
 // ── Scene object commands ───────────────────────────────────────────────────
 
 #[derive(Clone, serde::Serialize)]
@@ -330,6 +372,7 @@ pub(crate) fn load_start_screen_logo(
 ) -> Result<(), String> {
     let state = Arc::clone(&*state);
     let app_err = app.clone();
+    let token = state.overlay_mesh_generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::Builder::new()
         .name("logo-load".into())
         .spawn(move || {
@@ -340,10 +383,22 @@ pub(crate) fn load_start_screen_logo(
                     return;
                 }
             };
-            let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let mode = *state.rendering_mode.lock();
+            let is_stale = {
+                let st = Arc::clone(&state);
+                move || st.overlay_mesh_generation.load(Ordering::Relaxed) != token
+            };
+            let Some((mesh, bounds)) = build_mesh_for_mode(&file, mode, is_stale) else {
+                log::info!(target: "voxelle_load", "logo mesh build cancelled (stale)");
+                return;
+            };
             let app_main = app_err.clone();
+            let state_up = Arc::clone(&state);
             let _ = app_err.run_on_main_thread(move || {
-                let mut v = state.viewer.lock();
+                if state_up.overlay_mesh_generation.load(Ordering::Relaxed) != token {
+                    return;
+                }
+                let mut v = state_up.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_logo_mesh(&mesh, bounds);
                     if let Some(logo) = viewer.logo_overlay.as_mut() {
@@ -371,6 +426,7 @@ pub(crate) fn mascot_load(
 ) -> Result<(), String> {
     let state = Arc::clone(&*state);
     let app_err = app.clone();
+    let token = state.overlay_mesh_generation.load(Ordering::SeqCst);
     std::thread::Builder::new()
         .name("mascot-load".into())
         .spawn(move || {
@@ -388,9 +444,19 @@ pub(crate) fn mascot_load(
                     return;
                 }
             };
-            let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let mode = *state.rendering_mode.lock();
+            let is_stale = {
+                let st = Arc::clone(&state);
+                move || st.overlay_mesh_generation.load(Ordering::Relaxed) != token
+            };
+            let Some((mesh, bounds)) = build_mesh_for_mode(&file, mode, is_stale) else {
+                return;
+            };
             let state_up = Arc::clone(&state);
             let _ = app_err.run_on_main_thread(move || {
+                if state_up.overlay_mesh_generation.load(Ordering::Relaxed) != token {
+                    return;
+                }
                 let mut v = state_up.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_mascot_mesh(id, &mesh, bounds);
@@ -433,6 +499,7 @@ pub(crate) fn mascot_load_embedded(
     };
     let state = Arc::clone(&*state);
     let app_err = app.clone();
+    let token = state.overlay_mesh_generation.load(Ordering::SeqCst);
     std::thread::Builder::new()
         .name("mascot-load-embedded".into())
         .spawn(move || {
@@ -443,11 +510,21 @@ pub(crate) fn mascot_load_embedded(
                     return;
                 }
             };
-            let (mesh, bounds) =
-                greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+            let mode = *state.rendering_mode.lock();
+            let is_stale = {
+                let st = Arc::clone(&state);
+                move || st.overlay_mesh_generation.load(Ordering::Relaxed) != token
+            };
+            let Some((mesh, bounds)) = build_mesh_for_mode(&file, mode, is_stale) else {
+                return;
+            };
+            let state_up = Arc::clone(&state);
             let app_main = app_err.clone();
             let _ = app_err.run_on_main_thread(move || {
-                let mut v = state.viewer.lock();
+                if state_up.overlay_mesh_generation.load(Ordering::Relaxed) != token {
+                    return;
+                }
+                let mut v = state_up.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_mascot_mesh(id, &mesh, bounds);
                     drop(v);

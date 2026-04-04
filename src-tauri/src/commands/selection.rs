@@ -573,6 +573,9 @@ fn selection_fill_flood_coords_blocking(
             Some(cancel),
         )
         .map_err(|_| "fill cancelled".to_string())?;
+        if large && !args.confirmed {
+            return Err("confirm_large_fill".to_string());
+        }
         if large {
             emit_work_progress(
                 app,

@@ -407,6 +407,14 @@ pub(crate) fn apply_rendering_mode(
     if let Some(viewer) = state.viewer.lock().as_mut() {
         viewer.set_raytrace_mode(matches!(mode, RenderingMode::Ray));
     }
+    // On the start screen, bump the overlay generation so in-flight smooth-mesh
+    // builds are cancelled, then tell the frontend to reload logo + mascots.
+    if !state.active_project.load(std::sync::atomic::Ordering::Relaxed) {
+        state
+            .overlay_mesh_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let _ = app.emit("voxelle-reload-start-screen-overlays", ());
+    }
     if mode.uses_smooth_surface() {
         // DC/MC mesh build can take many seconds; run it on a side thread so the
         // main thread stays responsive.  `schedule_opaque_mesh_refresh` handles

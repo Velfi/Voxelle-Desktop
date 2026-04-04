@@ -746,6 +746,7 @@ pub fn run() {
         hovered_extrude_axis: AtomicU8::new(255),
         start_screen_logo_transparent: std::sync::atomic::AtomicBool::new(true),
         start_screen_light: std::sync::atomic::AtomicBool::new(false),
+        overlay_mesh_generation: AtomicU64::new(0),
         viewport_cursor_debug_overlay: AtomicBool::new(false),
         show_grid_borders: AtomicBool::new(false),
         hovered_gizmo_axis: AtomicU8::new(255),
@@ -812,6 +813,9 @@ pub fn run() {
             } else if event.id() == "menu_save_as" {
                 let state: State<'_, Arc<ViewerState>> = app.state();
                 let _ = save_voxelle_as(state, app.clone());
+            } else if event.id() == "menu_close_project" {
+                let state = app.state::<Arc<ViewerState>>();
+                close_project_dialog(app.clone(), state.inner().clone());
             } else if event.id() == "menu_export_glb" {
                 let state: State<'_, Arc<ViewerState>> = app.state();
                 let _ = export_mesh_glb(state, app.clone());
@@ -1696,6 +1700,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         hovered_extrude_axis: AtomicU8::new(255),
         start_screen_logo_transparent: std::sync::atomic::AtomicBool::new(true),
         start_screen_light: std::sync::atomic::AtomicBool::new(false),
+        overlay_mesh_generation: AtomicU64::new(0),
         viewport_cursor_debug_overlay: AtomicBool::new(false),
         show_grid_borders: AtomicBool::new(false),
         hovered_gizmo_axis: AtomicU8::new(255),

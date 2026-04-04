@@ -449,7 +449,15 @@ pub(crate) fn unload_current_project<R: Runtime>(
     viewer.clear_ping_mesh();
     viewer.set_mood_params(&MoodParams::default());
     viewer.speech_bubbles.clear();
+    // Restore start-screen rendering state so the logo and mascots draw again.
+    viewer.set_start_screen_transparent(true);
+    if let Some(logo) = viewer.logo_overlay.as_mut() {
+        logo.visible = true;
+    }
     drop(v);
+    state
+        .start_screen_logo_transparent
+        .store(true, Ordering::Release);
 
     *state.last_scene_bounds.lock() = Some(prepared.bounds);
     *state.voxel_edit_stats_cache.lock() = None;

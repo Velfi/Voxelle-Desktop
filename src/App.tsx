@@ -1390,6 +1390,10 @@ function App() {
   /** True from flood-fill invoke start until it settles; mesh phases say "Applying edit…" not "Fill", so HUD can't rely on phase text alone. */
   const [fillOperationPending, setFillOperationPending] = useState(false);
   const fillOperationPendingRef = useRef(false);
+  /** Pending large-fill confirmation: stores the callback pair to resolve when user picks. */
+  const [pendingFillConfirm, setPendingFillConfirm] = useState<{
+    resolve: (confirmed: boolean) => void;
+  } | null>(null);
   const [fpsDisplayed, setFpsDisplayed] = useState(0);
   const [showFpsCounter, setShowFpsCounter] = useState(() => loadPreferences().showFpsCounter);
   const [pingMs, setPingMs] = useState<number | null>(null);
@@ -1406,12 +1410,14 @@ function App() {
   const [scaleDialogOpen, setScaleDialogOpen] = useState(false);
   const [scaleDialogFactor, setScaleDialogFactor] = useState(2);
   const [sidebarExpanded, setSidebarExpanded] = useState(() => {
-    if (typeof localStorage === "undefined") return false;
-    return localStorage.getItem(LS_SIDEBAR_EXPANDED) === "1";
+    if (typeof localStorage === "undefined") return true;
+    const stored = localStorage.getItem(LS_SIDEBAR_EXPANDED);
+    return stored === null ? true : stored === "1";
   });
   const [rightSidebarExpanded, setRightSidebarExpanded] = useState(() => {
-    if (typeof localStorage === "undefined") return false;
-    return localStorage.getItem(LS_RIGHT_SIDEBAR_EXPANDED) === "1";
+    if (typeof localStorage === "undefined") return true;
+    const stored = localStorage.getItem(LS_RIGHT_SIDEBAR_EXPANDED);
+    return stored === null ? true : stored === "1";
   });
   const [toolsPaneFloating, setToolsPaneFloating] = useState(() => {
     if (typeof localStorage === "undefined") return false;
@@ -1822,6 +1828,17 @@ function App() {
       listen("voxelle-open-new-project", () => {
         setNewProjectOpen(true);
       }),
+      listen("voxelle-project-closed", () => {
+        setPathLabel("");
+        setLoading(false);
+        setLoadProgress(0);
+        setLoadPhase("");
+        setLoadError(null);
+        setWorkBusy(false);
+        setSpeechBubbles([]);
+        setMood(defaultMoodState());
+        void invoke("load_start_screen_logo").catch(() => {});
+      }),
       listen("voxelle-collab-start-session", () => {
         if (collabActiveMenuRef.current) return;
         startHostMenuRef.current();
@@ -2001,6 +2018,10 @@ function App() {
         if (m === "greedy" || m === "marchingCubes" || m === "dualContour" || m === "ray") {
           localStorage.setItem(LS_RENDERING_MODE, m);
         }
+      }),
+      listen("voxelle-reload-start-screen-overlays", () => {
+        void invoke("load_start_screen_logo").catch(() => {});
+        void invoke("mascot_load_embedded", { id: 0, name: "seagull" }).catch(() => {});
       }),
       listen<string>("voxelle-menu-selection-mode", (e) => {
         const m = e.payload;
@@ -3163,41 +3184,66 @@ function App() {
     if (dispatch.kind === "edit") {
       const palette = selectedColorsRef.current;
       const multiColor = palette.length > 1;
-      return invoke("voxel_edit_at_screen", {
-        args: {
-          ...sharedArgs,
-          tool: dispatch.tool,
-          color: activeColorRef.current,
-          ...(multiColor
-            ? {
-                palette,
-                paintColorDistrib: paintColorDistribRef.current,
-                strokeSeed: currentStrokeSeedRef.current,
-              }
-            : {}),
-          material: activeMaterialRef.current,
-        },
-      })
-        .catch((e: unknown) => {
+      const editArgs = {
+        ...sharedArgs,
+        tool: dispatch.tool,
+        color: activeColorRef.current,
+        ...(multiColor
+          ? {
+              palette,
+              paintColorDistrib: paintColorDistribRef.current,
+              strokeSeed: currentStrokeSeedRef.current,
+            }
+          : {}),
+        material: activeMaterialRef.current,
+      };
+      return invoke("voxel_edit_at_screen", { args: editArgs })
+        .catch(async (e: unknown) => {
+          if (isFill && typeof e === "string" && e === "confirm_large_fill") {
+            if (await askFillConfirmation()) {
+              beginFillOperation();
+              return invoke("voxel_edit_at_screen", {
+                args: { ...editArgs, confirmed: true },
+              }).catch((e2: unknown) => {
+                console.error("[voxelle] voxel_edit_at_screen error", e2);
+              });
+            }
+            return;
+          }
           console.error("[voxelle] voxel_edit_at_screen error", e);
         })
         .finally(() => {
           if (isFill) endFillOperation();
         }) as Promise<void>;
     } else {
-      return invoke<number>("selection_stroke_at_screen", {
-        args: {
-          ...sharedArgs,
-          interaction: dispatch.interaction,
-          ...(strokeShiftKeyRef.current ? { combineModeOverride: "add" } : {}),
-        },
-      })
+      const selArgs = {
+        ...sharedArgs,
+        interaction: dispatch.interaction,
+        ...(strokeShiftKeyRef.current ? { combineModeOverride: "add" } : {}),
+      };
+      return invoke<number>("selection_stroke_at_screen", { args: selArgs })
         .then((n) => {
           if (n > 0) {
             void invoke<number>("selection_get_count").then((c) => setSelectionCount(c));
           }
         })
-        .catch(() => {})
+        .catch(async (e: unknown) => {
+          if (isFill && typeof e === "string" && e === "confirm_large_fill") {
+            if (await askFillConfirmation()) {
+              beginFillOperation();
+              return invoke<number>("selection_stroke_at_screen", {
+                args: { ...selArgs, confirmed: true },
+              })
+                .then((n) => {
+                  if (n > 0) {
+                    void invoke<number>("selection_get_count").then((c) => setSelectionCount(c));
+                  }
+                })
+                .catch(() => {});
+            }
+            return;
+          }
+        })
         .finally(() => {
           if (isFill) endFillOperation();
         });
@@ -3488,6 +3534,18 @@ function App() {
   function endFillOperation() {
     fillOperationPendingRef.current = false;
     setFillOperationPending(false);
+  }
+
+  /** Show a non-blocking React confirmation modal and resolve true/false. */
+  function askFillConfirmation(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      setPendingFillConfirm({
+        resolve: (confirmed: boolean) => {
+          setPendingFillConfirm(null);
+          resolve(confirmed);
+        },
+      });
+    });
   }
 
   useLayoutEffect(() => {
@@ -11147,6 +11205,30 @@ function App() {
             .catch(() => {});
         }}
       />
+      {pendingFillConfirm && (
+        <div
+          className="modal-overlay"
+          role="dialog"
+          aria-modal="true"
+          tabIndex={-1}
+          onKeyDown={(e) => {
+            if (e.key === "Escape") pendingFillConfirm.resolve(false);
+          }}
+        >
+          <div className="modal">
+            <h3>Large fill</h3>
+            <p style={{ fontSize: "0.85rem", margin: "0 0 0.75rem" }}>
+              This fill covers a large area and may take a while. Continue?
+            </p>
+            <div className="modal-buttons">
+              <button onClick={() => pendingFillConfirm.resolve(true)} autoFocus>
+                Fill
+              </button>
+              <button onClick={() => pendingFillConfirm.resolve(false)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
       <PreferencesModal
         open={preferencesOpen}
         onClose={() => setPreferencesOpen(false)}

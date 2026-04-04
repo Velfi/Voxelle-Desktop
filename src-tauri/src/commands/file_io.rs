@@ -598,6 +598,98 @@ pub(crate) fn open_voxelle_dialog(state: State<'_, Arc<ViewerState>>, app: AppHa
     Ok(())
 }
 
+// ── Close project (return to start screen) ────────────────────────────────
+
+/// Performs the unload + emit so the frontend returns to the start screen.
+fn finish_close_project(state: &Arc<ViewerState>, app: &AppHandle) {
+    *state.file_label.lock() = String::new();
+    if let Err(e) = run_unload_on_main_thread(state, app) {
+        log::error!(target: "voxelle_load", "close_project unload failed: {e}");
+    }
+    let _ = app.emit("voxelle-project-closed", ());
+}
+
+/// Show a "Save your changes?" dialog, then unload and return to the start screen.
+/// Called from the File → Close Project menu item.
+pub(crate) fn close_project_dialog(app: AppHandle, state: Arc<ViewerState>) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+
+    // Nothing to close — already on the start screen.
+    if !state.active_project.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    let label = state.file_label.lock().clone();
+    let is_named = !label.starts_with("New project") && label.ends_with(".voxelle");
+
+    let app_d = app.clone();
+    let state_d = Arc::clone(&state);
+    let mut builder = app
+        .dialog()
+        .message("Do you want to save changes before closing?")
+        .title("Close Project")
+        .kind(MessageDialogKind::Warning)
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Save".into(),
+            "Don\u{2019}t Save".into(),
+        ));
+    if let Some(window) = app.get_webview_window("main") {
+        builder = builder.parent(&window);
+    }
+    builder.show(move |save| {
+        if save {
+            // User chose "Save".
+            if is_named {
+                // Named file — save in place, then close.
+                let path = std::path::Path::new(label.as_str());
+                if let Err(e) = write_voxelle_file_to_path(Some(&app_d), &state_d, path) {
+                    let _ = app_d.emit("voxelle-load-error", e);
+                    return;
+                }
+                persist_last_document_path(&app_d, &label);
+                finish_close_project(&state_d, &app_d);
+            } else {
+                // Unsaved / new project — show Save As dialog first.
+                let app_sa = app_d.clone();
+                let state_sa = Arc::clone(&state_d);
+                let mut sa_builder = app_d
+                    .dialog()
+                    .file()
+                    .add_filter("Voxelle", &["voxelle"])
+                    .set_file_name("untitled.voxelle");
+                if let Some(window) = app_d.get_webview_window("main") {
+                    sa_builder = sa_builder.set_parent(&window);
+                }
+                sa_builder.save_file(move |file_path| {
+                    let Some(file_path) = file_path else {
+                        // User cancelled the Save As dialog — abort close.
+                        return;
+                    };
+                    let Ok(path) = file_path.into_path() else {
+                        let _ = app_sa.emit("voxelle-load-error", "could not resolve save path");
+                        return;
+                    };
+                    if let Err(e) = write_voxelle_file_to_path(Some(&app_sa), &state_sa, &path) {
+                        let _ = app_sa.emit("voxelle-load-error", e);
+                        return;
+                    }
+                    let s = path.to_string_lossy().to_string();
+                    persist_last_document_path(&app_sa, &s);
+                    persist_recent_file(&app_sa, &s);
+                    #[cfg(desktop)]
+                    if let Some(rm) = app_sa.try_state::<RecentMenuState>() {
+                        rebuild_recent_submenu(&app_sa, &rm.submenu);
+                    }
+                    finish_close_project(&state_sa, &app_sa);
+                });
+            }
+        } else {
+            // User chose "Don't Save" — close without saving.
+            finish_close_project(&state_d, &app_d);
+        }
+    });
+}
+
 // ── Tauri commands: new project ─────────────────────────────────────────────
 
 pub(crate) const MAX_GRID_SIZE: u32 = 256;

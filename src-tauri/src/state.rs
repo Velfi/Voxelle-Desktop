@@ -602,6 +602,8 @@ pub struct ViewerState {
     pub start_screen_logo_transparent: std::sync::atomic::AtomicBool,
     /// Cold-start gradient: light (paper) vs dark — synced from webview appearance preference.
     pub start_screen_light: std::sync::atomic::AtomicBool,
+    /// Bumps when start-screen overlay meshes (logo, mascots) need rebuilding; stale builds are discarded.
+    pub overlay_mesh_generation: AtomicU64,
     /// **Debug → Viewport cursor debug overlay**: use bright red ray-hover preview (menu + webview).
     pub viewport_cursor_debug_overlay: AtomicBool,
     /// **View → Show borders**: per-voxel cell wireframe (matches web `showGrid` / `gridLines.ts`).
