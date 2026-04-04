@@ -256,34 +256,7 @@ impl WgpuViewer {
         (true, perf)
     }
 
-    /// Run [`gpu::mesh_greedy`] compute: fills [`MeshGreedyPool`] scratch; read back vertex/index counts.
-    /// Does not copy to draw buffers — see [`Self::upload_or_replace_chunk_mesh_from_gpu_scratch`] or full rebuild path.
-    ///
-    /// For the scene voxel brick buffer, call sites use [`Self::mesh_greedy_dispatch`] so `brick_storage` can be `&self.brick_buffer` with disjoint field borrows.
-    pub fn run_mesh_greedy_compute_with_brick(
-        &mut self,
-        headers: &[greedy_mesh::GpuSliceHeader],
-        bits: &[u32],
-        mesh_brick_origin: IVec3,
-        mesh_brick_dims: (u32, u32, u32),
-        brick_storage: &wgpu::Buffer,
-    ) -> Result<(u32, u32), String> {
-        Self::mesh_greedy_dispatch(
-            &self.device,
-            &self.queue,
-            &mut self.mesh_greedy_pool,
-            &mut self.mesh_greedy_bind_layout,
-            &mut self.mesh_greedy_pipeline,
-            &mut self.mesh_greedy_pl_version,
-            brick_storage,
-            headers,
-            bits,
-            mesh_brick_origin,
-            mesh_brick_dims,
-        )
-    }
-
-    /// Same as [`Self::run_mesh_greedy_compute_with_brick`], but allows `brick_storage == self.brick_buffer` via disjoint `&mut self.*` borrows at the call site.
+    /// Run [`gpu::mesh_greedy`] compute via disjoint `&mut self.*` borrows so `brick_storage == self.brick_buffer` works.
     pub(crate) fn mesh_greedy_dispatch(
         device: &wgpu::Device,
         queue: &wgpu::Queue,

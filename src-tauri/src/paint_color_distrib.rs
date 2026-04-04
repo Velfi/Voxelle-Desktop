@@ -160,11 +160,6 @@ fn bayer_threshold(size: u32, x: i32, y: i32) -> f32 {
     }
 }
 
-fn ordered_dither_t(t: f32, x: i32, y: i32, size: u32, strength: f32) -> f32 {
-    let th = bayer_threshold(size, x, y);
-    (t + (th - 0.5) * 2.0 * strength).clamp(0.0, 1.0)
-}
-
 // ── Serde types ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]

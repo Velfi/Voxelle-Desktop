@@ -112,26 +112,6 @@ pub(crate) fn mood_settings_to_params(m: &voxelle::MoodSettings) -> MoodParams {
     }
 }
 
-impl PreviewMode {
-    /// Returns the corresponding edit tool for modes that use the brush preview
-    /// (Add, Remove, Paint).  All other modes are handled by dedicated early-return
-    /// paths in `prepare_preview_mesh` and should never need this.
-    fn brush_edit_tool(self) -> Option<voxel_edit::EditTool> {
-        match self {
-            Self::Add => Some(voxel_edit::EditTool::Add),
-            Self::Remove => Some(voxel_edit::EditTool::Remove),
-            Self::Paint => Some(voxel_edit::EditTool::Paint),
-            Self::Navigate
-            | Self::Fly
-            | Self::Select
-            | Self::SelectExtrude
-            | Self::Squishy
-            | Self::Stamp
-            | Self::Punch => None,
-        }
-    }
-}
-
 /// Hover preview uses the same brush/stroke inputs as [`voxel_edit_at_screen`] / [`voxel_stroke_preview_at_screen`].
 #[derive(Clone, Debug)]
 pub(crate) struct PreviewHoverContext {
@@ -148,8 +128,6 @@ pub(crate) struct PreviewHoverContext {
     match_material: bool,
     /// When false (e.g. sculpt), hover uses the legacy single-cell preview.
     use_brush_preview: bool,
-    /// Symmetry bitmask for mirrored brush preview: bit 0 = X, bit 1 = Y, bit 2 = Z.
-    mirror_axes: u8,
     /// `Some("rope" | "cloth" | "rocks" | "grass")` when the generator tool is active (webview sync).
     generator_kind: Option<String>,
     generator_rope_first_nx: Option<f32>,
@@ -306,7 +284,6 @@ impl Default for PreviewHoverContext {
             material: String::new(),
             match_material: false,
             use_brush_preview: true,
-            mirror_axes: 0,
             generator_kind: None,
             generator_rope_first_nx: None,
             generator_rope_first_ny: None,

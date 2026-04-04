@@ -1,9 +1,23 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check } from "@tauri-apps/plugin-updater";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useFlyMode } from "./hooks/useFlyMode";
+import { useViewportPointer } from "./hooks/useViewportPointer";
+import { useWalkMode } from "./hooks/useWalkMode";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+import { useTauriEventListeners, type SelectionCombineModeApi } from "./hooks/useTauriEventListeners";
+import {
+  useRocksGenerator,
+  useGrassGenerator,
+  useAshlarGenerator,
+  useFloraGenerator,
+  usePiscinaGenerator,
+  useInsectaGenerator,
+  useFaunaGenerator,
+  useRopeClothGenerator,
+  useRoofGenerator,
+} from "./hooks/useGeneratorState";
 import { MascotView } from "./MascotView";
 import { SpeechBubbleOverlay, type BubbleInfo } from "./SpeechBubbleOverlay";
 import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
@@ -11,7 +25,7 @@ import { JoinSessionModal } from "./JoinSessionModal";
 import { PreferencesModal } from "./PreferencesModal";
 import { StampBookModal } from "./StampBookModal";
 import type { StampBookEntryTuple } from "./stampBookStorage";
-import { loadRecentJoinUrls, rememberJoinedUrl } from "./joinRecent";
+import { loadRecentJoinUrls } from "./joinRecent";
 import {
   applyAppearanceToDocument,
   autosaveSettingsInvokeArgs,
@@ -29,7 +43,6 @@ import {
   deriveSelectionMethod,
   getStrokeDispatch,
   selectionMethodToState,
-  strokeModeSkipsDrag,
   type DrawStrokeModeApi,
   type PlaneAxisApi,
   type StrokeDrawStyle,
@@ -43,19 +56,19 @@ import { ViewportCameraHud } from "./ViewportCameraHud";
 import { useStrokePhase } from "./useStrokePhase";
 import { SelectionGizmo, type SelectionGizmoRef } from "./SelectionGizmo";
 import { ExtrudeGizmo, type ExtrudeGizmoRef } from "./ExtrudeGizmo";
-import RadialPingMenu, { RADIAL_HOLD_MS } from "./RadialPingMenu";
+import RadialPingMenu from "./RadialPingMenu";
+import GamepadRadialMenu from "./GamepadRadialMenu";
+import VirtualCursor from "./VirtualCursor";
+import { useGamepad } from "./useGamepad";
+import { toolSliceToMode, type SubOptionChoice } from "./gamepadRadialMenuData";
 import { PingArrowIndicator } from "./PingArrowIndicator";
-import { ViewportSettingsSidebar } from "./ViewportSettingsSidebar";
+import { ToolsSidebar, PaletteSwatches } from "./ToolsSidebar";
 import { generateIdea } from "./ideaGenerator";
 import packageJson from "../package.json";
 import type {
-  CuboidPlaneGeo,
   DepthPhaseData,
   MoodState,
-  PaintColorMode,
-  FbmParams,
-  GradientParams,
-  DitherParams,
+
   PaintColorDistrib,
   ViewportCursorDebugPayload,
   ViewportCursorDebugScreen,
@@ -69,7 +82,6 @@ import type {
   SculptStrokeModeApi,
   TerrainSculptOpApi,
   GeneratorKindId,
-  ClothGravityDirectionId,
   BrushShape,
   SculptBrushShapeUi,
   WallAreaShapeApi,
@@ -89,17 +101,12 @@ import {
   LS_PALETTE_FLOAT_SIZE,
   LS_VIEWPORT_CURSOR_DEBUG,
   LS_PAINT_COLOR_DISTRIB,
-  CHAT_TOAST_CAP,
-  PING_HUD_MS,
-  MATERIAL_OPTIONS,
   SCULPT_BRUSH_MAX_INDEX,
   loadPaintColorDistrib,
   layoutViewportCssSize,
   viewportCursorOverlayPercent,
-  playPingSound,
   playSeagullSpeech,
   basename,
-  userFacingUpdaterError,
   lastProjectReopenBlurb,
   sculptBrushShapeToRust,
 } from "./constants";
@@ -112,479 +119,6 @@ const VOXELLE_DESKTOP_VERSION = packageJson.version;
 
 /** Avoid duplicate `load_start_screen_logo` in React Strict Mode (dev). */
 let startScreenLogoInvokeSent = false;
-
-/** Multi-color paint distribution settings panel (shown when ≥2 palette colors selected). */
-function MultiColorPaintSection(props: {
-  distrib: PaintColorDistrib;
-  setDistrib: (d: PaintColorDistrib) => void;
-}) {
-  const { distrib, setDistrib } = props;
-  const patch = (part: Partial<PaintColorDistrib>) => setDistrib({ ...distrib, ...part });
-  const patchFbm = (part: Partial<FbmParams>) => patch({ fbm: { ...distrib.fbm, ...part } });
-  const patchGrad = (part: Partial<GradientParams>) =>
-    patch({ gradient: { ...distrib.gradient, ...part } });
-  const patchDither = (part: Partial<DitherParams>) =>
-    patch({ dither: { ...distrib.dither, ...part } });
-  return (
-    <div className="multi-color-section">
-      <div className="sidebar-section-label">
-        Color distribution
-        {distrib.mode !== "whiteNoise" && distrib.mode !== "randomSingle"
-          ? ` · ${distrib.mode === "fbmNoise" ? "FBM" : distrib.mode === "gradient" ? "Gradient" : "Dither"}`
-          : ""}
-      </div>
-      <div className="sidebar-row">
-        <label className="sidebar-label-sm">Mode</label>
-        <select
-          className="sidebar-select-sm"
-          value={distrib.mode}
-          onChange={(e) => patch({ mode: e.target.value as PaintColorMode })}
-        >
-          <option value="whiteNoise">White noise</option>
-          <option value="randomSingle">Single random per stroke</option>
-          <option value="fbmNoise">FBM noise</option>
-          <option value="gradient">Gradient</option>
-          <option value="dither">Dither</option>
-        </select>
-      </div>
-      {distrib.mode === "fbmNoise" && (
-        <>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Octaves {distrib.fbm.octaves}</label>
-            <input
-              type="range"
-              min={1}
-              max={12}
-              step={1}
-              value={distrib.fbm.octaves}
-              onChange={(e) => patchFbm({ octaves: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Frequency {distrib.fbm.frequency.toFixed(2)}</label>
-            <input
-              type="range"
-              min={0.02}
-              max={0.8}
-              step={0.01}
-              value={distrib.fbm.frequency}
-              onChange={(e) => patchFbm({ frequency: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Lacunarity {distrib.fbm.lacunarity.toFixed(2)}
-            </label>
-            <input
-              type="range"
-              min={1.5}
-              max={3.5}
-              step={0.05}
-              value={distrib.fbm.lacunarity}
-              onChange={(e) => patchFbm({ lacunarity: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Persistence {distrib.fbm.persistence.toFixed(2)}
-            </label>
-            <input
-              type="range"
-              min={0.1}
-              max={1}
-              step={0.05}
-              value={distrib.fbm.persistence}
-              onChange={(e) => patchFbm({ persistence: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              <input
-                type="checkbox"
-                checked={distrib.fbm.quantized}
-                onChange={(e) => patchFbm({ quantized: e.target.checked })}
-              />{" "}
-              Quantized (palette steps)
-            </label>
-          </div>
-        </>
-      )}
-      {distrib.mode === "gradient" && (
-        <>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Kind</label>
-            <select
-              className="sidebar-select-sm"
-              value={distrib.gradient.kind}
-              onChange={(e) => patchGrad({ kind: e.target.value as "linear" | "radial" })}
-            >
-              <option value="linear">Linear</option>
-              <option value="radial">Radial</option>
-            </select>
-          </div>
-          {distrib.gradient.kind === "linear" && (
-            <div className="sidebar-row">
-              <label className="sidebar-label-sm">Axis</label>
-              <select
-                className="sidebar-select-sm"
-                value={distrib.gradient.linearAxis}
-                onChange={(e) => patchGrad({ linearAxis: Number(e.target.value) as 0 | 1 | 2 })}
-              >
-                <option value={0}>X</option>
-                <option value={1}>Y</option>
-                <option value={2}>Z</option>
-              </select>
-            </div>
-          )}
-          {distrib.gradient.kind === "radial" && (
-            <div className="sidebar-row sidebar-row-inline">
-              <label className="sidebar-label-sm">Center</label>
-              {(["X", "Y", "Z"] as const).map((axis, i) => (
-                <label key={axis} className="sidebar-label-sm">
-                  {axis}
-                  <input
-                    type="number"
-                    className="sidebar-number-sm"
-                    style={{ width: "3.5rem" }}
-                    value={distrib.gradient.radialCenter[i]}
-                    onChange={(e) => {
-                      const c = [...distrib.gradient.radialCenter] as [number, number, number];
-                      c[i] = Number(e.target.value);
-                      patchGrad({ radialCenter: c });
-                    }}
-                  />
-                </label>
-              ))}
-            </div>
-          )}
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Scale {distrib.gradient.scale.toFixed(3)}</label>
-            <input
-              type="range"
-              min={0.01}
-              max={0.5}
-              step={0.005}
-              value={distrib.gradient.scale}
-              onChange={(e) => patchGrad({ scale: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Phase {distrib.gradient.phase.toFixed(2)}</label>
-            <input
-              type="range"
-              min={-3.15}
-              max={3.15}
-              step={0.05}
-              value={distrib.gradient.phase}
-              onChange={(e) => patchGrad({ phase: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              <input
-                type="checkbox"
-                checked={distrib.gradient.quantized}
-                onChange={(e) => patchGrad({ quantized: e.target.checked })}
-              />{" "}
-              Quantized (palette steps)
-            </label>
-          </div>
-        </>
-      )}
-      {distrib.mode === "dither" && (
-        <>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Bayer size</label>
-            <select
-              className="sidebar-select-sm"
-              value={distrib.dither.orderedSize}
-              onChange={(e) =>
-                patchDither({
-                  orderedSize: Number(e.target.value) as 2 | 4 | 8,
-                })
-              }
-            >
-              <option value={2}>2×2</option>
-              <option value={4}>4×4</option>
-              <option value={8}>8×8</option>
-            </select>
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">
-              Strength {distrib.dither.orderedStrength.toFixed(2)}
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={distrib.dither.orderedStrength}
-              onChange={(e) => patchDither({ orderedStrength: Number(e.target.value) })}
-            />
-          </div>
-          <div className="sidebar-row">
-            <label className="sidebar-label-sm">Error diffusion</label>
-            <select
-              className="sidebar-select-sm"
-              value={distrib.dither.errorDiffusion}
-              onChange={(e) =>
-                patchDither({
-                  errorDiffusion: e.target.value as "none" | "floydSteinberg",
-                })
-              }
-            >
-              <option value="none">None (ordered only)</option>
-              <option value="floydSteinberg">Floyd–Steinberg</option>
-            </select>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-/** Palette swatch grid with multi-select support (click, shift+click, drag, shift+drag). */
-function PaletteSwatches(props: {
-  activeColor: number;
-  selectedColors: number[];
-  setActiveColor: (n: number) => void;
-  setSelectedColors: (c: number[]) => void;
-  disabled: boolean;
-  palette: readonly string[];
-}) {
-  const { activeColor, selectedColors, setActiveColor, setSelectedColors, disabled, palette } =
-    props;
-  const dragStartIdxRef = useRef<number | null>(null);
-  const isDraggingRef = useRef(false);
-  const shiftHeldRef = useRef(false);
-
-  function getSwatchIndex(el: Element): number {
-    const idx = el.getAttribute("data-idx");
-    return idx !== null ? Number(idx) : -1;
-  }
-
-  function selectRange(lo: number, hi: number, baseColors?: number[]): number[] {
-    const [a, b] = lo <= hi ? [lo, hi] : [hi, lo];
-    const rangeRgbs = palette.slice(a, b + 1).map((hex) => Number.parseInt(hex.slice(1), 16));
-    if (baseColors) {
-      const merged = new Set([...baseColors, ...rangeRgbs]);
-      return Array.from(merged);
-    }
-    return rangeRgbs;
-  }
-
-  function handlePointerDown(e: React.PointerEvent<HTMLDivElement>) {
-    if (disabled) return;
-    const target = (e.target as HTMLElement).closest("[data-idx]");
-    if (!target) return;
-    const idx = getSwatchIndex(target);
-    if (idx < 0) return;
-    shiftHeldRef.current = e.shiftKey;
-    isDraggingRef.current = false;
-    dragStartIdxRef.current = idx;
-    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
-  }
-
-  function handlePointerMove(e: React.PointerEvent<HTMLDivElement>) {
-    if (disabled || dragStartIdxRef.current === null) return;
-    const target = document.elementFromPoint(e.clientX, e.clientY);
-    if (!target) return;
-    const swatchEl = target.closest("[data-idx]");
-    if (!swatchEl) return;
-    const idx = getSwatchIndex(swatchEl);
-    if (idx < 0) return;
-    isDraggingRef.current = true;
-    const newRange = selectRange(
-      dragStartIdxRef.current,
-      idx,
-      shiftHeldRef.current ? selectedColors : undefined,
-    );
-    setSelectedColors(newRange);
-  }
-
-  function handlePointerUp(e: React.PointerEvent<HTMLDivElement>) {
-    if (disabled || dragStartIdxRef.current === null) return;
-    const startIdx = dragStartIdxRef.current;
-    dragStartIdxRef.current = null;
-    if (!isDraggingRef.current) {
-      // Single click
-      const rgb = Number.parseInt(palette[startIdx]!.slice(1), 16);
-      if (e.shiftKey) {
-        // Toggle in selected list
-        const alreadySelected = selectedColors.includes(rgb);
-        if (alreadySelected) {
-          const next = selectedColors.filter((c) => c !== rgb);
-          setSelectedColors(next);
-        } else {
-          setSelectedColors([...selectedColors, rgb]);
-        }
-      } else {
-        // Plain click: clear multi-select, set single color
-        setSelectedColors([]);
-        setActiveColor(rgb);
-      }
-    }
-    isDraggingRef.current = false;
-  }
-
-  const selectedSet = new Set(selectedColors);
-
-  return (
-    <div
-      className={`sidebar-palette-swatches${disabled ? " is-disabled" : ""}`}
-      role="group"
-      aria-label="Material color palette (shift+click or drag to multi-select)"
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-    >
-      {palette.map((hex, idx) => {
-        const rgb = Number.parseInt(hex.slice(1), 16);
-        const isActive = selectedColors.length === 0 && (activeColor & 0xffffff) === rgb;
-        const isSelected = selectedSet.has(rgb);
-        let cls = "sidebar-palette-swatch";
-        if (isActive) cls += " is-active";
-        if (isSelected) cls += " is-selected";
-        return (
-          <div
-            key={hex}
-            data-idx={idx}
-            className={cls}
-            style={{ backgroundColor: hex }}
-            title={`${hex}${isSelected ? " (selected)" : ""}`}
-            role="button"
-            aria-pressed={isActive || isSelected}
-            aria-label={`Color ${hex}`}
-          />
-        );
-      })}
-    </div>
-  );
-}
-
-function SymmetryColorSidebarSections(props: {
-  loading: boolean;
-  workBusy: boolean;
-  activeColor: number;
-  setActiveColor: (n: number) => void;
-  selectedColors: number[];
-  setSelectedColors: (c: number[]) => void;
-  paintColorDistrib: PaintColorDistrib;
-  setPaintColorDistrib: (d: PaintColorDistrib) => void;
-  interactionMode: InteractionMode;
-  setInteractionMode: (m: InteractionMode) => void;
-  mirrorX: boolean;
-  setMirrorX: (v: boolean) => void;
-  mirrorY: boolean;
-  setMirrorY: (v: boolean) => void;
-  mirrorZ: boolean;
-  setMirrorZ: (v: boolean) => void;
-}) {
-  const {
-    loading,
-    workBusy,
-    activeColor,
-    setActiveColor,
-    selectedColors,
-    setSelectedColors,
-    paintColorDistrib,
-    setPaintColorDistrib,
-    interactionMode,
-    setInteractionMode,
-    mirrorX,
-    setMirrorX,
-    mirrorY,
-    setMirrorY,
-    mirrorZ,
-    setMirrorZ,
-  } = props;
-  return (
-    <div className="sidebar-symmetry-color-panel">
-      <div className="sidebar-section-label">Symmetry</div>
-      <div className="sidebar-mode-grid sidebar-mode-grid-3">
-        <button
-          type="button"
-          className={mirrorX ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-          onClick={() => setMirrorX(!mirrorX)}
-          title="Mirror across X axis"
-        >
-          <span className="sidebar-mode-label">X</span>
-        </button>
-        <button
-          type="button"
-          className={mirrorY ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-          onClick={() => setMirrorY(!mirrorY)}
-          title="Mirror across Y axis"
-        >
-          <span className="sidebar-mode-label">Y</span>
-        </button>
-        <button
-          type="button"
-          className={mirrorZ ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
-          onClick={() => setMirrorZ(!mirrorZ)}
-          title="Mirror across Z axis"
-        >
-          <span className="sidebar-mode-label">Z</span>
-        </button>
-      </div>
-
-      <div className="sidebar-color-stack">
-        <div className="sidebar-section-label">Color</div>
-        <div className="sidebar-color-row">
-          <label className="sidebar-palette-row sidebar-color-swatch">
-            <input
-              type="color"
-              value={`#${activeColor.toString(16).padStart(6, "0")}`}
-              onChange={(ev) => {
-                const h = ev.target.value.slice(1);
-                const n = Number.parseInt(h, 16);
-                if (!Number.isNaN(n)) setActiveColor(n);
-              }}
-              disabled={loading || workBusy}
-              aria-label="Brush color"
-            />
-          </label>
-          <button
-            type="button"
-            className={
-              interactionMode === "eyedropper" ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
-            }
-            disabled={loading || workBusy}
-            onClick={() => setInteractionMode("eyedropper")}
-          >
-            <span className="sidebar-mode-label">Eyedropper</span>
-          </button>
-        </div>
-        {selectedColors.length > 0 && (
-          <div className="multi-color-hint">
-            {selectedColors.length} colors selected
-            {selectedColors.length > 1 &&
-              ` · ${paintColorDistrib.mode === "whiteNoise" ? "white noise" : paintColorDistrib.mode === "randomSingle" ? "random single" : paintColorDistrib.mode === "fbmNoise" ? "FBM" : paintColorDistrib.mode === "gradient" ? "gradient" : "dither"}`}
-            <button
-              type="button"
-              className="multi-color-clear-btn"
-              onClick={() => setSelectedColors([])}
-              title="Clear multi-color selection"
-            >
-              ✕
-            </button>
-          </div>
-        )}
-        <PaletteSwatches
-          activeColor={activeColor}
-          selectedColors={selectedColors}
-          setActiveColor={setActiveColor}
-          setSelectedColors={setSelectedColors}
-          disabled={loading || workBusy}
-          palette={MATERIAL_BUILTIN_PALETTE_HEX}
-        />
-        {selectedColors.length > 1 && (
-          <MultiColorPaintSection distrib={paintColorDistrib} setDistrib={setPaintColorDistrib} />
-        )}
-      </div>
-    </div>
-  );
-}
 
 function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -640,22 +174,9 @@ function App() {
   const collabActiveMenuRef = useRef(false);
   const startHostMenuRef = useRef<() => void>(() => {});
   const leaveSessionMenuRef = useRef<() => void>(() => {});
-  const keysDownRef = useRef<Set<string>>(new Set());
-  const flyRafRef = useRef<number>(0);
-  /** True while fly mouse-look is active (pointer capture + Tauri grab / cursor warp for infinite look). */
-  const flyMouseLookActiveRef = useRef(false);
-  /** `pointerId` passed to `setPointerCapture` while mouselook is on; cleared on release. */
-  const flyCapturedPointerIdRef = useRef<number | null>(null);
-  /** Last client coords (CSS px) for fallback when movementX/Y are zero; never store viewport center unless the cursor is there. */
-  const flyLastClientRef = useRef<{ x: number; y: number } | null>(null);
-  /** Ignore one pointermove after programmatic cursor recenter (avoids treating the warp as a huge delta). */
-  const flySkipNextFlyMoveRef = useRef(false);
-  /** Physical-pixel look deltas coalesced per animation frame (pointermove IPC was starving RAF and inflating fly dt). */
+  /** Physical-pixel look deltas coalesced per animation frame (shared between useFlyMode, useWalkMode, and useGamepad). */
   const flyPendingLookDxRef = useRef(0);
   const flyPendingLookDyRef = useRef(0);
-  const [flySpeed, setFlySpeed] = useState<1 | 2 | 4>(1);
-  const flySpeedRef = useRef<1 | 2 | 4>(1);
-  flySpeedRef.current = flySpeed;
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("navigate");
   const [mood, setMood] = useState<MoodState>(() => defaultMoodState());
   const [selectionCount, setSelectionCount] = useState(0);
@@ -711,7 +232,6 @@ function App() {
   /** Selection fill (web `fillSelectDiagonals` / `fillRespectsColor`). */
   const [fillSelectDiagonals, setFillSelectDiagonals] = useState(false);
   const [fillRespectsColor, setFillRespectsColor] = useState(true);
-  type SelectionCombineModeApi = "replace" | "add" | "subtract" | "intersect";
   const [selectionCombineMode, setSelectionCombineMode] =
     useState<SelectionCombineModeApi>("replace");
   const fillSelectDiagonalsRef = useRef(false);
@@ -818,357 +338,8 @@ function App() {
   const [extrusionDepthEditing, setExtrusionDepthEditing] = useState(false);
   const [extrusionDepthDraft, setExtrusionDepthDraft] = useState("");
   const strokePolygonLastScreenRef = useRef<{ nx: number; ny: number } | null>(null);
-  const [ropeFirstScreen, setRopeFirstScreen] = useState<{
-    nx: number;
-    ny: number;
-  } | null>(null);
-  /** Rope phased tool: click two points → adjust tension/sag → Done/Cancel. */
-  const ropePhase = useStrokePhase<{
-    nx1: number;
-    ny1: number;
-    nx2: number;
-    ny2: number;
-  }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      setRopeFirstScreen(null);
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx1, ny1, nx2, ny2 } = snap.data;
-      void invoke("generator_rope_at_screen", {
-        args: {
-          nx1,
-          ny1,
-          nx2,
-          ny2,
-          tension: ropeTensionRef.current,
-          gravityDirection: clothGravityDirectionRef.current,
-          brushRadius: ropeBrushRadiusIndexRef.current,
-          brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      }).catch(() => {});
-      setRopeFirstScreen(null);
-    },
-  });
-  /** Cloth phased tool: click 3+ pins → settings overlay → Done/Cancel. */
-  const clothPhase = useStrokePhase<Record<string, never>>({
-    phases: ["settings"],
-    onCancel: () => {
-      setClothPins([]);
-      clothPinsRef.current = [];
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: () => {
-      const pins = clothPinsRef.current;
-      if (pins.length < 3) return;
-      void invoke("generator_cloth_from_pins_cmd", {
-        args: {
-          pins: pins.map((p) => [p[0], p[1], p[2]]),
-          tension: clothTensionRef.current,
-          gravityDirection: clothGravityDirectionRef.current,
-          brushRadius: ropeBrushRadiusIndexRef.current,
-          brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-          gravityScale: clothSimGravityPctRef.current / 100,
-          stiffnessScale: clothSimStiffnessPctRef.current / 100,
-          clothIterations: clothSimIterationsRef.current,
-          clothConstraintPasses: clothSimConstraintPassesRef.current,
-        },
-      }).catch(() => {});
-      setClothPins([]);
-      clothPinsRef.current = [];
-    },
-  });
-  const [ropeSag, _setRopeSag] = useState(2.5);
-  /** 0 = loose, 1 = taut (web ropeTension). */
-  const [ropeTension, setRopeTension] = useState(0.5);
-  const [ropeBrushRadiusIndex, setRopeBrushRadiusIndex] = useState(2);
-  const [ropeBrushShapeUi, setRopeBrushShapeUi] = useState<"sphere" | "cube">("sphere");
-  /** Cloth: corner pins (surface picks), then Apply in tool options. */
-  const [clothPins, setClothPins] = useState<[number, number, number][]>([]);
-  const clothPinsRef = useRef<[number, number, number][]>([]);
-  const [clothTension, setClothTension] = useState(0.5);
-  const [clothGravityDirection, setClothGravityDirection] =
-    useState<ClothGravityDirectionId>("down");
-  const [clothSimGravityPct, setClothSimGravityPct] = useState(100);
-  const [clothSimStiffnessPct, setClothSimStiffnessPct] = useState(100);
-  const [clothSimIterations, setClothSimIterations] = useState(0);
-  const [clothSimConstraintPasses, setClothSimConstraintPasses] = useState(2);
-  /** Single-click generators: click → settings overlay → Done/Cancel. */
-  const rocksPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny, seed } = snap.data;
-      void invoke("generator_rocks_at_screen", {
-        args: {
-          nx,
-          ny,
-          seed,
-          size: Math.max(1, generatorSphereRadiusRef.current),
-          roughness: rockRoughnessRef.current,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-          count: rockCountRef.current,
-          clusterRadius: rockClusterRadiusRef.current,
-          sinkDirection:
-            rockSinkDirectionRef.current === "under"
-              ? -1
-              : rockSinkDirectionRef.current === "over"
-                ? 1
-                : 0,
-          sinkAmount: rockSinkAmountRef.current,
-        },
-      }).catch(() => {});
-      rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-    },
-  });
-  const grassPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny, seed } = snap.data;
-      void invoke("generator_grass_at_screen", {
-        args: {
-          nx,
-          ny,
-          seed,
-          radius: Math.max(1, generatorSphereRadiusRef.current),
-          density: grassDensityRef.current,
-          maxHeight: grassMaxHeightRef.current,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      }).catch(() => {});
-      grassPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-    },
-  });
-  const ashlarPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny, seed } = snap.data;
-      void invoke("generator_ashlar_at_screen", {
-        args: {
-          nx,
-          ny,
-          seed,
-          size: Math.max(1, generatorSphereRadiusRef.current),
-          roughness: rockRoughnessRef.current,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-          thickness: ashlarThicknessRef.current,
-        },
-      }).catch((err: unknown) => {
-        console.error("[ashlar] placement failed:", err);
-      });
-      ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-    },
-  });
-  const floraPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny, seed } = snap.data;
-      void invoke("generator_flora_at_screen", {
-        args: {
-          nx,
-          ny,
-          seed,
-          height: floraHeight,
-          girth: floraGirth,
-          wobble: floraWobble,
-          taper: floraTaper,
-          stemCount: floraStemCount,
-          clusterRadius: floraClusterRadius,
-          branchCount: floraBranchCount,
-          branchDepth: floraBranchDepth,
-          branchStart: floraBranchStart,
-          branchSpread: floraBranchSpread,
-          braidStrands: floraBraidStrands,
-          braidTwist: floraBraidTwist,
-          canopy: floraCanopy,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      }).catch(() => {});
-      floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-    },
-  });
-  const piscinaPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny, seed } = snap.data;
-      void invoke("generator_piscina_at_screen", {
-        args: {
-          nx,
-          ny,
-          seed,
-          species: piscinaSpecies,
-          length: piscinaLength,
-          widthParam: piscinaWidth,
-          thickness: piscinaThickness,
-          spineBend: piscinaSpineBend,
-          spineSCurve: piscinaSpineSCurve,
-          finDorsal: piscinaFinDorsal,
-          finAnal: piscinaFinAnal,
-          finCaudal: piscinaFinCaudal,
-          finPectoral: piscinaFinPectoral,
-          finPelvic: piscinaFinPelvic,
-          finAdipose: piscinaFinAdipose,
-          showFinDorsal: piscinaShowFinDorsal,
-          showFinAnal: piscinaShowFinAnal,
-          showFinCaudal: piscinaShowFinCaudal,
-          showFinPectoral: piscinaShowFinPectoral,
-          showFinPelvic: piscinaShowFinPelvic,
-          showFinAdipose: piscinaShowFinAdipose,
-          anchorOffsetU: piscinaAnchorU,
-          anchorOffsetV: piscinaAnchorV,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      }).catch(() => {});
-      piscinaPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-    },
-  });
-  const insectaPhase = useStrokePhase<{ nx: number; ny: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny } = snap.data;
-      void invoke("generator_insecta_at_screen", {
-        args: {
-          nx,
-          ny,
-          species: insectaSpecies,
-          totalLength: insectaTotalLength,
-          headRatio: insectaHeadRatio,
-          thoraxRatio: insectaThoraxRatio,
-          abdomenRatio: insectaAbdomenRatio,
-          bodyHalfWidth: insectaBodyHalfWidth,
-          bodyHalfHeight: insectaBodyHalfHeight,
-          abdomenTaper: insectaAbdomenTaper,
-          headShape: insectaHeadShape,
-          anchorOffsetU: insectaAnchorU,
-          anchorOffsetV: insectaAnchorV,
-          bodyYaw: insectaBodyYawDeg * (Math.PI / 180),
-          bodyArch: insectaBodyArch,
-          antennaLength: insectaAntennaLength,
-          antennaSpread: insectaAntennaSpread,
-          antennaPitch: insectaAntennaPitch,
-          antennaRoot: insectaAntennaRoot,
-          mandibleLength: insectaMandibleLength,
-          mandibleSpread: insectaMandibleSpread,
-          mandibleForward: insectaMandibleForward,
-          wingShape: insectaWingShape,
-          showWingFore: insectaShowWingFore,
-          wingForeLength: insectaWingForeLength,
-          wingForeWidth: insectaWingForeWidth,
-          wingForeSpread: insectaWingForeSpread,
-          wingForePitch: insectaWingForePitch,
-          wingForeOffset: insectaWingForeOffset,
-          wingForeForwardCant: insectaWingForeForwardCant,
-          showWingHind: insectaShowWingHind,
-          wingHindLength: insectaWingHindLength,
-          wingHindWidth: insectaWingHindWidth,
-          wingHindSpread: insectaWingHindSpread,
-          wingHindPitch: insectaWingHindPitch,
-          wingHindOffset: insectaWingHindOffset,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      }).catch(() => {});
-    },
-  });
-  const faunaPhase = useStrokePhase<{ nx: number; ny: number }>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      void invoke("voxel_stroke_preview_reset").catch(() => {});
-    },
-    onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
-      const { nx, ny } = snap.data;
-      void invoke("generator_fauna_at_screen", {
-        args: {
-          nx,
-          ny,
-          stance: faunaStance,
-          archetype: faunaArchetype,
-          anchorOffsetU: faunaAnchorU,
-          anchorOffsetV: faunaAnchorV,
-          bodyYaw: faunaBodyYawDeg * (Math.PI / 180),
-          bodyArch: faunaBodyArch,
-          spineSegments: faunaSpineSegments,
-          bodyLength: faunaBodyLength,
-          bodyHalfWidth: faunaBodyHalfWidth,
-          bodyHalfHeight: faunaBodyHalfHeight,
-          neckLength: faunaNeckLength,
-          neckHalfWidth: faunaNeckHalfWidth,
-          neckHalfHeight: faunaNeckHalfHeight,
-          headLength: faunaHeadLength,
-          headHalfWidth: faunaHeadHalfWidth,
-          headHalfHeight: faunaHeadHalfHeight,
-          tailLength: faunaTailLength,
-          shoulderOffsetForward: faunaShoulderOffsetForward,
-          hipOffsetForward: faunaHipOffsetForward,
-          frontUpperLength: faunaFrontUpperLength,
-          frontLowerLength: faunaFrontLowerLength,
-          hindUpperLength: faunaHindUpperLength,
-          hindLowerLength: faunaHindLowerLength,
-          limbTargets: [
-            [20, -2.1, -19],
-            [20, 2.1, -19],
-            [-3.5, -2.2, -20],
-            [-3.5, 2.2, -20],
-          ],
-          limbPoles: [
-            [20, -2.4, 0.6],
-            [20, 2.4, 0.6],
-            [1.8, -2.8, 1.2],
-            [1.8, 2.8, 1.2],
-          ],
-          spinePoseChest: [0, 0, 0],
-          spinePoseNeck: [0, 0, 0],
-          spinePoseHead: [0, 0, 0],
-          autoFootPlacement: faunaAutoFootPlacement,
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      }).catch(() => {});
-    },
-  });
+  // Rope/cloth state now in useRopeClothGenerator hook.
+  // Generator useStrokePhase + useState blocks now live in per-generator hooks.
   /** Squishy (metaball) session phase: Enter commits, Escape cancels. */
   const squishyPhase = useStrokePhase<Record<string, never>>({
     phases: ["settings"],
@@ -1189,121 +360,6 @@ function App() {
         .catch(() => {});
     },
   });
-  const [rockRoughness, setRockRoughness] = useState(0.4);
-  const [ashlarThickness, setAshlarThickness] = useState(3);
-  const [rockCount, setRockCount] = useState(1);
-  const [rockClusterRadius, setRockClusterRadius] = useState(1);
-  const [rockSinkDirection, setRockSinkDirection] = useState<"none" | "under" | "over">("none");
-  const [rockSinkAmount, setRockSinkAmount] = useState(0);
-  const [grassDensity, setGrassDensity] = useState(0.6);
-  const [grassMaxHeight, setGrassMaxHeight] = useState(3);
-  // Flora params
-  const [floraPreset, setFloraPreset] = useState<string>("stalk");
-  const [floraHeight, setFloraHeight] = useState(14);
-  const [floraGirth, setFloraGirth] = useState(0);
-  const [floraWobble, setFloraWobble] = useState(0.12);
-  const [floraTaper, setFloraTaper] = useState(0.12);
-  const [floraStemCount, setFloraStemCount] = useState(1);
-  const [floraClusterRadius, setFloraClusterRadius] = useState(0);
-  const [floraBranchCount, setFloraBranchCount] = useState(0);
-  const [floraBranchDepth, setFloraBranchDepth] = useState(1);
-  const [floraBranchStart, setFloraBranchStart] = useState(0.5);
-  const [floraBranchSpread, setFloraBranchSpread] = useState(1.0);
-  const [floraBraidStrands, setFloraBraidStrands] = useState(1);
-  const [floraBraidTwist, setFloraBraidTwist] = useState(0.35);
-  const [floraCanopy, setFloraCanopy] = useState(0.18);
-  // Piscina params
-  const [piscinaSpecies, setPiscinaSpecies] = useState<string>("trout");
-  const [piscinaLength, setPiscinaLength] = useState(16);
-  const [piscinaWidth, setPiscinaWidth] = useState(4);
-  const [piscinaThickness, setPiscinaThickness] = useState(3);
-  const [piscinaSpineBend, setPiscinaSpineBend] = useState(0);
-  const [piscinaSpineSCurve, setPiscinaSpineSCurve] = useState(0);
-  const [piscinaShowFinDorsal, setPiscinaShowFinDorsal] = useState(true);
-  const [piscinaFinDorsal, setPiscinaFinDorsal] = useState(3);
-  const [piscinaShowFinAnal, setPiscinaShowFinAnal] = useState(true);
-  const [piscinaFinAnal, setPiscinaFinAnal] = useState(3);
-  const [piscinaShowFinCaudal, setPiscinaShowFinCaudal] = useState(true);
-  const [piscinaFinCaudal, setPiscinaFinCaudal] = useState(3);
-  const [piscinaShowFinPectoral, setPiscinaShowFinPectoral] = useState(true);
-  const [piscinaFinPectoral, setPiscinaFinPectoral] = useState(3);
-  const [piscinaShowFinPelvic, setPiscinaShowFinPelvic] = useState(true);
-  const [piscinaFinPelvic, setPiscinaFinPelvic] = useState(3);
-  const [piscinaShowFinAdipose, setPiscinaShowFinAdipose] = useState(true);
-  const [piscinaFinAdipose, setPiscinaFinAdipose] = useState(3);
-  const [piscinaAnchorU, setPiscinaAnchorU] = useState(0);
-  const [piscinaAnchorV, setPiscinaAnchorV] = useState(0);
-  // Insecta params
-  const [insectaSpecies, setInsectaSpecies] = useState<string>("bee");
-  const [insectaTotalLength, setInsectaTotalLength] = useState(24);
-  const [insectaHeadRatio, setInsectaHeadRatio] = useState(1.0);
-  const [insectaThoraxRatio, setInsectaThoraxRatio] = useState(1.2);
-  const [insectaAbdomenRatio, setInsectaAbdomenRatio] = useState(2.0);
-  const [insectaBodyHalfWidth, setInsectaBodyHalfWidth] = useState(3);
-  const [insectaBodyHalfHeight, setInsectaBodyHalfHeight] = useState(3);
-  const [insectaAbdomenTaper, setInsectaAbdomenTaper] = useState(0.6);
-  const [insectaHeadShape, setInsectaHeadShape] = useState(60);
-  const [insectaBodyYawDeg, setInsectaBodyYawDeg] = useState(0);
-  const [insectaBodyArch, setInsectaBodyArch] = useState(0);
-  const [insectaAnchorU, setInsectaAnchorU] = useState(0);
-  const [insectaAnchorV, setInsectaAnchorV] = useState(0);
-  const [insectaAntennaLength, setInsectaAntennaLength] = useState(6);
-  const [insectaAntennaSpread, setInsectaAntennaSpread] = useState(20);
-  const [insectaAntennaPitch, setInsectaAntennaPitch] = useState(30);
-  const [insectaAntennaRoot, setInsectaAntennaRoot] = useState(0);
-  const [insectaMandibleLength, setInsectaMandibleLength] = useState(0);
-  const [insectaMandibleSpread, setInsectaMandibleSpread] = useState(0);
-  const [insectaMandibleForward, setInsectaMandibleForward] = useState(0);
-  const [insectaWingShape, setInsectaWingShape] = useState(85);
-  const [insectaShowWingFore, setInsectaShowWingFore] = useState(true);
-  const [insectaWingForeLength, setInsectaWingForeLength] = useState(12);
-  const [insectaWingForeWidth, setInsectaWingForeWidth] = useState(3);
-  const [insectaWingForeSpread, setInsectaWingForeSpread] = useState(15);
-  const [insectaWingForePitch, setInsectaWingForePitch] = useState(0);
-  const [insectaWingForeOffset, setInsectaWingForeOffset] = useState(0);
-  const [insectaWingForeForwardCant, setInsectaWingForeForwardCant] = useState(0);
-  const [insectaShowWingHind, setInsectaShowWingHind] = useState(false);
-  const [insectaWingHindLength, setInsectaWingHindLength] = useState(8);
-  const [insectaWingHindWidth, setInsectaWingHindWidth] = useState(2);
-  const [insectaWingHindSpread, setInsectaWingHindSpread] = useState(15);
-  const [insectaWingHindPitch, setInsectaWingHindPitch] = useState(0);
-  const [insectaWingHindOffset, setInsectaWingHindOffset] = useState(0);
-  // Fauna params
-  const [faunaStance, setFaunaStance] = useState<string>("quadruped");
-  const [faunaArchetype, setFaunaArchetype] = useState<string>("ungulate");
-  const [faunaBodyYawDeg, setFaunaBodyYawDeg] = useState(0);
-  const [faunaBodyArch, setFaunaBodyArch] = useState(0.02);
-  const [faunaSpineSegments, setFaunaSpineSegments] = useState(7);
-  const [faunaBodyLength, setFaunaBodyLength] = useState(17);
-  const [faunaBodyHalfWidth, setFaunaBodyHalfWidth] = useState(2);
-  const [faunaBodyHalfHeight, setFaunaBodyHalfHeight] = useState(3);
-  const [faunaNeckLength, setFaunaNeckLength] = useState(8);
-  const [faunaNeckHalfWidth, setFaunaNeckHalfWidth] = useState(2);
-  const [faunaNeckHalfHeight, setFaunaNeckHalfHeight] = useState(3);
-  const [faunaHeadLength, setFaunaHeadLength] = useState(6);
-  const [faunaHeadHalfWidth, setFaunaHeadHalfWidth] = useState(2);
-  const [faunaHeadHalfHeight, setFaunaHeadHalfHeight] = useState(3);
-  const [faunaTailLength, setFaunaTailLength] = useState(1);
-  const [faunaShoulderOffsetForward, setFaunaShoulderOffsetForward] = useState(3);
-  const [faunaHipOffsetForward, setFaunaHipOffsetForward] = useState(-3);
-  const [faunaFrontUpperLength, setFaunaFrontUpperLength] = useState(7);
-  const [faunaFrontLowerLength, setFaunaFrontLowerLength] = useState(7);
-  const [faunaHindUpperLength, setFaunaHindUpperLength] = useState(8);
-  const [faunaHindLowerLength, setFaunaHindLowerLength] = useState(8);
-  const [faunaAnchorU, setFaunaAnchorU] = useState(0);
-  const [faunaAnchorV, setFaunaAnchorV] = useState(0);
-  const [faunaAutoFootPlacement, setFaunaAutoFootPlacement] = useState(false);
-  // Roof params
-  const [roofStyle, setRoofStyle] = useState<string>("gable");
-  const [roofHeight, setRoofHeight] = useState(6);
-  const [roofHollow, setRoofHollow] = useState(false);
-  const [roofPins, setRoofPins] = useState<[number, number, number][]>([]);
-  const roofPinsRef = useRef<[number, number, number][]>([]);
-  const [roofAreaShape, setRoofAreaShape] = useState<"polygon" | "square" | "circle">("polygon");
-  const roofAreaShapeRef = useRef<"polygon" | "square" | "circle">("polygon");
-  // First click anchor for square/circle roof modes
-  const [roofFirstClick, setRoofFirstClick] = useState<[number, number, number] | null>(null);
-  const roofFirstClickRef = useRef<[number, number, number] | null>(null);
   const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
   const [terrainBaseY, setTerrainBaseY] = useState(0);
@@ -1715,406 +771,70 @@ function App() {
     }
   }, []);
 
-  useEffect(() => {
-    sendResize();
-    const ro = new ResizeObserver(() => sendResize());
-    const el = viewportRef.current;
-    if (el) ro.observe(el);
-
-    const clearCollabSessionUi = () => {
-      pendingJoinUrlRef.current = null;
-      setCollabJoinPending(false);
-      setCollabActive(false);
-      setHostWsUrl(null);
-      setHostWanUrl(null);
-      setNatPending(false);
-      setNatError(null);
-      setRoster([]);
-      setLocalPeerId(0);
-      setPingMs(null);
-      setChatLines([]);
-      setChatInput("");
-      setChatToasts([]);
-      setHostingCopied(false);
-    };
-
-    /** `listen()` is async; React Strict Mode runs cleanup before those promises resolve, which used to call stale `unlisten` and break Tauri's listener table. */
-    let active = true;
-    const unlistenReady = Promise.all([
-      listen<string>("voxelle-load-start", (e) => {
-        setLoadError(null);
-        setCollabBanner(null);
-        setStartScreenLogoLoaded(false);
-        setPathLabel(e.payload);
-        setLoading(true);
-        setLoadProgress(0);
-        setLoadPhase("");
-        setSpeechBubbles([]);
-      }),
-      listen<{ fraction: number; phase: string }>("voxelle-load-progress", (e) => {
-        const p = e.payload;
-        setLoadProgress(p.fraction);
-        setLoadPhase(p.phase);
-        if (p.fraction >= 1) {
-          setLoading(false);
-          setLoadPhase("");
-        }
-      }),
-      listen<{ fraction: number; phase: string }>("voxelle-work-progress", (e) => {
-        const p = e.payload;
-        setWorkProgress(p.fraction);
-        setWorkPhase(p.phase);
-        if (p.fraction >= 1) {
-          setWorkBusy(false);
-          setWorkPhase("");
-          fillOperationPendingRef.current = false;
-          setFillOperationPending(false);
-        } else {
-          setWorkBusy(true);
-        }
-      }),
-      listen<unknown>("logo-loaded", () => {
-        setStartScreenLogoLoaded(true);
-      }),
-      listen<boolean>("voxelle-debug-logo-light-controls", (e) => {
-        setLogoLightControlsVisible(e.payload);
-      }),
-      listen<unknown>("voxelle-loaded", (e) => {
-        setLoadError(null);
-        const p = e.payload;
-        if (typeof p === "string") {
-          setPathLabel(p);
-          setStartScreenLogoLoaded(false);
-        } else if (p && typeof p === "object" && "path" in p) {
-          const o = p as {
-            path: string;
-            mood?: Partial<MoodState>;
-          };
-          setPathLabel(o.path);
-          setStartScreenLogoLoaded(false);
-          if (o.mood) {
-            setMood(moodWith(defaultMoodState(), o.mood));
-          } else {
-            setMood(defaultMoodState());
-          }
-        }
-        setLoading(false);
-        setLoadProgress(1);
-        setLoadPhase("");
-        refreshSceneObjects();
-      }),
-      listen<string>("voxelle-load-error", (e) => {
-        setLoadError(e.payload);
-        setLoading(false);
-        setLoadPhase("");
-        setCollabJoinPending((p) => (p ? false : p));
-      }),
-      listen<number>("viewport-fps", (e) => {
-        setFpsDisplayed(e.payload);
-      }),
-      listen<number>("collab-latency-ms", (e) => {
-        setPingMs(e.payload);
-      }),
-      listen<{
-        width: number;
-        height: number;
-        surfaceWidth: number;
-        surfaceHeight: number;
-      }>("viewport-pixel-size", (e) => {
-        const p = e.payload;
-        viewportPhysRef.current = { w: p.width, h: p.height };
-        surfacePhysRef.current = { w: p.surfaceWidth, h: p.surfaceHeight };
-      }),
-      listen("voxelle-open-new-project", () => {
-        setNewProjectOpen(true);
-      }),
-      listen("voxelle-project-closed", () => {
-        setPathLabel("");
-        setLoading(false);
-        setLoadProgress(0);
-        setLoadPhase("");
-        setLoadError(null);
-        setWorkBusy(false);
-        setSpeechBubbles([]);
-        setMood(defaultMoodState());
-        void invoke("load_start_screen_logo").catch(() => {});
-      }),
-      listen("voxelle-collab-start-session", () => {
-        if (collabActiveMenuRef.current) return;
-        startHostMenuRef.current();
-      }),
-      listen("voxelle-collab-join-session", () => {
-        setJoinModalOpen(true);
-      }),
-      listen("voxelle-collab-leave-session", () => {
-        if (!collabActiveMenuRef.current) return;
-        leaveSessionMenuRef.current();
-      }),
-      listen("voxelle-show-chat-panel", () => {
-        setChatPanelOpen(true);
-      }),
-      listen("voxelle-open-preferences", () => {
-        setPreferencesOpen(true);
-      }),
-      listen("voxelle-menu-stamp-book", () => {
-        setStampBookOpen(true);
-      }),
-      listen<string>("collab-ping", (e) => {
-        try {
-          const j = JSON.parse(e.payload) as {
-            displayName?: string;
-            display_name?: string;
-            x?: number;
-            y?: number;
-            z?: number;
-            emoji?: string;
-          };
-          const name = j.displayName ?? j.display_name ?? "?";
-          const vx = j.x ?? 0;
-          const vy = j.y ?? 0;
-          const vz = j.z ?? 0;
-          pingHudRef.current = {
-            name,
-            wx: vx + 0.5,
-            wy: vy + 0.5,
-            wz: vz + 0.5,
-            until: Date.now() + PING_HUD_MS,
-            emoji: j.emoji || undefined,
-          };
-          setPingHudTick((n) => n + 1);
-          playPingSound();
-        } catch {
-          /* ignore */
-        }
-      }),
-      listen<string>("collab-chat", (e) => {
-        let line: string;
-        let fromPeerId: number | undefined;
-        try {
-          const j = JSON.parse(e.payload) as {
-            displayName?: string;
-            display_name?: string;
-            text?: string;
-            peer_id?: number;
-            peerId?: number;
-          };
-          const who = j.displayName ?? j.display_name ?? "?";
-          line = `${who}: ${j.text ?? ""}`;
-          fromPeerId = j.peerId ?? j.peer_id;
-          setChatLines((prev) => [...prev.slice(-80), line]);
-        } catch {
-          line = e.payload;
-          setChatLines((prev) => [...prev.slice(-80), e.payload]);
-        }
-        const showToast =
-          collabActiveRef.current &&
-          !chatPanelOpenRef.current &&
-          (fromPeerId === undefined || fromPeerId !== localPeerIdRef.current);
-        if (showToast) {
-          setChatToasts((prev) => {
-            const id = ++chatToastIdRef.current;
-            const next = [...prev, { id, text: line }];
-            return next.length > CHAT_TOAST_CAP ? next.slice(-CHAT_TOAST_CAP) : next;
-          });
-        }
-      }),
-      listen("collab-joined", () => {
-        setCollabBanner(null);
-        setCollabActive(true);
-        setCollabJoinPending(false);
-        const u = pendingJoinUrlRef.current;
-        if (u) {
-          rememberJoinedUrl(u);
-          pendingJoinUrlRef.current = null;
-        }
-        setJoinModalOpen(false);
-        // Announce our avatar choice so other peers see the right model immediately.
-        const avatarName = loadPreferences().collabAvatarName;
-        void invoke("set_local_avatar", { avatarName }).catch(() => {});
-      }),
-      listen<number>("collab-local-peer", (e) => {
-        setLocalPeerId(typeof e.payload === "number" ? e.payload : 0);
-      }),
-      listen<string>("collab-roster", (e) => {
-        try {
-          const arr = JSON.parse(e.payload) as RosterEntry[];
-          setRoster(arr);
-        } catch {
-          /* ignore */
-        }
-      }),
-      listen<string>("collab-peer-left", (e) => {
-        if (localPeerIdRef.current !== 1) return;
-        try {
-          const j = JSON.parse(e.payload) as {
-            displayName?: string;
-            reason?: string;
-          };
-          const name =
-            typeof j.displayName === "string" && j.displayName.length > 0 ? j.displayName : "Guest";
-          const text = j.reason === "left" ? `${name} left the session.` : `${name} disconnected.`;
-          setCollabBanner({ text, tone: "info" });
-        } catch {
-          /* ignore */
-        }
-      }),
-      listen<string>("collab-error", (e) => {
-        pendingJoinUrlRef.current = null;
-        setCollabJoinPending(false);
-        setLoadError(e.payload);
-      }),
-      listen<unknown>("collab-nat-result", (e) => {
-        try {
-          const raw = e.payload;
-          const j =
-            typeof raw === "string"
-              ? (JSON.parse(raw) as {
-                  wanUrl?: string | null;
-                  error?: string | null;
-                })
-              : (raw as { wanUrl?: string | null; error?: string | null });
-          setNatPending(false);
-          setNatError(typeof j.error === "string" && j.error.length > 0 ? j.error : null);
-          setHostWanUrl(typeof j.wanUrl === "string" && j.wanUrl.length > 0 ? j.wanUrl : null);
-        } catch {
-          setNatPending(false);
-        }
-      }),
-      listen<string>("collab-ended", (e) => {
-        const text = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
-        if (text.trim().length > 0) {
-          setCollabBanner({ text, tone: "info" });
-        }
-        clearCollabSessionUi();
-      }),
-      listen<string>("collab-kicked", (e) => {
-        const msg = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
-        setCollabBanner({
-          text: `Removed from session: ${msg}`,
-          tone: "alert",
-        });
-        clearCollabSessionUi();
-      }),
-      listen("voxelle-check-updates", async () => {
-        try {
-          const update = await check();
-          if (!update) {
-            window.alert("You're up to date.");
-            return;
-          }
-          const ok = await invoke<boolean>("confirm_app_update_dialog", {
-            message: `Download and install Voxelle Desktop ${update.version}?`,
-            title: "Update available",
-          });
-          if (!ok) return;
-          await update.downloadAndInstall();
-          await relaunch();
-        } catch (e) {
-          window.alert(userFacingUpdaterError(e));
-        }
-      }),
-      listen<string>("voxelle-rendering-mode-changed", (e) => {
-        const m = e.payload;
-        if (m === "greedy" || m === "marchingCubes" || m === "dualContour" || m === "ray") {
-          localStorage.setItem(LS_RENDERING_MODE, m);
-        }
-      }),
-      listen("voxelle-reload-start-screen-overlays", () => {
-        void invoke("load_start_screen_logo").catch(() => {});
-        void invoke("mascot_load_embedded", { id: 0, name: "seagull" }).catch(() => {});
-      }),
-      listen<string>("voxelle-menu-selection-mode", (e) => {
-        const m = e.payload;
-        if (m === "selectByColor" || m === "selectCoplanar" || m === "selectCoplanarEmpty") {
-          setInteractionMode(m);
-        }
-      }),
-      listen<boolean>("voxelle-menu-match-material", (e) => {
-        setMatchMaterialSelectColor(e.payload);
-      }),
-      listen<boolean>("voxelle-debug-viewport-cursor-overlay", (e) => {
-        const enabled = e.payload;
-        try {
-          localStorage.setItem(LS_VIEWPORT_CURSOR_DEBUG, enabled ? "1" : "0");
-        } catch {
-          /* ignore */
-        }
-        setViewportCursorDebugEnabled(enabled);
-        if (!enabled) {
-          setViewportCursorDebugJs(null);
-          setViewportCursorDebugRust(null);
-          viewportCursorDebugScreenRef.current = null;
-          setViewportCursorDebugScreen(null);
-        }
-      }),
-      listen<{
-        frame_count: number;
-        viewport_width: number;
-        viewport_height: number;
-        total_ms: number;
-        avg_ms: number;
-        stddev_ms: number;
-        min_ms: number;
-        p50_ms: number;
-        p95_ms: number;
-        p99_ms: number;
-        max_ms: number;
-        mpix_per_sec: number;
-        frame_times_ms: number[];
-      }>("voxelle-debug-raytrace-benchmark", (e) => {
-        const r = e.payload;
-        const f = (n: number) => n.toFixed(2);
-        console.group(
-          `Ray trace benchmark — ${r.viewport_width}×${r.viewport_height} — ${r.frame_count} frames — ${f(r.mpix_per_sec)} Mpix/s`,
-        );
-        console.log(
-          `avg ${f(r.avg_ms)} ms  σ ${f(r.stddev_ms)} ms  min ${f(r.min_ms)} ms  p50 ${f(r.p50_ms)} ms  p95 ${f(r.p95_ms)} ms  p99 ${f(r.p99_ms)} ms  max ${f(r.max_ms)} ms`,
-        );
-        console.log(`total ${f(r.total_ms)} ms over ${r.frame_count} frames`);
-        console.log(
-          "frame times (ms):",
-          r.frame_times_ms.map((t) => +t.toFixed(2)),
-        );
-        console.groupEnd();
-      }),
-      listen<boolean>("voxelle-hide-ui", (e) => {
-        setHideUI(e.payload);
-      }),
-      listen<number>("voxelle-selection-updated", (e) => {
-        setSelectionCount(typeof e.payload === "number" ? e.payload : 0);
-      }),
-      listen<string>("voxelle-selection-combine-mode", (e) => {
-        const p = e.payload;
-        if (p === "replace" || p === "add" || p === "subtract" || p === "intersect") {
-          setSelectionCombineMode(p);
-        }
-      }),
-      listen<string>("voxelle-menu-not-implemented", (e) => {
-        const msg = typeof e.payload === "string" ? e.payload : String(e.payload ?? "");
-        console.warn(msg);
-      }),
-      listen("voxelle-menu-rotate-selection", () => {
-        setRotateDialogOpen(true);
-      }),
-      listen("voxelle-menu-scale-selection", () => {
-        setScaleDialogOpen(true);
-      }),
-    ]).then((unlisteners) => {
-      if (!active) {
-        unlisteners.forEach((u) => u());
-        return undefined;
-      }
-      return unlisteners;
-    });
-
-    return () => {
-      ro.disconnect();
-      active = false;
-      void unlistenReady.then((uns) => {
-        if (uns) uns.forEach((u) => u());
-      });
-    };
-  }, [sendResize, refreshSceneObjects]);
+  // ── Tauri event listeners hook ──
+  useTauriEventListeners({
+    viewportRef,
+    sendResize,
+    refreshSceneObjects,
+    viewportPhysRef,
+    surfacePhysRef,
+    fillOperationPendingRef,
+    collabActiveRef,
+    chatPanelOpenRef,
+    localPeerIdRef,
+    chatToastIdRef,
+    pendingJoinUrlRef,
+    collabActiveMenuRef,
+    startHostMenuRef,
+    leaveSessionMenuRef,
+    viewportCursorDebugScreenRef,
+    pingHudRef,
+    setLoadError,
+    setCollabBanner,
+    setStartScreenLogoLoaded,
+    setPathLabel,
+    setLoading,
+    setLoadProgress,
+    setLoadPhase,
+    setSpeechBubbles,
+    setWorkProgress,
+    setWorkPhase,
+    setWorkBusy,
+    setFillOperationPending,
+    setLogoLightControlsVisible,
+    setMood,
+    setFpsDisplayed,
+    setPingMs,
+    setNewProjectOpen,
+    setJoinModalOpen,
+    setChatPanelOpen,
+    setPreferencesOpen,
+    setStampBookOpen,
+    setPingHudTick,
+    setChatLines,
+    setChatToasts,
+    setCollabActive,
+    setCollabJoinPending,
+    setLocalPeerId,
+    setRoster,
+    setNatPending,
+    setNatError,
+    setHostWsUrl,
+    setHostWanUrl,
+    setHostingCopied,
+    setChatInput,
+    setInteractionMode,
+    setMatchMaterialSelectColor,
+    setViewportCursorDebugEnabled,
+    setViewportCursorDebugJs,
+    setViewportCursorDebugRust,
+    setViewportCursorDebugScreen,
+    setHideUI,
+    setSelectionCount,
+    setSelectionCombineMode,
+    setRotateDialogOpen,
+    setScaleDialogOpen,
+  });
 
   /** Sidebars change flex width; sync native viewer after layout so `.viewport` matches `viewer_resize`. */
   useLayoutEffect(() => {
@@ -2466,6 +1186,169 @@ function App() {
   useEffect(() => {
     generatorKindRef.current = generatorKind;
   }, [generatorKind]);
+
+  // -- Generator hooks --------------------------------------------------------
+  const _genCtx = { activeColorRef, activeMaterialRef, generatorSphereRadiusRef };
+  const rocks = useRocksGenerator(_genCtx);
+  const {
+    rockRoughness, setRockRoughness, rockRoughnessRef,
+    rockCount, setRockCount, rockCountRef,
+    rockClusterRadius, setRockClusterRadius, rockClusterRadiusRef,
+    rockSinkDirection, setRockSinkDirection, rockSinkDirectionRef,
+    rockSinkAmount, setRockSinkAmount, rockSinkAmountRef,
+    rockPreviewSeedRef, rocksPhase,
+  } = rocks;
+  const grass = useGrassGenerator(_genCtx);
+  const {
+    grassDensity, setGrassDensity, grassDensityRef,
+    grassMaxHeight, setGrassMaxHeight, grassMaxHeightRef,
+    grassPreviewSeedRef, grassPhase,
+  } = grass;
+  const ashlar = useAshlarGenerator({ ..._genCtx, rockRoughnessRef });
+  const {
+    ashlarThickness, setAshlarThickness, ashlarThicknessRef,
+    ashlarPreviewSeedRef, ashlarPhase,
+  } = ashlar;
+  const flora = useFloraGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    floraPreset, setFloraPreset,
+    floraHeight, setFloraHeight,
+    floraGirth, setFloraGirth,
+    floraWobble, setFloraWobble,
+    floraTaper, setFloraTaper,
+    floraStemCount, setFloraStemCount,
+    floraClusterRadius, setFloraClusterRadius,
+    floraBranchCount, setFloraBranchCount,
+    floraBranchDepth, setFloraBranchDepth,
+    floraBranchStart, setFloraBranchStart,
+    floraBranchSpread, setFloraBranchSpread,
+    floraBraidStrands, setFloraBraidStrands,
+    floraBraidTwist, setFloraBraidTwist,
+    floraCanopy, setFloraCanopy,
+    floraPreviewSeedRef, floraPhase,
+  } = flora;
+  const piscina = usePiscinaGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    piscinaSpecies, setPiscinaSpecies,
+    piscinaLength, setPiscinaLength,
+    piscinaWidth, setPiscinaWidth,
+    piscinaThickness, setPiscinaThickness,
+    piscinaSpineBend, setPiscinaSpineBend,
+    piscinaSpineSCurve, setPiscinaSpineSCurve,
+    piscinaShowFinDorsal, setPiscinaShowFinDorsal,
+    piscinaFinDorsal, setPiscinaFinDorsal,
+    piscinaShowFinAnal, setPiscinaShowFinAnal,
+    piscinaFinAnal, setPiscinaFinAnal,
+    piscinaShowFinCaudal, setPiscinaShowFinCaudal,
+    piscinaFinCaudal, setPiscinaFinCaudal,
+    piscinaShowFinPectoral, setPiscinaShowFinPectoral,
+    piscinaFinPectoral, setPiscinaFinPectoral,
+    piscinaShowFinPelvic, setPiscinaShowFinPelvic,
+    piscinaFinPelvic, setPiscinaFinPelvic,
+    piscinaShowFinAdipose, setPiscinaShowFinAdipose,
+    piscinaFinAdipose, setPiscinaFinAdipose,
+    piscinaAnchorU, setPiscinaAnchorU,
+    piscinaAnchorV, setPiscinaAnchorV,
+    piscinaPreviewSeedRef, piscinaPhase,
+  } = piscina;
+  const insecta = useInsectaGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    insectaSpecies, setInsectaSpecies,
+    insectaTotalLength, setInsectaTotalLength,
+    insectaHeadRatio, setInsectaHeadRatio,
+    insectaThoraxRatio, setInsectaThoraxRatio,
+    insectaAbdomenRatio, setInsectaAbdomenRatio,
+    insectaBodyHalfWidth, setInsectaBodyHalfWidth,
+    insectaBodyHalfHeight, setInsectaBodyHalfHeight,
+    insectaAbdomenTaper, setInsectaAbdomenTaper,
+    insectaHeadShape, setInsectaHeadShape,
+    insectaBodyYawDeg, setInsectaBodyYawDeg,
+    insectaBodyArch, setInsectaBodyArch,
+    insectaAnchorU, setInsectaAnchorU,
+    insectaAnchorV, setInsectaAnchorV,
+    insectaAntennaLength, setInsectaAntennaLength,
+    insectaAntennaSpread, setInsectaAntennaSpread,
+    insectaAntennaPitch, setInsectaAntennaPitch,
+    insectaAntennaRoot, setInsectaAntennaRoot,
+    insectaMandibleLength, setInsectaMandibleLength,
+    insectaMandibleSpread, setInsectaMandibleSpread,
+    insectaMandibleForward, setInsectaMandibleForward,
+    insectaWingShape, setInsectaWingShape,
+    insectaShowWingFore, setInsectaShowWingFore,
+    insectaWingForeLength, setInsectaWingForeLength,
+    insectaWingForeWidth, setInsectaWingForeWidth,
+    insectaWingForeSpread, setInsectaWingForeSpread,
+    insectaWingForePitch, setInsectaWingForePitch,
+    insectaWingForeOffset, setInsectaWingForeOffset,
+    insectaWingForeForwardCant, setInsectaWingForeForwardCant,
+    insectaShowWingHind, setInsectaShowWingHind,
+    insectaWingHindLength, setInsectaWingHindLength,
+    insectaWingHindWidth, setInsectaWingHindWidth,
+    insectaWingHindSpread, setInsectaWingHindSpread,
+    insectaWingHindPitch, setInsectaWingHindPitch,
+    insectaWingHindOffset, setInsectaWingHindOffset,
+    insectaPhase,
+  } = insecta;
+  const fauna = useFaunaGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    faunaStance, setFaunaStance,
+    faunaArchetype, setFaunaArchetype,
+    faunaBodyYawDeg, setFaunaBodyYawDeg,
+    faunaBodyArch, setFaunaBodyArch,
+    faunaSpineSegments, setFaunaSpineSegments,
+    faunaBodyLength, setFaunaBodyLength,
+    faunaBodyHalfWidth, setFaunaBodyHalfWidth,
+    faunaBodyHalfHeight, setFaunaBodyHalfHeight,
+    faunaNeckLength, setFaunaNeckLength,
+    faunaNeckHalfWidth, setFaunaNeckHalfWidth,
+    faunaNeckHalfHeight, setFaunaNeckHalfHeight,
+    faunaHeadLength, setFaunaHeadLength,
+    faunaHeadHalfWidth, setFaunaHeadHalfWidth,
+    faunaHeadHalfHeight, setFaunaHeadHalfHeight,
+    faunaTailLength, setFaunaTailLength,
+    faunaShoulderOffsetForward, setFaunaShoulderOffsetForward,
+    faunaHipOffsetForward, setFaunaHipOffsetForward,
+    faunaFrontUpperLength, setFaunaFrontUpperLength,
+    faunaFrontLowerLength, setFaunaFrontLowerLength,
+    faunaHindUpperLength, setFaunaHindUpperLength,
+    faunaHindLowerLength, setFaunaHindLowerLength,
+    faunaAnchorU, setFaunaAnchorU,
+    faunaAnchorV, setFaunaAnchorV,
+    faunaAutoFootPlacement, setFaunaAutoFootPlacement,
+    faunaPhase,
+  } = fauna;
+  const ropeCloth = useRopeClothGenerator({
+    activeColorRef,
+    activeMaterialRef,
+    selectionStrokeSnapToSurfaceRef,
+  });
+  const {
+    clothGravityDirection, setClothGravityDirection, clothGravityDirectionRef,
+    ropeBrushRadiusIndex, setRopeBrushRadiusIndex, ropeBrushRadiusIndexRef,
+    ropeBrushShapeUi, setRopeBrushShapeUi, ropeBrushShapeUiRef,
+    ropeFirstScreen, setRopeFirstScreen, ropeFirstScreenRef,
+    ropeSag,
+    ropeTension, setRopeTension, ropeTensionRef,
+    ropePhase,
+    clothPins, setClothPins, clothPinsRef,
+    clothTension, setClothTension, clothTensionRef,
+    clothSimGravityPct, setClothSimGravityPct, clothSimGravityPctRef,
+    clothSimStiffnessPct, setClothSimStiffnessPct, clothSimStiffnessPctRef,
+    clothSimIterations, setClothSimIterations, clothSimIterationsRef,
+    clothSimConstraintPasses, setClothSimConstraintPasses, clothSimConstraintPassesRef,
+    clothPhase,
+    handleClothPinClick,
+  } = ropeCloth;
+  const roof = useRoofGenerator();
+  const {
+    roofStyle, setRoofStyle, roofStyleRef,
+    roofHeight, setRoofHeight, roofHeightRef,
+    roofHollow, setRoofHollow, roofHollowRef,
+    roofPins, setRoofPins, roofPinsRef,
+    roofAreaShape, setRoofAreaShape, roofAreaShapeRef,
+    roofFirstClick, setRoofFirstClick, roofFirstClickRef,
+  } = roof;
+
   useEffect(() => {
     sculptStrokeModeRef.current = sculptStrokeMode;
   }, [sculptStrokeMode]);
@@ -2593,105 +1476,7 @@ function App() {
   useEffect(() => {
     strokePolygonVertsRef.current = strokePolygonVerts;
   }, [strokePolygonVerts]);
-  useEffect(() => {
-    clothPinsRef.current = clothPins;
-  }, [clothPins]);
-  useEffect(() => {
-    roofAreaShapeRef.current = roofAreaShape;
-  }, [roofAreaShape]);
-  const ropeFirstScreenRef = useRef<{ nx: number; ny: number } | null>(null);
-  const ropeSagRef = useRef(ropeSag);
-  const ropeTensionRef = useRef(ropeTension);
-  const ropeBrushRadiusIndexRef = useRef(ropeBrushRadiusIndex);
-  const ropeBrushShapeUiRef = useRef<"sphere" | "cube">(ropeBrushShapeUi);
-  const clothTensionRef = useRef(clothTension);
-  const clothGravityDirectionRef = useRef(clothGravityDirection);
-  const clothSimGravityPctRef = useRef(clothSimGravityPct);
-  const clothSimStiffnessPctRef = useRef(clothSimStiffnessPct);
-  const clothSimIterationsRef = useRef(clothSimIterations);
-  const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
-  const rockRoughnessRef = useRef(rockRoughness);
-  const ashlarThicknessRef = useRef(ashlarThickness);
-  const ashlarPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-  const rockCountRef = useRef(rockCount);
-  const rockClusterRadiusRef = useRef(rockClusterRadius);
-  const rockSinkDirectionRef = useRef(rockSinkDirection);
-  const rockSinkAmountRef = useRef(rockSinkAmount);
-  const grassDensityRef = useRef(grassDensity);
-  const grassMaxHeightRef = useRef(grassMaxHeight);
-  const rockPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-  const grassPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-  const floraPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-  const piscinaPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-  const roofStyleRef = useRef(roofStyle);
-  const roofHeightRef = useRef(roofHeight);
-  const roofHollowRef = useRef(roofHollow);
-  useEffect(() => {
-    ropeFirstScreenRef.current = ropeFirstScreen;
-  }, [ropeFirstScreen]);
-  useEffect(() => {
-    ropeSagRef.current = ropeSag;
-  }, [ropeSag]);
-  useEffect(() => {
-    ropeTensionRef.current = ropeTension;
-  }, [ropeTension]);
-  useEffect(() => {
-    ropeBrushRadiusIndexRef.current = ropeBrushRadiusIndex;
-  }, [ropeBrushRadiusIndex]);
-  useEffect(() => {
-    ropeBrushShapeUiRef.current = ropeBrushShapeUi;
-  }, [ropeBrushShapeUi]);
-  useEffect(() => {
-    clothTensionRef.current = clothTension;
-  }, [clothTension]);
-  useEffect(() => {
-    clothGravityDirectionRef.current = clothGravityDirection;
-  }, [clothGravityDirection]);
-  useEffect(() => {
-    clothSimGravityPctRef.current = clothSimGravityPct;
-  }, [clothSimGravityPct]);
-  useEffect(() => {
-    clothSimStiffnessPctRef.current = clothSimStiffnessPct;
-  }, [clothSimStiffnessPct]);
-  useEffect(() => {
-    clothSimIterationsRef.current = clothSimIterations;
-  }, [clothSimIterations]);
-  useEffect(() => {
-    clothSimConstraintPassesRef.current = clothSimConstraintPasses;
-  }, [clothSimConstraintPasses]);
-  useEffect(() => {
-    rockRoughnessRef.current = rockRoughness;
-  }, [rockRoughness]);
-  useEffect(() => {
-    ashlarThicknessRef.current = ashlarThickness;
-  }, [ashlarThickness]);
-  useEffect(() => {
-    rockCountRef.current = rockCount;
-  }, [rockCount]);
-  useEffect(() => {
-    rockClusterRadiusRef.current = rockClusterRadius;
-  }, [rockClusterRadius]);
-  useEffect(() => {
-    rockSinkDirectionRef.current = rockSinkDirection;
-  }, [rockSinkDirection]);
-  useEffect(() => {
-    rockSinkAmountRef.current = rockSinkAmount;
-  }, [rockSinkAmount]);
-  useEffect(() => {
-    grassDensityRef.current = grassDensity;
-  }, [grassDensity]);
-  useEffect(() => {
-    grassMaxHeightRef.current = grassMaxHeight;
-  }, [grassMaxHeight]);
-  useEffect(() => {
-    roofStyleRef.current = roofStyle;
-  }, [roofStyle]);
-  useEffect(() => {
-    roofHeightRef.current = roofHeight;
-  }, [roofHeight]);
-  useEffect(() => {
-    roofHollowRef.current = roofHollow;
-  }, [roofHollow]);
+  // Generator refs + useEffect syncs now live in per-generator hooks.
   useEffect(() => {
     squishyModeRef.current = squishyMode;
   }, [squishyMode]);
@@ -3251,115 +2036,7 @@ function App() {
   }
 
   /** Specialized selection single-click commands (selectByColor, selectCoplanar, selectCoplanarEmpty). */
-  function invokeSelectionSpecialClick(interaction: string, nx: number, ny: number) {
-    const cmd =
-      interaction === "selectByColor"
-        ? "selection_add_by_color_at_screen"
-        : interaction === "selectCoplanar"
-          ? "selection_add_coplanar_at_screen"
-          : interaction === "selectCoplanarEmpty"
-            ? "selection_add_coplanar_empty_at_screen"
-            : null;
-    if (!cmd) return;
-    const args: Record<string, unknown> = { nx, ny };
-    if (interaction === "selectByColor") {
-      args.matchMaterial = matchMaterialSelectColorRef.current;
-    }
-    if (strokeShiftKeyRef.current) {
-      args.combineModeOverride = "add";
-    }
-    void invoke<number>(cmd, { args })
-      .then((n) => {
-        if (n > 0) {
-          void invoke<number>("selection_get_count").then((c) => setSelectionCount(c));
-        }
-      })
-      .catch(() => {});
-  }
-
-  async function handleStrokeAnchorClick(nx: number, ny: number) {
-    const dispatch = getStrokeDispatch(interactionModeRef.current);
-    if (!dispatch) return;
-    const tool = dispatch.kind === "edit" ? dispatch.tool : "remove";
-    const c = await invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
-      args: {
-        nx,
-        ny,
-        tool,
-        strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-      },
-    });
-    if (!c) return;
-    const sm = drawStrokeModeRef.current;
-    if (sm === "fill") {
-      runStrokeAtScreen(nx, ny, {});
-      return;
-    }
-    if (sm === "polygon" || sm === "polygonHull") {
-      setStrokePolygonVerts((v) => {
-        const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
-        const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
-        strokePolygonVertsRef.current = next;
-        return next;
-      });
-      strokePolygonLastScreenRef.current = { nx, ny };
-      queueMicrotask(() => {
-        void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(nx, ny, previewModeForSync(interactionModeRef.current)),
-        }).catch(() => {});
-      });
-      return;
-    }
-    if (sm === "circle") {
-      const r = strokeClickRef.current;
-      if (!r.circleCenter) {
-        r.circleCenter = c;
-      } else {
-        runStrokeAtScreen(nx, ny, {
-          circleCenter: r.circleCenter,
-          circleEdge: c,
-        });
-        r.circleCenter = null;
-      }
-      return;
-    }
-  }
-
-  async function handleWallSculptPolygonClick(nx: number, ny: number) {
-    const c = await invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
-      args: {
-        nx,
-        ny,
-        tool: "add",
-        strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-      },
-    });
-    if (!c) return;
-    setWallSculptPolygonVerts((v) => {
-      const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
-      const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
-      wallSculptPolygonVertsRef.current = next;
-      return next;
-    });
-  }
-
-  async function handleClothPinClick(nx: number, ny: number) {
-    const c = await invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
-      args: {
-        nx,
-        ny,
-        tool: "add",
-        strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-      },
-    });
-    if (!c) return;
-    setClothPins((v) => {
-      const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
-      const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
-      clothPinsRef.current = next;
-      return next;
-    });
-  }
+  // handleClothPinClick now lives in useRopeClothGenerator hook.
 
   function applyPolygonStrokeFill() {
     if (strokePolygonVerts.length < 3) return;
@@ -3516,16 +2193,6 @@ function App() {
    * Line style always; brush style for plane/circle/cuboid/etc. (Surface/Solid), but not Spray
    * (Spray uses segment prev only). Without this, Rust never sees `strokeLineStart*` for Surface.
    */
-  function strokeViewportLineStartNorm(): { nx: number; ny: number } | null {
-    const start = strokeViewportStartRef.current;
-    if (!start) return null;
-    if (strokeDrawStyleRef.current === "line") return start;
-    if (strokeDrawStyleRef.current === "brush" && drawStrokeModeRef.current !== "spray") {
-      return start;
-    }
-    return null;
-  }
-
   function beginFillOperation() {
     fillOperationPendingRef.current = true;
     setFillOperationPending(true);
@@ -3567,20 +2234,6 @@ function App() {
     loadingRef.current = loading;
     interactionBlockedRef.current = loading || workBusy || fillOperationPending;
   }, [loading, workBusy, fillOperationPending]);
-
-  /** Escape cancels in-progress flood fill (Rust BFS checks `fill_operation_cancel`). */
-  useEffect(() => {
-    if (!workBusy && !fillOperationPending) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.code !== "Escape") return;
-      if (e.repeat) return;
-      if (!fillOperationPendingRef.current && !/fill/i.test(workPhaseRef.current)) return;
-      e.preventDefault();
-      void invoke("voxel_fill_cancel").catch(() => {});
-    };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, [workBusy, fillOperationPending]);
 
   /** Any path that sets `loadError` must not leave `loading` stuck true (e.g. `collab-error`, invoke `.catch`). */
   useEffect(() => {
@@ -3746,185 +2399,8 @@ function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [chatPanelOpen]);
 
-  // Fire a ping at the given normalized viewport coords with an optional emoji.
-  const firePing = useCallback((p: { nx: number; ny: number }, emoji?: string) => {
-    const dn = loadPreferences().collabDisplayName.trim();
-    void invoke<{
-      ok: boolean;
-      x?: number;
-      y?: number;
-      z?: number;
-    }>("ping_cursor_pick", {
-      args: { nx: p.nx, ny: p.ny, displayName: dn, emoji: emoji ?? "" },
-    })
-      .then((r) => {
-        if (!r?.ok || r.x == null || r.y == null || r.z == null) return;
-        const name = dn.length > 0 ? dn : "You";
-        pingHudRef.current = {
-          name,
-          wx: r.x + 0.5,
-          wy: r.y + 0.5,
-          wz: r.z + 0.5,
-          until: Date.now() + PING_HUD_MS,
-          emoji: emoji || undefined,
-        };
-        setPingHudTick((n) => n + 1);
-        playPingSound();
-        void invoke("collab_send_ping", {
-          x: r.x,
-          y: r.y,
-          z: r.z,
-          emoji: emoji ?? "",
-        }).catch(() => {});
-      })
-      .catch(() => {});
-  }, []);
-
-  // Handle radial menu selection (emoji chosen or null = cancelled)
-  const onRadialSelect = useCallback(
-    (emoji: string | null) => {
-      setRadialMenu((m) => ({ ...m, visible: false }));
-      const p = pendingPingRef.current;
-      if (!p) return;
-      pendingPingRef.current = null;
-      if (emoji) {
-        firePing(p, emoji);
-      }
-    },
-    [firePing],
-  );
-
-  useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      const meta = e.metaKey || e.ctrlKey;
-      if (meta && e.key === "z") {
-        e.preventDefault();
-        if (e.shiftKey) {
-          void invoke("voxel_redo").catch(() => {});
-        } else {
-          void invoke("voxel_undo").catch(() => {});
-        }
-        return;
-      }
-      if (meta && e.key === "s") {
-        e.preventDefault();
-        void invoke("save_voxelle").catch(() => {
-          void invoke("save_voxelle_as").catch(() => {});
-        });
-        return;
-      }
-      if (e.key !== "z" && e.key !== "Z") return;
-      if (meta) return;
-      if (e.repeat) return;
-      const t = e.target as HTMLElement | null;
-      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) {
-        return;
-      }
-      if (preferencesOpen || stampBookOpen || joinModalOpen || newProjectOpen || collabJoinPending)
-        return;
-      const p = lastViewportPickNormRef.current;
-      if (!p) return;
-      e.preventDefault();
-      // Stash the pick coords for the radial menu / quick-tap path
-      pendingPingRef.current = { nx: p.nx, ny: p.ny };
-      const scr = lastCursorScreenRef.current;
-      // Start hold timer — if Z is held long enough, show radial menu
-      if (radialHoldTimerRef.current) clearTimeout(radialHoldTimerRef.current);
-      radialHoldTimerRef.current = setTimeout(() => {
-        radialHoldTimerRef.current = null;
-        setRadialMenu({ x: scr.x, y: scr.y, visible: true });
-      }, RADIAL_HOLD_MS);
-    };
-
-    const onKeyUp = (e: KeyboardEvent) => {
-      if (e.key !== "z" && e.key !== "Z") return;
-      // If the hold timer is still pending, it was a quick tap → fire normal ping
-      if (radialHoldTimerRef.current) {
-        clearTimeout(radialHoldTimerRef.current);
-        radialHoldTimerRef.current = null;
-        const p = pendingPingRef.current;
-        pendingPingRef.current = null;
-        if (p) firePing(p);
-      }
-      // If radial menu is visible, RadialPingMenu handles keyup via onSelect
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-      window.removeEventListener("keyup", onKeyUp);
-      if (radialHoldTimerRef.current) {
-        clearTimeout(radialHoldTimerRef.current);
-        radialHoldTimerRef.current = null;
-      }
-    };
-  }, [preferencesOpen, stampBookOpen, joinModalOpen, newProjectOpen, collabJoinPending, firePing]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.repeat) return;
-      const t = e.target as HTMLElement | null;
-      if (
-        t &&
-        (t.tagName === "INPUT" ||
-          t.tagName === "TEXTAREA" ||
-          t.tagName === "SELECT" ||
-          t.isContentEditable)
-      ) {
-        return;
-      }
-      if (
-        preferencesOpen ||
-        stampBookOpen ||
-        joinModalOpen ||
-        newProjectOpen ||
-        collabJoinPending
-      ) {
-        return;
-      }
-      if (loading || workBusy) return;
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (selectionCount === 0) return;
-      if (e.code === "KeyX") {
-        e.preventDefault();
-        e.stopPropagation();
-        void invoke<number>("selection_delete_selected_voxels").catch(() => {});
-        return;
-      }
-      // Arrow keys: translate (plain) or rotate 90° (Shift+arrow).
-      // X/Z plane: ← → move X. Shift+← → rotate around Y.
-      // Y axis: no arrow for Y translate; use Shift+↑↓ for rotate around X/Z.
-      const arrowMap: Record<string, [number, number, number]> = {
-        ArrowLeft: [-1, 0, 0],
-        ArrowRight: [1, 0, 0],
-        ArrowUp: [0, 0, -1],
-        ArrowDown: [0, 0, 1],
-      };
-      const rotateMap: Record<string, [number, number]> = {
-        ArrowLeft: [1, -1],
-        ArrowRight: [1, 1],
-        ArrowUp: [0, -1],
-        ArrowDown: [0, 1],
-      };
-      if (!e.shiftKey && arrowMap[e.code]) {
-        e.preventDefault();
-        e.stopPropagation();
-        const [dx, dy, dz] = arrowMap[e.code];
-        void invoke("selection_translate", { dx, dy, dz }).catch(() => {});
-        return;
-      }
-      if (e.shiftKey && rotateMap[e.code]) {
-        e.preventDefault();
-        e.stopPropagation();
-        const [axis, quarters] = rotateMap[e.code];
-        void invoke("selection_rotate", { axis, quarters }).catch(() => {});
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [
-    selectionCount,
+  // ── Keyboard shortcuts hook (undo/redo, save, ping, selection translate/rotate, fill cancel) ──
+  const { onRadialSelect } = useKeyboardShortcuts({
     preferencesOpen,
     stampBookOpen,
     joinModalOpen,
@@ -3932,87 +2408,24 @@ function App() {
     collabJoinPending,
     loading,
     workBusy,
-  ]);
+    fillOperationPending,
+    selectionCount,
+    lastViewportPickNormRef,
+    pendingPingRef,
+    radialHoldTimerRef,
+    lastCursorScreenRef,
+    fillOperationPendingRef,
+    workPhaseRef,
+    pingHudRef,
+    setPingHudTick,
+    setRadialMenu,
+  });
 
   const clearPreview = useCallback(() => {
     void invoke("sync_preview_input", {
       args: buildSyncPreviewPayload(-1, 0, "navigate"),
     }).catch(() => {});
     void invoke("squishy_gizmo_pointer_up").catch(() => {});
-  }, []);
-
-  const releaseFlyMouseLook = useCallback(async () => {
-    flyMouseLookActiveRef.current = false;
-    flyLastClientRef.current = null;
-    flySkipNextFlyMoveRef.current = false;
-    flyPendingLookDxRef.current = 0;
-    flyPendingLookDyRef.current = 0;
-    flyCapturedPointerIdRef.current = null;
-    // Release pointer lock if active
-    if (document.pointerLockElement) {
-      try {
-        document.exitPointerLock();
-      } catch {
-        /* */
-      }
-    }
-    // Release Tauri-native cursor grab/visibility
-    const w = getCurrentWindow();
-    try {
-      await w.setCursorGrab(false);
-    } catch {
-      /* e.g. Linux: grab unsupported */
-    }
-    try {
-      await w.setCursorVisible(true);
-    } catch {
-      /* */
-    }
-  }, []);
-
-  const activateFlyMouseLook = useCallback(async (_pointerId: number) => {
-    const el = viewportRef.current;
-    console.log("[walk-debug] activateFlyMouseLook called, el=", !!el);
-    if (!el) return;
-    flySkipNextFlyMoveRef.current = false;
-    flyPendingLookDxRef.current = 0;
-    flyPendingLookDyRef.current = 0;
-    flyCapturedPointerIdRef.current = null;
-    // Request pointer lock FIRST — must be called synchronously from user gesture
-    // before any awaits, otherwise the browser drops the gesture context.
-    try {
-      await el.requestPointerLock();
-      console.log(
-        "[walk-debug] requestPointerLock succeeded, pointerLockElement=",
-        document.pointerLockElement === el,
-      );
-    } catch (err) {
-      console.warn("[walk-debug] requestPointerLock FAILED:", err);
-    }
-    const r = el.getBoundingClientRect();
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    // Tauri-native fallback: grab + hide cursor if pointer lock didn't engage
-    if (document.pointerLockElement !== el) {
-      const w = getCurrentWindow();
-      try {
-        await w.setCursorPosition(new LogicalPosition(cx, cy));
-      } catch {
-        /* */
-      }
-      try {
-        await w.setCursorGrab(true);
-      } catch {
-        /* Linux: unsupported */
-      }
-      try {
-        await w.setCursorVisible(false);
-      } catch {
-        /* */
-      }
-    }
-    flyLastClientRef.current = { x: cx, y: cy };
-    flyMouseLookActiveRef.current = true;
   }, []);
 
   useEffect(() => {
@@ -4141,309 +2554,262 @@ function App() {
     void invoke("set_mood_params", { args: mood }).catch(() => {});
   }, [mood]);
 
-  useEffect(() => {
-    if (interactionMode !== "fly") {
-      void invoke("set_fly_mode", { enabled: false }).catch(() => {});
-      keysDownRef.current.clear();
-      void releaseFlyMouseLook();
-      return;
-    }
-    void invoke("set_fly_mode", { enabled: true }).catch(() => {});
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.code === "Escape" && flyMouseLookActiveRef.current) {
-        void releaseFlyMouseLook();
-        e.preventDefault();
-        return;
-      }
-      keysDownRef.current.add(e.code);
-      if (
-        e.code === "KeyW" ||
-        e.code === "KeyS" ||
-        e.code === "KeyA" ||
-        e.code === "KeyD" ||
-        e.code === "KeyE" ||
-        e.code === "KeyQ" ||
-        e.code === "ShiftLeft" ||
-        e.code === "ShiftRight"
-      ) {
-        e.preventDefault();
-      }
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      keysDownRef.current.delete(e.code);
-      if (
-        e.code === "KeyW" ||
-        e.code === "KeyS" ||
-        e.code === "KeyA" ||
-        e.code === "KeyD" ||
-        e.code === "KeyE" ||
-        e.code === "KeyQ" ||
-        e.code === "ShiftLeft" ||
-        e.code === "ShiftRight"
-      ) {
-        e.preventDefault();
-      }
-    };
-    const dpr = () => window.devicePixelRatio || 1;
-    const onFlyPointerMove = (e: PointerEvent) => {
-      const vp = viewportRef.current;
-      const s = dpr();
-      if (!flyMouseLookActiveRef.current || !vp) return;
-
-      // When pointer lock is active, movementX/Y give raw deltas directly —
-      // no need to recenter or skip synthetic events.
-      if (document.pointerLockElement === vp) {
-        const dxCss = e.movementX;
-        const dyCss = e.movementY;
-        if (dxCss === 0 && dyCss === 0) return;
-        flyPendingLookDxRef.current += dxCss * s;
-        flyPendingLookDyRef.current += dyCss * s;
-        return;
-      }
-
-      // Fallback: manual recentering when pointer lock is unavailable
-      if (flySkipNextFlyMoveRef.current) {
-        flySkipNextFlyMoveRef.current = false;
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
-      let dxCss = e.movementX;
-      let dyCss = e.movementY;
-      if (dxCss === 0 && dyCss === 0) {
-        const last = flyLastClientRef.current;
-        if (last == null) {
-          flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-        dxCss = e.clientX - last.x;
-        dyCss = e.clientY - last.y;
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-        if (dxCss === 0 && dyCss === 0) return;
-      } else {
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-      }
-      flyPendingLookDxRef.current += dxCss * s;
-      flyPendingLookDyRef.current += dyCss * s;
-      const r = vp.getBoundingClientRect();
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      void getCurrentWindow()
-        .setCursorPosition(new LogicalPosition(cx, cy))
-        .then(() => {
-          flySkipNextFlyMoveRef.current = true;
-          flyLastClientRef.current = { x: cx, y: cy };
+  // ── Gamepad / controller support ──────────────────────────────────────
+  const virtualCursorElRef = useRef<HTMLDivElement | null>(null);
+  const gamepad = useGamepad({
+    flyPendingLookDxRef,
+    flyPendingLookDyRef,
+    onToolActivate: useCallback(() => {
+      void runStrokeAtScreen(0.5, 0.5, {});
+    }, []),
+    onEyedropper: useCallback(() => {
+      void invoke<{ color: number; material: string } | null>(
+        "voxel_pick_color_at_screen",
+        {
+          args: {
+            nx: 0.5,
+            ny: 0.5,
+            tool: "add",
+            color: activeColorRef.current,
+            material: activeMaterialRef.current,
+            brushRadius: 0,
+            brushShape: brushShapeRef.current,
+          },
+        },
+      )
+        .then((r) => {
+          if (r) {
+            setActiveColor(r.color);
+            setActiveMaterial(r.material);
+          }
         })
         .catch(() => {});
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("keyup", onKeyUp, true);
-    document.addEventListener("pointermove", onFlyPointerMove, true);
-    const tick = () => {
-      const pdx = flyPendingLookDxRef.current;
-      const pdy = flyPendingLookDyRef.current;
-      flyPendingLookDxRef.current = 0;
-      flyPendingLookDyRef.current = 0;
-      if (pdx !== 0 || pdy !== 0) {
-        void invoke("camera_fly_look", {
-          args: { dx: pdx, dy: pdy },
-        }).catch(() => {});
+    }, []),
+    onUndo: useCallback(() => {
+      void invoke("voxel_undo").catch(() => {});
+    }, []),
+    onToolSelect: useCallback(
+      (sliceId: string) => {
+        const { interactionMode: im, toolsPane: tp } = toolSliceToMode(sliceId);
+        setInteractionMode(im);
+        setToolsPane(tp);
+      },
+      [],
+    ),
+    onSubOptionSelect: useCallback((choice: SubOptionChoice) => {
+      if (choice.kind === "selectionMethod") {
+        const s = selectionMethodToState(choice.method);
+        setDrawStrokeMode(s.drawStrokeMode);
+        setStrokeDrawStyle(s.strokeDrawStyle);
+        setStrokeFamilyVariant(s.strokeFamilyVariant);
+        setSprayDensity(s.sprayDensity);
+      } else if (choice.kind === "sculptMode") {
+        setSculptStrokeMode(choice.mode);
       }
-      const k = keysDownRef.current;
-      let forward = 0;
-      let right = 0;
-      let up = 0;
-      if (k.has("KeyW")) forward += 1;
-      if (k.has("KeyS")) forward -= 1;
-      if (k.has("KeyD")) right += 1;
-      if (k.has("KeyA")) right -= 1;
-      if (k.has("KeyE")) up += 1;
-      if (k.has("KeyQ")) up -= 1;
-      const slow = k.has("ShiftLeft") || k.has("ShiftRight");
-      const speedScale = (slow ? 1 / 8 : 1) * flySpeedRef.current;
-      void invoke("sync_fly_input", {
-        args: { forward, right, up, speedScale },
-      }).catch(() => {});
-      // Recenter cursor each frame when using Tauri fallback (not pointer lock)
-      if (flyMouseLookActiveRef.current && !document.pointerLockElement) {
-        const vp = viewportRef.current;
-        if (vp) {
-          const r = vp.getBoundingClientRect();
-          const cx = r.left + r.width / 2;
-          const cy = r.top + r.height / 2;
-          void getCurrentWindow()
-            .setCursorPosition(new LogicalPosition(cx, cy))
-            .then(() => {
-              flySkipNextFlyMoveRef.current = true;
-              flyLastClientRef.current = { x: cx, y: cy };
-            })
-            .catch(() => {});
-        }
+    }, []),
+    onRequestFlyMode: useCallback(() => {
+      if (interactionModeRef.current !== "fly" && interactionModeRef.current !== "walk") {
+        setInteractionMode("fly");
+        setToolsPane("fly");
       }
-      flyRafRef.current = requestAnimationFrame(tick);
-    };
-    flyRafRef.current = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(flyRafRef.current);
-      window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("keyup", onKeyUp, true);
-      document.removeEventListener("pointermove", onFlyPointerMove, true);
-      void invoke("set_fly_mode", { enabled: false }).catch(() => {});
-      void releaseFlyMouseLook();
-    };
-  }, [interactionMode, releaseFlyMouseLook]);
+    }, []),
+    onToggleLocomotion: useCallback((direction: "fly" | "walk") => {
+      setInteractionMode(direction);
+      setToolsPane(direction);
+    }, []),
+    interactionModeRef,
+    cursorElRef: virtualCursorElRef,
+  });
 
-  // ── Walk mode: first-person with gravity, collision, jumping ──
-  useEffect(() => {
-    if (interactionMode !== "walk") {
-      void invoke("set_walk_mode", { enabled: false }).catch(() => {});
-      keysDownRef.current.clear();
-      void releaseFlyMouseLook();
-      return;
-    }
-    console.log("[walk-debug] walk useEffect SETUP — activating walk mode");
-    void invoke("set_walk_mode", { enabled: true })
-      .then(() => {
-        console.log("[walk-debug] set_walk_mode(true) resolved OK");
-      })
-      .catch((err) => {
-        console.error("[walk-debug] set_walk_mode(true) FAILED:", err);
-      });
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      if (e.code === "Escape" && flyMouseLookActiveRef.current) {
-        void releaseFlyMouseLook();
-        e.preventDefault();
-        return;
-      }
-      keysDownRef.current.add(e.code);
-      if (
-        e.code === "KeyW" ||
-        e.code === "KeyS" ||
-        e.code === "KeyA" ||
-        e.code === "KeyD" ||
-        e.code === "Space" ||
-        e.code === "ShiftLeft" ||
-        e.code === "ShiftRight"
-      ) {
-        e.preventDefault();
-      }
-    };
-    const onKeyUp = (e: KeyboardEvent) => {
-      keysDownRef.current.delete(e.code);
-      if (
-        e.code === "KeyW" ||
-        e.code === "KeyS" ||
-        e.code === "KeyA" ||
-        e.code === "KeyD" ||
-        e.code === "Space" ||
-        e.code === "ShiftLeft" ||
-        e.code === "ShiftRight"
-      ) {
-        e.preventDefault();
-      }
-    };
-    const dpr = () => window.devicePixelRatio || 1;
-    const onWalkPointerMove = (e: PointerEvent) => {
-      const vp = viewportRef.current;
-      const s = dpr();
-      if (!flyMouseLookActiveRef.current || !vp) return;
-      if (document.pointerLockElement === vp) {
-        const dxCss = e.movementX;
-        const dyCss = e.movementY;
-        if (dxCss === 0 && dyCss === 0) return;
-        flyPendingLookDxRef.current += dxCss * s;
-        flyPendingLookDyRef.current += dyCss * s;
-        return;
-      }
-      // Fallback: manual recentering when pointer lock is unavailable
-      if (flySkipNextFlyMoveRef.current) {
-        flySkipNextFlyMoveRef.current = false;
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
-      let dxCss = e.movementX;
-      let dyCss = e.movementY;
-      if (dxCss === 0 && dyCss === 0) {
-        const last = flyLastClientRef.current;
-        if (last == null) {
-          flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-        dxCss = e.clientX - last.x;
-        dyCss = e.clientY - last.y;
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-        if (dxCss === 0 && dyCss === 0) return;
-      } else {
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-      }
-      flyPendingLookDxRef.current += dxCss * s;
-      flyPendingLookDyRef.current += dyCss * s;
-      const r = vp.getBoundingClientRect();
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      void getCurrentWindow()
-        .setCursorPosition(new LogicalPosition(cx, cy))
-        .then(() => {
-          flySkipNextFlyMoveRef.current = true;
-          flyLastClientRef.current = { x: cx, y: cy };
-        })
-        .catch(() => {});
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    window.addEventListener("keyup", onKeyUp, true);
-    document.addEventListener("pointermove", onWalkPointerMove, true);
-    const tick = () => {
-      const pdx = flyPendingLookDxRef.current;
-      const pdy = flyPendingLookDyRef.current;
-      flyPendingLookDxRef.current = 0;
-      flyPendingLookDyRef.current = 0;
-      if (pdx !== 0 || pdy !== 0) {
-        void invoke("camera_fly_look", {
-          args: { dx: pdx, dy: pdy },
-        }).catch(() => {});
-      }
-      const k = keysDownRef.current;
-      let forward = 0;
-      let right = 0;
-      if (k.has("KeyW")) forward += 1;
-      if (k.has("KeyS")) forward -= 1;
-      if (k.has("KeyD")) right += 1;
-      if (k.has("KeyA")) right -= 1;
-      const jump = k.has("Space");
-      const slow = k.has("ShiftLeft") || k.has("ShiftRight");
-      const speedScale = slow ? 1 / 3 : 1;
-      void invoke("sync_fly_input", {
-        args: { forward, right, up: 0, speedScale, jump },
-      }).catch(() => {});
-      // Recenter cursor each frame when using Tauri fallback (not pointer lock)
-      if (flyMouseLookActiveRef.current && !document.pointerLockElement) {
-        const vp = viewportRef.current;
-        if (vp) {
-          const r = vp.getBoundingClientRect();
-          const cx = r.left + r.width / 2;
-          const cy = r.top + r.height / 2;
-          void getCurrentWindow()
-            .setCursorPosition(new LogicalPosition(cx, cy))
-            .then(() => {
-              flySkipNextFlyMoveRef.current = true;
-              flyLastClientRef.current = { x: cx, y: cy };
-            })
-            .catch(() => {});
-        }
-      }
-      flyRafRef.current = requestAnimationFrame(tick);
-    };
-    flyRafRef.current = requestAnimationFrame(tick);
-    return () => {
-      cancelAnimationFrame(flyRafRef.current);
-      window.removeEventListener("keydown", onKeyDown, true);
-      window.removeEventListener("keyup", onKeyUp, true);
-      document.removeEventListener("pointermove", onWalkPointerMove, true);
-      void invoke("set_walk_mode", { enabled: false }).catch(() => {});
-      void releaseFlyMouseLook();
-    };
-  }, [interactionMode, releaseFlyMouseLook]);
+  // ── Fly mode hook (WASD, mouse look, RAF tick) ──
+  const {
+    flySpeed,
+    setFlySpeed,
+    releaseFlyMouseLook,
+    activateFlyMouseLook,
+    flyMouseLookActiveRef,
+    keysDownRef,
+    flyRafRef,
+    flyLastClientRef,
+    flySkipNextFlyMoveRef,
+  } = useFlyMode({
+    interactionMode,
+    viewportRef,
+    pollGamepad: gamepad.pollGamepad,
+    flyPendingLookDxRef,
+    flyPendingLookDyRef,
+  });
+
+  // ── Walk mode hook (first-person with gravity, collision, jumping) ──
+  useWalkMode({
+    interactionMode,
+    viewportRef,
+    pollGamepad: gamepad.pollGamepad,
+    releaseFlyMouseLook,
+    flyMouseLookActiveRef,
+    keysDownRef,
+    flyRafRef,
+    flyLastClientRef,
+    flySkipNextFlyMoveRef,
+    flyPendingLookDxRef,
+    flyPendingLookDyRef,
+  });
+
+  // ── Viewport pointer handlers (extracted to useViewportPointer) ──
+  const _vpLocalsRef = useRef<any>(null);
+  _vpLocalsRef.current = {
+    activeColorRef,
+    activeMaterialRef,
+    activePointerIdRef,
+    ashlarPreviewSeedRef,
+    brushClipBottomHalfRef,
+    brushRadiusRef,
+    brushShapeRef,
+    capturedPointerIdRef,
+    currentStrokeSeedRef,
+    dragDidEditRef,
+    drawStrokeModeRef,
+    extrudeDirectionRefRef,
+    extrudeEndCapRef,
+    extrudeGizmoRef,
+    extrudeProfileRef,
+    extrudeRedragRef,
+    extrudeStartNormRef,
+    extrudeTaperEndRef,
+    extrudeTaperRef,
+    extrudeTaperStartRef,
+    eyedropperReturnModeRef,
+    floraPreviewSeedRef,
+    flyMouseLookActiveRef,
+    generatorKindRef,
+    generatorSphereRadiusRef,
+    gestureRef,
+    gizmoHoverRef,
+    gizmoRef,
+    grassPreviewSeedRef,
+    interactionBlockedRef,
+    interactionModeRef,
+    lastCursorScreenRef,
+    lastRef,
+    lastStrokeEditMsRef,
+    lastStrokeNormRef,
+    lastTerrainHoverMsRef,
+    lastViewportPickNormRef,
+    lastWallHoverMsRef,
+    matchMaterialSelectColorRef,
+    maxPointerMoveRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+    onPointerUpRef,
+    paintColorDistribRef,
+    pendingPointerUpRef,
+    piscinaPreviewSeedRef,
+    planeAxisRef,
+    pointerStartRef,
+    probingRef,
+    rockPreviewSeedRef,
+    roofAreaShapeRef,
+    roofFirstClickRef,
+    roofPinsRef,
+    sculptBrushFalloffRef,
+    sculptBrushRadiusRef,
+    sculptBrushShapeUiRef,
+    sculptBrushStrengthRef,
+    sculptSmoothPassesRef,
+    sculptSmoothVariantRef,
+    sculptStrokeModeRef,
+    selectedColorsRef,
+    selectionStrokeBegunRef,
+    selectionStrokeSnapToSurfaceRef,
+    smoothAggressivenessRef,
+    smoothLaplacianIterationsRef,
+    smoothLaplacianRelaxPctRef,
+    smoothNeighborRadiusRef,
+    sprayDensityRef,
+    sprayDirectionRef,
+    squishyModeRef,
+    stampOriginXRef,
+    stampOriginZRef,
+    stampRotXRef,
+    stampRotYRef,
+    stampRotZRef,
+    startScreenLogoLoadedRef,
+    strokeClickRef,
+    strokeDrawStyleRef,
+    strokePolygonLastScreenRef,
+    strokePolygonVertsRef,
+    strokeShiftKeyRef,
+    strokeViewportStartRef,
+    surfacePhysRef,
+    terrainBaseYRef,
+    terrainFlattenUseBaseYRef,
+    terrainSculptOpRef,
+    terrainSmoothRadiusRef,
+    terrainSubVoxelRef,
+    viewportCursorDebugRafRef,
+    viewportCursorDebugScreenRef,
+    viewportPhysRef,
+    viewportRef,
+    wallAreaShapeRef,
+    wallAxisAlignRef,
+    wallHeightVoxRef,
+    wallLockStartHeightRef,
+    wallSculptPolygonVertsRef,
+    wallWidthIndexRef,
+    cuboidDepthRef,
+    cylinderDepthRef,
+    setActiveColor,
+    setActiveMaterial,
+    setCuboidDepthUi,
+    setCylinderDepthUi,
+    setInteractionMode,
+    setRoofFirstClick,
+    setRoofPins,
+    setRopeFirstScreen,
+    setSelectionCount,
+    setSquishyBallCount,
+    setStrokePolygonVerts,
+    setTerrainHoverY,
+    setViewportCursorDebugJs,
+    setViewportCursorDebugRust,
+    setViewportCursorDebugScreen,
+    setWallSculptPolygonVerts,
+    ashlarPhase,
+    clothPhase,
+    cuboidPhase,
+    cylinderPhase,
+    extrudePhase,
+    faunaPhase,
+    floraPhase,
+    grassPhase,
+    insectaPhase,
+    piscinaPhase,
+    rocksPhase,
+    ropePhase,
+    squishyPhase,
+    loading,
+    workBusy,
+    fillOperationPending,
+    viewportCursorDebugEnabled,
+    ropeFirstScreen,
+    mergedStrokeAux,
+    buildSyncPreviewPayload,
+    previewModeForSync,
+    runStrokeAtScreen,
+    clearPreview,
+    handleClothPinClick,
+    beginFillOperation,
+    endFillOperation,
+    askFillConfirmation,
+    activateFlyMouseLook,
+    releaseFlyMouseLook,
+  };
+  const {
+    onPointerDown, onPointerMove, onPointerUp, onPointerLeave,
+    onGotPointerCapture, onLostPointerCapture, onWheel,
+    commitWallSculptPolygonStroke,
+  } = useViewportPointer(_vpLocalsRef);
 
   useEffect(() => {
     if (
@@ -4474,50 +2840,6 @@ function App() {
    * **Full-window GPU viewport** (experimental): texture covers the full swapchain; normalize with
    * `layoutViewportCssSize` so the denominator matches `clientX`/`clientY` (same as `sendResize`).
    */
-  const clientToViewportNormalized = useCallback((e: React.PointerEvent) => {
-    const el = viewportRef.current;
-    if (!el) return { nx: 0.5, ny: 0.5 };
-    const rect = el.getBoundingClientRect();
-    const rw = rect.width;
-    const rh = rect.height;
-    if (rw <= 0 || rh <= 0) return { nx: 0.5, ny: 0.5 };
-
-    const relX = e.clientX - rect.left;
-    const relY = e.clientY - rect.top;
-    return {
-      nx: Math.min(1, Math.max(0, relX / rw)),
-      ny: Math.min(1, Math.max(0, relY / rh)),
-    };
-  }, []);
-
-  const planeStrokeDebugEnabledRef = useRef(true);
-  const logPlaneStrokeDebug = useCallback(
-    (_phase: string, _e: React.PointerEvent, _extra?: Record<string, unknown>) => {
-      if (!planeStrokeDebugEnabledRef.current) return;
-      const mode = interactionModeRef.current;
-      const sm = drawStrokeModeRef.current;
-      if (!(sm === "plane" && (mode === "add" || mode === "remove" || mode === "paint"))) {
-        return;
-      }
-      void gestureRef.current;
-    },
-    [],
-  );
-
-  const resetPointerGesture = useCallback(
-    (reason: string, e?: React.PointerEvent) => {
-      if (e) {
-        logPlaneStrokeDebug(`gesture:reset:${reason}`, e);
-      }
-      gestureRef.current = null;
-      activePointerIdRef.current = null;
-      pointerStartRef.current = null;
-      maxPointerMoveRef.current = 0;
-      pendingPointerUpRef.current = null;
-    },
-    [logPlaneStrokeDebug],
-  );
-
   useEffect(() => {
     if (newProjectOpen) {
       const p = loadPreferences();
@@ -4556,1578 +2878,6 @@ function App() {
       void w.setTitle("Voxelle Desktop");
     }
   }, [pathLabel, loading, loadError]);
-
-  const onPointerDown = async (e: React.PointerEvent) => {
-    logPlaneStrokeDebug("down:received", e);
-    const modeEarly = interactionModeRef.current;
-    if ((modeEarly === "fly" || modeEarly === "walk") && (e.button === 0 || e.button === 2)) {
-      console.log(
-        "[walk-debug] pointer-down in",
-        modeEarly,
-        "mode, button=",
-        e.button,
-        "mouseLookActive=",
-        flyMouseLookActiveRef.current,
-      );
-      e.preventDefault();
-      if (flyMouseLookActiveRef.current) {
-        void releaseFlyMouseLook();
-      } else {
-        void activateFlyMouseLook(e.pointerId);
-      }
-      probingRef.current = false;
-      resetPointerGesture("fly-toggle", e);
-      return;
-    }
-
-    const captureEl = e.currentTarget as HTMLElement;
-    try {
-      captureEl.setPointerCapture(e.pointerId);
-      capturedPointerIdRef.current = e.pointerId;
-    } catch (err) {
-      capturedPointerIdRef.current = null;
-      console.warn("[voxelle][plane-stroke] setPointerCapture failed", err);
-    }
-    activePointerIdRef.current = e.pointerId;
-    pointerStartRef.current = { x: e.clientX, y: e.clientY };
-    maxPointerMoveRef.current = 0;
-    probingRef.current = true;
-    gestureRef.current = null;
-
-    // Extrude settings phase: re-drag to reposition endpoint instead of cancelling.
-    if (
-      extrudePhase.ref.current &&
-      interactionModeRef.current === "sculpt" &&
-      sculptStrokeModeRef.current === "extrude" &&
-      e.button === 0
-    ) {
-      extrudeRedragRef.current = true;
-      probingRef.current = false;
-      return;
-    }
-    // Cancel extrude phase on left-click — but NOT for selectExtrude, where
-    // we defer to the gizmo hit-test below so re-clicking a handle doesn't commit.
-    if (
-      extrudePhase.ref.current &&
-      e.button === 0 &&
-      interactionModeRef.current !== "selectExtrude"
-    ) {
-      extrudePhase.cancel();
-    }
-
-    const { nx, ny } = clientToViewportNormalized(e);
-    const pointerId = e.pointerId;
-    const shiftKey = e.shiftKey;
-    const middleButton = e.button === 1;
-    const mode = interactionModeRef.current;
-    const navigate = mode === "navigate" || mode === "fly" || mode === "walk";
-    const forceCamera =
-      middleButton ||
-      (mode === "add" && e.button !== 0) ||
-      (mode === "remove" && e.button !== 0) ||
-      (mode === "paint" && e.button !== 0) ||
-      (mode === "eyedropper" && e.button !== 0) ||
-      (mode === "select" && e.button !== 0) ||
-      (mode === "selectByColor" && e.button !== 0) ||
-      (mode === "selectCoplanar" && e.button !== 0) ||
-      (mode === "selectCoplanarEmpty" && e.button !== 0) ||
-      (mode === "stamp" && e.button !== 0 && e.button !== 2) ||
-      (mode === "punch" && e.button !== 0 && e.button !== 2) ||
-      (mode === "sculpt" && e.button !== 0) ||
-      (mode === "generator" && e.button !== 0 && e.button !== 2) ||
-      (mode === "squishy" && e.button !== 0);
-
-    const logoSplashPointer =
-      startScreenLogoLoadedRef.current && !loading && !workBusy && e.button === 0;
-
-    if (
-      mode === "squishy" &&
-      squishyModeRef.current === "edit" &&
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer
-    ) {
-      try {
-        const consumed = await invoke<boolean>("squishy_gizmo_pointer_down", {
-          args: { nx, ny },
-        });
-        if (consumed) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "squishyGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through to pick / camera */
-      }
-    }
-
-    // Extrude gizmo: check in selectExtrude mode before falling through to camera.
-    if (
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer &&
-      !navigate &&
-      !forceCamera &&
-      mode === "selectExtrude"
-    ) {
-      try {
-        const hit = await extrudeGizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
-        if (hit) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "extrudeGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through */
-      }
-      // Gizmo wasn't hit — cancel the settings phase if active.
-      if (extrudePhase.ref.current) {
-        extrudePhase.cancel();
-      }
-    }
-
-    // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
-    // Exclude selectExtrude — in that mode we use the extrude gizmo instead.
-    if (
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer &&
-      !navigate &&
-      !forceCamera &&
-      mode !== "selectExtrude"
-    ) {
-      try {
-        const hit = await gizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
-        if (hit) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "selectionGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-
-    // Stamp/punch right-click is handled in onContextMenu (fires reliably on all platforms).
-    // Still return early here to avoid setting a camera gesture if pointerdown does fire.
-    if ((mode === "stamp" || mode === "punch") && e.button === 2) {
-      probingRef.current = false;
-      resetPointerGesture("stamp-rotate-passthrough", e);
-      return;
-    }
-
-    // Generator right-click: reseed preview (web parity)
-
-    if (mode === "generator" && e.button === 2 && !loading && !workBusy) {
-      e.preventDefault();
-      rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-      ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-      floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-      piscinaPreviewSeedRef.current = (Math.random() * 1e9) | 0;
-      // Trigger a preview sync so the new seed is sent to Rust
-      const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(mode)),
-      }).catch(() => {});
-      probingRef.current = false;
-      resetPointerGesture("generator-reseed", e);
-      return;
-    }
-
-    let hitSolid = false;
-    const isDrawOrSelect =
-      !logoSplashPointer &&
-      !loading &&
-      !workBusy &&
-      !forceCamera &&
-      !navigate &&
-      (mode === "add" ||
-        mode === "remove" ||
-        mode === "paint" ||
-        mode === "eyedropper" ||
-        mode === "select" ||
-        mode === "selectByColor" ||
-        mode === "selectCoplanar" ||
-        mode === "selectCoplanarEmpty" ||
-        mode === "stamp" ||
-        mode === "punch" ||
-        mode === "sculpt" ||
-        mode === "generator" ||
-        mode === "squishy") &&
-      e.button === 0;
-    // All draw/select modes run the async pick probe. Pointer-up events that
-    // arrive while probing are deferred and replayed after the probe resolves
-    // (see pendingPointerUpRef), which fixes both the "click twice" race and
-    // the "can't orbit on empty space" bug for all tools including fill and
-    // selection modes.
-    if (isDrawOrSelect) {
-      try {
-        hitSolid = await invoke<boolean>("voxel_pick_probe", {
-          args: { nx, ny },
-        });
-      } catch {
-        hitSolid = false;
-      }
-    }
-
-    probingRef.current = false;
-
-    if (activePointerIdRef.current !== pointerId) {
-      return;
-    }
-
-    gestureRef.current = {
-      pointerId,
-      mode: forceCamera || navigate || !hitSolid ? "camera" : "voxel",
-    };
-    logPlaneStrokeDebug("down:gesture-assigned", e, {
-      hitSolid,
-      forceCamera,
-      navigate,
-      assignedGestureMode: gestureRef.current.mode,
-    });
-    lastRef.current = { x: e.clientX, y: e.clientY };
-
-    if (gestureRef.current.mode === "voxel") {
-      const dispatch = getStrokeDispatch(mode);
-      const isSculptOrDispatch = dispatch || mode === "sculpt";
-      if (isSculptOrDispatch) {
-        if (drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current) {
-          cuboidPhase.cancel();
-        }
-        if (drawStrokeModeRef.current === "cylinder" && cylinderPhase.ref.current) {
-          cylinderPhase.cancel();
-        }
-        dragDidEditRef.current = false;
-        strokeViewportStartRef.current = { nx, ny };
-        lastStrokeNormRef.current = { nx, ny };
-        currentStrokeSeedRef.current = Math.floor(Math.random() * 0xffffffff) >>> 0;
-        strokeShiftKeyRef.current = shiftKey;
-        if (dispatch?.kind === "selection") {
-          selectionStrokeBegunRef.current = true;
-          void invoke("selection_stroke_begin").catch(() => {});
-        } else {
-          void invoke("voxel_stroke_begin").catch(() => {});
-          // Immediately refresh the preview so the correct stroke seed and
-          // line-start are reflected on click without requiring mouse movement.
-          if (
-            mode === "sculpt" &&
-            sculptStrokeModeRef.current !== "extrude" &&
-            !loading &&
-            !workBusy
-          ) {
-            void invoke("voxel_sculpt_stroke_preview_at_screen", {
-              args: buildSculptStrokeInvokeArgs(nx, ny, {
-                strokeSegmentPrev: { nx, ny },
-              }),
-            }).catch(() => {});
-          }
-        }
-      }
-      // Roof square/circle: resolve first anchor for drag-to-define.
-      if (
-        mode === "generator" &&
-        generatorKindRef.current === "roof" &&
-        (roofAreaShapeRef.current === "square" || roofAreaShapeRef.current === "circle")
-      ) {
-        dragDidEditRef.current = false;
-        void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
-          args: {
-            nx,
-            ny,
-            tool: "add",
-            strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-          },
-        })
-          .then((c) => {
-            if (c) {
-              roofFirstClickRef.current = c;
-              setRoofFirstClick(c);
-            }
-          })
-          .catch(() => {});
-      }
-    }
-
-    if (gestureRef.current.mode === "camera" && mode !== "fly") {
-      void invoke("viewport_pointer", {
-        ev: {
-          kind: "down",
-          nx,
-          ny,
-          dx: 0,
-          dy: 0,
-          button: e.button,
-          buttons: e.buttons,
-          shiftKey: e.shiftKey,
-        },
-      });
-    }
-
-    // If pointer-up arrived while the probe was in-flight, replay it now that
-    // the gesture is fully established.
-    const pendingUp = pendingPointerUpRef.current;
-    if (pendingUp && pendingUp.pointerId === pointerId) {
-      pendingPointerUpRef.current = null;
-      onPointerUpRef.current?.(pendingUp);
-    }
-  };
-
-  /** Shared sculpt stroke payload for preview and apply (matches Rust `SculptStrokeAtScreenArgs`). */
-  function buildSculptStrokeInvokeArgs(
-    nx: number,
-    ny: number,
-    opts: {
-      strokeSegmentPrev?: { nx: number; ny: number } | null;
-      includeStrokeSeed?: boolean;
-    } = {},
-  ) {
-    const sm = sculptStrokeModeRef.current;
-    const includeStrokeSeed = opts.includeStrokeSeed !== false;
-    const lineStart =
-      sm === "wall" &&
-      (wallAreaShapeRef.current === "circle" || wallAreaShapeRef.current === "brush") &&
-      strokeViewportStartRef.current
-        ? {
-            strokeLineStartNx: strokeViewportStartRef.current.nx,
-            strokeLineStartNy: strokeViewportStartRef.current.ny,
-          }
-        : {};
-    const wallPoly =
-      sm === "wall" &&
-      wallAreaShapeRef.current === "polygon" &&
-      wallSculptPolygonVertsRef.current.length >= 2
-        ? {
-            wallPolygonVertices: wallSculptPolygonVertsRef.current.map((v) => [v[0], v[1], v[2]]),
-          }
-        : {};
-    const seg = opts.strokeSegmentPrev
-      ? {
-          strokeSegmentPrevNx: opts.strokeSegmentPrev.nx,
-          strokeSegmentPrevNy: opts.strokeSegmentPrev.ny,
-        }
-      : {};
-    return {
-      nx,
-      ny,
-      sculptMode: sm,
-      color: activeColorRef.current,
-      material: activeMaterialRef.current,
-      brushRadius: sculptBrushRadiusRef.current,
-      brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
-      sprayDensity: 0,
-      brushClipBottomHalf: brushClipBottomHalfRef.current,
-      ...seg,
-      ...(sm === "terrain"
-        ? {
-            terrainOp: terrainSculptOpRef.current,
-            terrainBaseY: terrainBaseYRef.current,
-            terrainStrength: sculptBrushStrengthRef.current,
-            terrainSmoothRadius: terrainSmoothRadiusRef.current,
-            terrainFlattenUseBaseY: terrainFlattenUseBaseYRef.current,
-            terrainSubVoxel: terrainSubVoxelRef.current,
-          }
-        : {}),
-      ...(sm === "smooth"
-        ? {
-            smoothNeighborPasses: sculptSmoothPassesRef.current,
-          }
-        : {}),
-      brushStrength: sculptBrushStrengthRef.current,
-      brushFalloff: sculptBrushFalloffRef.current,
-      ...(includeStrokeSeed
-        ? {
-            strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
-          }
-        : {}),
-      wallAreaShape: wallAreaShapeRef.current,
-      sprayDirection: sprayDirectionRef.current,
-      wallWidthIndex: wallWidthIndexRef.current,
-      wallHeightVox: wallHeightVoxRef.current,
-      wallLockStartHeight: wallLockStartHeightRef.current,
-      wallAxisAlign: wallAxisAlignRef.current,
-      sculptSmoothVariant: sculptSmoothVariantRef.current,
-      smoothNeighborRadius: smoothNeighborRadiusRef.current,
-      smoothAggressiveness: smoothAggressivenessRef.current,
-      smoothLaplacianIterations: smoothLaplacianIterationsRef.current,
-      smoothLaplacianRelaxPct: smoothLaplacianRelaxPctRef.current,
-      extrudeProfile: extrudeProfileRef.current,
-      extrudeEndCap: extrudeEndCapRef.current,
-      extrudeTaper: extrudeTaperRef.current,
-      extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
-      extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
-      ...lineStart,
-      ...wallPoly,
-    };
-  }
-
-  function commitWallSculptPolygonStroke() {
-    const verts = wallSculptPolygonVertsRef.current;
-    if (verts.length < 2) return;
-    const scr = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
-    void invoke("voxel_sculpt_stroke_at_screen", {
-      args: buildSculptStrokeInvokeArgs(scr.nx, scr.ny, {
-        includeStrokeSeed: true,
-      }),
-    }).catch(() => {});
-    setWallSculptPolygonVerts([]);
-  }
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    const { nx: px, ny: py } = clientToViewportNormalized(e);
-    lastViewportPickNormRef.current = { nx: px, ny: py };
-    lastCursorScreenRef.current = { x: e.clientX, y: e.clientY };
-    if (viewportCursorDebugEnabled) {
-      const el = viewportRef.current;
-      const rect = el?.getBoundingClientRect();
-      const lv = layoutViewportCssSize();
-      const scr: ViewportCursorDebugScreen | null = rect
-        ? {
-            clientX: e.clientX,
-            clientY: e.clientY,
-            relX: e.clientX - rect.left,
-            relY: e.clientY - rect.top,
-            innerWidth: window.innerWidth,
-            innerHeight: window.innerHeight,
-            layoutWidth: lv.w,
-            layoutHeight: lv.h,
-            rectLeft: rect.left,
-            rectTop: rect.top,
-            rectWidth: rect.width,
-            rectHeight: rect.height,
-          }
-        : null;
-      viewportCursorDebugScreenRef.current = scr;
-      setViewportCursorDebugScreen(scr);
-      setViewportCursorDebugJs({ nx: px, ny: py });
-      if (viewportCursorDebugRafRef.current == null) {
-        viewportCursorDebugRafRef.current = requestAnimationFrame(() => {
-          viewportCursorDebugRafRef.current = null;
-          void invoke<ViewportCursorDebugPayload>("get_viewport_cursor_debug")
-            .then((d) => {
-              setViewportCursorDebugRust(d);
-              // #region agent log
-              const vel = viewportRef.current;
-              const wrap = vel?.parentElement;
-              const rV = vel?.getBoundingClientRect();
-              const rW = wrap?.getBoundingClientRect();
-              const phys = viewportPhysRef.current;
-              const surf = surfacePhysRef.current;
-              const scrSnap = viewportCursorDebugScreenRef.current;
-              const iw = scrSnap?.layoutWidth ?? layoutViewportCssSize().w;
-              const ih = scrSnap?.layoutHeight ?? layoutViewportCssSize().h;
-              fetch("http://127.0.0.1:7756/ingest/93734617-b27b-4379-bb59-e5971936c3d4", {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  "X-Debug-Session-Id": "0e537f",
-                },
-                body: JSON.stringify({
-                  sessionId: "0e537f",
-                  runId: "rect-mapping",
-                  hypothesisId: "H_innerY_vs_relY",
-                  location: "App.tsx:viewportDebugRaf",
-                  message: "pick uses rel/rect; compare inner*surface−origin Y vs relY/rh",
-                  data: (() => {
-                    const scr = viewportCursorDebugScreenRef.current;
-                    const pick = lastViewportPickNormRef.current;
-                    let nxFromRel: number | null = null;
-                    let nxWindow: number | null = null;
-                    let deltaWinVsRel: number | null = null;
-                    let nyFromRel: number | null = null;
-                    let nyFromInner: number | null = null;
-                    let deltaInnerVsRelNy: number | null = null;
-                    if (
-                      scr &&
-                      rV &&
-                      rV.width > 0 &&
-                      rV.height > 0 &&
-                      phys.w > 0 &&
-                      phys.h > 0 &&
-                      iw > 0 &&
-                      ih > 0 &&
-                      surf.w > 0 &&
-                      surf.h > 0
-                    ) {
-                      nxFromRel = scr.relX / rV.width;
-                      nyFromRel = scr.relY / rV.height;
-                      const ox = Math.max(0, Math.round((rV.left / iw) * surf.w));
-                      const oy = Math.max(0, Math.round((rV.top / ih) * surf.h));
-                      nxWindow = ((scr.clientX / iw) * surf.w - ox) / phys.w;
-                      deltaWinVsRel = nxWindow - nxFromRel;
-                      nyFromInner = ((scr.clientY / ih) * surf.h - oy) / phys.h;
-                      deltaInnerVsRelNy = nyFromInner - nyFromRel;
-                    }
-                    return {
-                      viewportRw: rV?.width,
-                      viewportRh: rV?.height,
-                      wrapRw: rW?.width,
-                      wrapRh: rW?.height,
-                      rectDeltaW: rV && rW ? rV.width - rW.width : null,
-                      rectDeltaH: rV && rW ? rV.height - rW.height : null,
-                      aspectDom: rV && rV.height > 0 ? rV.width / rV.height : null,
-                      physW: phys.w,
-                      physH: phys.h,
-                      aspectPhys: phys.h > 0 ? phys.w / phys.h : null,
-                      rustW: d.viewportWidth,
-                      rustH: d.viewportHeight,
-                      aspectRust: d.viewportHeight > 0 ? d.viewportWidth / d.viewportHeight : null,
-                      surfaceW: surf.w,
-                      surfaceH: surf.h,
-                      vwPerRw: rV && rV.width > 0 ? phys.w / rV.width : null,
-                      swPerIw: iw > 0 ? surf.w / iw : null,
-                      shPerIh: ih > 0 ? surf.h / ih : null,
-                      nxFromRel,
-                      nxWindow,
-                      deltaWinVsRel,
-                      nyFromRel,
-                      nyFromInner,
-                      deltaInnerVsRelNy,
-                      nxPick: pick?.nx ?? null,
-                      nyPick: pick?.ny ?? null,
-                      deltaPickVsRelNx: pick && nxFromRel != null ? pick.nx - nxFromRel : null,
-                      deltaPickVsRelNy: pick && nyFromRel != null ? pick.ny - nyFromRel : null,
-                    };
-                  })(),
-                  timestamp: Date.now(),
-                }),
-              }).catch(() => {});
-              // #endregion
-            })
-            .catch(() => setViewportCursorDebugRust(null));
-        });
-      }
-    }
-    if (
-      gestureRef.current?.mode === "squishyGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      void invoke("squishy_gizmo_pointer_move", {
-        args: { nx: px, ny: py },
-      }).catch(() => {});
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "selectionGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      const last = lastRef.current;
-      const cx = e.clientX;
-      const cy = e.clientY;
-      gizmoRef.current?.pointerMove(cx, cy, last.x, last.y);
-      lastRef.current = { x: cx, y: cy };
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "extrudeGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      const last = lastRef.current;
-      const cx = e.clientX;
-      const cy = e.clientY;
-      extrudeGizmoRef.current?.pointerMove(
-        cx,
-        cy,
-        last.x,
-        last.y,
-        activeColorRef.current,
-        activeMaterialRef.current,
-      );
-      dragDidEditRef.current = true;
-      lastRef.current = { x: cx, y: cy };
-      return;
-    }
-    if (!gestureRef.current) {
-      if (interactionModeRef.current === "selectExtrude") {
-        extrudeGizmoRef.current
-          ?.updateHover(e.clientX, e.clientY)
-          .then((h) => {
-            gizmoHoverRef.current = h ?? false;
-          })
-          .catch(() => {
-            gizmoHoverRef.current = false;
-          });
-      } else {
-        gizmoRef.current
-          ?.updateHover(e.clientX, e.clientY)
-          .then((h) => {
-            gizmoHoverRef.current = h ?? false;
-          })
-          .catch(() => {
-            gizmoHoverRef.current = false;
-          });
-      }
-    } else {
-      gizmoHoverRef.current = false;
-    }
-    const overGizmo = !gestureRef.current && gizmoHoverRef.current;
-    const anyGenPhaseActive =
-      rocksPhase.active ||
-      grassPhase.active ||
-      ashlarPhase.active ||
-      floraPhase.active ||
-      piscinaPhase.active ||
-      insectaPhase.active ||
-      faunaPhase.active;
-    if (
-      !overGizmo &&
-      !probingRef.current &&
-      (interactionModeRef.current === "add" ||
-        interactionModeRef.current === "remove" ||
-        interactionModeRef.current === "paint" ||
-        interactionModeRef.current === "sculpt" ||
-        interactionModeRef.current === "select" ||
-        interactionModeRef.current === "selectByColor" ||
-        interactionModeRef.current === "selectCoplanar" ||
-        interactionModeRef.current === "selectCoplanarEmpty" ||
-        interactionModeRef.current === "squishy" ||
-        interactionModeRef.current === "generator" ||
-        interactionModeRef.current === "stamp" ||
-        interactionModeRef.current === "punch" ||
-        interactionModeRef.current === "selectExtrude") &&
-      !interactionBlockedRef.current &&
-      !anyGenPhaseActive
-    ) {
-      const m = previewModeForSync(interactionModeRef.current);
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(px, py, m),
-      }).catch(() => {});
-    } else if (overGizmo) {
-      // Preserve selectExtrude mode when hovering the extrude gizmo so the
-      // GPU gizmo continues rendering in extrude style (balls, no rings).
-      const hoverMode =
-        interactionModeRef.current === "selectExtrude" ? "selectExtrude" : "navigate";
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, hoverMode),
-      }).catch(() => {});
-    }
-
-    // Wall brush hover preview: show the full wall footprint under the cursor before any drag.
-    // Pass strokeLineStart = current position so Rust uses a zero-length line anchor (single
-    // surface voxel) and treats the union as non-accumulating, replacing each frame.
-    // strokeSeed is fixed so the stochastic filter is stable and doesn't flicker on hover.
-    if (
-      !overGizmo &&
-      e.buttons === 0 &&
-      !probingRef.current &&
-      !interactionBlockedRef.current &&
-      !loading &&
-      !workBusy &&
-      interactionModeRef.current === "sculpt" &&
-      sculptStrokeModeRef.current === "wall" &&
-      wallAreaShapeRef.current === "brush"
-    ) {
-      const now = Date.now();
-      if (now - lastWallHoverMsRef.current >= 40) {
-        lastWallHoverMsRef.current = now;
-        void invoke("voxel_sculpt_stroke_preview_at_screen", {
-          args: {
-            ...buildSculptStrokeInvokeArgs(px, py, {
-              includeStrokeSeed: false,
-            }),
-            strokeLineStartNx: px,
-            strokeLineStartNy: py,
-            strokeSeed: 0,
-          },
-        }).catch(() => {});
-      }
-    }
-
-    // Terrain hover: show surface Y under cursor when not stroking.
-    if (
-      e.buttons === 0 &&
-      !probingRef.current &&
-      !interactionBlockedRef.current &&
-      !loading &&
-      !workBusy &&
-      interactionModeRef.current === "sculpt" &&
-      sculptStrokeModeRef.current === "terrain"
-    ) {
-      const now = Date.now();
-      if (now - lastTerrainHoverMsRef.current >= 80) {
-        lastTerrainHoverMsRef.current = now;
-        void invoke<number | null>("terrain_surface_y_at_screen", {
-          nx: px,
-          ny: py,
-        })
-          .then((r) => setTerrainHoverY(r))
-          .catch(() => {});
-      }
-    }
-
-    if (probingRef.current && activePointerIdRef.current === e.pointerId) {
-      return;
-    }
-    // Extrude re-drag: reposition endpoint during settings phase.
-    if (extrudeRedragRef.current && e.buttons && pointerStartRef.current) {
-      const now = Date.now();
-      if (now - lastStrokeEditMsRef.current >= 24) {
-        lastStrokeEditMsRef.current = now;
-        const startNorm = extrudeStartNormRef.current;
-        if (startNorm) {
-          const dpr = window.devicePixelRatio || 1;
-          const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
-          const screenDy = (pointerStartRef.current.y - e.clientY) * dpr;
-          if (interactionModeRef.current === "selectExtrude") {
-            void invoke("selection_extrude_preview", {
-              args: {
-                screenDx,
-                screenDy,
-                directionRef: "camera",
-                color: activeColorRef.current,
-                material: activeMaterialRef.current,
-              },
-            }).catch((err) => {
-              console.error("[selection_extrude_preview re-drag]", err);
-            });
-          } else {
-            void invoke("extrude_ray_preview", {
-              args: {
-                startNx: startNorm.nx,
-                startNy: startNorm.ny,
-                screenDx,
-                screenDy,
-                directionRef: extrudeDirectionRefRef.current,
-                color: activeColorRef.current,
-                material: activeMaterialRef.current,
-                brushRadius: sculptBrushRadiusRef.current,
-                brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
-                brushStrength: sculptBrushStrengthRef.current,
-                brushFalloff: sculptBrushFalloffRef.current,
-                strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
-                extrudeProfile: extrudeProfileRef.current,
-                extrudeEndCap: extrudeEndCapRef.current,
-                extrudeTaper: extrudeTaperRef.current,
-                extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
-                extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
-              },
-            }).catch((err) => {
-              console.error("[extrude_ray_preview re-drag]", err);
-            });
-          }
-        }
-      }
-      return;
-    }
-    if (
-      gestureRef.current &&
-      gestureRef.current.pointerId === e.pointerId &&
-      gestureRef.current.mode === "voxel"
-    ) {
-      if (pointerStartRef.current) {
-        const dx = e.clientX - pointerStartRef.current.x;
-        const dy = e.clientY - pointerStartRef.current.y;
-        maxPointerMoveRef.current = Math.max(maxPointerMoveRef.current, Math.hypot(dx, dy));
-      }
-      const m = interactionModeRef.current;
-      {
-        const dispatch = getStrokeDispatch(m);
-        if (
-          e.buttons &&
-          dispatch &&
-          !loading &&
-          !workBusy &&
-          !fillOperationPending &&
-          !strokeModeSkipsDrag(drawStrokeModeRef.current) &&
-          !(drawStrokeModeRef.current === "cuboid" && cuboidPhase.ref.current) &&
-          !(drawStrokeModeRef.current === "cylinder" && cylinderPhase.ref.current)
-        ) {
-          const now = Date.now();
-          if (now - lastStrokeEditMsRef.current >= 24) {
-            lastStrokeEditMsRef.current = now;
-            dragDidEditRef.current = true;
-            const lineStart = strokeViewportLineStartNorm();
-            const brushPrev =
-              strokeDrawStyleRef.current === "brush" && lastStrokeNormRef.current
-                ? lastStrokeNormRef.current
-                : null;
-            if (dispatch.kind === "edit") {
-              const previewPalette = selectedColorsRef.current;
-              const previewMultiColor = previewPalette.length > 1;
-              void invoke("voxel_stroke_preview_at_screen", {
-                args: {
-                  nx: px,
-                  ny: py,
-                  tool: dispatch.tool,
-                  color: activeColorRef.current,
-                  ...(previewMultiColor
-                    ? {
-                        palette: previewPalette,
-                        paintColorDistrib: paintColorDistribRef.current,
-                        strokeSeed: currentStrokeSeedRef.current,
-                      }
-                    : {}),
-                  material: activeMaterialRef.current,
-                  brushRadius: brushRadiusRef.current,
-                  brushShape: brushShapeRef.current,
-                  sprayDensity: sprayDensityRef.current,
-                  strokeMode: drawStrokeModeRef.current,
-                  planeAxis: planeAxisRef.current,
-                  strokeAux: mergedStrokeAux({}),
-                  matchMaterial: matchMaterialSelectColorRef.current,
-                  mirrorAxes:
-                    (mirrorXRef.current ? 1 : 0) |
-                    (mirrorYRef.current ? 2 : 0) |
-                    (mirrorZRef.current ? 4 : 0),
-                  ...(lineStart
-                    ? {
-                        strokeLineStartNx: lineStart.nx,
-                        strokeLineStartNy: lineStart.ny,
-                      }
-                    : {}),
-                  ...(!lineStart && brushPrev
-                    ? {
-                        strokeSegmentPrevNx: brushPrev.nx,
-                        strokeSegmentPrevNy: brushPrev.ny,
-                      }
-                    : {}),
-                },
-              })
-                .finally(() => {
-                  if (strokeDrawStyleRef.current === "brush") {
-                    lastStrokeNormRef.current = { nx: px, ny: py };
-                  }
-                })
-                .catch(() => {});
-              logPlaneStrokeDebug("move:preview", e, {
-                nx: px,
-                ny: py,
-                tool: dispatch.tool,
-                lineStart: lineStart ?? null,
-                brushPrev: brushPrev ?? null,
-              });
-            } else {
-              runStrokeAtScreen(px, py, {}, { lineStart, brushPrev });
-              if (strokeDrawStyleRef.current === "brush") {
-                lastStrokeNormRef.current = { nx: px, ny: py };
-              }
-            }
-          }
-        }
-      }
-      if (e.buttons && m === "sculpt" && !loading && !workBusy && !fillOperationPending) {
-        const now = Date.now();
-        if (now - lastStrokeEditMsRef.current >= 24) {
-          lastStrokeEditMsRef.current = now;
-          dragDidEditRef.current = true;
-          if (
-            sculptStrokeModeRef.current === "extrude" &&
-            pointerStartRef.current &&
-            (strokeViewportStartRef.current || extrudeRedragRef.current)
-          ) {
-            // Ray-based extrude: compute screen delta and send to Rust.
-            // Use stored start position for re-drags during settings phase.
-            const startNorm = extrudeStartNormRef.current ?? strokeViewportStartRef.current;
-            if (startNorm) {
-              // On first drag, persist the start position for later re-drags.
-              if (!extrudeStartNormRef.current && strokeViewportStartRef.current) {
-                extrudeStartNormRef.current = {
-                  ...strokeViewportStartRef.current,
-                };
-              }
-              const dpr = window.devicePixelRatio || 1;
-              const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
-              const screenDy = (pointerStartRef.current.y - e.clientY) * dpr; // screen up = +
-              void invoke("extrude_ray_preview", {
-                args: {
-                  startNx: startNorm.nx,
-                  startNy: startNorm.ny,
-                  screenDx,
-                  screenDy,
-                  directionRef: extrudeDirectionRefRef.current,
-                  color: activeColorRef.current,
-                  material: activeMaterialRef.current,
-                  brushRadius: sculptBrushRadiusRef.current,
-                  brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
-                  brushStrength: sculptBrushStrengthRef.current,
-                  brushFalloff: sculptBrushFalloffRef.current,
-                  strokeSeed: Math.floor(Math.random() * 0x1_0000_0000) >>> 0,
-                  extrudeProfile: extrudeProfileRef.current,
-                  extrudeEndCap: extrudeEndCapRef.current,
-                  extrudeTaper: extrudeTaperRef.current,
-                  extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
-                  extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
-                },
-              }).catch((err) => {
-                console.error("[extrude_ray_preview]", err);
-              });
-            }
-          } else {
-            const sculptBrushPrev = lastStrokeNormRef.current;
-            void invoke("voxel_sculpt_stroke_preview_at_screen", {
-              args: buildSculptStrokeInvokeArgs(px, py, {
-                strokeSegmentPrev: sculptBrushPrev,
-              }),
-            })
-              .finally(() => {
-                lastStrokeNormRef.current = { nx: px, ny: py };
-              })
-              .catch(() => {});
-          }
-        }
-      }
-      // selectExtrude drag: preview extruded selection along drag direction.
-      if (e.buttons && m === "selectExtrude" && pointerStartRef.current && !loading && !workBusy) {
-        const now = Date.now();
-        if (now - lastStrokeEditMsRef.current >= 24) {
-          lastStrokeEditMsRef.current = now;
-          dragDidEditRef.current = true;
-          const startNorm = extrudeStartNormRef.current ?? strokeViewportStartRef.current;
-          if (startNorm) {
-            if (!extrudeStartNormRef.current && strokeViewportStartRef.current) {
-              extrudeStartNormRef.current = { ...strokeViewportStartRef.current };
-            }
-            const dpr = window.devicePixelRatio || 1;
-            const screenDx = (e.clientX - pointerStartRef.current.x) * dpr;
-            const screenDy = (pointerStartRef.current.y - e.clientY) * dpr;
-            void invoke("selection_extrude_preview", {
-              args: {
-                screenDx,
-                screenDy,
-                directionRef: "camera",
-                color: activeColorRef.current,
-                material: activeMaterialRef.current,
-              },
-            }).catch((err) => {
-              console.error("[selection_extrude_preview]", err);
-            });
-          }
-        }
-      }
-      // Roof square/circle drag: compute pins during drag.
-      if (
-        e.buttons &&
-        m === "generator" &&
-        generatorKindRef.current === "roof" &&
-        roofFirstClickRef.current &&
-        !loading &&
-        !workBusy
-      ) {
-        const shape = roofAreaShapeRef.current;
-        if (shape === "square" || shape === "circle") {
-          const now = Date.now();
-          if (now - lastStrokeEditMsRef.current >= 40) {
-            lastStrokeEditMsRef.current = now;
-            dragDidEditRef.current = true;
-            void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
-              args: {
-                nx: px,
-                ny: py,
-                tool: "add",
-                strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-              },
-            })
-              .then((c) => {
-                if (!c || !roofFirstClickRef.current) return;
-                const first = roofFirstClickRef.current;
-                let pins: [number, number, number][];
-                if (shape === "square") {
-                  const [x1, y1, z1] = first;
-                  const [x2, , z2] = c;
-                  pins = [
-                    [x1, y1, z1],
-                    [x2, y1, z1],
-                    [x2, y1, z2],
-                    [x1, y1, z2],
-                  ];
-                } else {
-                  const [cx, cy, cz] = first;
-                  const [ex, , ez] = c;
-                  const dx = ex - cx;
-                  const dz = ez - cz;
-                  const r = Math.sqrt(dx * dx + dz * dz);
-                  const N = 16;
-                  pins = [];
-                  for (let i = 0; i < N; i++) {
-                    const angle = (2 * Math.PI * i) / N;
-                    pins.push([
-                      Math.round(cx + r * Math.cos(angle)),
-                      cy,
-                      Math.round(cz + r * Math.sin(angle)),
-                    ]);
-                  }
-                }
-                // Ensure pins wind so the roof grows upward (+Y).
-                // In the XZ plane, positive signed area means CW from
-                // above, which gives a downward normal — reverse to fix.
-                let areaXZ = 0;
-                for (let i = 0; i < pins.length; i++) {
-                  const p = pins[i];
-                  const q = pins[(i + 1) % pins.length];
-                  areaXZ += p[0] * q[2] - q[0] * p[2];
-                }
-                if (areaXZ >= 0) {
-                  pins.reverse();
-                }
-                setRoofPins(pins);
-                roofPinsRef.current = pins;
-                void invoke("sync_preview_input", {
-                  args: buildSyncPreviewPayload(
-                    px,
-                    py,
-                    previewModeForSync(interactionModeRef.current),
-                  ),
-                }).catch(() => {});
-              })
-              .catch(() => {});
-          }
-        }
-      }
-      return;
-    }
-    if (pointerStartRef.current) {
-      const dx = e.clientX - pointerStartRef.current.x;
-      const dy = e.clientY - pointerStartRef.current.y;
-      maxPointerMoveRef.current = Math.max(maxPointerMoveRef.current, Math.hypot(dx, dy));
-    }
-    const dpr = window.devicePixelRatio || 1;
-    const dx = (e.clientX - lastRef.current.x) * dpr;
-    const dy = (e.clientY - lastRef.current.y) * dpr;
-    lastRef.current = { x: e.clientX, y: e.clientY };
-    if (e.buttons === 0) {
-      logPlaneStrokeDebug("move:buttons-zero", e);
-      if (startScreenLogoLoadedRef.current && interactionModeRef.current !== "fly") {
-        const { nx, ny } = clientToViewportNormalized(e);
-        void invoke("viewport_pointer", {
-          ev: {
-            kind: "move",
-            nx,
-            ny,
-            dx: 0,
-            dy: 0,
-            button: e.button,
-            buttons: 0,
-            shiftKey: e.shiftKey,
-          },
-        }).catch(() => {});
-      }
-      return;
-    }
-    const { nx, ny } = clientToViewportNormalized(e);
-    // Don't pan the camera during right-button drag in stamp/punch mode —
-    // right-click in those modes rotates the stamp, not the camera.
-    const stampPunchRightDrag =
-      (interactionModeRef.current === "stamp" || interactionModeRef.current === "punch") &&
-      (e.buttons & 2) !== 0 &&
-      gestureRef.current?.mode !== "camera";
-    if (interactionModeRef.current !== "fly" && !stampPunchRightDrag) {
-      void invoke("viewport_pointer", {
-        ev: {
-          kind: "move",
-          nx,
-          ny,
-          dx,
-          dy,
-          button: e.button,
-          buttons: e.buttons,
-          shiftKey: e.shiftKey && gestureRef.current?.mode !== "voxel",
-        },
-      });
-    }
-  };
-
-  const onPointerUp = (e: React.PointerEvent) => {
-    logPlaneStrokeDebug("up:received", e);
-    // Extrude re-drag: stay in settings phase after repositioning endpoint.
-    if (extrudeRedragRef.current) {
-      extrudeRedragRef.current = false;
-      pointerStartRef.current = null;
-      return;
-    }
-    if (probingRef.current && activePointerIdRef.current === e.pointerId) {
-      // Probe is still in-flight — defer this up event so onPointerDown can
-      // replay it once the gesture is established (see pendingPointerUpRef).
-      pendingPointerUpRef.current = e;
-      return;
-    }
-
-    if (
-      gestureRef.current?.mode === "squishyGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      void invoke("squishy_gizmo_pointer_up").catch(() => {});
-      resetPointerGesture("squishy-gizmo-up", e);
-      return;
-    }
-
-    if (
-      gestureRef.current?.mode === "selectionGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      gizmoRef.current?.pointerUp();
-      resetPointerGesture("selection-gizmo-up", e);
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "extrudeGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      extrudeGizmoRef.current?.pointerUp();
-      // Restore selectExtrude preview_mode so the GPU gizmo keeps its extrude style.
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, "selectExtrude"),
-      }).catch(() => {});
-      if (dragDidEditRef.current) {
-        extrudePhase.enter("settings", {} as Record<string, never>);
-        lastStrokeNormRef.current = null;
-      } else {
-        void invoke("voxel_stroke_preview_reset").catch(() => {});
-        lastStrokeNormRef.current = null;
-      }
-      resetPointerGesture("extrude-gizmo-up", e);
-      return;
-    }
-
-    const g = gestureRef.current;
-    const start = pointerStartRef.current;
-    const moved = maxPointerMoveRef.current;
-    const isThisPointer = g?.pointerId === e.pointerId;
-    let hasPointerCaptureForUp = capturedPointerIdRef.current === e.pointerId;
-    if (!hasPointerCaptureForUp && viewportRef.current) {
-      try {
-        hasPointerCaptureForUp = viewportRef.current.hasPointerCapture(e.pointerId);
-      } catch {
-        hasPointerCaptureForUp = false;
-      }
-    }
-
-    if (
-      isThisPointer &&
-      g?.mode === "voxel" &&
-      !loading &&
-      !workBusy &&
-      !fillOperationPending &&
-      start &&
-      e.button === 0 &&
-      hasPointerCaptureForUp
-    ) {
-      const { nx, ny } = clientToViewportNormalized(e);
-      const m = interactionModeRef.current;
-      if (moved < 5) {
-        if (m === "stamp") {
-          void invoke("clipboard_stamp_at_screen", {
-            args: {
-              nx,
-              ny,
-              rotX: stampRotXRef.current,
-              rotY: stampRotYRef.current,
-              rotZ: stampRotZRef.current,
-              originX: stampOriginXRef.current,
-              originZ: stampOriginZRef.current,
-            },
-          }).catch(() => {});
-        } else if (m === "punch") {
-          void invoke("clipboard_punch_at_screen", {
-            args: {
-              nx,
-              ny,
-              rotX: stampRotXRef.current,
-              rotY: stampRotYRef.current,
-              rotZ: stampRotZRef.current,
-              originX: stampOriginXRef.current,
-              originZ: stampOriginZRef.current,
-            },
-          }).catch(() => {});
-        } else if (m === "generator") {
-          const gk = generatorKindRef.current;
-          if (gk === "rocks") {
-            if (!rocksPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              rocksPhase.enter("settings", { nx, ny, seed: rockPreviewSeedRef.current });
-            }
-          } else if (gk === "grass") {
-            if (!grassPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              grassPhase.enter("settings", { nx, ny, seed: grassPreviewSeedRef.current });
-            }
-          } else if (gk === "cloth") {
-            if (!clothPhase.active) {
-              void handleClothPinClick(nx, ny);
-            }
-          } else if (gk === "rope") {
-            if (ropePhase.active) {
-              // Already in settings phase — ignore clicks
-            } else if (!ropeFirstScreen) {
-              setRopeFirstScreen({ nx, ny });
-            } else {
-              // Enter settings phase instead of immediately generating
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              ropePhase.enter("settings", {
-                nx1: ropeFirstScreen.nx,
-                ny1: ropeFirstScreen.ny,
-                nx2: nx,
-                ny2: ny,
-              });
-            }
-          } else if (gk === "ashlar") {
-            if (!ashlarPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              ashlarPhase.enter("settings", { nx, ny, seed: ashlarPreviewSeedRef.current });
-            }
-          } else if (gk === "flora") {
-            if (!floraPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              floraPhase.enter("settings", { nx, ny, seed: floraPreviewSeedRef.current });
-            }
-          } else if (gk === "roof") {
-            // Square/circle use drag-to-define (handled in pointer move/up).
-            // Polygon still uses click-to-add-pin.
-            if (roofAreaShapeRef.current === "polygon") {
-              void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
-                args: {
-                  nx,
-                  ny,
-                  tool: "add",
-                  strokeSnapToSurface: selectionStrokeSnapToSurfaceRef.current,
-                },
-              })
-                .then((c) => {
-                  if (!c) return;
-                  setRoofPins((v) => {
-                    // Click on existing pin → remove it.
-                    const idx = v.findIndex((p) => p[0] === c[0] && p[1] === c[1] && p[2] === c[2]);
-                    const next = idx >= 0 ? v.filter((_, i) => i !== idx) : [...v, c];
-                    roofPinsRef.current = next;
-                    return next;
-                  });
-                })
-                .catch(() => {});
-            }
-          } else if (gk === "piscina") {
-            if (!piscinaPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              piscinaPhase.enter("settings", { nx, ny, seed: piscinaPreviewSeedRef.current });
-            }
-          } else if (gk === "insecta") {
-            if (!insectaPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              insectaPhase.enter("settings", { nx, ny });
-            }
-          } else if (gk === "fauna") {
-            if (!faunaPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              faunaPhase.enter("settings", { nx, ny });
-            }
-          }
-        } else if (m === "squishy") {
-          if (!squishyPhase.active) {
-            squishyPhase.enter("settings", {});
-          }
-          const mode = squishyModeRef.current;
-          void invoke("squishy_session_set_mode", { args: { mode } })
-            .then(() => {
-              if (mode === "add") {
-                return invoke("squishy_metaball_add_at_screen", {
-                  args: {
-                    nx,
-                    ny,
-                    radius: Math.max(2, generatorSphereRadiusRef.current),
-                  },
-                });
-              }
-              return invoke<number | null>("squishy_pick_at_screen", {
-                args: { nx, ny },
-              }).then((id) => {
-                if (id == null) return;
-                if (mode === "delete") {
-                  return invoke("squishy_metaball_remove", { args: { id } });
-                }
-                return invoke("squishy_metaball_select", { args: { id } });
-              });
-            })
-            .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
-            .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-            .catch(() => {});
-        }
-      }
-      if (m === "eyedropper") {
-        if (moved < 5) {
-          void invoke<{
-            color: number;
-            material: string;
-          } | null>("voxel_pick_color_at_screen", {
-            args: {
-              nx,
-              ny,
-              tool: "add",
-              color: activeColorRef.current,
-              material: activeMaterialRef.current,
-              brushRadius: 0,
-              brushShape: brushShapeRef.current,
-            },
-          })
-            .then((r) => {
-              if (r) {
-                setActiveColor(r.color);
-                setActiveMaterial(r.material);
-                const back = eyedropperReturnModeRef.current;
-                if (back != null && back !== "eyedropper") {
-                  setInteractionMode(back);
-                }
-              }
-            })
-            .catch(() => {});
-        }
-      } else if (getStrokeDispatch(m)) {
-        const dispatch = getStrokeDispatch(m)!;
-        const sm = drawStrokeModeRef.current;
-        // Depth phase activation after drag (cuboid/cylinder)
-        if (
-          (sm === "cuboid" || sm === "cylinder") &&
-          (dragDidEditRef.current || moved >= 5) &&
-          strokeViewportStartRef.current
-        ) {
-          const phase = sm === "cuboid" ? cuboidPhase : cylinderPhase;
-          const depthRef = sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
-          const setDepthUi = sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
-          depthRef.current = 1;
-          setDepthUi(1);
-          const lineStart = { ...strokeViewportStartRef.current };
-          phase.enter("depth", { lineStart, endNorm: { nx, ny }, frozenGeo: null });
-          {
-            const im = interactionModeRef.current;
-            const tool = im === "remove" ? "remove" : im === "paint" ? "paint" : "add";
-            void invoke<CuboidPlaneGeo | null>("query_cuboid_plane_geometry", {
-              args: {
-                nx,
-                ny,
-                tool,
-                color: activeColorRef.current,
-                material: activeMaterialRef.current,
-                brushRadius: brushRadiusRef.current,
-                brushShape: brushShapeRef.current,
-                sprayDensity: 0,
-                strokeMode: sm,
-                planeAxis: planeAxisRef.current,
-                strokeAux: mergedStrokeAux({}),
-                matchMaterial: false,
-                strokeLineStartNx: lineStart.nx,
-                strokeLineStartNy: lineStart.ny,
-              },
-            })
-              .then((geo) => {
-                phase.update({ frozenGeo: geo ?? null });
-              })
-              .catch(() => {});
-          }
-        }
-        // Single-click handling (no drag)
-        // For selection strokes, we must wait for the stroke invoke to
-        // complete before calling selection_stroke_end, otherwise the
-        // end command can race ahead and clear the accumulator.
-        let clickStrokePromise: Promise<void> | null = null;
-        if (!dragDidEditRef.current && moved < 5) {
-          if ((sm === "cuboid" || sm === "cylinder") && strokeViewportStartRef.current) {
-            // Single-click cuboid/cylinder: enter depth phase
-            const phase = sm === "cuboid" ? cuboidPhase : cylinderPhase;
-            const depthRef = sm === "cuboid" ? cuboidDepthRef : cylinderDepthRef;
-            const setDepthUi = sm === "cuboid" ? setCuboidDepthUi : setCylinderDepthUi;
-            depthRef.current = 1;
-            setDepthUi(1);
-            const lineStart = { ...strokeViewportStartRef.current };
-            phase.enter("depth", { lineStart, endNorm: { nx, ny }, frozenGeo: null });
-            {
-              const im = interactionModeRef.current;
-              const tool = im === "remove" ? "remove" : im === "paint" ? "paint" : "add";
-              void invoke<CuboidPlaneGeo | null>("query_cuboid_plane_geometry", {
-                args: {
-                  nx,
-                  ny,
-                  tool,
-                  color: activeColorRef.current,
-                  material: activeMaterialRef.current,
-                  brushRadius: brushRadiusRef.current,
-                  brushShape: brushShapeRef.current,
-                  sprayDensity: 0,
-                  strokeMode: sm,
-                  planeAxis: planeAxisRef.current,
-                  strokeAux: mergedStrokeAux({}),
-                  matchMaterial: false,
-                  strokeLineStartNx: lineStart.nx,
-                  strokeLineStartNy: lineStart.ny,
-                },
-              })
-                .then((geo) => {
-                  phase.update({ frozenGeo: geo ?? null });
-                })
-                .catch(() => {});
-            }
-          } else if (strokeModeSkipsDrag(sm)) {
-            void handleStrokeAnchorClick(nx, ny);
-          } else if (
-            dispatch.kind === "selection" &&
-            dispatch.interaction !== "select" &&
-            sm !== "fill"
-          ) {
-            // Specialized selection click commands (selectByColor, etc.)
-            void invokeSelectionSpecialClick(dispatch.interaction, nx, ny);
-          } else {
-            const lineStart = strokeViewportLineStartNorm();
-            clickStrokePromise = runStrokeAtScreen(nx, ny, {}, { lineStart });
-          }
-        }
-        logPlaneStrokeDebug("up:stroke-end", e, {
-          moved,
-          dragDidEdit: dragDidEditRef.current,
-          strokeMode: sm,
-          interactionMode: m,
-        });
-        if (dispatch.kind === "edit") {
-          void invoke("voxel_stroke_end").catch(() => {});
-        } else {
-          const endSelection = () => {
-            void invoke("selection_stroke_end").catch(() => {});
-            selectionStrokeBegunRef.current = false;
-          };
-          if (clickStrokePromise) {
-            void clickStrokePromise.then(endSelection);
-          } else {
-            endSelection();
-          }
-        }
-        lastStrokeNormRef.current = null;
-      } else if (m === "sculpt") {
-        const sm = sculptStrokeModeRef.current;
-        if (sm === "extrude" && (dragDidEditRef.current || moved >= 5)) {
-          // Extrude phased tool: enter settings phase instead of committing.
-          // The preview union is already accumulated from the drag. Keep it visible.
-          extrudePhase.enter("settings", {} as Record<string, never>);
-          lastStrokeNormRef.current = null;
-          // Do NOT call voxel_stroke_end — preview must stay.
-        } else {
-          if (!dragDidEditRef.current && moved < 5) {
-            const wa = wallAreaShapeRef.current;
-            if (sm === "wall" && wa === "polygon") {
-              void handleWallSculptPolygonClick(nx, ny);
-            } else {
-              void invoke("voxel_sculpt_stroke_at_screen", {
-                args: buildSculptStrokeInvokeArgs(nx, ny),
-              }).catch(() => {});
-            }
-          }
-          void invoke("voxel_stroke_end").catch(() => {});
-          lastStrokeNormRef.current = null;
-        }
-      } else if (m === "selectExtrude") {
-        if (dragDidEditRef.current || moved >= 5) {
-          // Enter settings phase — preview union stays visible.
-          extrudePhase.enter("settings", {} as Record<string, never>);
-          lastStrokeNormRef.current = null;
-          // Do NOT call voxel_stroke_end — preview must stay.
-        } else {
-          void invoke("voxel_stroke_preview_reset").catch(() => {});
-          lastStrokeNormRef.current = null;
-        }
-      } else if (m === "generator" && generatorKindRef.current === "roof") {
-        // Roof square/circle drag complete: clear first-click anchor.
-        // Pins are already set from the move handler during drag.
-        const shape = roofAreaShapeRef.current;
-        if (shape === "square" || shape === "circle") {
-          roofFirstClickRef.current = null;
-          setRoofFirstClick(null);
-        }
-      }
-    } else if (isThisPointer && g?.mode === "voxel" && e.button === 0 && !hasPointerCaptureForUp) {
-      logPlaneStrokeDebug("up:ignored-no-capture", e, {
-        moved,
-      });
-    }
-
-    if (isThisPointer && g?.mode === "camera" && interactionModeRef.current !== "fly") {
-      const { nx, ny } = clientToViewportNormalized(e);
-      void invoke("viewport_pointer", {
-        ev: {
-          kind: "up",
-          nx,
-          ny,
-          dx: 0,
-          dy: 0,
-          button: e.button,
-          buttons: e.buttons,
-          shiftKey: e.shiftKey,
-        },
-      });
-    }
-
-    if (isThisPointer) {
-      resetPointerGesture("pointer-up-complete", e);
-      if (capturedPointerIdRef.current === e.pointerId) {
-        capturedPointerIdRef.current = null;
-      }
-    }
-  };
-  onPointerUpRef.current = onPointerUp;
-
-  const onPointerLeave = (e: React.PointerEvent) => {
-    logPlaneStrokeDebug("leave", e);
-    // Keep the select preview visible when the pointer moves to the sidebar / tool panel.
-    // Also keep phased-tool previews alive — their coordinates are locked to
-    // stored data anyway, so clearing on leave just creates a jarring flicker
-    // when the user mouses over the settings overlay.
-    const im = interactionModeRef.current;
-    const anyPhaseActive =
-      cuboidPhase.ref.current !== null ||
-      cylinderPhase.ref.current !== null ||
-      extrudePhase.ref.current !== null ||
-      ropePhase.ref.current !== null ||
-      clothPhase.ref.current !== null;
-    if (
-      !anyPhaseActive &&
-      im !== "select" &&
-      im !== "selectByColor" &&
-      im !== "selectCoplanar" &&
-      im !== "selectCoplanarEmpty" &&
-      im !== "selectExtrude" &&
-      im !== "squishy" &&
-      im !== "generator"
-    ) {
-      clearPreview();
-    }
-    if (viewportCursorDebugEnabled) {
-      setViewportCursorDebugJs(null);
-      setViewportCursorDebugRust(null);
-      viewportCursorDebugScreenRef.current = null;
-      setViewportCursorDebugScreen(null);
-    }
-    if (startScreenLogoLoadedRef.current && interactionModeRef.current !== "fly") {
-      void invoke("viewport_pointer", {
-        ev: {
-          kind: "leave",
-          nx: 0.5,
-          ny: 0.5,
-          dx: 0,
-          dy: 0,
-          button: 0,
-          buttons: 0,
-          shiftKey: false,
-        },
-      }).catch(() => {});
-    }
-    // Never synthesize pointer-up from leave. Commit only on real pointer-up/cancel;
-    // pointer capture keeps those events routed to the viewport during drags.
-  };
-
-  const onGotPointerCapture = (e: React.PointerEvent) => {
-    logPlaneStrokeDebug("capture:got", e);
-  };
-
-  const onLostPointerCapture = (e: React.PointerEvent) => {
-    logPlaneStrokeDebug("capture:lost", e);
-  };
-
-  const onWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    if (interactionModeRef.current === "fly" || interactionModeRef.current === "walk") return;
-    void invoke("viewport_wheel", {
-      ev: { delta_x: e.deltaX, delta_y: e.deltaY },
-    });
-  };
 
   const startHost = () => {
     if (collabActive) return;
@@ -6407,1102 +3157,63 @@ function App() {
       className={`app${loading && !loadError ? " app-loading-cursor" : ""}${hideUI ? " app--ui-hidden" : ""}`}
     >
       <div className="app-main">
-        {toolsPaneFloating && showEditorChrome ? (
-          <div className="app-sidebar-spacer" aria-hidden />
-        ) : null}
-        {showEditorChrome ? (
-          <aside
-            className={`${
-              sidebarExpanded ? "app-sidebar is-expanded" : "app-sidebar is-collapsed"
-            }${toolsPaneFloating ? " is-floating" : ""}`}
-            style={toolsPaneFloating ? { left: toolPanePos.x, top: toolPanePos.y } : undefined}
-            aria-label="Tools"
-          >
-            <div
-              className={
-                toolsPaneFloating ? "sidebar-header sidebar-header-floating" : "sidebar-header"
-              }
-            >
-              {toolsPaneFloating ? (
-                <>
-                  <div
-                    className="floating-tools-drag-handle"
-                    onPointerDown={onToolPaneDragDown}
-                    aria-label="Drag to move tools"
-                  >
-                    <span className="floating-tools-grip" aria-hidden>
-                      ⋮⋮
-                    </span>
-                    {sidebarExpanded ? <span className="floating-tools-title">Tools</span> : null}
-                  </div>
-                  <div className="floating-tools-header-actions">
-                    <button
-                      type="button"
-                      className="floating-tools-dock-btn"
-                      onClick={() => setToolsPaneFloating(false)}
-                      title="Dock tools to the left edge"
-                    >
-                      Dock
-                    </button>
-                    <button
-                      type="button"
-                      className="sidebar-expand-toggle floating-tools-collapse-toggle"
-                      onClick={() => setSidebarExpanded((v) => !v)}
-                      aria-expanded={sidebarExpanded}
-                      title={sidebarExpanded ? "Collapse tools" : "Expand tools"}
-                    >
-                      <span className="sidebar-expand-toggle-icon" aria-hidden>
-                        {sidebarExpanded ? "«" : "»"}
-                      </span>
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <div className="sidebar-tools-header-row">
-                  <button
-                    type="button"
-                    className="sidebar-expand-toggle"
-                    onClick={() => setSidebarExpanded((v) => !v)}
-                    aria-expanded={sidebarExpanded}
-                    title={sidebarExpanded ? "Collapse tools" : "Expand tools"}
-                  >
-                    <span className="sidebar-expand-toggle-icon" aria-hidden>
-                      {sidebarExpanded ? "«" : "»"}
-                    </span>
-                    {sidebarExpanded ? (
-                      <span className="sidebar-expand-toggle-label">Tools</span>
-                    ) : null}
-                  </button>
-                  <button
-                    type="button"
-                    className="sidebar-float-btn"
-                    onClick={() => setToolsPaneFloating(true)}
-                    title="Float tools panel"
-                    aria-label="Float tools panel"
-                  >
-                    ⧉
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="sidebar-scroll">
-              {sidebarExpanded ? (
-                <>
-                  <div className="sidebar-toolpane-tabs" role="tablist" aria-label="Tool panes">
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "hand" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "hand"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("hand");
-                        setInteractionMode("navigate");
-                      }}
-                    >
-                      ✋
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "draw" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "draw"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("draw");
-                        setInteractionMode("add");
-                      }}
-                    >
-                      Draw
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "select" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "select"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("select");
-                        setInteractionMode("select");
-                      }}
-                    >
-                      Select
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "sculpt" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "sculpt"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("sculpt");
-                        setInteractionMode("sculpt");
-                      }}
-                    >
-                      Sculpt
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "generators"
-                          ? "sidebar-pane-tab is-active"
-                          : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "generators"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("generators");
-                        setInteractionMode("generator");
-                      }}
-                    >
-                      Generators
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "squishy" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "squishy"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("squishy");
-                        setInteractionMode("squishy");
-                      }}
-                    >
-                      Squishy
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "mood" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "mood"}
-                      disabled={loading || workBusy}
-                      onClick={() => setToolsPane("mood")}
-                    >
-                      Mood
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "fly" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "fly"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("fly");
-                        setInteractionMode("fly");
-                      }}
-                    >
-                      Fly
-                    </button>
-                    <button
-                      type="button"
-                      role="tab"
-                      className={
-                        toolsPane === "walk" ? "sidebar-pane-tab is-active" : "sidebar-pane-tab"
-                      }
-                      aria-selected={toolsPane === "walk"}
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        setToolsPane("walk");
-                        setInteractionMode("walk");
-                      }}
-                    >
-                      Walk
-                    </button>
-                  </div>
-                  <div className="sidebar-expanded-slot" aria-label="Tool pane options">
-                    {toolsPane === "hand" ? (
-                      <p className="sidebar-pane-hint">Drag in viewport to orbit/pan.</p>
-                    ) : null}
-
-                    {toolsPane === "fly" ? (
-                      <>
-                        <p className="sidebar-pane-hint">
-                          Click viewport to capture pointer. WASD move, E/Q up/down, Shift slow.
-                          Mouse looks. Esc releases pointer.
-                        </p>
-                        <div className="sidebar-section-label">Speed</div>
-                        <div className="sidebar-mode-grid sidebar-mode-grid-3">
-                          {([1, 2, 4] as const).map((s) => (
-                            <button
-                              key={s}
-                              type="button"
-                              className={
-                                flySpeed === s ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
-                              }
-                              onClick={() => setFlySpeed(s)}
-                            >
-                              <span className="sidebar-mode-label">{s}×</span>
-                            </button>
-                          ))}
-                        </div>
-                      </>
-                    ) : null}
-
-                    {toolsPane === "walk" ? (
-                      <p className="sidebar-pane-hint">
-                        Click viewport to capture pointer. WASD to walk, Space to jump, Shift slow.
-                        Mouse looks. Esc releases pointer.
-                      </p>
-                    ) : null}
-
-                    {toolsPane === "draw" ? (
-                      <>
-                        <div
-                          className="sidebar-tool-selection-row"
-                          role="group"
-                          aria-label="Tool and selection"
-                        >
-                          <div className="sidebar-tool-selection-col">
-                            <div className="sidebar-section-label">Tool</div>
-                            <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
-                              {(["add", "remove", "paint"] as const).map((m) => (
-                                <button
-                                  key={m}
-                                  type="button"
-                                  className={
-                                    interactionMode === m
-                                      ? "sidebar-mode-btn is-active"
-                                      : "sidebar-mode-btn"
-                                  }
-                                  disabled={loading || workBusy}
-                                  onClick={() => setInteractionMode(m)}
-                                >
-                                  <span className="sidebar-mode-label">
-                                    {m[0].toUpperCase() + m.slice(1)}
-                                  </span>
-                                </button>
-                              ))}
-                            </div>
-                          </div>
-                          <div className="sidebar-tool-selection-col">
-                            <div className="sidebar-section-label">Selection</div>
-                            <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
-                              <button
-                                type="button"
-                                className={
-                                  interactionMode === "select"
-                                    ? "sidebar-mode-btn is-active"
-                                    : "sidebar-mode-btn"
-                                }
-                                disabled={loading || workBusy}
-                                onClick={() => setInteractionMode("select")}
-                              >
-                                <span className="sidebar-mode-label">Select</span>
-                              </button>
-                              <button
-                                type="button"
-                                className={
-                                  interactionMode === "stamp"
-                                    ? "sidebar-mode-btn is-active"
-                                    : "sidebar-mode-btn"
-                                }
-                                disabled={
-                                  loading ||
-                                  workBusy ||
-                                  (selectionCount === 0 && !stampBookPatternActive)
-                                }
-                                onClick={() => setInteractionMode("stamp")}
-                              >
-                                <span className="sidebar-mode-label">Stamp</span>
-                              </button>
-                              <button
-                                type="button"
-                                className={
-                                  interactionMode === "punch"
-                                    ? "sidebar-mode-btn is-active"
-                                    : "sidebar-mode-btn"
-                                }
-                                disabled={loading || workBusy || selectionCount === 0}
-                                onClick={() => setInteractionMode("punch")}
-                              >
-                                <span className="sidebar-mode-label">Punch</span>
-                              </button>
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="sidebar-section-label">Selection method</div>
-                        <div className="sidebar-mode-grid sidebar-mode-grid-3">
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "stroke"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("stroke");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Line from pointer down to cursor (web Stroke)"
-                          >
-                            <span className="sidebar-mode-label">Stroke</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "surface"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("surface");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Plane / circle / polygon in the face plane (web Surface)"
-                          >
-                            <span className="sidebar-mode-label">Surface</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "solid"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("solid");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Solid volume: cube/cylinder/polygon (web Solid)"
-                          >
-                            <span className="sidebar-mode-label">Solid</span>
-                          </button>
-                        </div>
-                        <div
-                          className="sidebar-mode-grid sidebar-mode-grid-2"
-                          style={{ marginTop: "0.35rem" }}
-                        >
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "spray"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("spray");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Spray density along brush path"
-                          >
-                            <span className="sidebar-mode-label">Spray</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "fill"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("fill");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Fill connected region (add / remove / paint / selection)"
-                          >
-                            <span className="sidebar-mode-label">Fill</span>
-                          </button>
-                        </div>
-
-                        <SymmetryColorSidebarSections
-                          loading={loading}
-                          workBusy={workBusy}
-                          activeColor={activeColor}
-                          setActiveColor={setActiveColor}
-                          interactionMode={interactionMode}
-                          setInteractionMode={setInteractionMode}
-                          selectedColors={selectedColors}
-                          setSelectedColors={setSelectedColors}
-                          paintColorDistrib={paintColorDistrib}
-                          setPaintColorDistrib={setPaintColorDistrib}
-                          mirrorX={mirrorX}
-                          setMirrorX={setMirrorX}
-                          mirrorY={mirrorY}
-                          setMirrorY={setMirrorY}
-                          mirrorZ={mirrorZ}
-                          setMirrorZ={setMirrorZ}
-                        />
-
-                        <div className="sidebar-section-label">Material</div>
-                        <select
-                          className="sidebar-material-select"
-                          value={activeMaterial}
-                          onChange={(ev) => setActiveMaterial(ev.target.value)}
-                          disabled={loading || workBusy}
-                          aria-label="Material"
-                        >
-                          {MATERIAL_OPTIONS.map((o) => (
-                            <option key={o.id} value={o.id}>
-                              {o.label}
-                            </option>
-                          ))}
-                        </select>
-                      </>
-                    ) : null}
-
-                    {toolsPane === "select" ? (
-                      <>
-                        <div className="sidebar-section-label">Selection</div>
-                        <div className="sidebar-mode-grid sidebar-mode-grid-stacked">
-                          <button
-                            type="button"
-                            className={
-                              interactionMode === "select"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => setInteractionMode("select")}
-                          >
-                            <span className="sidebar-mode-label">Select</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              interactionMode === "stamp"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={
-                              loading ||
-                              workBusy ||
-                              (selectionCount === 0 && !stampBookPatternActive)
-                            }
-                            onClick={() => setInteractionMode("stamp")}
-                          >
-                            <span className="sidebar-mode-label">Stamp</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              interactionMode === "punch"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy || selectionCount === 0}
-                            onClick={() => setInteractionMode("punch")}
-                          >
-                            <span className="sidebar-mode-label">Punch</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              interactionMode === "selectExtrude"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy || selectionCount === 0}
-                            onClick={() => setInteractionMode("selectExtrude")}
-                          >
-                            <span className="sidebar-mode-label">Extrude</span>
-                          </button>
-                        </div>
-
-                        <div className="sidebar-section-label">Selection method</div>
-                        <div className="sidebar-mode-grid sidebar-mode-grid-3">
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "stroke"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("stroke");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Line from pointer down to cursor (web Stroke)"
-                          >
-                            <span className="sidebar-mode-label">Stroke</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "surface"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("surface");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Plane / circle / polygon in the face plane (web Surface)"
-                          >
-                            <span className="sidebar-mode-label">Surface</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "solid"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("solid");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Solid volume: cube/cylinder/polygon (web Solid)"
-                          >
-                            <span className="sidebar-mode-label">Solid</span>
-                          </button>
-                        </div>
-                        <div
-                          className="sidebar-mode-grid sidebar-mode-grid-2"
-                          style={{ marginTop: "0.35rem" }}
-                        >
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "spray"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("spray");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Spray density along brush path"
-                          >
-                            <span className="sidebar-mode-label">Spray</span>
-                          </button>
-                          <button
-                            type="button"
-                            className={
-                              selectionMethod === "fill"
-                                ? "sidebar-mode-btn is-active"
-                                : "sidebar-mode-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => {
-                              const s = selectionMethodToState("fill");
-                              setDrawStrokeMode(s.drawStrokeMode);
-                              setStrokeDrawStyle(s.strokeDrawStyle);
-                              setSprayDensity(s.sprayDensity);
-                              setStrokeFamilyVariant(s.strokeFamilyVariant);
-                            }}
-                            title="Fill connected region (selection)"
-                          >
-                            <span className="sidebar-mode-label">Fill</span>
-                          </button>
-                        </div>
-                      </>
-                    ) : null}
-
-                    {toolsPane === "sculpt" ? (
-                      <>
-                        <div className="sidebar-section-label">Sculpt mode</div>
-                        <div className="sidebar-mode-grid">
-                          {(
-                            [
-                              ["draw", "Draw"],
-                              ["gouge", "Scrape"],
-                              ["smooth", "Smooth"],
-                              ["wall", "Wall"],
-                              ["extrude", "Extrude"],
-                              ["terrain", "Terrain"],
-                            ] as const
-                          ).map(([id, label]) => (
-                            <button
-                              key={id}
-                              type="button"
-                              className={
-                                sculptStrokeMode === id
-                                  ? "sidebar-mode-btn is-active"
-                                  : "sidebar-mode-btn"
-                              }
-                              disabled={loading || workBusy || interactionMode !== "sculpt"}
-                              onClick={() => setSculptStrokeMode(id)}
-                            >
-                              <span className="sidebar-mode-label">{label}</span>
-                            </button>
-                          ))}
-                        </div>
-                        <SymmetryColorSidebarSections
-                          loading={loading}
-                          workBusy={workBusy}
-                          activeColor={activeColor}
-                          setActiveColor={setActiveColor}
-                          interactionMode={interactionMode}
-                          setInteractionMode={setInteractionMode}
-                          selectedColors={selectedColors}
-                          setSelectedColors={setSelectedColors}
-                          paintColorDistrib={paintColorDistrib}
-                          setPaintColorDistrib={setPaintColorDistrib}
-                          mirrorX={mirrorX}
-                          setMirrorX={setMirrorX}
-                          mirrorY={mirrorY}
-                          setMirrorY={setMirrorY}
-                          mirrorZ={mirrorZ}
-                          setMirrorZ={setMirrorZ}
-                        />
-                        <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                          Brush and terrain options are in the tool options panel.
-                        </p>
-                      </>
-                    ) : null}
-
-                    {toolsPane === "generators" ? (
-                      <>
-                        <div className="sidebar-section-label">Generators</div>
-                        <div className="sidebar-mode-grid sidebar-mode-grid-2">
-                          {(
-                            [
-                              ["rocks", "Rocks"],
-                              ["grass", "Grass"],
-                              ["rope", "Rope"],
-                              ["cloth", "Cloth"],
-                              ["ashlar", "Ashlar"],
-                              ["flora", "Flora"],
-                              ["roof", "Roof"],
-                              ["piscina", "Fish"],
-                              ["insecta", "Insect"],
-                              ["fauna", "Creature"],
-                            ] as const
-                          ).map(([id, label]) => (
-                            <button
-                              key={id}
-                              type="button"
-                              className={
-                                generatorKind === id
-                                  ? "sidebar-mode-btn is-active"
-                                  : "sidebar-mode-btn"
-                              }
-                              disabled={loading || workBusy}
-                              onClick={() => {
-                                setGeneratorKind(id);
-                                if (ropePhase.active) ropePhase.cancel();
-                                else setRopeFirstScreen(null);
-                                if (clothPhase.active) clothPhase.cancel();
-                                else {
-                                  setClothPins([]);
-                                  clothPinsRef.current = [];
-                                }
-                                rocksPhase.cancel();
-                                grassPhase.cancel();
-                                ashlarPhase.cancel();
-                                floraPhase.cancel();
-                                piscinaPhase.cancel();
-                                insectaPhase.cancel();
-                                faunaPhase.cancel();
-                              }}
-                            >
-                              <span className="sidebar-mode-label">{label}</span>
-                            </button>
-                          ))}
-                        </div>
-                        <SymmetryColorSidebarSections
-                          loading={loading}
-                          workBusy={workBusy}
-                          activeColor={activeColor}
-                          setActiveColor={setActiveColor}
-                          interactionMode={interactionMode}
-                          setInteractionMode={setInteractionMode}
-                          selectedColors={selectedColors}
-                          setSelectedColors={setSelectedColors}
-                          paintColorDistrib={paintColorDistrib}
-                          setPaintColorDistrib={setPaintColorDistrib}
-                          mirrorX={mirrorX}
-                          setMirrorX={setMirrorX}
-                          mirrorY={mirrorY}
-                          setMirrorY={setMirrorY}
-                          mirrorZ={mirrorZ}
-                          setMirrorZ={setMirrorZ}
-                        />
-                        {generatorKind === "rope" && ropeFirstScreen && !ropePhase.active ? (
-                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                            Click second point for rope.
-                          </p>
-                        ) : null}
-                        {generatorKind === "rope" && ropePhase.active ? (
-                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                            Adjust tension and sag, then Done.
-                          </p>
-                        ) : null}
-                        {generatorKind === "cloth" && !clothPhase.active ? (
-                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                            Cloth: click surface to add pins (3+ corners), then Done.
-                          </p>
-                        ) : null}
-                        {generatorKind === "cloth" && clothPhase.active ? (
-                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                            Adjust settings, then Done.
-                          </p>
-                        ) : null}
-                        {generatorKind === "roof" ? (
-                          <p className="sidebar-pane-hint sidebar-toolpanel-hint" role="status">
-                            Roof: click the surface to add pins (3+ corners), then Apply in tool
-                            options.
-                          </p>
-                        ) : null}
-                        <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                          Size and shape in the tool options panel. Rope: two clicks. Cloth:
-                          multi-pin + Apply.
-                        </p>
-                      </>
-                    ) : null}
-
-                    {toolsPane === "squishy" ? (
-                      <>
-                        <div className="sidebar-section-label">Squishy</div>
-                        <button
-                          type="button"
-                          className={
-                            interactionMode === "squishy"
-                              ? "sidebar-mode-btn is-active"
-                              : "sidebar-mode-btn"
-                          }
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode("squishy")}
-                        >
-                          <span className="sidebar-mode-label">Metaballs</span>
-                        </button>
-                        <SymmetryColorSidebarSections
-                          loading={loading}
-                          workBusy={workBusy}
-                          activeColor={activeColor}
-                          setActiveColor={setActiveColor}
-                          interactionMode={interactionMode}
-                          setInteractionMode={setInteractionMode}
-                          selectedColors={selectedColors}
-                          setSelectedColors={setSelectedColors}
-                          paintColorDistrib={paintColorDistrib}
-                          setPaintColorDistrib={setPaintColorDistrib}
-                          mirrorX={mirrorX}
-                          setMirrorX={setMirrorX}
-                          mirrorY={mirrorY}
-                          setMirrorY={setMirrorY}
-                          mirrorZ={mirrorZ}
-                          setMirrorZ={setMirrorZ}
-                        />
-                        <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                          Add / pick / delete blobs in the viewport; commit in tool options.
-                        </p>
-                      </>
-                    ) : null}
-
-                    {toolsPane === "mood" ? (
-                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Mood sliders are in the tool options panel.
-                      </p>
-                    ) : null}
-
-                    <ViewportSettingsSidebar loading={loading} workBusy={workBusy} />
-                  </div>
-                </>
-              ) : (
-                <div className="sidebar-collapsed-tools">
-                  {/* ── Pane tabs ── */}
-                  {(
-                    [
-                      { pane: "hand", label: "Hand", mode: "navigate" },
-                      { pane: "draw", label: "Draw", mode: "add" },
-                      { pane: "select", label: "Sel", mode: "select" },
-                      { pane: "sculpt", label: "Sculpt", mode: "sculpt" },
-                      { pane: "generators", label: "Gen", mode: "generator" },
-                      { pane: "squishy", label: "Sqsh", mode: "squishy" },
-                      { pane: "mood", label: "Mood", mode: null },
-                      { pane: "fly", label: "Fly", mode: "fly" },
-                      { pane: "walk", label: "Walk", mode: "walk" },
-                    ] as const
-                  ).map(({ pane, label, mode }) => (
-                    <button
-                      key={pane}
-                      type="button"
-                      className={`sidebar-collapsed-tool-btn${toolsPane === pane ? " is-active" : ""}`}
-                      disabled={loading || workBusy}
-                      title={label}
-                      onClick={() => {
-                        setToolsPane(pane as typeof toolsPane);
-                        if (mode) setInteractionMode(mode);
-                      }}
-                    >
-                      <span className="sidebar-collapsed-tool-icon">{label}</span>
-                    </button>
-                  ))}
-
-                  {/* ── Draw sub-options ── */}
-                  {toolsPane === "draw" && (
-                    <>
-                      <div className="sidebar-collapsed-tool-separator" />
-                      <div className="sidebar-collapsed-section-label">Tool</div>
-                      {(["add", "remove", "paint"] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          className={`sidebar-collapsed-sub-btn${interactionMode === m ? " is-active" : ""}`}
-                          disabled={loading || workBusy}
-                          onClick={() => setInteractionMode(m)}
-                        >
-                          {m[0].toUpperCase() + m.slice(1)}
-                        </button>
-                      ))}
-                      <div className="sidebar-collapsed-section-label">Select</div>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "select" ? " is-active" : ""}`}
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("select")}
-                      >
-                        Select
-                      </button>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "stamp" ? " is-active" : ""}`}
-                        disabled={
-                          loading || workBusy || (selectionCount === 0 && !stampBookPatternActive)
-                        }
-                        onClick={() => setInteractionMode("stamp")}
-                      >
-                        Stamp
-                      </button>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "punch" ? " is-active" : ""}`}
-                        disabled={loading || workBusy || selectionCount === 0}
-                        onClick={() => setInteractionMode("punch")}
-                      >
-                        Punch
-                      </button>
-                      <div className="sidebar-collapsed-section-label">Method</div>
-                      {(["stroke", "surface", "solid", "spray", "fill"] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          className={`sidebar-collapsed-sub-btn${selectionMethod === m ? " is-active" : ""}`}
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState(m);
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                        >
-                          {m[0].toUpperCase() + m.slice(1)}
-                        </button>
-                      ))}
-                    </>
-                  )}
-
-                  {/* ── Select sub-options ── */}
-                  {toolsPane === "select" && (
-                    <>
-                      <div className="sidebar-collapsed-tool-separator" />
-                      <div className="sidebar-collapsed-section-label">Selection</div>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "select" ? " is-active" : ""}`}
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("select")}
-                      >
-                        Select
-                      </button>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "stamp" ? " is-active" : ""}`}
-                        disabled={
-                          loading || workBusy || (selectionCount === 0 && !stampBookPatternActive)
-                        }
-                        onClick={() => setInteractionMode("stamp")}
-                      >
-                        Stamp
-                      </button>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "punch" ? " is-active" : ""}`}
-                        disabled={loading || workBusy || selectionCount === 0}
-                        onClick={() => setInteractionMode("punch")}
-                      >
-                        Punch
-                      </button>
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "selectExtrude" ? " is-active" : ""}`}
-                        disabled={loading || workBusy || selectionCount === 0}
-                        onClick={() => setInteractionMode("selectExtrude")}
-                      >
-                        Extrude
-                      </button>
-                      <div className="sidebar-collapsed-section-label">Method</div>
-                      {(["stroke", "surface", "solid", "spray", "fill"] as const).map((m) => (
-                        <button
-                          key={m}
-                          type="button"
-                          className={`sidebar-collapsed-sub-btn${selectionMethod === m ? " is-active" : ""}`}
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            const s = selectionMethodToState(m);
-                            setDrawStrokeMode(s.drawStrokeMode);
-                            setStrokeDrawStyle(s.strokeDrawStyle);
-                            setSprayDensity(s.sprayDensity);
-                            setStrokeFamilyVariant(s.strokeFamilyVariant);
-                          }}
-                        >
-                          {m[0].toUpperCase() + m.slice(1)}
-                        </button>
-                      ))}
-                    </>
-                  )}
-
-                  {/* ── Sculpt sub-options ── */}
-                  {toolsPane === "sculpt" && (
-                    <>
-                      <div className="sidebar-collapsed-tool-separator" />
-                      <div className="sidebar-collapsed-section-label">Mode</div>
-                      {(
-                        [
-                          ["draw", "Draw"],
-                          ["gouge", "Scrape"],
-                          ["smooth", "Smooth"],
-                          ["wall", "Wall"],
-                          ["extrude", "Extrude"],
-                          ["terrain", "Terrain"],
-                        ] as const
-                      ).map(([id, label]) => (
-                        <button
-                          key={id}
-                          type="button"
-                          className={`sidebar-collapsed-sub-btn${sculptStrokeMode === id ? " is-active" : ""}`}
-                          disabled={loading || workBusy || interactionMode !== "sculpt"}
-                          onClick={() => setSculptStrokeMode(id)}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </>
-                  )}
-
-                  {/* ── Generators sub-options ── */}
-                  {toolsPane === "generators" && (
-                    <>
-                      <div className="sidebar-collapsed-tool-separator" />
-                      <div className="sidebar-collapsed-section-label">Kind</div>
-                      {(
-                        [
-                          ["rocks", "Rocks"],
-                          ["grass", "Grass"],
-                          ["rope", "Rope"],
-                          ["cloth", "Cloth"],
-                          ["ashlar", "Ashlar"],
-                          ["flora", "Flora"],
-                          ["roof", "Roof"],
-                          ["piscina", "Fish"],
-                          ["insecta", "Insect"],
-                          ["fauna", "Creature"],
-                        ] as const
-                      ).map(([id, label]) => (
-                        <button
-                          key={id}
-                          type="button"
-                          className={`sidebar-collapsed-sub-btn${generatorKind === id ? " is-active" : ""}`}
-                          disabled={loading || workBusy}
-                          onClick={() => {
-                            setGeneratorKind(id);
-                            if (ropePhase.active) ropePhase.cancel();
-                            else setRopeFirstScreen(null);
-                            if (clothPhase.active) clothPhase.cancel();
-                            else {
-                              setClothPins([]);
-                              clothPinsRef.current = [];
-                            }
-                            rocksPhase.cancel();
-                            grassPhase.cancel();
-                            ashlarPhase.cancel();
-                            floraPhase.cancel();
-                            piscinaPhase.cancel();
-                            insectaPhase.cancel();
-                            faunaPhase.cancel();
-                          }}
-                        >
-                          {label}
-                        </button>
-                      ))}
-                    </>
-                  )}
-
-                  {/* ── Squishy sub-options ── */}
-                  {toolsPane === "squishy" && (
-                    <>
-                      <div className="sidebar-collapsed-tool-separator" />
-                      <button
-                        type="button"
-                        className={`sidebar-collapsed-sub-btn${interactionMode === "squishy" ? " is-active" : ""}`}
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("squishy")}
-                      >
-                        Metaballs
-                      </button>
-                    </>
-                  )}
-
-                  {/* ── Palette toggle ── */}
-                  <div className="sidebar-collapsed-tool-separator" />
-                  <button
-                    type="button"
-                    className="sidebar-collapsed-tool-btn"
-                    onClick={() => setColorPaletteFloating(!colorPaletteFloating)}
-                    disabled={loading || workBusy}
-                    title="Toggle color palette"
-                  >
-                    <span className="sidebar-collapsed-tool-icon">🎨</span>
-                  </button>
-                </div>
-              )}
-            </div>
-          </aside>
-        ) : null}
+        <ToolsSidebar
+          showEditorChrome={showEditorChrome}
+          loading={loading}
+          workBusy={workBusy}
+          toolsPaneFloating={toolsPaneFloating}
+          setToolsPaneFloating={setToolsPaneFloating}
+          sidebarExpanded={sidebarExpanded}
+          setSidebarExpanded={setSidebarExpanded}
+          toolPanePos={toolPanePos}
+          onToolPaneDragDown={onToolPaneDragDown}
+          toolsPane={toolsPane}
+          setToolsPane={setToolsPane}
+          interactionMode={interactionMode}
+          setInteractionMode={setInteractionMode}
+          flySpeed={flySpeed}
+          setFlySpeed={setFlySpeed}
+          selectionMethod={selectionMethod}
+          setDrawStrokeMode={setDrawStrokeMode}
+          setStrokeDrawStyle={setStrokeDrawStyle}
+          setSprayDensity={setSprayDensity}
+          setStrokeFamilyVariant={setStrokeFamilyVariant}
+          selectionCount={selectionCount}
+          stampBookPatternActive={stampBookPatternActive}
+          activeColor={activeColor}
+          setActiveColor={setActiveColor}
+          selectedColors={selectedColors}
+          setSelectedColors={setSelectedColors}
+          paintColorDistrib={paintColorDistrib}
+          setPaintColorDistrib={setPaintColorDistrib}
+          mirrorX={mirrorX}
+          setMirrorX={setMirrorX}
+          mirrorY={mirrorY}
+          setMirrorY={setMirrorY}
+          mirrorZ={mirrorZ}
+          setMirrorZ={setMirrorZ}
+          activeMaterial={activeMaterial}
+          setActiveMaterial={setActiveMaterial}
+          sculptStrokeMode={sculptStrokeMode}
+          setSculptStrokeMode={setSculptStrokeMode}
+          generatorKind={generatorKind}
+          setGeneratorKind={setGeneratorKind}
+          ropePhase={ropePhase}
+          clothPhase={clothPhase}
+          rocksPhase={rocksPhase}
+          grassPhase={grassPhase}
+          ashlarPhase={ashlarPhase}
+          floraPhase={floraPhase}
+          piscinaPhase={piscinaPhase}
+          insectaPhase={insectaPhase}
+          faunaPhase={faunaPhase}
+          ropeFirstScreen={ropeFirstScreen}
+          setRopeFirstScreen={setRopeFirstScreen}
+          setClothPins={setClothPins}
+          clothPinsRef={clothPinsRef}
+          colorPaletteFloating={colorPaletteFloating}
+          setColorPaletteFloating={setColorPaletteFloating}
+        />
         {colorPaletteFloating && showEditorChrome ? (
           <div
             className="floating-palette-panel"
@@ -11408,6 +7119,40 @@ function App() {
         visible={radialMenu.visible}
         onSelect={onRadialSelect}
       />
+
+      {/* ── Gamepad radial menus (LT / RT triggers) ───────────────────── */}
+      <GamepadRadialMenu
+        visible={gamepad.radialMenu != null}
+        slices={gamepad.radialSlices}
+        selectedIndex={gamepad.selectedSliceIndex}
+        title={gamepad.radialMenu === "tools" ? "Tool" : gamepad.radialMenu === "subOptions" ? "Options" : undefined}
+      />
+
+      {/* ── Gamepad speed HUD ─────────────────────────────────────────── */}
+      {gamepad.connected && gamepad.speedMultiplier > 1 && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 48,
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "rgba(0,0,0,0.5)",
+            color: "rgba(255,255,255,0.8)",
+            padding: "4px 12px",
+            borderRadius: 6,
+            fontSize: 13,
+            fontWeight: 600,
+            pointerEvents: "none",
+            zIndex: 99990,
+            userSelect: "none",
+          }}
+        >
+          {gamepad.speedMultiplier}x
+        </div>
+      )}
+
+      {/* ── Gamepad virtual cursor (X to toggle) ─────────────────────── */}
+      <VirtualCursor ref={virtualCursorElRef} visible={gamepad.cursorMode} />
 
       {/* ── Off-screen ping arrow indicator ────────────────────────────── */}
       {(() => {

@@ -1,1 +1,1 @@
-- I want the ability to extrude a selected face
+- Optional: apply `useLatestRef` to ~90 ref-sync triads in App.tsx

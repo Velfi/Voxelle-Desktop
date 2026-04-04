@@ -878,33 +878,6 @@ impl WgpuViewer {
         self.selection_overlay_cache_key = None;
     }
 
-    /// Line list: each vertex is `[x,y,z, r,g,b]` (6 floats); pairs form eye→target segments.
-    pub fn upload_collab_peer_lines(&mut self, verts: &[f32]) {
-        if verts.is_empty() || verts.len() % 6 != 0 {
-            self.collab_line_vertex_buffer = None;
-            self.collab_line_vertex_count = 0;
-            return;
-        }
-        let n_floats = verts.len();
-        let vertex_count = (n_floats / 6) as u32;
-        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
-        if let Some(ref buf) = self.collab_line_vertex_buffer {
-            if buf.size() == nbytes {
-                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
-                self.collab_line_vertex_count = vertex_count;
-                return;
-            }
-        }
-        self.collab_line_vertex_buffer = Some(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("collab_peer_lines_vtx"),
-                contents: bytemuck::cast_slice(verts),
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-        self.collab_line_vertex_count = vertex_count;
-    }
-
     pub fn clear_collab_peer_lines(&mut self) {
         self.collab_line_vertex_buffer = None;
         self.collab_line_vertex_count = 0;

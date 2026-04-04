@@ -5992,13 +5992,26 @@ mod tests {
 
     #[test]
     fn brush_extent_toward_solid_matches_radius_for_axis_aligned_normals() {
+        // radius is a 0-based display index: size = radius + 1.
+        // Sphere radius=4 → size 5 (odd): offsets span [-2, 2], extent = 2.
         assert_eq!(
             brush_footprint_extent_toward_solid(BrushShape::Sphere, 4, (0, 1, 0), None),
-            4
+            2
         );
+        // Cube radius=3 → size 4 (even): offsets span [-1, 2], extent = 1.
         assert_eq!(
             brush_footprint_extent_toward_solid(BrushShape::Cube, 3, (1, 0, 0), None),
+            1
+        );
+        // Sphere radius=7 → size 8 (even): offsets span [-3, 4], extent = 3.
+        assert_eq!(
+            brush_footprint_extent_toward_solid(BrushShape::Sphere, 7, (0, 0, 1), None),
             3
+        );
+        // Cube radius=0 → size 1: single voxel at origin, extent = 0.
+        assert_eq!(
+            brush_footprint_extent_toward_solid(BrushShape::Cube, 0, (1, 0, 0), None),
+            0
         );
     }
 

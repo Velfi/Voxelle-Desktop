@@ -1,5 +1,3 @@
-use super::*;
-
 /// Number of mip levels in the bloom downsample/upsample pyramid.
 pub(crate) const BLOOM_LEVELS: usize = 5;
 
