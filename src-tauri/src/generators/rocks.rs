@@ -58,7 +58,7 @@ fn seed_to_range(seed: i32, lo: f32, hi: f32) -> f32 {
 /// Generate rock voxel coordinates in local space (origin at center), matching the web version.
 /// Returns Vec of (local_x, local_y, local_z) offsets.
 fn generate_rock_local(seed: i32, size: i32, roughness: f32) -> Vec<(i32, i32, i32)> {
-    let r = size.max(1).min(20);
+    let r = size.clamp(1, 20);
     let lumpiness = roughness.clamp(0.0, 1.0) * 0.6;
     let scale = 2.5 / (r as f32).max(1.0);
 
@@ -143,10 +143,10 @@ pub fn generate_rock_cluster_deltas(
     let ny = (face_empty.1 - solid.1).signum();
     let nz = (face_empty.2 - solid.2).signum();
 
-    let count = count.max(1).min(5);
-    let cluster_r = cluster_radius.max(0).min(3);
+    let count = count.clamp(1, 5);
+    let cluster_r = cluster_radius.clamp(0, 3);
     let sink_n = if sink_direction != 0 {
-        sink_amount.max(0).min(5)
+        sink_amount.clamp(0, 5)
     } else {
         0
     };
@@ -288,10 +288,10 @@ pub fn preview_rock_cluster_coords(
     let ny = (face_empty.1 - solid.1).signum();
     let nz = (face_empty.2 - solid.2).signum();
 
-    let count = count.max(1).min(5);
-    let cluster_r = cluster_radius.max(0).min(3);
+    let count = count.clamp(1, 5);
+    let cluster_r = cluster_radius.clamp(0, 3);
     let sink_n = if sink_direction != 0 {
-        sink_amount.max(0).min(5)
+        sink_amount.clamp(0, 5)
     } else {
         0
     };

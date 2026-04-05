@@ -46,11 +46,15 @@ export function StatusBar(props: StatusBarProps) {
   const [rtActive, setRtActive] = useState(false);
 
   useEffect(() => {
-    void invoke<boolean>("get_raytrace_mode").then(setRtActive).catch(() => {});
+    void invoke<boolean>("get_raytrace_mode")
+      .then(setRtActive)
+      .catch(() => {});
     const unlisten = listen<boolean>("voxelle-raytrace-changed", (e) => {
       setRtActive(e.payload);
     });
-    return () => { void unlisten.then((f) => f()); };
+    return () => {
+      void unlisten.then((f) => f());
+    };
   }, []);
 
   const toggleRt = () => {

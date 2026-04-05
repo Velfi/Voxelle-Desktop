@@ -185,7 +185,9 @@ fn place_voxelle_custom_top_level_menus<R: tauri::Runtime>(
 }
 
 #[cfg(desktop)]
-pub(crate) fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuState, RecentMenuState)> {
+pub(crate) fn install_app_menu(
+    app: &AppHandle,
+) -> tauri::Result<(SelectionMenuState, RecentMenuState)> {
     use tauri::menu::{CheckMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
 
     let menu = Menu::default(app)?;
@@ -200,8 +202,13 @@ pub(crate) fn install_app_menu(app: &AppHandle) -> tauri::Result<(SelectionMenuS
         true,
         Some("CommandOrCtrl+Shift+S"),
     )?;
-    let close_project_item =
-        MenuItem::with_id(app, "menu_close_project", "Close Project", true, Some("CommandOrCtrl+W"))?;
+    let close_project_item = MenuItem::with_id(
+        app,
+        "menu_close_project",
+        "Close Project",
+        true,
+        Some("CommandOrCtrl+W"),
+    )?;
     let export_glb_item =
         MenuItem::with_id(app, "menu_export_glb", "Export GLB…", true, None::<&str>)?;
     let open_recent_submenu = Submenu::with_id(app, "open_recent_submenu", "Open Recent", true)?;

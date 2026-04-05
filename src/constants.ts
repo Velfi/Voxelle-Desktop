@@ -91,7 +91,10 @@ export function layoutViewportCssSize(): { w: number; h: number } {
 }
 
 /** Map texture-normalized nx, ny to position inside `.viewport` for debug overlay markers. */
-export function viewportCursorOverlayPercent(nx: number, ny: number): { leftPct: number; topPct: number } {
+export function viewportCursorOverlayPercent(
+  nx: number,
+  ny: number,
+): { leftPct: number; topPct: number } {
   return { leftPct: nx * 100, topPct: ny * 100 };
 }
 

@@ -13,7 +13,6 @@ pub(crate) struct MeshGreedyPool {
     pub(crate) idx_cap: u64,
 }
 
-
 impl MeshGreedyPool {
     pub(crate) fn ensure_counters(&mut self, device: &wgpu::Device) {
         if self.counters.is_none() {
@@ -725,13 +724,7 @@ impl WgpuViewer {
             0,
             (v_total as u64).saturating_mul(VTX_STRIDE),
         );
-        enc3.copy_buffer_to_buffer(
-            idx_out,
-            0,
-            &ib_final,
-            0,
-            (i_total as u64).saturating_mul(4),
-        );
+        enc3.copy_buffer_to_buffer(idx_out, 0, &ib_final, 0, (i_total as u64).saturating_mul(4));
         self.queue.submit(std::iter::once(enc3.finish()));
         poll_device_yielding_until_queue_empty(&self.device);
 

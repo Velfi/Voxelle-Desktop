@@ -1,8 +1,8 @@
 use crate::camera;
 use crate::collab;
 use crate::generators;
-use crate::greedy_mesh;
 use crate::gpu_brick;
+use crate::greedy_mesh;
 use crate::render::WgpuViewer;
 use crate::stroke_modes;
 use crate::voxel_edit;

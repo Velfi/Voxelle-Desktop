@@ -1056,8 +1056,7 @@ impl WgpuViewer {
         );
 
         // Logo overlay, mascots, and speech bubbles render directly on the swapchain surface.
-        let needs_swap_pass =
-            self.start_screen_transparent || self.has_visible_speech_bubbles();
+        let needs_swap_pass = self.start_screen_transparent || self.has_visible_speech_bubbles();
         if needs_swap_pass {
             let swap_view = frame
                 .texture

@@ -1706,14 +1706,12 @@ fn circle_plane_axis_two_click(
 ) -> usize {
     let grid_size = crate::voxel_edit::effective_ray_grid_size(file);
     let (origin, dir) = crate::voxel_edit::screen_to_world_ray(camera, width, height, sx, sy);
-    if let Some((hit, prev, _oid)) =
+    if let Some((hit, Some(prev), _oid)) =
         crate::voxel_edit::ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)
     {
-        if let Some(prev) = prev {
-            if let Some(face_ax) = face_normal_axis(prev, hit) {
-                if let Some(ax) = axis_from_plane_axis(plane_axis, Some(face_ax)) {
-                    return ax;
-                }
+        if let Some(face_ax) = face_normal_axis(prev, hit) {
+            if let Some(ax) = axis_from_plane_axis(plane_axis, Some(face_ax)) {
+                return ax;
             }
         }
     }

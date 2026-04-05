@@ -38,14 +38,7 @@ const VirtualCursor = forwardRef<HTMLDivElement, Props>(({ visible }, ref) => {
         style={{ display: "block" }}
       >
         {/* Outer ring */}
-        <circle
-          cx="12"
-          cy="12"
-          r="9"
-          fill="none"
-          stroke="rgba(0,0,0,0.5)"
-          strokeWidth="2.5"
-        />
+        <circle cx="12" cy="12" r="9" fill="none" stroke="rgba(0,0,0,0.5)" strokeWidth="2.5" />
         <circle
           cx="12"
           cy="12"

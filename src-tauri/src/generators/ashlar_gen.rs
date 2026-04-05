@@ -61,7 +61,7 @@ pub fn ashlar_world_coords(
         }
     });
     if let (Some(t), Some(axis)) = (thickness, resolved_axis) {
-        let t = t.max(1).min(20);
+        let t = t.clamp(1, 20);
         match axis {
             0 => wx = t,
             1 => wy = t,

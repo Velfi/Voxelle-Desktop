@@ -6,7 +6,14 @@ import { check } from "@tauri-apps/plugin-updater";
 import { loadPreferences } from "../preferences";
 import { rememberJoinedUrl } from "../joinRecent";
 import { defaultMoodState, moodWith } from "../types";
-import type { MoodState, RosterEntry, ChatToast, InteractionMode, ViewportCursorDebugPayload, ViewportCursorDebugScreen } from "../types";
+import type {
+  MoodState,
+  RosterEntry,
+  ChatToast,
+  InteractionMode,
+  ViewportCursorDebugPayload,
+  ViewportCursorDebugScreen,
+} from "../types";
 import {
   LS_RENDERING_MODE,
   LS_VIEWPORT_CURSOR_DEBUG,
@@ -48,7 +55,9 @@ export interface UseTauriEventListenersParams {
 
   /* State setters */
   setLoadError: React.Dispatch<React.SetStateAction<string | null>>;
-  setCollabBanner: React.Dispatch<React.SetStateAction<{ text: string; tone: "info" | "alert" } | null>>;
+  setCollabBanner: React.Dispatch<
+    React.SetStateAction<{ text: string; tone: "info" | "alert" } | null>
+  >;
   setStartScreenLogoLoaded: React.Dispatch<React.SetStateAction<boolean>>;
   setPathLabel: React.Dispatch<React.SetStateAction<string>>;
   setLoading: React.Dispatch<React.SetStateAction<boolean>>;
@@ -85,8 +94,12 @@ export interface UseTauriEventListenersParams {
   setMatchMaterialSelectColor: React.Dispatch<React.SetStateAction<boolean>>;
   setViewportCursorDebugEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   setViewportCursorDebugJs: React.Dispatch<React.SetStateAction<{ nx: number; ny: number } | null>>;
-  setViewportCursorDebugRust: React.Dispatch<React.SetStateAction<ViewportCursorDebugPayload | null>>;
-  setViewportCursorDebugScreen: React.Dispatch<React.SetStateAction<ViewportCursorDebugScreen | null>>;
+  setViewportCursorDebugRust: React.Dispatch<
+    React.SetStateAction<ViewportCursorDebugPayload | null>
+  >;
+  setViewportCursorDebugScreen: React.Dispatch<
+    React.SetStateAction<ViewportCursorDebugScreen | null>
+  >;
   setHideUI: React.Dispatch<React.SetStateAction<boolean>>;
   setSelectionCount: React.Dispatch<React.SetStateAction<number>>;
   setSelectionCombineMode: React.Dispatch<React.SetStateAction<SelectionCombineModeApi>>;

@@ -3,9 +3,7 @@
 //! Tests the CPU loop that generates 25k individual cube meshes for stroke previews.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use std::collections::HashMap;
 use voxelle_desktop_lib::greedy_mesh::{self, MeshBuffers, VoxelCoord};
-use voxelle_desktop_lib::voxelle::{MaterialId, SceneObject, Voxel};
 
 /// Generate a sparse set of voxel coordinates (mimics brush footprint).
 fn sparse_voxel_coords(count: usize) -> Vec<VoxelCoord> {
@@ -19,37 +17,6 @@ fn sparse_voxel_coords(count: usize) -> Vec<VoxelCoord> {
         idx += 1;
     }
     coords
-}
-
-/// Generate a voxel map (occupied cells lookup) from a voxel list.
-fn make_voxel_map(voxels: &[Voxel]) -> HashMap<VoxelCoord, usize> {
-    let mut map = HashMap::new();
-    for (i, v) in voxels.iter().enumerate() {
-        map.insert((v.x, v.y, v.z), i);
-    }
-    map
-}
-
-/// Single solid box for mesh transformation lookup.
-fn solid_box(origin: (i32, i32, i32), edge: i32, color: u32) -> Vec<Voxel> {
-    let (ox, oy, oz) = origin;
-    let e = edge.max(1);
-    let mut voxels = Vec::with_capacity((e as usize).pow(3));
-    for dz in 0..e {
-        for dy in 0..e {
-            for dx in 0..e {
-                voxels.push(Voxel {
-                    x: ox + dx,
-                    y: oy + dy,
-                    z: oz + dz,
-                    color,
-                    material: MaterialId::Plastic,
-                    object_id: 0,
-                });
-            }
-        }
-    }
-    voxels
 }
 
 /// Simulate the core loop: generate individual cube meshes, transform, and append.

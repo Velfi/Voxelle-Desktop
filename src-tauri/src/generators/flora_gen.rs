@@ -212,7 +212,7 @@ fn generate_branches(
     branch_start: f64,
     branch_spread: f64,
     girth: f64,
-    taper: f64,
+    _taper: f64,
     canopy: f64,
     rng: &mut Rng,
     coords: &mut HashSet<VoxelCoord>,
@@ -277,7 +277,7 @@ fn generate_branches(
 
         // Recursive sub-branches (depth 2)
         if branch_depth >= 2 && path.len() > 2 {
-            let sub_count = (branch_count / 2).max(1).min(3);
+            let sub_count = (branch_count / 2).clamp(1, 3);
             let sub_spine: Vec<V3> = path
                 .iter()
                 .map(|&(x, y, z)| (x as f64, y as f64, z as f64))
@@ -292,7 +292,7 @@ fn generate_branches(
                 0.3,
                 branch_spread * 0.6,
                 girth * 0.4,
-                taper,
+                _taper,
                 canopy * 0.5,
                 rng,
                 coords,

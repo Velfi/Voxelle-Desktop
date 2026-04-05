@@ -190,8 +190,8 @@ pub fn ik_drag_update(
     fabrik_solve(&mut positions, &drag.bone_lengths, target, 10);
 
     // Write back (skip root which is pinned).
-    for i in 1..drag.chain.len() {
-        let p = positions[i];
+    for (i, p) in positions.iter().enumerate().skip(1) {
+        let p = *p;
         session.set_joint_position(drag.chain[i], p.x, p.y, p.z);
     }
 }

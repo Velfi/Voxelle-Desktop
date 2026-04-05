@@ -80,16 +80,12 @@ export function PreferencesModal({
   }, [open]);
 
   useEffect(() => {
-    void (invoke("avatar_list_embedded") as Promise<string[]>)
-      .then(setAvatarNames)
-      .catch(() => {});
+    void (invoke("avatar_list_embedded") as Promise<string[]>).then(setAvatarNames).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!open) return;
-    void (invoke("avatar_list_user") as Promise<string[]>)
-      .then(setUserAvatarNames)
-      .catch(() => {});
+    void (invoke("avatar_list_user") as Promise<string[]>).then(setUserAvatarNames).catch(() => {});
   }, [open]);
 
   const applyToneToGpu = (t: ToneMappingPreference) => {
@@ -366,7 +362,9 @@ export function PreferencesModal({
                 value={prefs.newProjectDefaultSize}
                 onChange={(e) => onNewProjectDefaultSize(Number(e.target.value))}
               />
-              <span className="prefs-field-hint">Grid size pre-filled when creating a new project (1–256).</span>
+              <span className="prefs-field-hint">
+                Grid size pre-filled when creating a new project (1–256).
+              </span>
             </label>
             <label className="prefs-select-label">
               <span className="prefs-select-label-text">Default new project shape</span>
@@ -500,7 +498,10 @@ export function PreferencesModal({
               </button>
             </div>
             <p className="prefs-field-hint">
-              To create an avatar: build your character in Voxelle, then use <strong>File › Save As</strong> to save it as a <code>.voxelle</code> file. Drop that file into the avatars folder and reopen Preferences to see it here. Files must be under 64 KB.
+              To create an avatar: build your character in Voxelle, then use{" "}
+              <strong>File › Save As</strong> to save it as a <code>.voxelle</code> file. Drop that
+              file into the avatars folder and reopen Preferences to see it here. Files must be
+              under 64 KB.
             </p>
             {collabHosting ? (
               <p className="prefs-field-hint prefs-section-hint">

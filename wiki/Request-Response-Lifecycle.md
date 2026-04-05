@@ -86,7 +86,7 @@ fn collab_join(
 ```typescript
 // Frontend listens for async results
 listen<string>("collab-error", (e) => {
-    showError(e.payload);
+  showError(e.payload);
 });
 ```
 
@@ -112,16 +112,16 @@ flowchart LR
 
 All commands share a single `Arc<ViewerState>` managed by Tauri. Key fields:
 
-| Field | Type | Purpose |
-|-------|------|---------|
-| `viewer` | `Mutex<Option<WgpuViewer>>` | GPU renderer |
-| `camera` | `Mutex<OrbitCamera>` | Camera position and projection |
-| `current_file` | `Mutex<Option<VoxelleFile>>` | Loaded `.voxelle` file |
-| `stroke_buffer` | `Mutex<Vec<...>>` | Active brush stroke vertices |
-| `selection_cells` | `Mutex<AHashSet<...>>` | Currently selected voxels |
-| `collab` | `Arc<Mutex<CollabRuntime>>` | Collaboration state & peer roster |
-| `collab_edit_inbox` | `Mutex<VecDeque<CollabInboxItem>>` | Queued remote edits |
-| `chunk_mesh_inbox` | `Mutex<VecDeque<...>>` | Pending GPU mesh uploads |
+| Field               | Type                               | Purpose                           |
+| ------------------- | ---------------------------------- | --------------------------------- |
+| `viewer`            | `Mutex<Option<WgpuViewer>>`        | GPU renderer                      |
+| `camera`            | `Mutex<OrbitCamera>`               | Camera position and projection    |
+| `current_file`      | `Mutex<Option<VoxelleFile>>`       | Loaded `.voxelle` file            |
+| `stroke_buffer`     | `Mutex<Vec<...>>`                  | Active brush stroke vertices      |
+| `selection_cells`   | `Mutex<AHashSet<...>>`             | Currently selected voxels         |
+| `collab`            | `Arc<Mutex<CollabRuntime>>`        | Collaboration state & peer roster |
+| `collab_edit_inbox` | `Mutex<VecDeque<CollabInboxItem>>` | Queued remote edits               |
+| `chunk_mesh_inbox`  | `Mutex<VecDeque<...>>`             | Pending GPU mesh uploads          |
 
 ## Command Registration
 
@@ -177,12 +177,12 @@ sequenceDiagram
 
 The frontend registers listeners at startup for backend-initiated events:
 
-| Event | Payload | Source |
-|-------|---------|--------|
-| `viewport-fps` | `number` | Frame loop |
-| `viewport-pixel-size` | `{ w, h }` | Resize handler |
-| `voxelle-load-start` | `string` (filename) | File open command |
-| `voxelle-work-progress` | `string` (message) | Long operations |
-| `collab-chat` | `string` | Collaboration chat |
-| `collab-ping` | `string` | Peer ping notifications |
-| `collab-error` | `string` | Connection failures |
+| Event                   | Payload             | Source                  |
+| ----------------------- | ------------------- | ----------------------- |
+| `viewport-fps`          | `number`            | Frame loop              |
+| `viewport-pixel-size`   | `{ w, h }`          | Resize handler          |
+| `voxelle-load-start`    | `string` (filename) | File open command       |
+| `voxelle-work-progress` | `string` (message)  | Long operations         |
+| `collab-chat`           | `string`            | Collaboration chat      |
+| `collab-ping`           | `string`            | Peer ping notifications |
+| `collab-error`          | `string`            | Connection failures     |

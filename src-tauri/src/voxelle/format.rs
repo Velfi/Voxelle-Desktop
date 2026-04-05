@@ -15,6 +15,8 @@ pub const V3_RECORD_SIZE: usize = 20;
 /// Dense **VX3 wire version 4** body: `object_id` `u32` after the legacy 20-byte fields (24 bytes total).
 pub const V4_WIRE_RECORD_SIZE: usize = 24;
 /// Always use dense wire format for the voxel array (faster and more compact than BSON-per-voxel).
+/// Kept for format docs / future BSON-inner path; the writer currently always uses wire.
+#[allow(dead_code)]
 pub const V3_WIRE_VOXEL_THRESHOLD: usize = 0;
 
 #[derive(Debug, Error)]
@@ -418,28 +420,16 @@ fn lighting_to_bson_document(l: &LightingSettings) -> Document {
 fn parse_lighting_from_scene_optional(scene: &Document) -> Option<LightingSettings> {
     let m = scene.get_document("lighting").ok()?;
     Some(LightingSettings {
-        ambient_intensity: m
-            .get("ambientIntensity")
-            .and_then(bson_f32)
-            .unwrap_or(1.0),
-        sunlight_intensity: m
-            .get("sunlightIntensity")
-            .and_then(bson_f32)
-            .unwrap_or(1.0),
+        ambient_intensity: m.get("ambientIntensity").and_then(bson_f32).unwrap_or(1.0),
+        sunlight_intensity: m.get("sunlightIntensity").and_then(bson_f32).unwrap_or(1.0),
         light_color: m
             .get_str("lightColor")
             .ok()
             .map(|s| s.to_string())
             .filter(|s| s.starts_with('#'))
             .unwrap_or_else(|| "#ffffff".to_string()),
-        light_angle_deg: m
-            .get("lightAngle")
-            .and_then(bson_f32)
-            .unwrap_or(45.0),
-        light_elevation_deg: m
-            .get("lightElevation")
-            .and_then(bson_f32)
-            .unwrap_or(45.0),
+        light_angle_deg: m.get("lightAngle").and_then(bson_f32).unwrap_or(45.0),
+        light_elevation_deg: m.get("lightElevation").and_then(bson_f32).unwrap_or(45.0),
         enable_shadows: m.get_bool("enableShadows").unwrap_or(true),
         enable_sky: m.get_bool("enableSky").unwrap_or(true),
         background_color: m
@@ -564,14 +554,13 @@ pub fn parse_mood_from_scene_optional(scene: &Document) -> Option<MoodSettings> 
     if is_old {
         let grain_v = m.get("grain").and_then(bson_f32).unwrap_or(0.0);
         let vig_v = m.get("vignette").and_then(bson_f32).unwrap_or(0.0);
-        let dt_v = m
-            .get("distanceTint")
-            .and_then(bson_f32)
-            .unwrap_or(0.0);
+        let dt_v = m.get("distanceTint").and_then(bson_f32).unwrap_or(0.0);
         let atm_v = m.get("atmosphere").and_then(bson_f32).unwrap_or(0.0);
         let ss_v = m.get("sunShafts").and_then(bson_f32).unwrap_or(0.0);
-        let mut ms = MoodSettings::default();
-        ms.vignette = vig_v;
+        let mut ms = MoodSettings {
+            vignette: vig_v,
+            ..Default::default()
+        };
         if grain_v > 0.001 {
             ms.grain_enabled = true;
             ms.grain_strength = grain_v.clamp(0.0, 0.5);
@@ -645,8 +634,10 @@ fn parse_mood_from_raw_file_bytes(bytes: &[u8]) -> Option<MoodSettings> {
             .flatten()
             .and_then(raw_bson_to_f32)
             .unwrap_or(0.0);
-        let mut ms = MoodSettings::default();
-        ms.vignette = vig_v;
+        let mut ms = MoodSettings {
+            vignette: vig_v,
+            ..Default::default()
+        };
         if grain_v > 0.001 {
             ms.grain_enabled = true;
             ms.grain_strength = grain_v.clamp(0.0, 0.5);
@@ -1355,6 +1346,7 @@ fn build_v3_wire_payload(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     Ok(out)
 }
 
+#[allow(dead_code)] // BSON inner encoder; documented in VOXELLE_FORMAT_V4; not selected by current writer.
 fn build_bson_v4_payload(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     let grid_size = grid_size_for_encode(file);
     let scene = scene_document_for_encode(file);

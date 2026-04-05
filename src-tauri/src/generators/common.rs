@@ -173,7 +173,7 @@ impl Rng {
 ///
 /// - `up`      — outward face normal (the direction things grow / stand).
 /// - `forward` — in-plane, primary orientation direction (head→tail for
-///               creatures, stem growth direction for flora).
+///   creatures, stem growth direction for flora).
 /// - `side`    — in-plane, lateral (right-hand side).
 /// - `origin`  — world-space anchor in float coordinates.
 #[derive(Clone, Copy, Debug)]

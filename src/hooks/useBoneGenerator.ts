@@ -80,9 +80,9 @@ export function useBoneGenerator(ctx: BoneGeneratorContext): BoneGeneratorState 
         .then((session) => {
           const sel = session?.selected;
           if (!sel) return;
-          const jointId = sel.joint ?? (sel.bone != null
-            ? session.bones?.find((b) => b.id === sel.bone)?.jointA
-            : null);
+          const jointId =
+            sel.joint ??
+            (sel.bone != null ? session.bones?.find((b) => b.id === sel.bone)?.jointA : null);
           if (jointId == null) return;
           return invoke("bone_set_joint_position", {
             args: { id: jointId, x, y, z },
@@ -90,7 +90,9 @@ export function useBoneGenerator(ctx: BoneGeneratorContext): BoneGeneratorState 
         })
         .catch(() => {});
     });
-    return () => { void unlisten.then((u) => u()); };
+    return () => {
+      void unlisten.then((u) => u());
+    };
   }, []);
 
   // When the scale ring is dragged, sync the selected joint radius.
@@ -107,7 +109,9 @@ export function useBoneGenerator(ctx: BoneGeneratorContext): BoneGeneratorState 
         })
         .catch(() => {});
     });
-    return () => { void unlisten.then((u) => u()); };
+    return () => {
+      void unlisten.then((u) => u());
+    };
   }, []);
 
   return {

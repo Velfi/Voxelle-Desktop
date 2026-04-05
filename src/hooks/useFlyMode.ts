@@ -77,50 +77,53 @@ export function useFlyMode({
     }
   }, [flyPendingLookDxRef, flyPendingLookDyRef]);
 
-  const activateFlyMouseLook = useCallback(async (_pointerId: number) => {
-    const el = viewportRef.current;
-    console.log("[walk-debug] activateFlyMouseLook called, el=", !!el);
-    if (!el) return;
-    flySkipNextFlyMoveRef.current = false;
-    flyPendingLookDxRef.current = 0;
-    flyPendingLookDyRef.current = 0;
-    flyCapturedPointerIdRef.current = null;
-    // Request pointer lock FIRST — must be called synchronously from user gesture
-    // before any awaits, otherwise the browser drops the gesture context.
-    try {
-      await el.requestPointerLock();
-      console.log(
-        "[walk-debug] requestPointerLock succeeded, pointerLockElement=",
-        document.pointerLockElement === el,
-      );
-    } catch (err) {
-      console.warn("[walk-debug] requestPointerLock FAILED:", err);
-    }
-    const r = el.getBoundingClientRect();
-    const cx = r.left + r.width / 2;
-    const cy = r.top + r.height / 2;
-    // Tauri-native fallback: grab + hide cursor if pointer lock didn't engage
-    if (document.pointerLockElement !== el) {
-      const w = getCurrentWindow();
+  const activateFlyMouseLook = useCallback(
+    async (_pointerId: number) => {
+      const el = viewportRef.current;
+      console.log("[walk-debug] activateFlyMouseLook called, el=", !!el);
+      if (!el) return;
+      flySkipNextFlyMoveRef.current = false;
+      flyPendingLookDxRef.current = 0;
+      flyPendingLookDyRef.current = 0;
+      flyCapturedPointerIdRef.current = null;
+      // Request pointer lock FIRST — must be called synchronously from user gesture
+      // before any awaits, otherwise the browser drops the gesture context.
       try {
-        await w.setCursorPosition(new LogicalPosition(cx, cy));
-      } catch {
-        /* */
+        await el.requestPointerLock();
+        console.log(
+          "[walk-debug] requestPointerLock succeeded, pointerLockElement=",
+          document.pointerLockElement === el,
+        );
+      } catch (err) {
+        console.warn("[walk-debug] requestPointerLock FAILED:", err);
       }
-      try {
-        await w.setCursorGrab(true);
-      } catch {
-        /* Linux: unsupported */
+      const r = el.getBoundingClientRect();
+      const cx = r.left + r.width / 2;
+      const cy = r.top + r.height / 2;
+      // Tauri-native fallback: grab + hide cursor if pointer lock didn't engage
+      if (document.pointerLockElement !== el) {
+        const w = getCurrentWindow();
+        try {
+          await w.setCursorPosition(new LogicalPosition(cx, cy));
+        } catch {
+          /* */
+        }
+        try {
+          await w.setCursorGrab(true);
+        } catch {
+          /* Linux: unsupported */
+        }
+        try {
+          await w.setCursorVisible(false);
+        } catch {
+          /* */
+        }
       }
-      try {
-        await w.setCursorVisible(false);
-      } catch {
-        /* */
-      }
-    }
-    flyLastClientRef.current = { x: cx, y: cy };
-    flyMouseLookActiveRef.current = true;
-  }, [viewportRef, flyPendingLookDxRef, flyPendingLookDyRef]);
+      flyLastClientRef.current = { x: cx, y: cy };
+      flyMouseLookActiveRef.current = true;
+    },
+    [viewportRef, flyPendingLookDxRef, flyPendingLookDyRef],
+  );
 
   // ── Fly mode useEffect ──
   useEffect(() => {
@@ -275,8 +278,14 @@ export function useFlyMode({
       void invoke("set_fly_mode", { enabled: false }).catch(() => {});
       void releaseFlyMouseLook();
     };
-  }, [interactionMode, releaseFlyMouseLook, viewportRef, pollGamepad,
-      flyPendingLookDxRef, flyPendingLookDyRef]);
+  }, [
+    interactionMode,
+    releaseFlyMouseLook,
+    viewportRef,
+    pollGamepad,
+    flyPendingLookDxRef,
+    flyPendingLookDyRef,
+  ]);
 
   return {
     flySpeed,

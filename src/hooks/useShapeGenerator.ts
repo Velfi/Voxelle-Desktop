@@ -49,19 +49,33 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
   const shapeOverwriteRef = useRef(shapeOverwrite);
   const shapeGizmoPosRef = useRef<[number, number, number] | null>(null);
 
-  useEffect(() => { shapeKindRef.current = shapeKind; }, [shapeKind]);
-  useEffect(() => { shapeSizeRef.current = shapeSize; }, [shapeSize]);
-  useEffect(() => { shapeRotXRef.current = shapeRotX; }, [shapeRotX]);
-  useEffect(() => { shapeRotYRef.current = shapeRotY; }, [shapeRotY]);
-  useEffect(() => { shapeRotZRef.current = shapeRotZ; }, [shapeRotZ]);
-  useEffect(() => { shapeOverwriteRef.current = shapeOverwrite; }, [shapeOverwrite]);
+  useEffect(() => {
+    shapeKindRef.current = shapeKind;
+  }, [shapeKind]);
+  useEffect(() => {
+    shapeSizeRef.current = shapeSize;
+  }, [shapeSize]);
+  useEffect(() => {
+    shapeRotXRef.current = shapeRotX;
+  }, [shapeRotX]);
+  useEffect(() => {
+    shapeRotYRef.current = shapeRotY;
+  }, [shapeRotY]);
+  useEffect(() => {
+    shapeRotZRef.current = shapeRotZ;
+  }, [shapeRotZ]);
+  useEffect(() => {
+    shapeOverwriteRef.current = shapeOverwrite;
+  }, [shapeOverwrite]);
 
   // Listen for gizmo-moved events from Rust.
   useEffect(() => {
     const unlisten = listen<[number, number, number]>("generator-gizmo-moved", (ev) => {
       shapeGizmoPosRef.current = ev.payload;
     });
-    return () => { void unlisten.then((u) => u()); };
+    return () => {
+      void unlisten.then((u) => u());
+    };
   }, []);
 
   // Listen for gizmo-rotated events from Rust (ring drag during shape phase).
@@ -74,7 +88,9 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
       else if (axis === 1) setShapeRotY((prev) => clamp(prev + degrees));
       else setShapeRotZ((prev) => clamp(prev + degrees));
     });
-    return () => { void unlisten.then((u) => u()); };
+    return () => {
+      void unlisten.then((u) => u());
+    };
   }, []);
 
   const clearGizmo = () => {
@@ -112,12 +128,24 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
   });
 
   return {
-    shapeKind, setShapeKind, shapeKindRef,
-    shapeSize, setShapeSize, shapeSizeRef,
-    shapeRotX, setShapeRotX, shapeRotXRef,
-    shapeRotY, setShapeRotY, shapeRotYRef,
-    shapeRotZ, setShapeRotZ, shapeRotZRef,
-    shapeOverwrite, setShapeOverwrite, shapeOverwriteRef,
+    shapeKind,
+    setShapeKind,
+    shapeKindRef,
+    shapeSize,
+    setShapeSize,
+    shapeSizeRef,
+    shapeRotX,
+    setShapeRotX,
+    shapeRotXRef,
+    shapeRotY,
+    setShapeRotY,
+    shapeRotYRef,
+    shapeRotZ,
+    setShapeRotZ,
+    shapeRotZRef,
+    shapeOverwrite,
+    setShapeOverwrite,
+    shapeOverwriteRef,
     shapePhase,
     shapeGizmoPosRef,
   };

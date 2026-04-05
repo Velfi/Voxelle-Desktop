@@ -217,7 +217,6 @@ pub(crate) fn vertex_layout_collab_lines() -> wgpu::VertexBufferLayout<'static> 
     }
 }
 
-
 pub(crate) fn fullscreen_pipeline(
     device: &wgpu::Device,
     layout: &wgpu::PipelineLayout,

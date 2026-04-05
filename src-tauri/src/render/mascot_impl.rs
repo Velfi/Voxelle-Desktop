@@ -185,7 +185,7 @@ impl WgpuViewer {
         }
 
         let mut interleaved: Vec<f32> = Vec::with_capacity(n * 17);
-        for i in 0..n {
+        for (i, vc) in voxel_centers.iter().enumerate().take(n) {
             interleaved.push(mesh.positions[i * 3]);
             interleaved.push(mesh.positions[i * 3 + 1]);
             interleaved.push(mesh.positions[i * 3 + 2]);
@@ -201,9 +201,9 @@ impl WgpuViewer {
             interleaved.push(mesh.emission_tint.get(ei).copied().unwrap_or(0.0));
             interleaved.push(mesh.emission_tint.get(ei + 1).copied().unwrap_or(0.0));
             interleaved.push(mesh.emission_tint.get(ei + 2).copied().unwrap_or(0.0));
-            interleaved.push(voxel_centers[i][0]);
-            interleaved.push(voxel_centers[i][1]);
-            interleaved.push(voxel_centers[i][2]);
+            interleaved.push(vc[0]);
+            interleaved.push(vc[1]);
+            interleaved.push(vc[2]);
         }
         interleaved
     }

@@ -2,11 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { MutableRefObject } from "react";
 import type { InteractionMode } from "./types";
 import type { RadialSlice, SubOptionChoice } from "./gamepadRadialMenuData";
-import {
-  TOOL_SLICES,
-  getSubOptionSlices,
-  subOptionSliceToChoice,
-} from "./gamepadRadialMenuData";
+import { TOOL_SLICES, getSubOptionSlices, subOptionSliceToChoice } from "./gamepadRadialMenuData";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,11 +77,7 @@ export interface GamepadHandle {
 // ---------------------------------------------------------------------------
 
 /** Apply radial deadzone and re-normalize. Returns [x, y, magnitude]. */
-function applyDeadzone(
-  rawX: number,
-  rawY: number,
-  deadzone: number,
-): [number, number, number] {
+function applyDeadzone(rawX: number, rawY: number, deadzone: number): [number, number, number] {
   const mag = Math.sqrt(rawX * rawX + rawY * rawY);
   if (mag < deadzone) return [0, 0, 0];
   const normMag = Math.min((mag - deadzone) / (1.0 - deadzone), 1.0);
@@ -106,11 +98,7 @@ function triggerValue(gp: Gamepad, idx: number): number {
 }
 
 /** Angle from stick deflection, 0 = up, clockwise. Returns null in deadzone. */
-function stickAngle(
-  x: number,
-  y: number,
-  deadzone: number,
-): number | null {
+function stickAngle(x: number, y: number, deadzone: number): number | null {
   const mag = Math.sqrt(x * x + y * y);
   if (mag < deadzone) return null;
   let a = Math.atan2(x, -y); // 0 = up, positive = clockwise
@@ -118,10 +106,7 @@ function stickAngle(
   return a;
 }
 
-function sliceIndexFromAngle(
-  angle: number | null,
-  sliceCount: number,
-): number | null {
+function sliceIndexFromAngle(angle: number | null, sliceCount: number): number | null {
   if (angle === null || sliceCount === 0) return null;
   const sliceSize = (2 * Math.PI) / sliceCount;
   return Math.floor(angle / sliceSize);
@@ -212,13 +197,9 @@ export function useGamepad(opts: GamepadOpts): GamepadHandle {
 
   const [connected, setConnected] = useState(false);
   const [cursorMode, setCursorMode] = useState(false);
-  const [radialMenu, setRadialMenu] = useState<"tools" | "subOptions" | null>(
-    null,
-  );
+  const [radialMenu, setRadialMenu] = useState<"tools" | "subOptions" | null>(null);
   const [radialSlices, setRadialSlices] = useState<RadialSlice[]>([]);
-  const [selectedSliceIndex, setSelectedSliceIndex] = useState<number | null>(
-    null,
-  );
+  const [selectedSliceIndex, setSelectedSliceIndex] = useState<number | null>(null);
   const [speedMultiplier, setSpeedMultiplier] = useState(1);
 
   const gamepadIndexRef = useRef<number | null>(null);
@@ -239,13 +220,10 @@ export function useGamepad(opts: GamepadOpts): GamepadHandle {
   const selectedSliceIndexRef = useRef<number | null>(null);
 
   // Keep refs in sync with state
-  const setRadialMenuSync = useCallback(
-    (v: "tools" | "subOptions" | null) => {
-      radialMenuRef.current = v;
-      setRadialMenu(v);
-    },
-    [],
-  );
+  const setRadialMenuSync = useCallback((v: "tools" | "subOptions" | null) => {
+    radialMenuRef.current = v;
+    setRadialMenu(v);
+  }, []);
   const setRadialSlicesSync = useCallback((v: RadialSlice[]) => {
     radialSlicesRef.current = v;
     setRadialSlices(v);
@@ -255,30 +233,27 @@ export function useGamepad(opts: GamepadOpts): GamepadHandle {
     setSelectedSliceIndex(v);
   }, []);
 
-  const setCursorModeSync = useCallback((v: boolean) => {
-    cursorModeRef.current = v;
-    setCursorMode(v);
-    if (v) {
-      // Initialize cursor at screen center
-      cursorXRef.current = window.innerWidth / 2;
-      cursorYRef.current = window.innerHeight / 2;
-      const el = cursorElRef.current;
-      if (el) {
-        el.style.transform = `translate(${cursorXRef.current - 12}px, ${cursorYRef.current - 12}px)`;
+  const setCursorModeSync = useCallback(
+    (v: boolean) => {
+      cursorModeRef.current = v;
+      setCursorMode(v);
+      if (v) {
+        // Initialize cursor at screen center
+        cursorXRef.current = window.innerWidth / 2;
+        cursorYRef.current = window.innerHeight / 2;
+        const el = cursorElRef.current;
+        if (el) {
+          el.style.transform = `translate(${cursorXRef.current - 12}px, ${cursorYRef.current - 12}px)`;
+        }
       }
-    }
-    // Clean up any in-progress pointer on exit
-    if (!v && cursorPointerDownRef.current) {
-      dispatchPointerAt(
-        "pointerup",
-        cursorXRef.current,
-        cursorYRef.current,
-        0,
-        0,
-      );
-      cursorPointerDownRef.current = false;
-    }
-  }, [cursorElRef]);
+      // Clean up any in-progress pointer on exit
+      if (!v && cursorPointerDownRef.current) {
+        dispatchPointerAt("pointerup", cursorXRef.current, cursorYRef.current, 0, 0);
+        cursorPointerDownRef.current = false;
+      }
+    },
+    [cursorElRef],
+  );
 
   // -------------------------------------------------------------------------
   // Connection events
@@ -375,8 +350,14 @@ export function useGamepad(opts: GamepadOpts): GamepadHandle {
         const speed = mag * mag * CURSOR_SPEED_MAX; // quadratic
         const nx = lx / mag;
         const ny = ly / mag;
-        cursorXRef.current = Math.max(0, Math.min(window.innerWidth - 1, cursorXRef.current + nx * speed));
-        cursorYRef.current = Math.max(0, Math.min(window.innerHeight - 1, cursorYRef.current + ny * speed));
+        cursorXRef.current = Math.max(
+          0,
+          Math.min(window.innerWidth - 1, cursorXRef.current + nx * speed),
+        );
+        cursorYRef.current = Math.max(
+          0,
+          Math.min(window.innerHeight - 1, cursorYRef.current + ny * speed),
+        );
       }
 
       // Update cursor element position directly (no React state)
@@ -423,8 +404,14 @@ export function useGamepad(opts: GamepadOpts): GamepadHandle {
 
       // Right stick = fine-tune cursor (slower, for precision)
       if (rx !== 0 || ry !== 0) {
-        cursorXRef.current = Math.max(0, Math.min(window.innerWidth - 1, cursorXRef.current + rx * 3));
-        cursorYRef.current = Math.max(0, Math.min(window.innerHeight - 1, cursorYRef.current + ry * 3));
+        cursorXRef.current = Math.max(
+          0,
+          Math.min(window.innerWidth - 1, cursorXRef.current + rx * 3),
+        );
+        cursorYRef.current = Math.max(
+          0,
+          Math.min(window.innerHeight - 1, cursorYRef.current + ry * 3),
+        );
       }
 
       // Y = undo still works in cursor mode
@@ -439,10 +426,7 @@ export function useGamepad(opts: GamepadOpts): GamepadHandle {
     // =======================================================================
 
     // ----- Auto-enter fly mode on first meaningful input -----
-    if (
-      !hasRequestedFlyRef.current &&
-      (lx !== 0 || ly !== 0 || rx !== 0 || ry !== 0)
-    ) {
+    if (!hasRequestedFlyRef.current && (lx !== 0 || ly !== 0 || rx !== 0 || ry !== 0)) {
       hasRequestedFlyRef.current = true;
       onRequestFlyMode();
     }

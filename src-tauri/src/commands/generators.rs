@@ -1,7 +1,7 @@
-use crate::*;
 use crate::edit_pipeline::wake_viewport_loop;
 use crate::preview::default_true;
 use crate::state::viewport_texels_from_norm;
+use crate::*;
 
 // ── Generator arg structs & defaults ─────────────────────────────────────────
 
@@ -1801,13 +1801,11 @@ pub(crate) fn bone_gizmo_pointer_down(
     let cam = state.camera.lock();
     let bs = state.bone_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let Some((handle, joint_id)) =
-        generators::pick_bone_gizmo_handle(&bs, &cam, w, h, sx, sy)
+    let Some((handle, joint_id)) = generators::pick_bone_gizmo_handle(&bs, &cam, w, h, sx, sy)
     else {
         return Ok(false);
     };
-    let Some(drag) =
-        generators::bone_gizmo_begin_drag(&bs, &cam, w, h, sx, sy, handle, joint_id)
+    let Some(drag) = generators::bone_gizmo_begin_drag(&bs, &cam, w, h, sx, sy, handle, joint_id)
     else {
         return Ok(false);
     };
@@ -1891,9 +1889,7 @@ pub(crate) fn bone_ik_drag_start(
     let cam = state.camera.lock();
     let bs = state.bone_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let Some(drag) =
-        generators::ik_drag_begin(&bs, &cam, w, h, sx, sy, args.joint_id)
-    else {
+    let Some(drag) = generators::ik_drag_begin(&bs, &cam, w, h, sx, sy, args.joint_id) else {
         return Ok(false);
     };
     drop(bs);
@@ -1942,13 +1938,15 @@ pub(crate) fn generator_shape_at_screen(
     app: AppHandle,
     args: GeneratorShapeArgs,
 ) -> Result<bool, String> {
-    use crate::voxelle::start_shape::StartShape;
     use crate::voxel_edit::{ensure_grid_fits_coords, VoxelEditDelta};
+    use crate::voxelle::start_shape::StartShape;
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let shape = StartShape::from_str_id(&args.shape);
     // Use the explicit gizmo center from the frontend args (avoids race with
     // clear_generator_gizmo_center). Fall back to the state if not provided.
-    let gen_center = args.gizmo_center.or_else(|| *state.generator_gizmo_center.lock());
+    let gen_center = args
+        .gizmo_center
+        .or_else(|| *state.generator_gizmo_center.lock());
     let deltas = if let Some([gx, gy, gz]) = gen_center {
         let mut fg = state.current_file.lock();
         let mut vm = state.voxel_map.lock();
@@ -1975,7 +1973,9 @@ pub(crate) fn generator_shape_at_screen(
                     continue;
                 }
                 deltas.push(VoxelEditDelta::Added(voxelle::Voxel {
-                    x, y, z,
+                    x,
+                    y,
+                    z,
                     color: args.color,
                     material,
                     object_id: 0,
@@ -2026,10 +2026,7 @@ pub(crate) fn generator_shape_at_screen(
 // ── Generator gizmo override ────────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn set_generator_gizmo_center(
-    state: State<'_, Arc<ViewerState>>,
-    center: [f32; 3],
-) {
+pub(crate) fn set_generator_gizmo_center(state: State<'_, Arc<ViewerState>>, center: [f32; 3]) {
     *state.generator_gizmo_center.lock() = Some(center);
 }
 

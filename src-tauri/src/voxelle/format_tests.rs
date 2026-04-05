@@ -200,14 +200,18 @@ fn full_15_cube_fits_in_avatar_size_limit() {
     use crate::collab::MAX_AVATAR_FILE_BYTES;
 
     let voxels: Vec<Voxel> = (0..15)
-        .flat_map(|x| (0..15).flat_map(move |y| (0..15).map(move |z| Voxel {
-            x,
-            y,
-            z,
-            color: 0xff8800,
-            material: MaterialId::Plastic,
-            object_id: 0,
-        })))
+        .flat_map(|x| {
+            (0..15).flat_map(move |y| {
+                (0..15).map(move |z| Voxel {
+                    x,
+                    y,
+                    z,
+                    color: 0xff8800,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                })
+            })
+        })
         .collect();
     assert_eq!(voxels.len(), 15 * 15 * 15);
 

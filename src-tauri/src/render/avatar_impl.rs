@@ -95,11 +95,13 @@ impl WgpuViewer {
                 bytemuck::bytes_of(&uniforms),
             );
         } else {
-            let uniforms_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("avatar_peer_uniforms"),
-                contents: bytemuck::bytes_of(&uniforms),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            });
+            let uniforms_buf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("avatar_peer_uniforms"),
+                    contents: bytemuck::bytes_of(&uniforms),
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                });
             let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("avatar_peer_bg"),
                 layout: &self.avatar_bind_layout,

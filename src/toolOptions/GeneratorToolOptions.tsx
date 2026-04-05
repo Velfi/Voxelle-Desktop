@@ -3,9 +3,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import type { GeneratorKindId, ClothGravityDirectionId, StartShapeId } from "../types";
-import {
-  FLORA_PRESETS,
-} from "../generatorPresets";
+import { FLORA_PRESETS } from "../generatorPresets";
 import { SCULPT_BRUSH_MAX_INDEX } from "../constants";
 
 // ── Props ────────────────────────────────────────────────────────────
@@ -255,7 +253,10 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
           ) : null}
           <div className="tool-options-range-label tool-options-range-with-value">
             <span>Sink</span>
-            <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2, flex: "1 1 auto" }}>
+            <div
+              className="stroke-mode-buttons"
+              style={{ display: "flex", gap: 2, flex: "1 1 auto" }}
+            >
               {(["over", "none", "under"] as const).map((dir) => (
                 <button
                   key={dir}

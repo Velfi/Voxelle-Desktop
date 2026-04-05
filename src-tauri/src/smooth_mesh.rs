@@ -334,12 +334,12 @@ fn marching_cubes_bucket(
                     continue;
                 }
 
-                for e in 0..12 {
+                for (e, edge_pair) in EDGE_PAIRS.iter().enumerate() {
                     if (edge_mask & (1 << e)) == 0 {
                         continue;
                     }
-                    let a = EDGE_PAIRS[e][0];
-                    let b = EDGE_PAIRS[e][1];
+                    let a = edge_pair[0];
+                    let b = edge_pair[1];
                     let va = corner_v[a];
                     let vb = corner_v[b];
                     let denom = vb - va;
@@ -562,8 +562,8 @@ fn solve3x3(
     for col in 0..3 {
         let mut pivot = col;
         let mut max_abs = m[col][col].abs();
-        for r in (col + 1)..3 {
-            let v = m[r][col].abs();
+        for (r, row) in m.iter().enumerate().skip(col + 1) {
+            let v = row[col].abs();
             if v > max_abs {
                 max_abs = v;
                 pivot = r;
@@ -576,8 +576,8 @@ fn solve3x3(
             m.swap(col, pivot);
         }
         let div = m[col][col];
-        for c in col..4 {
-            m[col][c] /= div;
+        for val in &mut m[col][col..4] {
+            *val /= div;
         }
         for r in 0..3 {
             if r == col {
@@ -587,8 +587,12 @@ fn solve3x3(
             if f.abs() < 1e-15 {
                 continue;
             }
-            for c in col..4 {
-                m[r][c] -= f * m[col][c];
+            // Read pivot row coefficients first: simultaneous `&m[col]` + `&mut m[r]` borrows
+            // trip the borrow checker if done in one loop.
+            let tail = col..4;
+            let src: Vec<f64> = tail.clone().map(|tc| m[col][tc]).collect();
+            for (i, tc) in tail.enumerate() {
+                m[r][tc] -= f * src[i];
             }
         }
     }
@@ -715,9 +719,9 @@ fn dual_contour_bucket(
                 let mut col_sg = 0.0f64;
                 let mut col_sb = 0.0f64;
 
-                for e in 0..12 {
-                    let a = EDGE_PAIRS[e][0];
-                    let b = EDGE_PAIRS[e][1];
+                for edge_pair in &EDGE_PAIRS {
+                    let a = edge_pair[0];
+                    let b = edge_pair[1];
                     let va = corner_v[a];
                     let vb = corner_v[b];
                     let inside_a = va >= ISO;

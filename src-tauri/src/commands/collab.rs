@@ -63,7 +63,10 @@ pub(crate) fn collab_cancel_join(state: State<'_, Arc<ViewerState>>) {
 }
 
 #[tauri::command]
-pub(crate) fn collab_leave(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn collab_leave(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     let (was_host, was_client, upnp_port) = {
         let mut c = state.collab.lock();
         let wh = c.is_host();
@@ -101,7 +104,10 @@ pub(crate) fn collab_local_peer_id(state: State<'_, Arc<ViewerState>>) -> u32 {
 }
 
 #[tauri::command]
-pub(crate) fn collab_kick_peer(state: State<'_, Arc<ViewerState>>, target_peer: u32) -> Result<(), String> {
+pub(crate) fn collab_kick_peer(
+    state: State<'_, Arc<ViewerState>>,
+    target_peer: u32,
+) -> Result<(), String> {
     collab::host_kick_peer(&state.collab, target_peer)
 }
 
@@ -175,7 +181,10 @@ pub(crate) fn collab_set_can_edit(
 // ── Camera sharing ──────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn collab_push_camera(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn collab_push_camera(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     let vs = Arc::clone(&*state);
     let mut c = vs.collab.lock();
     if !c.is_active() {
@@ -215,7 +224,10 @@ pub(crate) fn collab_push_camera(state: State<'_, Arc<ViewerState>>, app: AppHan
 }
 
 #[tauri::command]
-pub(crate) fn collab_snap_camera(state: State<'_, Arc<ViewerState>>, peer_id: u32) -> Result<(), String> {
+pub(crate) fn collab_snap_camera(
+    state: State<'_, Arc<ViewerState>>,
+    peer_id: u32,
+) -> Result<(), String> {
     let pr = {
         let c = state.collab.lock();
         c.presence.get(&peer_id).copied()

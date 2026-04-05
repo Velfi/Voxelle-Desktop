@@ -6,7 +6,10 @@ import { useFlyMode } from "./hooks/useFlyMode";
 import { useViewportPointer } from "./hooks/useViewportPointer";
 import { useWalkMode } from "./hooks/useWalkMode";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
-import { useTauriEventListeners, type SelectionCombineModeApi } from "./hooks/useTauriEventListeners";
+import {
+  useTauriEventListeners,
+  type SelectionCombineModeApi,
+} from "./hooks/useTauriEventListeners";
 import {
   useRocksGenerator,
   useGrassGenerator,
@@ -67,7 +70,6 @@ import packageJson from "../package.json";
 import type {
   DepthPhaseData,
   MoodState,
-
   PaintColorDistrib,
   ViewportCursorDebugPayload,
   ViewportCursorDebugScreen,
@@ -362,11 +364,19 @@ function App() {
   const bone = useBoneGenerator({ activeColorRef, activeMaterialRef });
   const {
     bonePhase,
-    boneMode, setBoneMode, boneModeRef,
-    boneJointCount, setBoneJointCount,
-    boneBoneCount, setBoneBoneCount,
-    boneDefaultRadius, setBoneDefaultRadius, boneDefaultRadiusRef,
-    ikEnabled, setIkEnabled, ikEnabledRef,
+    boneMode,
+    setBoneMode,
+    boneModeRef,
+    boneJointCount,
+    setBoneJointCount,
+    boneBoneCount,
+    setBoneBoneCount,
+    boneDefaultRadius,
+    setBoneDefaultRadius,
+    boneDefaultRadiusRef,
+    ikEnabled,
+    setIkEnabled,
+    ikEnabledRef,
   } = bone;
   const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
@@ -1222,41 +1232,75 @@ function App() {
   const _genCtx = { activeColorRef, activeMaterialRef, generatorSphereRadiusRef };
   const rocks = useRocksGenerator(_genCtx);
   const {
-    rockRoughness, setRockRoughness, rockRoughnessRef,
-    rockCount, setRockCount, rockCountRef,
-    rockClusterRadius, setRockClusterRadius, rockClusterRadiusRef,
-    rockSinkDirection, setRockSinkDirection, rockSinkDirectionRef,
-    rockSinkAmount, setRockSinkAmount, rockSinkAmountRef,
-    rockPreviewSeedRef, rocksPhase,
+    rockRoughness,
+    setRockRoughness,
+    rockRoughnessRef,
+    rockCount,
+    setRockCount,
+    rockCountRef,
+    rockClusterRadius,
+    setRockClusterRadius,
+    rockClusterRadiusRef,
+    rockSinkDirection,
+    setRockSinkDirection,
+    rockSinkDirectionRef,
+    rockSinkAmount,
+    setRockSinkAmount,
+    rockSinkAmountRef,
+    rockPreviewSeedRef,
+    rocksPhase,
   } = rocks;
   const grass = useGrassGenerator(_genCtx);
   const {
-    grassDensity, setGrassDensity, grassDensityRef,
-    grassMaxHeight, setGrassMaxHeight, grassMaxHeightRef,
-    grassPreviewSeedRef, grassPhase,
+    grassDensity,
+    setGrassDensity,
+    grassDensityRef,
+    grassMaxHeight,
+    setGrassMaxHeight,
+    grassMaxHeightRef,
+    grassPreviewSeedRef,
+    grassPhase,
   } = grass;
   const ashlar = useAshlarGenerator({ ..._genCtx, rockRoughnessRef });
   const {
-    ashlarThickness, setAshlarThickness, ashlarThicknessRef,
-    ashlarPreviewSeedRef, ashlarPhase,
+    ashlarThickness,
+    setAshlarThickness,
+    ashlarThicknessRef,
+    ashlarPreviewSeedRef,
+    ashlarPhase,
   } = ashlar;
   const flora = useFloraGenerator({ activeColorRef, activeMaterialRef });
   const {
-    floraPreset, setFloraPreset,
-    floraHeight, setFloraHeight,
-    floraGirth, setFloraGirth,
-    floraWobble, setFloraWobble,
-    floraTaper, setFloraTaper,
-    floraStemCount, setFloraStemCount,
-    floraClusterRadius, setFloraClusterRadius,
-    floraBranchCount, setFloraBranchCount,
-    floraBranchDepth, setFloraBranchDepth,
-    floraBranchStart, setFloraBranchStart,
-    floraBranchSpread, setFloraBranchSpread,
-    floraBraidStrands, setFloraBraidStrands,
-    floraBraidTwist, setFloraBraidTwist,
-    floraCanopy, setFloraCanopy,
-    floraPreviewSeedRef, floraPhase,
+    floraPreset,
+    setFloraPreset,
+    floraHeight,
+    setFloraHeight,
+    floraGirth,
+    setFloraGirth,
+    floraWobble,
+    setFloraWobble,
+    floraTaper,
+    setFloraTaper,
+    floraStemCount,
+    setFloraStemCount,
+    floraClusterRadius,
+    setFloraClusterRadius,
+    floraBranchCount,
+    setFloraBranchCount,
+    floraBranchDepth,
+    setFloraBranchDepth,
+    floraBranchStart,
+    setFloraBranchStart,
+    floraBranchSpread,
+    setFloraBranchSpread,
+    floraBraidStrands,
+    setFloraBraidStrands,
+    floraBraidTwist,
+    setFloraBraidTwist,
+    floraCanopy,
+    setFloraCanopy,
+    floraPreviewSeedRef,
+    floraPhase,
   } = flora;
   const ropeCloth = useRopeClothGenerator({
     activeColorRef,
@@ -1264,40 +1308,86 @@ function App() {
     selectionStrokeSnapToSurfaceRef,
   });
   const {
-    clothGravityDirection, setClothGravityDirection, clothGravityDirectionRef,
-    ropeBrushRadiusIndex, setRopeBrushRadiusIndex, ropeBrushRadiusIndexRef,
-    ropeBrushShapeUi, setRopeBrushShapeUi, ropeBrushShapeUiRef,
-    ropeFirstScreen, setRopeFirstScreen, _ropeFirstScreenRef,
-    _ropeFirstVoxel, setRopeFirstVoxel, ropeFirstVoxelRef,
+    clothGravityDirection,
+    setClothGravityDirection,
+    clothGravityDirectionRef,
+    ropeBrushRadiusIndex,
+    setRopeBrushRadiusIndex,
+    ropeBrushRadiusIndexRef,
+    ropeBrushShapeUi,
+    setRopeBrushShapeUi,
+    ropeBrushShapeUiRef,
+    ropeFirstScreen,
+    setRopeFirstScreen,
+    setRopeFirstVoxel,
+    ropeFirstVoxelRef,
     ropeSag,
-    ropeTension, setRopeTension, ropeTensionRef,
+    ropeTension,
+    setRopeTension,
+    ropeTensionRef,
     ropePhase,
-    clothPins, setClothPins, clothPinsRef,
-    clothTension, setClothTension, clothTensionRef,
-    clothSimGravityPct, setClothSimGravityPct, clothSimGravityPctRef,
-    clothSimStiffnessPct, setClothSimStiffnessPct, clothSimStiffnessPctRef,
-    clothSimIterations, setClothSimIterations, clothSimIterationsRef,
-    clothSimConstraintPasses, setClothSimConstraintPasses, clothSimConstraintPassesRef,
+    clothPins,
+    setClothPins,
+    clothPinsRef,
+    clothTension,
+    setClothTension,
+    clothTensionRef,
+    clothSimGravityPct,
+    setClothSimGravityPct,
+    clothSimGravityPctRef,
+    clothSimStiffnessPct,
+    setClothSimStiffnessPct,
+    clothSimStiffnessPctRef,
+    clothSimIterations,
+    setClothSimIterations,
+    clothSimIterationsRef,
+    clothSimConstraintPasses,
+    setClothSimConstraintPasses,
+    clothSimConstraintPassesRef,
     clothPhase,
     handleClothPinClick,
   } = ropeCloth;
   const roof = useRoofGenerator();
   const {
-    roofStyle, setRoofStyle, roofStyleRef,
-    roofHeight, setRoofHeight, roofHeightRef,
-    roofHollow, setRoofHollow, roofHollowRef,
-    roofPins, setRoofPins, roofPinsRef,
-    roofAreaShape, setRoofAreaShape, roofAreaShapeRef,
-    roofFirstClick, setRoofFirstClick, roofFirstClickRef,
+    roofStyle,
+    setRoofStyle,
+    roofStyleRef,
+    roofHeight,
+    setRoofHeight,
+    roofHeightRef,
+    roofHollow,
+    setRoofHollow,
+    roofHollowRef,
+    roofPins,
+    setRoofPins,
+    roofPinsRef,
+    roofAreaShape,
+    setRoofAreaShape,
+    roofAreaShapeRef,
+    roofFirstClick,
+    setRoofFirstClick,
+    roofFirstClickRef,
   } = roof;
   const shape = useShapeGenerator({ activeColorRef, activeMaterialRef });
   const {
-    shapeKind, setShapeKind, shapeKindRef,
-    shapeSize, setShapeSize, shapeSizeRef,
-    shapeRotX, setShapeRotX, shapeRotXRef,
-    shapeRotY, setShapeRotY, shapeRotYRef,
-    shapeRotZ, setShapeRotZ, shapeRotZRef,
-    shapeOverwrite, setShapeOverwrite, shapeOverwriteRef,
+    shapeKind,
+    setShapeKind,
+    shapeKindRef,
+    shapeSize,
+    setShapeSize,
+    shapeSizeRef,
+    shapeRotX,
+    setShapeRotX,
+    shapeRotXRef,
+    shapeRotY,
+    setShapeRotY,
+    shapeRotYRef,
+    shapeRotZ,
+    setShapeRotZ,
+    shapeRotZRef,
+    shapeOverwrite,
+    setShapeOverwrite,
+    shapeOverwriteRef,
     shapePhase,
     shapeGizmoPosRef,
   } = shape;
@@ -2458,20 +2548,17 @@ function App() {
       void runStrokeAtScreen(0.5, 0.5, {});
     }, []),
     onEyedropper: useCallback(() => {
-      void invoke<{ color: number; material: string } | null>(
-        "voxel_pick_color_at_screen",
-        {
-          args: {
-            nx: 0.5,
-            ny: 0.5,
-            tool: "add",
-            color: activeColorRef.current,
-            material: activeMaterialRef.current,
-            brushRadius: 0,
-            brushShape: brushShapeRef.current,
-          },
+      void invoke<{ color: number; material: string } | null>("voxel_pick_color_at_screen", {
+        args: {
+          nx: 0.5,
+          ny: 0.5,
+          tool: "add",
+          color: activeColorRef.current,
+          material: activeMaterialRef.current,
+          brushRadius: 0,
+          brushShape: brushShapeRef.current,
         },
-      )
+      })
         .then((r) => {
           if (r) {
             setActiveColor(r.color);
@@ -2483,14 +2570,11 @@ function App() {
     onUndo: useCallback(() => {
       void invoke("voxel_undo").catch(() => {});
     }, []),
-    onToolSelect: useCallback(
-      (sliceId: string) => {
-        const { interactionMode: im, toolsPane: tp } = toolSliceToMode(sliceId);
-        setInteractionMode(im);
-        setToolsPane(tp);
-      },
-      [],
-    ),
+    onToolSelect: useCallback((sliceId: string) => {
+      const { interactionMode: im, toolsPane: tp } = toolSliceToMode(sliceId);
+      setInteractionMode(im);
+      setToolsPane(tp);
+    }, []),
     onSubOptionSelect: useCallback((choice: SubOptionChoice) => {
       if (choice.kind === "selectionMethod") {
         const s = selectionMethodToState(choice.method);
@@ -2711,8 +2795,13 @@ function App() {
     releaseFlyMouseLook,
   };
   const {
-    onPointerDown, onPointerMove, onPointerUp, onPointerLeave,
-    onGotPointerCapture, onLostPointerCapture, onWheel,
+    onPointerDown,
+    onPointerMove,
+    onPointerUp,
+    onPointerLeave,
+    onGotPointerCapture,
+    onLostPointerCapture,
+    onWheel,
     commitWallSculptPolygonStroke,
   } = useViewportPointer(_vpLocalsRef);
 
@@ -3459,7 +3548,11 @@ function App() {
               </div>
             ) : null}
             {showViewportTopCenterStack ? (
-              <div className="viewport-top-center-hud" onPointerDown={(e) => e.stopPropagation()} onPointerMove={(e) => e.stopPropagation()}>
+              <div
+                className="viewport-top-center-hud"
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerMove={(e) => e.stopPropagation()}
+              >
                 {viewportTopCenterHud ? (
                   <div className="viewport-work-phase-chip" role="status" aria-live="polite">
                     <span className="viewport-work-phase-text">{viewportTopCenterHud.label}</span>
@@ -4006,7 +4099,11 @@ function App() {
                   </div>
                 ) : null}
                 {bonePhase.active ? (
-                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Bone session">
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Bone session"
+                  >
                     <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Bone</span>
                     <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
                       {bonePhase.snapshot?.phase === "build"
@@ -4016,11 +4113,25 @@ function App() {
                     {bonePhase.snapshot?.phase === "build" ? (
                       <>
                         <button onClick={() => bonePhase.cancel()}>Cancel</button>
-                        <button onClick={() => { setBoneMode("edit"); bonePhase.advance(); }}>Next</button>
+                        <button
+                          onClick={() => {
+                            setBoneMode("edit");
+                            bonePhase.advance();
+                          }}
+                        >
+                          Next
+                        </button>
                       </>
                     ) : (
                       <>
-                        <button onClick={() => { setBoneMode("add"); bonePhase.retreat(); }}>Back</button>
+                        <button
+                          onClick={() => {
+                            setBoneMode("add");
+                            bonePhase.retreat();
+                          }}
+                        >
+                          Back
+                        </button>
                         <button onClick={() => bonePhase.commit()}>Done</button>
                       </>
                     )}
@@ -6871,7 +6982,13 @@ function App() {
         visible={gamepad.radialMenu != null}
         slices={gamepad.radialSlices}
         selectedIndex={gamepad.selectedSliceIndex}
-        title={gamepad.radialMenu === "tools" ? "Tool" : gamepad.radialMenu === "subOptions" ? "Options" : undefined}
+        title={
+          gamepad.radialMenu === "tools"
+            ? "Tool"
+            : gamepad.radialMenu === "subOptions"
+              ? "Options"
+              : undefined
+        }
       />
 
       {/* ── Gamepad speed HUD ─────────────────────────────────────────── */}

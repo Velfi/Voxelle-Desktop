@@ -41,7 +41,9 @@ pub(crate) fn get_viewport_pixel_size(
 }
 
 #[tauri::command]
-pub(crate) fn get_surface_pixel_size(state: State<'_, Arc<ViewerState>>) -> Result<SurfacePixelSize, String> {
+pub(crate) fn get_surface_pixel_size(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<SurfacePixelSize, String> {
     let v = state.viewer.lock();
     let Some(viewer) = v.as_ref() else {
         return Err("viewer not ready".into());
@@ -135,7 +137,8 @@ pub(crate) fn viewport_pointer(
     // Check if logo overlay is active (use viewer lock, not camera lock).
     let logo_active = {
         let v = state.viewer.lock();
-        v.as_ref().is_some_and(|viewer| viewer.logo_overlay_visible())
+        v.as_ref()
+            .is_some_and(|viewer| viewer.logo_overlay_visible())
     };
 
     if logo_active {
@@ -145,7 +148,9 @@ pub(crate) fn viewport_pointer(
             if let Some(logo) = viewer.logo_overlay.as_mut() {
                 match ev.kind.as_str() {
                     "down" | "move" => {
-                        state.camera_dragging.store(ev.buttons != 0, Ordering::Relaxed);
+                        state
+                            .camera_dragging
+                            .store(ev.buttons != 0, Ordering::Relaxed);
                         logo.update_mouse_ndc(x, y, vw, vh);
                         if ev.buttons & 1 != 0 && !ev.shift_key {
                             logo.rotate_drag(ev.dx, ev.dy, vh);
@@ -170,7 +175,9 @@ pub(crate) fn viewport_pointer(
         let mut cam = state.camera.lock();
         match ev.kind.as_str() {
             "down" | "move" => {
-                state.camera_dragging.store(ev.buttons != 0, Ordering::Relaxed);
+                state
+                    .camera_dragging
+                    .store(ev.buttons != 0, Ordering::Relaxed);
                 // bitmask: 1=left orbit (or shift+left pan), 2=right pan, 4=middle dolly (Three.js OrbitControls defaults)
                 if ev.buttons & 1 != 0 {
                     if ev.shift_key {
@@ -216,7 +223,9 @@ pub(crate) fn viewport_wheel(
     // Ignore scroll when logo overlay is active.
     {
         let v = state.viewer.lock();
-        if v.as_ref().is_some_and(|viewer| viewer.logo_overlay_visible()) {
+        if v.as_ref()
+            .is_some_and(|viewer| viewer.logo_overlay_visible())
+        {
             return Ok(());
         }
     }
@@ -301,7 +310,10 @@ pub(crate) fn get_camera_zoom_percent(state: State<'_, Arc<ViewerState>>) -> Res
 }
 
 #[tauri::command]
-pub(crate) fn camera_fit_to_scene(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+pub(crate) fn camera_fit_to_scene(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<(), String> {
     if *state.fly_mode.lock() || *state.walk_mode.lock() {
         return Ok(());
     }
@@ -321,7 +333,10 @@ pub(crate) fn camera_fit_to_scene(app: AppHandle, state: State<'_, Arc<ViewerSta
 }
 
 #[tauri::command]
-pub(crate) fn camera_reset_view(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+pub(crate) fn camera_reset_view(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<(), String> {
     if *state.fly_mode.lock() || *state.walk_mode.lock() {
         return Ok(());
     }
@@ -360,7 +375,10 @@ pub(crate) fn camera_orbit_gizmo_drag(
 // ── View settings commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn set_start_screen_light(state: State<'_, Arc<ViewerState>>, light: bool) -> Result<(), String> {
+pub(crate) fn set_start_screen_light(
+    state: State<'_, Arc<ViewerState>>,
+    light: bool,
+) -> Result<(), String> {
     state.start_screen_light.store(light, Ordering::Relaxed);
     Ok(())
 }
@@ -405,7 +423,10 @@ pub(crate) fn apply_rendering_mode(
     *state.rendering_mode.lock() = mode;
     // On the start screen, bump the overlay generation so in-flight smooth-mesh
     // builds are cancelled, then tell the frontend to reload logo + mascots.
-    if !state.active_project.load(std::sync::atomic::Ordering::Relaxed) {
+    if !state
+        .active_project
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         state
             .overlay_mesh_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -421,7 +442,10 @@ pub(crate) fn apply_rendering_mode(
     refresh_opaque_mesh(state, Some(app))
 }
 
-pub(crate) fn apply_orthographic(state: &Arc<ViewerState>, orthographic: bool) -> Result<(), String> {
+pub(crate) fn apply_orthographic(
+    state: &Arc<ViewerState>,
+    orthographic: bool,
+) -> Result<(), String> {
     {
         let mut cam = state.camera.lock();
         cam.perspective = !orthographic;
@@ -443,7 +467,9 @@ pub(crate) fn apply_orthographic(state: &Arc<ViewerState>, orthographic: bool) -
 }
 
 #[tauri::command]
-pub(crate) fn get_rendering_mode(state: State<'_, Arc<ViewerState>>) -> Result<RenderingMode, String> {
+pub(crate) fn get_rendering_mode(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<RenderingMode, String> {
     Ok(*state.rendering_mode.lock())
 }
 
@@ -471,9 +497,7 @@ pub(crate) fn set_rendering_mode(
 }
 
 #[tauri::command]
-pub(crate) fn get_raytrace_mode(
-    state: State<'_, Arc<ViewerState>>,
-) -> Result<bool, String> {
+pub(crate) fn get_raytrace_mode(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
     let v = state.viewer.lock();
     Ok(v.as_ref().is_some_and(|viewer| viewer.raytrace_enabled))
 }
@@ -600,7 +624,10 @@ pub(crate) fn debug_menu_sync_viewport_cursor_overlay(
 }
 
 #[tauri::command]
-pub(crate) fn set_soft_shadows(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_soft_shadows(
+    state: State<'_, Arc<ViewerState>>,
+    enabled: bool,
+) -> Result<(), String> {
     if let Some(viewer) = state.viewer.lock().as_mut() {
         viewer.soft_shadows = enabled;
     }
@@ -608,7 +635,10 @@ pub(crate) fn set_soft_shadows(state: State<'_, Arc<ViewerState>>, enabled: bool
 }
 
 #[tauri::command]
-pub(crate) fn set_gizmo_on_top(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_gizmo_on_top(
+    state: State<'_, Arc<ViewerState>>,
+    enabled: bool,
+) -> Result<(), String> {
     if let Some(viewer) = state.viewer.lock().as_mut() {
         viewer.set_gizmo_on_top(enabled);
     }
@@ -616,7 +646,10 @@ pub(crate) fn set_gizmo_on_top(state: State<'_, Arc<ViewerState>>, enabled: bool
 }
 
 #[tauri::command]
-pub(crate) fn set_soft_sunshafts(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_soft_sunshafts(
+    state: State<'_, Arc<ViewerState>>,
+    enabled: bool,
+) -> Result<(), String> {
     if let Some(viewer) = state.viewer.lock().as_mut() {
         viewer.set_soft_sunshafts(enabled);
     }
@@ -624,7 +657,10 @@ pub(crate) fn set_soft_sunshafts(state: State<'_, Arc<ViewerState>>, enabled: bo
 }
 
 #[tauri::command]
-pub(crate) fn set_emission_lighting(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_emission_lighting(
+    state: State<'_, Arc<ViewerState>>,
+    enabled: bool,
+) -> Result<(), String> {
     greedy_mesh::EMISSION_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
     // Invalidate the mesh cache so the next frame triggers a full remesh with the new setting.
     if let Some(viewer) = state.viewer.lock().as_mut() {
@@ -637,7 +673,10 @@ pub(crate) fn set_emission_lighting(state: State<'_, Arc<ViewerState>>, enabled:
 }
 
 #[tauri::command]
-pub(crate) fn set_tone_mapping(state: State<'_, Arc<ViewerState>>, mode: u32) -> Result<(), String> {
+pub(crate) fn set_tone_mapping(
+    state: State<'_, Arc<ViewerState>>,
+    mode: u32,
+) -> Result<(), String> {
     let mut v = state.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
@@ -656,7 +695,10 @@ pub(crate) fn is_hdr_available(state: State<'_, Arc<ViewerState>>) -> Result<boo
 }
 
 #[tauri::command]
-pub(crate) fn set_hdr_output(state: State<'_, Arc<ViewerState>>, enabled: bool) -> Result<(), String> {
+pub(crate) fn set_hdr_output(
+    state: State<'_, Arc<ViewerState>>,
+    enabled: bool,
+) -> Result<(), String> {
     let mut v = state.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
@@ -710,7 +752,10 @@ fn mood_params_to_settings(p: &MoodParams) -> voxelle::MoodSettings {
 }
 
 #[tauri::command]
-pub(crate) fn set_mood_params(state: State<'_, Arc<ViewerState>>, args: MoodParams) -> Result<(), String> {
+pub(crate) fn set_mood_params(
+    state: State<'_, Arc<ViewerState>>,
+    args: MoodParams,
+) -> Result<(), String> {
     let mut v = state.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
@@ -758,7 +803,10 @@ pub(crate) fn get_scene_lighting(
 }
 
 #[tauri::command]
-pub(crate) fn set_focal_length_mm(state: State<'_, Arc<ViewerState>>, mm: f32) -> Result<(), String> {
+pub(crate) fn set_focal_length_mm(
+    state: State<'_, Arc<ViewerState>>,
+    mm: f32,
+) -> Result<(), String> {
     let mm = mm.clamp(15.0, 200.0);
     let mut cam = state.camera.lock();
     if !cam.perspective {
@@ -1355,7 +1403,9 @@ pub(crate) struct PeerLabel {
 }
 
 #[tauri::command]
-pub(crate) fn collab_peer_labels(state: State<'_, Arc<ViewerState>>) -> Result<Vec<PeerLabel>, String> {
+pub(crate) fn collab_peer_labels(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<Vec<PeerLabel>, String> {
     let (w, h) = {
         let v = state.viewer.lock();
         let Some(viewer) = v.as_ref() else {

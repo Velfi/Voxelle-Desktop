@@ -42,11 +42,21 @@ export function useRocksGenerator(ctx: RocksGeneratorContext): RocksGeneratorSta
   const rockSinkAmountRef = useRef(rockSinkAmount);
   const rockPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
-  useEffect(() => { rockRoughnessRef.current = rockRoughness; }, [rockRoughness]);
-  useEffect(() => { rockCountRef.current = rockCount; }, [rockCount]);
-  useEffect(() => { rockClusterRadiusRef.current = rockClusterRadius; }, [rockClusterRadius]);
-  useEffect(() => { rockSinkDirectionRef.current = rockSinkDirection; }, [rockSinkDirection]);
-  useEffect(() => { rockSinkAmountRef.current = rockSinkAmount; }, [rockSinkAmount]);
+  useEffect(() => {
+    rockRoughnessRef.current = rockRoughness;
+  }, [rockRoughness]);
+  useEffect(() => {
+    rockCountRef.current = rockCount;
+  }, [rockCount]);
+  useEffect(() => {
+    rockClusterRadiusRef.current = rockClusterRadius;
+  }, [rockClusterRadius]);
+  useEffect(() => {
+    rockSinkDirectionRef.current = rockSinkDirection;
+  }, [rockSinkDirection]);
+  useEffect(() => {
+    rockSinkAmountRef.current = rockSinkAmount;
+  }, [rockSinkAmount]);
 
   const rocksPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
@@ -82,11 +92,21 @@ export function useRocksGenerator(ctx: RocksGeneratorContext): RocksGeneratorSta
   });
 
   return {
-    rockRoughness, setRockRoughness, rockRoughnessRef,
-    rockCount, setRockCount, rockCountRef,
-    rockClusterRadius, setRockClusterRadius, rockClusterRadiusRef,
-    rockSinkDirection, setRockSinkDirection, rockSinkDirectionRef,
-    rockSinkAmount, setRockSinkAmount, rockSinkAmountRef,
+    rockRoughness,
+    setRockRoughness,
+    rockRoughnessRef,
+    rockCount,
+    setRockCount,
+    rockCountRef,
+    rockClusterRadius,
+    setRockClusterRadius,
+    rockClusterRadiusRef,
+    rockSinkDirection,
+    setRockSinkDirection,
+    rockSinkDirectionRef,
+    rockSinkAmount,
+    setRockSinkAmount,
+    rockSinkAmountRef,
     rockPreviewSeedRef,
     rocksPhase,
   };

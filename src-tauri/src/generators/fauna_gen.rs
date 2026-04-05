@@ -93,7 +93,7 @@ fn build_spine_chain(
     side_axis: [f32; 3],
     up_axis: [f32; 3],
 ) -> (Vec<SpineBone>, Vec<SpineBone>, Vec<SpineBone>) {
-    let segs = spine_segments.max(2).min(20);
+    let segs = spine_segments.clamp(2, 20);
     let half_len = body_length as f32 * 0.5;
 
     // Body spine: from rear (-half_len) to front (+half_len)
@@ -284,9 +284,10 @@ fn fill_sphere(
                         cz + dz,
                         color,
                         material,
-                    ) {
-                        return;
-                    }
+                    )
+                {
+                    return;
+                }
             }
         }
     }

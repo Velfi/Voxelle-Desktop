@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tauri::{AppHandle, Emitter, Runtime};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc};
 use tokio::sync::watch;
+use tokio::sync::{broadcast, mpsc};
 use tokio_tungstenite::{accept_async, connect_async, tungstenite::Message, WebSocketStream};
 use tokio_util::sync::CancellationToken;
 
@@ -47,7 +47,11 @@ fn decode_client_edit_binary(data: &[u8]) -> Option<Vec<voxel_edit::VoxelEditDel
     bincode::deserialize(&data[1..]).ok()
 }
 
-fn encode_host_edit_binary(seq: u64, peer_id: u32, deltas: &[voxel_edit::VoxelEditDelta]) -> Vec<u8> {
+fn encode_host_edit_binary(
+    seq: u64,
+    peer_id: u32,
+    deltas: &[voxel_edit::VoxelEditDelta],
+) -> Vec<u8> {
     let payload = bincode::serialize(&(seq, peer_id, deltas)).expect("bincode serialize");
     let mut buf = Vec::with_capacity(1 + payload.len());
     buf.push(BIN_TAG_HOST_EDIT);
@@ -289,14 +293,21 @@ pub enum ClientToHost {
     /// Periodic liveness; host also treats any other inbound message as activity.
     Heartbeat,
     /// Round-trip latency probe; host echoes `sent_ms` back in a [`HostToClient::LatencyAck`].
-    LatencyProbe { sent_ms: u64 },
+    LatencyProbe {
+        sent_ms: u64,
+    },
     /// Guest is leaving the session (best-effort before the socket closes).
     Leave,
     /// Guest is changing their avatar model.
-    AvatarChoice { avatar_name: String },
+    AvatarChoice {
+        avatar_name: String,
+    },
     /// Guest is uploading the raw bytes of a custom avatar file so the host can
     /// redistribute them to all other peers.  Only sent for non-embedded avatars.
-    AvatarData { name: String, bytes: Vec<u8> },
+    AvatarData {
+        name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -369,12 +380,21 @@ pub enum HostToClient {
     /// Broadcast periodically while hosting so guests reset their read timeout during idle sessions.
     Keepalive,
     /// Echo of a guest's [`ClientToHost::LatencyProbe`]; guest computes RTT as `now_ms - sent_ms`.
-    LatencyAck { sent_ms: u64 },
+    LatencyAck {
+        sent_ms: u64,
+    },
     /// A peer changed their avatar model; broadcast to all other peers.
-    AvatarChoice { peer_id: u32, avatar_name: String },
+    AvatarChoice {
+        peer_id: u32,
+        avatar_name: String,
+    },
     /// Raw bytes of a peer's custom avatar file; broadcast to all other peers so
     /// they can decode and render it without having the file locally.
-    AvatarData { peer_id: u32, name: String, bytes: Vec<u8> },
+    AvatarData {
+        peer_id: u32,
+        name: String,
+        bytes: Vec<u8>,
+    },
 }
 
 pub struct CollabRuntime {
@@ -766,11 +786,7 @@ fn replace_file_on_main<R: Runtime>(
     let main_result = rx.recv().map_err(|_| "main thread closed".to_string())?;
     match main_result {
         Ok(()) => {
-            crate::emit_voxelle_loaded(
-                &app,
-                "collab snapshot".to_string(),
-                state_emit.as_ref(),
-            );
+            crate::emit_voxelle_loaded(&app, "collab snapshot".to_string(), state_emit.as_ref());
             Ok(())
         }
         Err(e) => {
@@ -780,7 +796,12 @@ fn replace_file_on_main<R: Runtime>(
     }
 }
 
-fn broadcast_edit_binary(collab: &Mutex<CollabRuntime>, seq: u64, peer_id: u32, deltas: &[voxel_edit::VoxelEditDelta]) {
+fn broadcast_edit_binary(
+    collab: &Mutex<CollabRuntime>,
+    seq: u64,
+    peer_id: u32,
+    deltas: &[voxel_edit::VoxelEditDelta],
+) {
     let bin = encode_host_edit_binary(seq, peer_id, deltas);
     let g = collab.lock();
     if let Some(tx) = &g.host_broadcast {
@@ -1264,8 +1285,9 @@ async fn handle_host_connection<R: Runtime>(
     // Tracks when this guest first started lagging. Cleared when they catch up.
     let mut lag_since: Option<Instant> = None;
     // Rate-limits camera-presence forwards for this guest: at most one per CAMERA_BROADCAST_MIN_INTERVAL.
-    let mut last_camera_forward =
-        Instant::now().checked_sub(CAMERA_BROADCAST_MIN_INTERVAL).unwrap_or_else(Instant::now);
+    let mut last_camera_forward = Instant::now()
+        .checked_sub(CAMERA_BROADCAST_MIN_INTERVAL)
+        .unwrap_or_else(Instant::now);
     loop {
         tokio::select! {
             biased;
@@ -2039,7 +2061,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 .lock()
                                 .push_back(CollabInboxItem::Edit { peer_id, deltas });
                         }
-                    } else if let Some((expected, ref mut received, ref mut buf)) = pending_snapshot {
+                    } else if let Some((expected, ref mut received, ref mut buf)) = pending_snapshot
+                    {
                         // Snapshot chunks: accumulate them.
                         buf.extend_from_slice(&data);
                         *received += 1;
@@ -2059,7 +2082,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 let now_ms = SystemTime::now()
                                     .duration_since(SystemTime::UNIX_EPOCH)
                                     .unwrap_or_default()
-                                    .as_millis() as u64;
+                                    .as_millis()
+                                    as u64;
                                 let rtt_ms = now_ms.saturating_sub(sent_ms);
                                 let _ = app4.emit("collab-latency-ms", rtt_ms as u32);
                             }
@@ -2121,11 +2145,18 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 cm4.lock().presence.insert(peer_id, presence);
                                 let _ = app4.emit("collab-camera", t);
                             }
-                            HostToClient::AvatarChoice { peer_id, ref avatar_name } => {
+                            HostToClient::AvatarChoice {
+                                peer_id,
+                                ref avatar_name,
+                            } => {
                                 cm4.lock().avatar_names.insert(peer_id, avatar_name.clone());
                                 let _ = app4.emit("collab-avatar-choice", t);
                             }
-                            HostToClient::AvatarData { ref name, ref bytes, .. } => {
+                            HostToClient::AvatarData {
+                                ref name,
+                                ref bytes,
+                                ..
+                            } => {
                                 if bytes.len() <= MAX_AVATAR_FILE_BYTES {
                                     cm4.lock().avatar_data.insert(name.clone(), bytes.clone());
                                 }
@@ -3034,8 +3065,7 @@ mod tests {
         // Poll next_seq until it reaches the expected value (host may still be draining
         // frames from the TCP receive buffer when the client write loop finishes).
         let expected_seq = (N * EDITS_PER_CLIENT) as u64;
-        let deadline =
-            tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             if cm.lock().next_seq == expected_seq {
                 break;
@@ -3087,7 +3117,10 @@ mod tests {
         // After recovering the receiver is positioned at the oldest surviving message
         // (capacity 2, 3 sent → msg0 evicted, ring holds msg1 and msg2; lag repositions to msg1)
         match rx.recv().await {
-            Ok(Message::Text(t)) => assert_eq!(t, "msg1", "should receive oldest surviving message after lag"),
+            Ok(Message::Text(t)) => assert_eq!(
+                t, "msg1",
+                "should receive oldest surviving message after lag"
+            ),
             other => panic!("unexpected result after lag recovery: {other:?}"),
         }
     }

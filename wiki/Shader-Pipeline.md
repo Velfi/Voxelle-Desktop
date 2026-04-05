@@ -74,14 +74,14 @@ flowchart TD
 
 Converts voxel brick data into triangle meshes on the GPU.
 
-| Binding | Type | Description |
-|---------|------|-------------|
-| `brick_cells` | Storage (read) | Raw voxel data (`u32` per cell) |
-| `slice_headers` | Storage (read) | Per-slice greedy mesh metadata |
-| `slice_bits` | Storage (read) | Bitmap per 64×64 slice |
-| `vtx_out` | Storage (write) | Output vertices (14×f32 stride) |
-| `idx_out` | Storage (write) | Triangle indices |
-| `alloc` | Storage (atomic) | Vertex/index counters |
+| Binding         | Type             | Description                     |
+| --------------- | ---------------- | ------------------------------- |
+| `brick_cells`   | Storage (read)   | Raw voxel data (`u32` per cell) |
+| `slice_headers` | Storage (read)   | Per-slice greedy mesh metadata  |
+| `slice_bits`    | Storage (read)   | Bitmap per 64×64 slice          |
+| `vtx_out`       | Storage (write)  | Output vertices (14×f32 stride) |
+| `idx_out`       | Storage (write)  | Triangle indices                |
+| `alloc`         | Storage (atomic) | Vertex/index counters           |
 
 Each workgroup processes a 64×64 slice independently with greedy face merging and per-vertex AO.
 
@@ -89,10 +89,10 @@ Each workgroup processes a 64×64 slice independently with greedy face merging a
 
 **Shader:** `shadow.wgsl` (vertex-only, depth attachment)
 
-| Input | Output |
-|-------|--------|
+| Input                                    | Output                                     |
+| ---------------------------------------- | ------------------------------------------ |
 | Opaque mesh (position, normal, mat_kind) | `shadow_texture` (Depth32Float, 8192×8192) |
-| `light_view_proj` matrix | |
+| `light_view_proj` matrix                 |                                            |
 
 Renders from the directional light's point of view. `glass_shadow_push()` handles transmissive materials by pushing depth along the slab thickness.
 
@@ -100,10 +100,10 @@ Renders from the directional light's point of view. `glass_shadow_push()` handle
 
 **Shader:** `sky.wgsl`
 
-| Input | Output |
-|-------|--------|
-| Camera inverse view/proj | `hdr_opaque_texture` (background fill) |
-| Light direction, sun/ambient colors | |
+| Input                               | Output                                 |
+| ----------------------------------- | -------------------------------------- |
+| Camera inverse view/proj            | `hdr_opaque_texture` (background fill) |
+| Light direction, sun/ambient colors |                                        |
 
 Analytic atmosphere with Rayleigh scattering, chromatic extinction, day/night blending, and procedural stars.
 
@@ -111,34 +111,34 @@ Analytic atmosphere with Rayleigh scattering, chromatic extinction, day/night bl
 
 **Shader:** `scene.wgsl` → `fs_opaque_mrt`
 
-| Input | Output |
-|-------|--------|
+| Input                                                                       | Output                                                |
+| --------------------------------------------------------------------------- | ----------------------------------------------------- |
 | Opaque vertex (position, normal, color, mat_kind, vertex_ao, emission_tint) | `hdr_opaque_texture` (RGB color + glow mask in alpha) |
-| Shadow map, GlobalState | `normal_texture` (world normal + metalness) |
-| | `depth_texture` (Depth32Float) |
+| Shadow map, GlobalState                                                     | `normal_texture` (world normal + metalness)           |
+|                                                                             | `depth_texture` (Depth32Float)                        |
 
 Handles all 9 material types with physically-based shading:
 
-| Material | Shading Model |
-|----------|--------------|
-| **Plastic** | Blinn-Phong specular |
-| **Metal** | Tinted specular, Fresnel (F0 = 0.96) |
-| **Rubber** | Blinn-Phong (low specular) |
-| **Glass** | Transmissive (handled in OIT pass) |
-| **Water** | Transmissive (handled in OIT pass) |
-| **Glow** | Self-illuminated (4× emission), shape hints |
-| **Velvet** | Anisotropic sheen, rim lighting, wrap diffuse |
-| **Wax** | Subsurface scattering, spectral absorption, Fresnel sheen |
-| **Holographic** | Thin-film interference + diffraction grating |
+| Material        | Shading Model                                             |
+| --------------- | --------------------------------------------------------- |
+| **Plastic**     | Blinn-Phong specular                                      |
+| **Metal**       | Tinted specular, Fresnel (F0 = 0.96)                      |
+| **Rubber**      | Blinn-Phong (low specular)                                |
+| **Glass**       | Transmissive (handled in OIT pass)                        |
+| **Water**       | Transmissive (handled in OIT pass)                        |
+| **Glow**        | Self-illuminated (4× emission), shape hints               |
+| **Velvet**      | Anisotropic sheen, rim lighting, wrap diffuse             |
+| **Wax**         | Subsurface scattering, spectral absorption, Fresnel sheen |
+| **Holographic** | Thin-film interference + diffraction grating              |
 
 ### 5. Screen-Space Reflections
 
 **Shader:** `post_ssr.wgsl`
 
-| Input | Output |
-|-------|--------|
+| Input                                   | Output                                               |
+| --------------------------------------- | ---------------------------------------------------- |
 | `hdr_opaque_texture` (scene to reflect) | `ssr_texture` (RGB reflection + confidence in alpha) |
-| `depth_snapshot_texture` (opaque depth) | |
+| `depth_snapshot_texture` (opaque depth) |                                                      |
 
 DDA ray march in screen space. Confidence fades at screen edges and with distance. Sky fallback for escaping rays.
 
@@ -146,16 +146,17 @@ DDA ray march in screen space. Confidence fades at screen edges and with distanc
 
 **Accumulation shader:** `scene.wgsl` → `fs_trans_oit`
 
-| Input | Output |
-|-------|--------|
+| Input                           | Output                                           |
+| ------------------------------- | ------------------------------------------------ |
 | Transparent mesh (glass, water) | `oit_accum_texture` (weighted color + alpha sum) |
-| `depth_snapshot_texture` | `oit_revealage_texture` (product of 1−alpha) |
+| `depth_snapshot_texture`        | `oit_revealage_texture` (product of 1−alpha)     |
 
 Uses weighted blended OIT. Transmission physics include IOR-based refraction (glass 1.5, water 1.333), thickness via voxel marching, and Fresnel-weighted split.
 
 **Composite shader:** `oit_composite.wgsl`
 
 Blends transparent and opaque layers:
+
 ```
 avg_color = accum.rgb / accum.a
 result = avg_color × (1 − revealage) + opaque × revealage
@@ -165,12 +166,12 @@ Also composites SSR reflections.
 
 ### 7. Bloom
 
-| Stage | Shader | Description |
-|-------|--------|-------------|
-| **Extract** | `post_bloom_extract.wgsl` | Soft-knee threshold; glow voxels bloom from luminance |
-| **Downsample** | `post_blit.wgsl` | Hardware bilinear, 5 mip levels (÷2 each) |
-| **Blur** | `post_blur.wgsl` | Separable Gaussian, horizontal then vertical per level |
-| **Upsample** | `post_blit.wgsl` (weighted add) | Coarsest → finest, ×0.75 falloff per level |
+| Stage          | Shader                          | Description                                            |
+| -------------- | ------------------------------- | ------------------------------------------------------ |
+| **Extract**    | `post_bloom_extract.wgsl`       | Soft-knee threshold; glow voxels bloom from luminance  |
+| **Downsample** | `post_blit.wgsl`                | Hardware bilinear, 5 mip levels (÷2 each)              |
+| **Blur**       | `post_blur.wgsl`                | Separable Gaussian, horizontal then vertical per level |
+| **Upsample**   | `post_blit.wgsl` (weighted add) | Coarsest → finest, ×0.75 falloff per level             |
 
 Parameters: strength 0.88, radius 0.42, threshold 0.15.
 
@@ -184,23 +185,23 @@ Computes average scene brightness into a 1×1 texture for auto-exposure.
 
 **Shader:** `post_composite.wgsl`
 
-| Input | Output |
-|-------|--------|
+| Input                      | Output                         |
+| -------------------------- | ------------------------------ |
 | `hdr_texture` (full scene) | `present_texture` (SDR or HDR) |
-| `bloom_a` (bloom result) | |
-| 224-byte options uniform | |
+| `bloom_a` (bloom result)   |                                |
+| 224-byte options uniform   |                                |
 
 Post-effects applied:
 
-| Effect | Details |
-|--------|---------|
-| **Tone mapping** | Linear, Reinhard, ACES, or Filmic |
-| **Exposure** | −5 to +5 EV |
-| **Vignette** | Adjustable radius and strength |
-| **Film grain** | Monochrome or colorful, animated |
-| **Atmosphere** | Slab or aerial, plane or volumetric |
-| **Distance tint** | Near/mid/far color grading |
-| **Sun shafts** | God rays with decay |
+| Effect            | Details                             |
+| ----------------- | ----------------------------------- |
+| **Tone mapping**  | Linear, Reinhard, ACES, or Filmic   |
+| **Exposure**      | −5 to +5 EV                         |
+| **Vignette**      | Adjustable radius and strength      |
+| **Film grain**    | Monochrome or colorful, animated    |
+| **Atmosphere**    | Slab or aerial, plane or volumetric |
+| **Distance tint** | Near/mid/far color grading          |
+| **Sun shafts**    | God rays with decay                 |
 
 ### 10. Ray Trace Path (Optional)
 
@@ -208,11 +209,11 @@ Post-effects applied:
 
 Progressive path tracer as an alternative to the rasterized path.
 
-| Input | Output |
-|-------|--------|
-| GlobalState (brick, light, camera) | `rt_accum_textures` (ping-pong Rgba16Float) |
-| Previous accumulation buffer | |
-| `RtUniform` (frame_seed, sample_n, fast_preview) | |
+| Input                                            | Output                                      |
+| ------------------------------------------------ | ------------------------------------------- |
+| GlobalState (brick, light, camera)               | `rt_accum_textures` (ping-pong Rgba16Float) |
+| Previous accumulation buffer                     |                                             |
+| `RtUniform` (frame_seed, sample_n, fast_preview) |                                             |
 
 - Per-pixel jittered primary rays
 - Voxel DDA traversal
@@ -222,24 +223,24 @@ Progressive path tracer as an alternative to the rasterized path.
 
 ## Texture Inventory
 
-| Texture | Format | Size | Purpose |
-|---------|--------|------|---------|
-| `shadow_texture` | Depth32Float | 8192×8192 | Directional shadow map |
-| `hdr_opaque_texture` | Rgba16Float | viewport | Opaque pass result |
-| `hdr_texture` | Rgba16Float | viewport | Composited scene (opaque + transparent) |
-| `normal_texture` | Rgba16Float | viewport | G-buffer normals + metalness |
-| `depth_texture` | Depth32Float | viewport | Scene depth |
-| `depth_snapshot_texture` | Depth32Float | viewport | Read-only opaque depth copy |
-| `oit_accum_texture` | Rgba16Float | viewport | OIT weighted accumulation |
-| `oit_revealage_texture` | R16Float | viewport | OIT transparency weight |
-| `ssr_texture` | Rgba16Float | viewport | Screen-space reflections |
-| `bloom_a` / `bloom_b` | Rgba16Float | viewport | Bloom working textures |
-| `bloom_pyramid_a[5]` | Rgba16Float | ÷2 … ÷32 | Bloom mip chain |
-| `bloom_pyramid_b[5]` | Rgba16Float | ÷2 … ÷32 | Bloom blur temp |
-| `present_texture` | Rgba8Unorm / Rgba16Float | viewport | Final output (SDR or HDR) |
-| `rt_accum_textures[2]` | Rgba16Float | viewport | Ray tracer ping-pong |
-| `rt_preview_tex` | Rgba16Float | viewport ÷ 2 | Half-res ray tracer (upscaled) |
-| `meter_texture` | Rgba8Unorm | 1×1 | Average luminance |
+| Texture                  | Format                   | Size         | Purpose                                 |
+| ------------------------ | ------------------------ | ------------ | --------------------------------------- |
+| `shadow_texture`         | Depth32Float             | 8192×8192    | Directional shadow map                  |
+| `hdr_opaque_texture`     | Rgba16Float              | viewport     | Opaque pass result                      |
+| `hdr_texture`            | Rgba16Float              | viewport     | Composited scene (opaque + transparent) |
+| `normal_texture`         | Rgba16Float              | viewport     | G-buffer normals + metalness            |
+| `depth_texture`          | Depth32Float             | viewport     | Scene depth                             |
+| `depth_snapshot_texture` | Depth32Float             | viewport     | Read-only opaque depth copy             |
+| `oit_accum_texture`      | Rgba16Float              | viewport     | OIT weighted accumulation               |
+| `oit_revealage_texture`  | R16Float                 | viewport     | OIT transparency weight                 |
+| `ssr_texture`            | Rgba16Float              | viewport     | Screen-space reflections                |
+| `bloom_a` / `bloom_b`    | Rgba16Float              | viewport     | Bloom working textures                  |
+| `bloom_pyramid_a[5]`     | Rgba16Float              | ÷2 … ÷32     | Bloom mip chain                         |
+| `bloom_pyramid_b[5]`     | Rgba16Float              | ÷2 … ÷32     | Bloom blur temp                         |
+| `present_texture`        | Rgba8Unorm / Rgba16Float | viewport     | Final output (SDR or HDR)               |
+| `rt_accum_textures[2]`   | Rgba16Float              | viewport     | Ray tracer ping-pong                    |
+| `rt_preview_tex`         | Rgba16Float              | viewport ÷ 2 | Half-res ray tracer (upscaled)          |
+| `meter_texture`          | Rgba8Unorm               | 1×1          | Average luminance                       |
 
 ## Voxel Data Format
 
@@ -258,15 +259,15 @@ Materials: 0=Plastic, 1=Metal, 2=Rubber, 3=Glass, 4=Water, 5=Glow, 6=Velvet, 7=W
 
 ## Key Files
 
-| File | Responsibility |
-|------|---------------|
-| `src-tauri/src/render/mod.rs` | Pipeline creation, render pass orchestration |
-| `src-tauri/src/render/scene.wgsl` | Opaque MRT + transparent OIT fragment shaders |
-| `src-tauri/src/render/shadow.wgsl` | Shadow depth pass |
-| `src-tauri/src/render/ray_trace.wgsl` | Progressive path tracer |
-| `src-tauri/src/render/gpu/mesh_greedy.wgsl` | Compute greedy mesher |
-| `src-tauri/src/shaders.wgsl` | Shared structs and utility functions |
-| `src-tauri/src/render_constants.rs` | Material parameters, bloom/shadow constants |
-| `src-tauri/src/gpu_brick.rs` | Voxel brick GPU data layout |
-| `src-tauri/src/greedy_mesh.rs` | CPU-side greedy mesh fallback |
-| `src-tauri/src/smooth_mesh.rs` | Smooth mesh generation |
+| File                                        | Responsibility                                |
+| ------------------------------------------- | --------------------------------------------- |
+| `src-tauri/src/render/mod.rs`               | Pipeline creation, render pass orchestration  |
+| `src-tauri/src/render/scene.wgsl`           | Opaque MRT + transparent OIT fragment shaders |
+| `src-tauri/src/render/shadow.wgsl`          | Shadow depth pass                             |
+| `src-tauri/src/render/ray_trace.wgsl`       | Progressive path tracer                       |
+| `src-tauri/src/render/gpu/mesh_greedy.wgsl` | Compute greedy mesher                         |
+| `src-tauri/src/shaders.wgsl`                | Shared structs and utility functions          |
+| `src-tauri/src/render_constants.rs`         | Material parameters, bloom/shadow constants   |
+| `src-tauri/src/gpu_brick.rs`                | Voxel brick GPU data layout                   |
+| `src-tauri/src/greedy_mesh.rs`              | CPU-side greedy mesh fallback                 |
+| `src-tauri/src/smooth_mesh.rs`              | Smooth mesh generation                        |

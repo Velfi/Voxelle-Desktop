@@ -1475,7 +1475,11 @@ pub(crate) fn prepare_preview_mesh(
                                 shape,
                                 ctx.generator_shape_size,
                                 origin,
-                                (ctx.generator_shape_rot_x, ctx.generator_shape_rot_y, ctx.generator_shape_rot_z),
+                                (
+                                    ctx.generator_shape_rot_x,
+                                    ctx.generator_shape_rot_y,
+                                    ctx.generator_shape_rot_z,
+                                ),
                             );
                             let mut cells: Vec<_> = if ctx.generator_shape_overwrite {
                                 all
@@ -1501,16 +1505,20 @@ pub(crate) fn prepare_preview_mesh(
                                     return PreviewMeshPrepared::Noop;
                                 }
                                 const NBRS: [(i32, i32, i32); 6] = [
-                                    (1, 0, 0), (-1, 0, 0),
-                                    (0, 1, 0), (0, -1, 0),
-                                    (0, 0, 1), (0, 0, -1),
+                                    (1, 0, 0),
+                                    (-1, 0, 0),
+                                    (0, 1, 0),
+                                    (0, -1, 0),
+                                    (0, 0, 1),
+                                    (0, 0, -1),
                                 ];
                                 let set: AHashSet<_> = cells.iter().copied().collect();
                                 let visible: AHashSet<_> = set
                                     .iter()
                                     .filter(|&&(x, y, z)| {
-                                        NBRS.iter()
-                                            .any(|&(dx, dy, dz)| !set.contains(&(x + dx, y + dy, z + dz)))
+                                        NBRS.iter().any(|&(dx, dy, dz)| {
+                                            !set.contains(&(x + dx, y + dy, z + dz))
+                                        })
                                     })
                                     .copied()
                                     .collect();
@@ -1546,14 +1554,7 @@ pub(crate) fn prepare_preview_mesh(
         let (csx, csy) = cursor
             .map(|(nx, ny)| viewport_texels_from_norm(nx, ny, viewport_w as f32, viewport_h as f32))
             .unwrap_or((-1.0, -1.0));
-        let key = hash_bone_preview(
-            &session_snap,
-            csx,
-            csy,
-            gizmo_drag,
-            dbg,
-            hover.color,
-        );
+        let key = hash_bone_preview(&session_snap, csx, csy, gizmo_drag, dbg, hover.color);
         if preview_overlay_cache_key_get(state) == Some(key) {
             return PreviewMeshPrepared::Noop;
         }
@@ -1608,7 +1609,7 @@ pub(crate) fn prepare_preview_mesh(
 
     if matches!(mode, PreviewMode::Squishy) {
         let hover = state.preview_hover.lock();
-        let preview_radius_i = hover.brush_radius.max(2).min(64);
+        let preview_radius_i = hover.brush_radius.clamp(2, 64);
         let gizmo_drag = state.squishy_gizmo_drag.lock().is_some();
         let max_v = if gizmo_drag { 12_000 } else { 24_000 };
 
@@ -2513,16 +2514,16 @@ pub(crate) fn prepare_preview_mesh(
                     let gen_center = *state.generator_gizmo_center.lock();
                     let mut cells = if let Some([gx, gy, gz]) = gen_center {
                         let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
-                        let origin = (
-                            gx as i32 + pdx,
-                            gy as i32 + pdy,
-                            gz as i32 + pdz,
-                        );
+                        let origin = (gx as i32 + pdx, gy as i32 + pdy, gz as i32 + pdz);
                         let all = crate::generators::compute_shape_positions(
                             shape,
                             ctx.generator_shape_size,
                             origin,
-                            (ctx.generator_shape_rot_x, ctx.generator_shape_rot_y, ctx.generator_shape_rot_z),
+                            (
+                                ctx.generator_shape_rot_x,
+                                ctx.generator_shape_rot_y,
+                                ctx.generator_shape_rot_z,
+                            ),
                         );
                         if ctx.generator_shape_overwrite {
                             all
@@ -2550,16 +2551,14 @@ pub(crate) fn prepare_preview_mesh(
                     if !cells.is_empty() {
                         // Include gizmo center + drag offset in the cache key so the
                         // preview rebuilds when the gizmo moves.
-                        let (hash_x, hash_y) = if gen_center.is_some() {
+                        let (hash_x, hash_y) = if let Some(gc) = gen_center {
                             let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
-                            let gc = gen_center.unwrap();
                             // Pack center + pending into two f32s for the hash.
                             (
+                                f32::from_bits((gc[0] as i32 + pdx) as u32),
                                 f32::from_bits(
-                                    (gc[0] as i32 + pdx) as u32
-                                ),
-                                f32::from_bits(
-                                    ((gc[1] as i32 + pdy) as u32).wrapping_add((gc[2] as i32 + pdz) as u32)
+                                    ((gc[1] as i32 + pdy) as u32)
+                                        .wrapping_add((gc[2] as i32 + pdz) as u32),
                                 ),
                             )
                         } else {
@@ -2684,9 +2683,7 @@ pub(crate) fn prepare_preview_mesh(
         }
         let key_cell = voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy);
         let key = match key_cell {
-            Some(((cx, cy, cz), oid)) => {
-                hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0, oid)
-            }
+            Some(((cx, cy, cz), oid)) => hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0, oid),
             None => hash_preview_miss(mode, dbg),
         };
         if preview_overlay_cache_key_get(state) == Some(key) {
@@ -2923,7 +2920,11 @@ pub(crate) fn clear_preview_mesh_sync_cache(viewer: &mut WgpuViewer, state: &Vie
     *state.preview_overlay_cache_key.lock() = None;
 }
 
-pub(crate) fn apply_preview_mesh(viewer: &mut WgpuViewer, state: &ViewerState, prep: PreviewMeshPrepared) {
+pub(crate) fn apply_preview_mesh(
+    viewer: &mut WgpuViewer,
+    state: &ViewerState,
+    prep: PreviewMeshPrepared,
+) {
     match prep {
         PreviewMeshPrepared::Noop => {}
         PreviewMeshPrepared::Clear => {

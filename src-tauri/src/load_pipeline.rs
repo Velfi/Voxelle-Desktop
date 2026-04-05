@@ -6,6 +6,10 @@
 use crate::collab;
 use crate::gpu_brick::GpuVoxelBrick;
 use crate::greedy_mesh;
+#[cfg(target_os = "macos")]
+use crate::macos_undo;
+#[cfg(desktop)]
+use crate::native_menu::{rebuild_recent_submenu, RecentMenuState};
 use crate::render::{MoodParams, PreparedOpaqueUpload};
 use crate::smooth_mesh;
 use crate::state::*;
@@ -17,10 +21,6 @@ use crate::{
 };
 #[cfg(desktop)]
 use crate::{scene_menu_flags, selection_menu_sync_enabled_for_scene};
-#[cfg(desktop)]
-use crate::native_menu::{RecentMenuState, rebuild_recent_submenu};
-#[cfg(target_os = "macos")]
-use crate::macos_undo;
 
 use std::any::Any;
 use std::path::PathBuf;
@@ -426,7 +426,8 @@ pub(crate) fn unload_current_project<R: Runtime>(
 ) -> Result<(), String> {
     let mode = *state.rendering_mode.lock();
     let objects = voxelle::default_scene_objects();
-    let prepared = prepare_load_scene_cpu::<R>(crate::MAX_GRID_SIZE as i32, &[], &objects, mode, None)?;
+    let prepared =
+        prepare_load_scene_cpu::<R>(crate::MAX_GRID_SIZE as i32, &[], &objects, mode, None)?;
     {
         let mut cf = state.current_file.lock();
         let mut vm = state.voxel_map.lock();
@@ -535,7 +536,12 @@ pub(crate) fn start_shape_label(shape: StartShape) -> &'static str {
     }
 }
 
-pub(crate) fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_size: u32, shape: StartShape) {
+pub(crate) fn spawn_new_project(
+    state: Arc<ViewerState>,
+    app: AppHandle,
+    grid_size: u32,
+    shape: StartShape,
+) {
     let shape_l = start_shape_label(shape);
     let label = format!("New project ({grid_size}³, {shape_l})");
     let load_gen = next_load_generation(&state);
@@ -589,9 +595,8 @@ pub(crate) fn spawn_new_project(state: Arc<ViewerState>, app: AppHandle, grid_si
                             let state_c = Arc::clone(&state);
                             let file_c = file;
                             let _ = app_c.run_on_main_thread(move || {
-                                let res = apply_mesh_and_camera(
-                                    &state_c, &app_mesh, file_c, prepared,
-                                );
+                                let res =
+                                    apply_mesh_and_camera(&state_c, &app_mesh, file_c, prepared);
                                 let _ = done_tx.send(res);
                             });
                             return match done_rx.recv() {
@@ -830,13 +835,7 @@ pub(crate) fn spawn_decode_and_mesh_inner(
                         }
 
                         if file.version == 3 && !file.voxels.is_empty() {
-                            run_v3_mesh_on_main(
-                                &state,
-                                &app,
-                                file,
-                                prepared,
-                                load_gen,
-                            )?;
+                            run_v3_mesh_on_main(&state, &app, file, prepared, load_gen)?;
                             return Ok(DecodeMeshOutcome::Done);
                         }
 
@@ -887,12 +886,7 @@ pub(crate) fn spawn_decode_and_mesh_inner(
                 let res: Result<(), String> = match mesh_result {
                     Ok(DecodeMeshOutcome::ApplyOnce { file, prepared }) => {
                         let t = Instant::now();
-                        let r = apply_mesh_and_camera(
-                            &state_c,
-                            &app_emit,
-                            file,
-                            prepared,
-                        );
+                        let r = apply_mesh_and_camera(&state_c, &app_emit, file, prepared);
                         log::info!(
                             target: "voxelle_load",
                             "load file: ApplyOnce apply_mesh_and_camera {:?}",

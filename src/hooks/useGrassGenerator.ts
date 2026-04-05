@@ -27,8 +27,12 @@ export function useGrassGenerator(ctx: GrassGeneratorContext): GrassGeneratorSta
   const grassMaxHeightRef = useRef(grassMaxHeight);
   const grassPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
-  useEffect(() => { grassDensityRef.current = grassDensity; }, [grassDensity]);
-  useEffect(() => { grassMaxHeightRef.current = grassMaxHeight; }, [grassMaxHeight]);
+  useEffect(() => {
+    grassDensityRef.current = grassDensity;
+  }, [grassDensity]);
+  useEffect(() => {
+    grassMaxHeightRef.current = grassMaxHeight;
+  }, [grassMaxHeight]);
 
   const grassPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
@@ -56,8 +60,12 @@ export function useGrassGenerator(ctx: GrassGeneratorContext): GrassGeneratorSta
   });
 
   return {
-    grassDensity, setGrassDensity, grassDensityRef,
-    grassMaxHeight, setGrassMaxHeight, grassMaxHeightRef,
+    grassDensity,
+    setGrassDensity,
+    grassDensityRef,
+    grassMaxHeight,
+    setGrassMaxHeight,
+    grassMaxHeightRef,
     grassPreviewSeedRef,
     grassPhase,
   };

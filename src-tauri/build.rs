@@ -61,10 +61,7 @@ fn generate_avatar_module() {
     code.push_str("    match name {\n");
     for name in &names {
         let const_name = avatar_const_name(name);
-        code.push_str(&format!(
-            "        {:?} => Some({}),\n",
-            name, const_name
-        ));
+        code.push_str(&format!("        {:?} => Some({}),\n", name, const_name));
     }
     code.push_str("        _ => None,\n");
     code.push_str("    }\n");

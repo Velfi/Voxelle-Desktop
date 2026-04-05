@@ -345,7 +345,7 @@ fn taubin_smooth_mesh(
     let s = (relax_pct.min(100) as f64) / 100.0;
     let lambda = 0.33 * s;
     let mu = -0.34 * s;
-    let iters = iterations.max(1).min(20);
+    let iters = iterations.clamp(1, 20);
     for _ in 0..iters {
         if lambda > 1e-8 {
             umbrella_laplacian_step(&mut pos, &adj, &pinned, lambda);

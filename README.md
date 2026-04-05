@@ -33,10 +33,10 @@ The app will notify you when updates are available and can install them automati
 ## Requirements
 
 | Platform | Minimum version |
-|----------|----------------|
-| macOS    | 11.0 (Big Sur) |
-| Windows  | Windows 10     |
-| Linux    | Ubuntu 20.04+  |
+| -------- | --------------- |
+| macOS    | 11.0 (Big Sur)  |
+| Windows  | Windows 10      |
+| Linux    | Ubuntu 20.04+   |
 
 ## Examples
 

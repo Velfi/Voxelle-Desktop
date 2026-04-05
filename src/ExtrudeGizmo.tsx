@@ -25,64 +25,63 @@ export type ExtrudeGizmoRef = {
   updateHover(clientX: number, clientY: number): Promise<boolean>;
 };
 
-export const ExtrudeGizmo = forwardRef<
-  ExtrudeGizmoRef,
-  { viewportEl: HTMLElement | null }
->(({ viewportEl }, ref) => {
-  const dprRef = useRef(window.devicePixelRatio || 1);
+export const ExtrudeGizmo = forwardRef<ExtrudeGizmoRef, { viewportEl: HTMLElement | null }>(
+  ({ viewportEl }, ref) => {
+    const dprRef = useRef(window.devicePixelRatio || 1);
 
-  const toPhysical = useCallback(
-    (clientX: number, clientY: number): [number, number] => {
-      if (!viewportEl) return [0, 0];
-      const rect = viewportEl.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      dprRef.current = dpr;
-      return [(clientX - rect.left) * dpr, (clientY - rect.top) * dpr];
-    },
-    [viewportEl],
-  );
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      async startDragIfHit(clientX, clientY): Promise<boolean> {
-        const [sx, sy] = toPhysical(clientX, clientY);
-        return invoke<boolean>("extrude_gizmo_pointer_down", {
-          sx,
-          sy,
-          dpr: dprRef.current,
-        });
-      },
-
-      pointerMove(clientX, clientY, prevClientX, prevClientY, color, material) {
+    const toPhysical = useCallback(
+      (clientX: number, clientY: number): [number, number] => {
+        if (!viewportEl) return [0, 0];
+        const rect = viewportEl.getBoundingClientRect();
         const dpr = window.devicePixelRatio || 1;
-        const dcx = (clientX - prevClientX) * dpr;
-        const dcy = (clientY - prevClientY) * dpr;
-        void invoke("extrude_gizmo_pointer_move", {
-          dcx,
-          dcy,
-          color,
-          material,
-        }).catch(() => {});
+        dprRef.current = dpr;
+        return [(clientX - rect.left) * dpr, (clientY - rect.top) * dpr];
       },
+      [viewportEl],
+    );
 
-      pointerUp() {
-        void invoke("extrude_gizmo_pointer_up").catch(() => {});
-      },
+    useImperativeHandle(
+      ref,
+      () => ({
+        async startDragIfHit(clientX, clientY): Promise<boolean> {
+          const [sx, sy] = toPhysical(clientX, clientY);
+          return invoke<boolean>("extrude_gizmo_pointer_down", {
+            sx,
+            sy,
+            dpr: dprRef.current,
+          });
+        },
 
-      async updateHover(clientX, clientY): Promise<boolean> {
-        const [sx, sy] = toPhysical(clientX, clientY);
-        return invoke<boolean>("extrude_gizmo_hit_test", {
-          sx,
-          sy,
-          dpr: dprRef.current,
-        });
-      },
-    }),
-    [toPhysical],
-  );
+        pointerMove(clientX, clientY, prevClientX, prevClientY, color, material) {
+          const dpr = window.devicePixelRatio || 1;
+          const dcx = (clientX - prevClientX) * dpr;
+          const dcy = (clientY - prevClientY) * dpr;
+          void invoke("extrude_gizmo_pointer_move", {
+            dcx,
+            dcy,
+            color,
+            material,
+          }).catch(() => {});
+        },
 
-  return null;
-});
+        pointerUp() {
+          void invoke("extrude_gizmo_pointer_up").catch(() => {});
+        },
+
+        async updateHover(clientX, clientY): Promise<boolean> {
+          const [sx, sy] = toPhysical(clientX, clientY);
+          return invoke<boolean>("extrude_gizmo_hit_test", {
+            sx,
+            sy,
+            dpr: dprRef.current,
+          });
+        },
+      }),
+      [toPhysical],
+    );
+
+    return null;
+  },
+);
 
 ExtrudeGizmo.displayName = "ExtrudeGizmo";

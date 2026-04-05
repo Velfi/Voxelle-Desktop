@@ -316,7 +316,11 @@ fn greedy_merge(cells: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
 }
 
 fn srgb_to_linear(c: f32) -> f32 {
-    if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn color_rgb(color: u32) -> glam::Vec3 {
@@ -538,6 +542,7 @@ pub struct GpuSliceHeader {
 }
 
 /// Pack coplanar face cells into 2D bitmaps for GPU greedy meshing (each sub-slice ≤64×64).
+#[allow(clippy::result_unit_err)] // Empty slice / degenerate buckets use `Err(())` as a sentinel.
 pub fn pack_gpu_greedy_slices(
     map: &AHashMap<VoxelCoord, Voxel>,
     emit: &[Voxel],
@@ -1318,7 +1323,11 @@ pub fn build_naive_mesh_mapped(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>
     build_mesh_mapped_inner(emit, map, false)
 }
 
-fn build_mesh_mapped_inner(emit: &[Voxel], map: &AHashMap<VoxelCoord, Voxel>, greedy: bool) -> MeshBuffers {
+fn build_mesh_mapped_inner(
+    emit: &[Voxel],
+    map: &AHashMap<VoxelCoord, Voxel>,
+    greedy: bool,
+) -> MeshBuffers {
     // Collect glow voxel positions/colors once; used for per-vertex emission baking.
     // Skip collection entirely when the preference is disabled.
     let glow_sources: Vec<(IVec3, Vec3)> = if EMISSION_ENABLED.load(Ordering::Relaxed) {

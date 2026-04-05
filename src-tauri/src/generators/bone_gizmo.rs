@@ -105,8 +105,7 @@ pub fn pick_bone_gizmo_handle(
         }
         None => return None,
     };
-    pick_joint_gizmo(session, camera, w, h, sx, sy, joint_id)
-        .map(|(handle, _)| (handle, joint_id))
+    pick_joint_gizmo(session, camera, w, h, sx, sy, joint_id).map(|(handle, _)| (handle, joint_id))
 }
 
 fn pick_joint_gizmo(
@@ -296,13 +295,7 @@ pub fn append_bone_skeleton_wire(
 /// Emit an octahedral (diamond) bone between two joint positions.
 /// The octahedron has its tips at `a` and `b`, and 4 equatorial vertices
 /// at the midpoint offset by `width` in the perpendicular plane.
-fn draw_octahedral_bone(
-    out: &mut MeshBuffers,
-    a: Vec3,
-    b: Vec3,
-    width: f32,
-    color: [f32; 3],
-) {
+fn draw_octahedral_bone(out: &mut MeshBuffers, a: Vec3, b: Vec3, width: f32, color: [f32; 3]) {
     let dir = b - a;
     let length = dir.length();
     if length < 1e-6 {
@@ -319,12 +312,12 @@ fn draw_octahedral_bone(
     let perp2 = axis.cross(perp).normalize();
 
     let mid = a.lerp(b, 0.5);
-    let v0 = a;                          // tip A
-    let v1 = b;                          // tip B
-    let v2 = mid + perp * width;         // equator +perp
-    let v3 = mid + perp2 * width;        // equator +perp2
-    let v4 = mid - perp * width;         // equator -perp
-    let v5 = mid - perp2 * width;        // equator -perp2
+    let v0 = a; // tip A
+    let v1 = b; // tip B
+    let v2 = mid + perp * width; // equator +perp
+    let v3 = mid + perp2 * width; // equator +perp2
+    let v4 = mid - perp * width; // equator -perp
+    let v5 = mid - perp2 * width; // equator -perp2
 
     // 8 triangular faces (4 on each half)
     let faces: [[Vec3; 3]; 8] = [
@@ -367,15 +360,40 @@ fn draw_sphere(out: &mut MeshBuffers, center: Vec3, radius: f32, color: [f32; 3]
     // Start with icosahedron vertices
     let t = (1.0 + 5.0_f32.sqrt()) / 2.0;
     let raw_verts: [[f32; 3]; 12] = [
-        [-1.0,  t, 0.0], [ 1.0,  t, 0.0], [-1.0, -t, 0.0], [ 1.0, -t, 0.0],
-        [ 0.0, -1.0,  t], [ 0.0,  1.0,  t], [ 0.0, -1.0, -t], [ 0.0,  1.0, -t],
-        [  t, 0.0, -1.0], [  t, 0.0,  1.0], [ -t, 0.0, -1.0], [ -t, 0.0,  1.0],
+        [-1.0, t, 0.0],
+        [1.0, t, 0.0],
+        [-1.0, -t, 0.0],
+        [1.0, -t, 0.0],
+        [0.0, -1.0, t],
+        [0.0, 1.0, t],
+        [0.0, -1.0, -t],
+        [0.0, 1.0, -t],
+        [t, 0.0, -1.0],
+        [t, 0.0, 1.0],
+        [-t, 0.0, -1.0],
+        [-t, 0.0, 1.0],
     ];
     let ico_faces: [[usize; 3]; 20] = [
-        [0,11,5],[0,5,1],[0,1,7],[0,7,10],[0,10,11],
-        [1,5,9],[5,11,4],[11,10,2],[10,7,6],[7,1,8],
-        [3,9,4],[3,4,2],[3,2,6],[3,6,8],[3,8,9],
-        [4,9,5],[2,4,11],[6,2,10],[8,6,7],[9,8,1],
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
     ];
 
     // Subdivide once for smoother sphere (20 → 80 tris)
@@ -386,7 +404,11 @@ fn draw_sphere(out: &mut MeshBuffers, center: Vec3, radius: f32, color: [f32; 3]
     let mut faces: Vec<[usize; 3]> = ico_faces.to_vec();
 
     let mut midpoint_cache = std::collections::HashMap::new();
-    let get_mid = |a: usize, b: usize, vs: &mut Vec<Vec3>, cache: &mut std::collections::HashMap<(usize,usize), usize>| -> usize {
+    let get_mid = |a: usize,
+                   b: usize,
+                   vs: &mut Vec<Vec3>,
+                   cache: &mut std::collections::HashMap<(usize, usize), usize>|
+     -> usize {
         let key = if a < b { (a, b) } else { (b, a) };
         if let Some(&idx) = cache.get(&key) {
             return idx;

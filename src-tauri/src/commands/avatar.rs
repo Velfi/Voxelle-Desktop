@@ -52,7 +52,9 @@ pub(crate) struct SceneObjectsPayload {
 }
 
 #[tauri::command]
-pub(crate) fn get_scene_objects(state: State<'_, Arc<ViewerState>>) -> Result<SceneObjectsPayload, String> {
+pub(crate) fn get_scene_objects(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<SceneObjectsPayload, String> {
     let fg = state.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
@@ -318,7 +320,6 @@ pub(crate) fn init_default_avatar_mesh(viewer: &mut WgpuViewer) {
     viewer.cache_avatar_mesh(String::new(), &mesh, centroid, 1.0);
 }
 
-
 /// Spawn a background thread that decodes an embedded avatar and uploads its mesh
 /// to the shared avatar cache. No-op if the name is unknown.
 pub(crate) fn spawn_load_avatar_mesh(state: Arc<ViewerState>, name: &str) {
@@ -563,7 +564,9 @@ pub(crate) fn logo_set_camera_angle(
     elevation: f32,
 ) -> Result<(), String> {
     let theta = azimuth.to_radians();
-    let phi = (90.0 - elevation).to_radians().clamp(0.01, std::f32::consts::PI - 0.01);
+    let phi = (90.0 - elevation)
+        .to_radians()
+        .clamp(0.01, std::f32::consts::PI - 0.01);
     let mut v = state.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         if let Some(logo) = viewer.logo_overlay.as_mut() {
@@ -767,12 +770,12 @@ pub(crate) fn avatar_load_file(
 /// can be selected immediately.  Files that are too large or fail to decode are
 /// silently skipped (a warning is logged).
 #[tauri::command]
-pub(crate) fn avatar_list_user(
-    state: State<'_, Arc<ViewerState>>,
-    app: AppHandle,
-) -> Vec<String> {
+pub(crate) fn avatar_list_user(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Vec<String> {
     let avatars_dir = match app.path().app_data_dir() {
-        Ok(mut d) => { d.push("avatars"); d }
+        Ok(mut d) => {
+            d.push("avatars");
+            d
+        }
         Err(_) => return vec![],
     };
     let _ = std::fs::create_dir_all(&avatars_dir);
@@ -792,15 +795,24 @@ pub(crate) fn avatar_list_user(
         };
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
-            Err(e) => { log::warn!("avatar_list_user: read {:?}: {e}", path); continue; }
+            Err(e) => {
+                log::warn!("avatar_list_user: read {:?}: {e}", path);
+                continue;
+            }
         };
         if bytes.len() > collab::MAX_AVATAR_FILE_BYTES {
-            log::warn!("avatar_list_user: {:?} exceeds MAX_AVATAR_FILE_BYTES, skipping", path);
+            log::warn!(
+                "avatar_list_user: {:?} exceeds MAX_AVATAR_FILE_BYTES, skipping",
+                path
+            );
             continue;
         }
         let file = match decode_payload(&bytes) {
             Ok(f) => f,
-            Err(e) => { log::warn!("avatar_list_user: decode {:?}: {e}", path); continue; }
+            Err(e) => {
+                log::warn!("avatar_list_user: decode {:?}: {e}", path);
+                continue;
+            }
         };
         // Cache raw bytes for collab peer distribution.
         state.local_avatar_data.lock().insert(stem.clone(), bytes);
@@ -821,14 +833,30 @@ pub(crate) fn avatar_list_user(
 /// Drop `.voxelle` files here to make them appear in the Avatar picker.
 #[tauri::command]
 pub(crate) fn avatar_open_user_folder(app: AppHandle) -> Result<(), String> {
-    let avatars_dir = app.path().app_data_dir().map_err(|e| e.to_string()).map(|mut d| { d.push("avatars"); d })?;
+    let avatars_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())
+        .map(|mut d| {
+            d.push("avatars");
+            d
+        })?;
     std::fs::create_dir_all(&avatars_dir).map_err(|e| e.to_string())?;
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(&avatars_dir).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new("open")
+        .arg(&avatars_dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     #[cfg(target_os = "windows")]
-    std::process::Command::new("explorer").arg(&avatars_dir).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new("explorer")
+        .arg(&avatars_dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(&avatars_dir).spawn().map_err(|e| e.to_string())?;
+    std::process::Command::new("xdg-open")
+        .arg(&avatars_dir)
+        .spawn()
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

@@ -284,4 +284,12 @@ export type SculptBrushShapeUi = "square" | "circle" | "cube" | "sphere";
 export type WallAreaShapeApi = "brush" | "circle" | "polygon";
 /** Web `SculptSmoothVariant`; Rust serde camelCase. */
 export type SculptSmoothVariantApi = "majority" | "meshLaplacian";
-export type SprayDirectionApi = "auto" | "none" | "right" | "left" | "up" | "down" | "back" | "forward";
+export type SprayDirectionApi =
+  | "auto"
+  | "none"
+  | "right"
+  | "left"
+  | "up"
+  | "down"
+  | "back"
+  | "forward";

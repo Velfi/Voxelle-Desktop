@@ -26,7 +26,10 @@ pub fn min_grid_size_for_balls(balls: &[Metaball], current_gs: i32) -> i32 {
             .max((b.z + r_pad).abs());
     }
     let need = (2 * (max_abs + 1)).max(1);
-    current_gs.max(1).max(need).min(crate::voxel_edit::MAX_GRID_SIZE)
+    current_gs
+        .max(1)
+        .max(need)
+        .min(crate::voxel_edit::MAX_GRID_SIZE)
 }
 
 /// Compute the scan bounding box as the union of per-ball influence regions,
@@ -50,9 +53,12 @@ fn scan_bbox(balls: &[Metaball], gs: i32) -> (i32, i32, i32, i32, i32, i32) {
     }
     let (gx0, gx1) = crate::voxel_edit::grid_valid_range(gs);
     (
-        min_x.max(gx0), max_x.min(gx1),
-        min_y.max(gx0), max_y.min(gx1),
-        min_z.max(gx0), max_z.min(gx1),
+        min_x.max(gx0),
+        max_x.min(gx1),
+        min_y.max(gx0),
+        max_y.min(gx1),
+        min_z.max(gx0),
+        max_z.min(gx1),
     )
 }
 
@@ -75,7 +81,6 @@ pub enum SquishyMode {
     Edit,
     Delete,
 }
-
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -309,10 +314,8 @@ pub fn squishy_add_ball_at_screen(
             file, voxel_map, camera, width, height, sx, sy,
         )
     };
-    let Some(anchor) = anchor else {
-        return None;
-    };
-    let r = radius.max(2).min(64) as f32;
+    let anchor = anchor?;
+    let r = radius.clamp(2, 64) as f32;
     let id = session.add_ball(anchor.0, anchor.1, anchor.2, r);
     Some(id)
 }
@@ -333,7 +336,7 @@ pub fn pick_metaball_at_screen(
     let mut best: Option<(u32, f32)> = None;
     for b in &session.balls {
         let c = Vec3::new(b.x as f32 + 0.5, b.y as f32 + 0.5, b.z as f32 + 0.5);
-        let pick_r = b.radius.max(0.2_f32).min(64.0_f32);
+        let pick_r = b.radius.clamp(0.2_f32, 64.0_f32);
         if let Some(t) = ray_sphere_intersect(o, d, c, pick_r) {
             if t >= 0.0 {
                 let replace = best.map(|(_, bt)| t < bt).unwrap_or(true);

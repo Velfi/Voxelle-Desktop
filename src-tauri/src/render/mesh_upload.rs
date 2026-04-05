@@ -256,7 +256,11 @@ impl WgpuViewer {
         interleaved
     }
 
-    pub(crate) fn opaque_draw_from_mesh(&self, mesh: &MeshBuffers, opaque_split: u32) -> OpaqueChunkDraw {
+    pub(crate) fn opaque_draw_from_mesh(
+        &self,
+        mesh: &MeshBuffers,
+        opaque_split: u32,
+    ) -> OpaqueChunkDraw {
         let interleaved = Self::interleaved_from_mesh(mesh);
         let vertex_buffer = self
             .device

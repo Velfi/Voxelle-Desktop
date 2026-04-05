@@ -36,17 +36,37 @@ export function useRoofGenerator(): RoofGeneratorState {
   const roofAreaShapeRef = useRef<"polygon" | "square" | "circle">("polygon");
   const roofFirstClickRef = useRef<[number, number, number] | null>(null);
 
-  useEffect(() => { roofStyleRef.current = roofStyle; }, [roofStyle]);
-  useEffect(() => { roofHeightRef.current = roofHeight; }, [roofHeight]);
-  useEffect(() => { roofHollowRef.current = roofHollow; }, [roofHollow]);
-  useEffect(() => { roofAreaShapeRef.current = roofAreaShape; }, [roofAreaShape]);
+  useEffect(() => {
+    roofStyleRef.current = roofStyle;
+  }, [roofStyle]);
+  useEffect(() => {
+    roofHeightRef.current = roofHeight;
+  }, [roofHeight]);
+  useEffect(() => {
+    roofHollowRef.current = roofHollow;
+  }, [roofHollow]);
+  useEffect(() => {
+    roofAreaShapeRef.current = roofAreaShape;
+  }, [roofAreaShape]);
 
   return {
-    roofStyle, setRoofStyle, roofStyleRef,
-    roofHeight, setRoofHeight, roofHeightRef,
-    roofHollow, setRoofHollow, roofHollowRef,
-    roofPins, setRoofPins, roofPinsRef,
-    roofAreaShape, setRoofAreaShape, roofAreaShapeRef,
-    roofFirstClick, setRoofFirstClick, roofFirstClickRef,
+    roofStyle,
+    setRoofStyle,
+    roofStyleRef,
+    roofHeight,
+    setRoofHeight,
+    roofHeightRef,
+    roofHollow,
+    setRoofHollow,
+    roofHollowRef,
+    roofPins,
+    setRoofPins,
+    roofPinsRef,
+    roofAreaShape,
+    setRoofAreaShape,
+    roofAreaShapeRef,
+    roofFirstClick,
+    setRoofFirstClick,
+    roofFirstClickRef,
   };
 }

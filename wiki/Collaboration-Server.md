@@ -79,33 +79,33 @@ Started via the `collab_join` command. The client:
 
 ### Client → Host
 
-| Message | Fields | Purpose |
-|---------|--------|---------|
-| `Join` | `display_name`, `color_rgb` | Announce presence |
-| `Edit` | `deltas: Vec<VoxelEditDelta>` | Voxel modifications |
-| `Undo` | — | Undo last local edit |
-| `Redo` | — | Redo last undone edit |
-| `Chat` | `text` | Chat message |
-| `Ping` | `x, y, z` | World-space ping marker |
-| `Heartbeat` | — | Keep-alive |
-| `LatencyProbe` | `sent_ms` | RTT measurement |
-| `Leave` | — | Graceful disconnect |
-| `AvatarChoice` | `avatar_name` | Select a preset avatar |
-| `AvatarData` | `name, bytes` | Upload custom avatar |
+| Message        | Fields                        | Purpose                 |
+| -------------- | ----------------------------- | ----------------------- |
+| `Join`         | `display_name`, `color_rgb`   | Announce presence       |
+| `Edit`         | `deltas: Vec<VoxelEditDelta>` | Voxel modifications     |
+| `Undo`         | —                             | Undo last local edit    |
+| `Redo`         | —                             | Redo last undone edit   |
+| `Chat`         | `text`                        | Chat message            |
+| `Ping`         | `x, y, z`                     | World-space ping marker |
+| `Heartbeat`    | —                             | Keep-alive              |
+| `LatencyProbe` | `sent_ms`                     | RTT measurement         |
+| `Leave`        | —                             | Graceful disconnect     |
+| `AvatarChoice` | `avatar_name`                 | Select a preset avatar  |
+| `AvatarData`   | `name, bytes`                 | Upload custom avatar    |
 
 ### Host → Client
 
-| Message | Fields | Purpose |
-|---------|--------|---------|
-| `Welcome` | `peer_id`, `snapshot`, `roster`, `avatar_names`, `avatar_data` | Initial state sync |
-| `WelcomeHeader` | `total_bytes` | Progress hint for large snapshots |
-| `Roster` | `roster` | Updated peer list (broadcast on join/leave) |
-| `Edit` | `peer_id`, `deltas` | Broadcast voxel edits |
-| `Undo` | `peer_id` | Broadcast undo |
-| `Redo` | `peer_id` | Broadcast redo |
-| `Chat` | `peer_id`, `display_name`, `text`, `ts_ms` | Broadcast chat message |
-| `Ping` | `peer_id`, `x, y, z`, `display_name`, `emoji` | Broadcast world ping |
-| `CameraPresence` | peer cameras | Broadcast camera positions for avatars |
+| Message          | Fields                                                         | Purpose                                     |
+| ---------------- | -------------------------------------------------------------- | ------------------------------------------- |
+| `Welcome`        | `peer_id`, `snapshot`, `roster`, `avatar_names`, `avatar_data` | Initial state sync                          |
+| `WelcomeHeader`  | `total_bytes`                                                  | Progress hint for large snapshots           |
+| `Roster`         | `roster`                                                       | Updated peer list (broadcast on join/leave) |
+| `Edit`           | `peer_id`, `deltas`                                            | Broadcast voxel edits                       |
+| `Undo`           | `peer_id`                                                      | Broadcast undo                              |
+| `Redo`           | `peer_id`                                                      | Broadcast redo                              |
+| `Chat`           | `peer_id`, `display_name`, `text`, `ts_ms`                     | Broadcast chat message                      |
+| `Ping`           | `peer_id`, `x, y, z`, `display_name`, `emoji`                  | Broadcast world ping                        |
+| `CameraPresence` | peer cameras                                                   | Broadcast camera positions for avatars      |
 
 All messages are serialized as JSON via `serde_json`.
 
@@ -133,19 +133,19 @@ This ensures all peers converge on the same voxel state. The host is authoritati
 
 ## Async Primitives
 
-| Primitive | Usage |
-|-----------|-------|
-| `tokio::sync::broadcast` | Host → all clients (fan-out) |
-| `tokio::sync::mpsc` | Per-client send queue |
-| `tokio_util::sync::CancellationToken` | Graceful shutdown of host/client tasks |
-| `Mutex<VecDeque<CollabInboxItem>>` | Thread-safe edit inbox drained by the frame loop |
+| Primitive                             | Usage                                            |
+| ------------------------------------- | ------------------------------------------------ |
+| `tokio::sync::broadcast`              | Host → all clients (fan-out)                     |
+| `tokio::sync::mpsc`                   | Per-client send queue                            |
+| `tokio_util::sync::CancellationToken` | Graceful shutdown of host/client tasks           |
+| `Mutex<VecDeque<CollabInboxItem>>`    | Thread-safe edit inbox drained by the frame loop |
 
 ## Key Files
 
-| File | Responsibility |
-|------|---------------|
-| `src-tauri/src/collab.rs` | WebSocket server, client, message types, peer roster |
-| `src-tauri/src/state.rs` | `CollabRuntime`, `collab_edit_inbox` |
-| `src-tauri/src/frame_loop.rs` | Inbox draining, `process_inbox_items_batched()` |
-| `src-tauri/src/lib.rs` | `collab_host_start`, `collab_join` command wrappers |
-| `src/App.tsx` | Frontend collab UI, event listeners |
+| File                          | Responsibility                                       |
+| ----------------------------- | ---------------------------------------------------- |
+| `src-tauri/src/collab.rs`     | WebSocket server, client, message types, peer roster |
+| `src-tauri/src/state.rs`      | `CollabRuntime`, `collab_edit_inbox`                 |
+| `src-tauri/src/frame_loop.rs` | Inbox draining, `process_inbox_items_batched()`      |
+| `src-tauri/src/lib.rs`        | `collab_host_start`, `collab_join` command wrappers  |
+| `src/App.tsx`                 | Frontend collab UI, event listeners                  |

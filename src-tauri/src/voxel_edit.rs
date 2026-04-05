@@ -677,9 +677,7 @@ pub fn resolve_extrude_direction(
 
     let axis_sign_from_drag = |axis: Vec3| -> f32 {
         let d = raw.dot(axis);
-        if d.abs() < 1e-9 {
-            1.0
-        } else if d > 0.0 {
+        if d.abs() < 1e-9 || d > 0.0 {
             1.0
         } else {
             -1.0
@@ -980,9 +978,7 @@ pub fn remove_voxel_at_coord(
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
     coord: VoxelCoord,
 ) -> Option<VoxelEditDelta> {
-    let Some(&remove_idx) = voxel_map.get(&coord) else {
-        return None;
-    };
+    let remove_idx = *voxel_map.get(&coord)?;
     let removed_voxel = file.voxels[remove_idx];
     let last = file.voxels.len() - 1;
     if remove_idx != last {
@@ -1119,13 +1115,14 @@ pub fn flood_fill_empty_at_screen(
     while let Some(c) = queue.pop_front() {
         steps += 1;
         if steps.is_multiple_of(FILL_BFS_CANCEL_CHECK_INTERVAL)
-            && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-                return Ok(FloodFillEditOutcome {
-                    deltas: out,
-                    cancelled: true,
-                    hit_absolute_cap: false,
-                });
-            }
+            && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+        {
+            return Ok(FloodFillEditOutcome {
+                deltas: out,
+                cancelled: true,
+                hit_absolute_cap: false,
+            });
+        }
         if steps.is_multiple_of(FILL_BFS_PROGRESS_INTERVAL) {
             on_progress(out.len());
         }
@@ -1271,13 +1268,8 @@ pub fn connected_solid_same_color_from_screen(
 ) -> Option<Vec<VoxelCoord>> {
     let grid_size = effective_ray_grid_size(file);
     let (origin, dir) = screen_to_world_ray(camera, width, height, sx, sy);
-    let Some((hit, _, _oid)) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)
-    else {
-        return None;
-    };
-    let Some(&seed_idx) = voxel_map.get(&hit) else {
-        return None;
-    };
+    let (hit, _, _oid) = ray_first_solid_scene(origin, dir, file, voxel_map, grid_size)?;
+    let seed_idx = *voxel_map.get(&hit)?;
     let seed = file.voxels[seed_idx];
     let tc = seed.color;
     let tm = seed.material;
@@ -1632,10 +1624,7 @@ pub fn extend_with_mirror_targets(targets: &mut Vec<VoxelCoord>, mirror_axes: u8
 }
 
 /// Like [`extend_with_mirror_targets`] but for `(VoxelCoord, u32)` pairs (coord + color).
-pub fn extend_with_mirror_targets_colored(
-    targets: &mut Vec<(VoxelCoord, u32)>,
-    mirror_axes: u8,
-) {
+pub fn extend_with_mirror_targets_colored(targets: &mut Vec<(VoxelCoord, u32)>, mirror_axes: u8) {
     if mirror_axes == 0 {
         return;
     }
@@ -1983,7 +1972,9 @@ pub fn apply_edit(
                         }
                         file.voxels.pop();
                         voxel_map.remove(&(mx, my, mz));
-                        out.push(VoxelEditDelta::Removed { voxel: removed_voxel });
+                        out.push(VoxelEditDelta::Removed {
+                            voxel: removed_voxel,
+                        });
                     }
                 }
                 EditTool::Paint => {
@@ -2788,13 +2779,14 @@ pub fn flood_fill_selection_coords_with_control(
     while let Some(c) = queue.pop_front() {
         steps += 1;
         if steps.is_multiple_of(FILL_BFS_CANCEL_CHECK_INTERVAL)
-            && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
-                return FillCoordOutcome {
-                    coords: out,
-                    cancelled: true,
-                    hit_absolute_cap: false,
-                };
-            }
+            && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false)
+        {
+            return FillCoordOutcome {
+                coords: out,
+                cancelled: true,
+                hit_absolute_cap: false,
+            };
+        }
         if steps.is_multiple_of(FILL_BFS_PROGRESS_INTERVAL) {
             on_progress(out.len());
         }
@@ -2806,10 +2798,9 @@ pub fn flood_fill_selection_coords_with_control(
             continue;
         };
         let v = file.voxels[idx];
-        if respect_color
-            && (v.color != tc || (match_material && v.material != tm)) {
-                continue;
-            }
+        if respect_color && (v.color != tc || (match_material && v.material != tm)) {
+            continue;
+        }
         if out.len() >= FILL_ABSOLUTE_MAX_CELLS {
             return FillCoordOutcome {
                 coords: out,
@@ -2847,6 +2838,7 @@ pub fn flood_fill_selection_coords_with_control(
 
 /// Fast check: would an unconstrained solid flood from this pick exceed `threshold` cells?
 /// [`Err(())`] means the caller’s [`AtomicBool`] cancel flag was set (Escape / Cancel).
+#[allow(clippy::result_unit_err)] // Cancel uses `Err(())` sentinel; no further error detail needed.
 pub fn flood_fill_selection_region_exceeds_threshold(
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
@@ -2901,10 +2893,9 @@ pub fn flood_fill_selection_region_exceeds_threshold(
             continue;
         };
         let v = file.voxels[idx];
-        if respect_color
-            && (v.color != tc || (match_material && v.material != tm)) {
-                continue;
-            }
+        if respect_color && (v.color != tc || (match_material && v.material != tm)) {
+            continue;
+        }
         matched += 1;
         if matched > threshold {
             return Ok(true);
@@ -2934,6 +2925,7 @@ pub fn flood_fill_selection_region_exceeds_threshold(
 
 /// Fast check for empty-cell flood (add fill): would region exceed `threshold` empty cells?
 /// [`Err(())`] means cancel.
+#[allow(clippy::result_unit_err)]
 pub fn flood_fill_empty_region_exceeds_threshold(
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
@@ -3248,7 +3240,9 @@ fn column_max_y(
     z: i32,
 ) -> Option<i32> {
     let (y_lo, y_hi) = grid_valid_range(grid_size);
-    (y_lo..=y_hi).rev().find(|&y| voxel_map.contains_key(&(x, y, z)))
+    (y_lo..=y_hi)
+        .rev()
+        .find(|&y| voxel_map.contains_key(&(x, y, z)))
 }
 
 /// Particle-based hydraulic erosion on the local heightfield patch.
@@ -3265,7 +3259,7 @@ fn apply_terrain_erode(
     grid_size: i32,
     voxel_map: &AHashMap<VoxelCoord, usize>,
     base_y: i32,
-    new_heights: &mut Vec<i32>,
+    new_heights: &mut [i32],
 ) {
     const ERODE_K: f32 = 0.35;
     const DEPOSIT_K: f32 = 0.25;
@@ -3301,7 +3295,7 @@ fn apply_terrain_erode(
         falloffs.insert((x, z), terrain_brush_falloff(x, z, spine, brush_r_vox));
     }
 
-    let n_particles = ((strength * 4) as u32).max(1).min(512);
+    let n_particles = ((strength * 4) as u32).clamp(1, 512);
     let col_count = cols.len();
     if col_count == 0 {
         return;
@@ -3628,7 +3622,7 @@ fn filter_sculpt_footprint_stochastic(
     stroke_seed: u32,
 ) -> Vec<VoxelCoord> {
     let fall = (falloff_100.min(100) as f32) / 100.0;
-    let str = (strength_100.max(1).min(100) as f32) / 100.0;
+    let str = (strength_100.clamp(1, 100) as f32) / 100.0;
     if fall <= 1e-9 && str >= 1.0 - 1e-9 {
         return footprint;
     }
@@ -4233,10 +4227,9 @@ fn add_flat_cylinder_segment(
                 let wy = qy - ty * axial;
                 let wz = qz - tz * axial;
                 let perp2 = wx * wx + wy * wy + wz * wz;
-                if perp2 <= r2
-                    && seen.insert((x, y, z)) {
-                        out.push((x, y, z));
-                    }
+                if perp2 <= r2 && seen.insert((x, y, z)) {
+                    out.push((x, y, z));
+                }
             }
         }
     }
@@ -4281,10 +4274,9 @@ fn add_capsule_segment(
                 let dx = x as f32 - px;
                 let dy = y as f32 - py;
                 let dz = z as f32 - pz;
-                if dx * dx + dy * dy + dz * dz <= r2
-                    && seen.insert((x, y, z)) {
-                        out.push((x, y, z));
-                    }
+                if dx * dx + dy * dy + dz * dz <= r2 && seen.insert((x, y, z)) {
+                    out.push((x, y, z));
+                }
             }
         }
     }
@@ -4321,10 +4313,9 @@ fn add_disk_slab(
                 let px = wx - tx * axial;
                 let py = wy - ty * axial;
                 let pz = wz - tz * axial;
-                if px * px + py * py + pz * pz <= r2
-                    && seen.insert((x, y, z)) {
-                        out.push((x, y, z));
-                    }
+                if px * px + py * py + pz * pz <= r2 && seen.insert((x, y, z)) {
+                    out.push((x, y, z));
+                }
             }
         }
     }
@@ -4886,8 +4877,8 @@ pub fn apply_sculpt_stroke(
             let base_y = terrain_base_y;
             // terrain_strength comes from sculptBrushStrength (0–100 percent).
             // Map to a voxel delta range of 1–10 so that 100% ≈ 10 voxels/sample.
-            let strength = ((terrain_strength * 10 + 99) / 100).max(1).min(10);
-            let smooth_r = terrain_smooth_radius.max(0).min(8);
+            let strength = ((terrain_strength * 10 + 99) / 100).clamp(1, 10);
+            let smooth_r = terrain_smooth_radius.clamp(0, 8);
 
             let mut xz_map: AHashMap<(i32, i32), (i32, i32)> = AHashMap::new();
             for (x, y, z) in &footprint {
@@ -5115,9 +5106,7 @@ pub fn remove_voxel_at(
     voxel_map: &mut AHashMap<VoxelCoord, usize>,
     coord: VoxelCoord,
 ) -> Option<Voxel> {
-    let Some(&remove_idx) = voxel_map.get(&coord) else {
-        return None;
-    };
+    let remove_idx = *voxel_map.get(&coord)?;
     let removed_voxel = file.voxels[remove_idx];
     let last = file.voxels.len() - 1;
     if remove_idx != last {

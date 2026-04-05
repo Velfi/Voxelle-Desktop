@@ -448,9 +448,9 @@ pub fn generate_insecta_deltas(
     color: u32,
     material: MaterialId,
 ) -> Vec<VoxelEditDelta> {
-    let tl = total_length.max(3).min(80) as f32;
-    let bhw = body_half_width.max(1).min(20) as f32;
-    let bhh = body_half_height.max(1).min(20) as f32;
+    let tl = total_length.clamp(3, 80) as f32;
+    let bhw = body_half_width.clamp(1, 20) as f32;
+    let bhh = body_half_height.clamp(1, 20) as f32;
     let abdomen_taper = abdomen_taper.clamp(0.0, 1.0);
 
     // Normalize ratios

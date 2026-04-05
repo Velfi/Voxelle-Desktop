@@ -24,7 +24,9 @@ export function useAshlarGenerator(ctx: AshlarGeneratorContext): AshlarGenerator
   const ashlarThicknessRef = useRef(ashlarThickness);
   const ashlarPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
-  useEffect(() => { ashlarThicknessRef.current = ashlarThickness; }, [ashlarThickness]);
+  useEffect(() => {
+    ashlarThicknessRef.current = ashlarThickness;
+  }, [ashlarThickness]);
 
   const ashlarPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],
@@ -54,7 +56,9 @@ export function useAshlarGenerator(ctx: AshlarGeneratorContext): AshlarGenerator
   });
 
   return {
-    ashlarThickness, setAshlarThickness, ashlarThicknessRef,
+    ashlarThickness,
+    setAshlarThickness,
+    ashlarThicknessRef,
     ashlarPreviewSeedRef,
     ashlarPhase,
   };

@@ -187,7 +187,17 @@ export function useWalkMode({
       void invoke("set_walk_mode", { enabled: false }).catch(() => {});
       void releaseFlyMouseLook();
     };
-  }, [interactionMode, releaseFlyMouseLook, viewportRef, pollGamepad,
-      flyMouseLookActiveRef, keysDownRef, flyRafRef, flyLastClientRef,
-      flySkipNextFlyMoveRef, flyPendingLookDxRef, flyPendingLookDyRef]);
+  }, [
+    interactionMode,
+    releaseFlyMouseLook,
+    viewportRef,
+    pollGamepad,
+    flyMouseLookActiveRef,
+    keysDownRef,
+    flyRafRef,
+    flyLastClientRef,
+    flySkipNextFlyMoveRef,
+    flyPendingLookDxRef,
+    flyPendingLookDyRef,
+  ]);
 }

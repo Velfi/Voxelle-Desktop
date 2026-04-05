@@ -237,7 +237,9 @@ pub(crate) fn commit_voxel_edits(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(
+                collab::encode_client_edit_binary(&deltas),
+            ));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -365,10 +367,8 @@ pub(crate) fn stroke_preview_meshes_for_union(
         }
     }
     let shell_occ = greedy_mesh::filter_voxel_set_to_shell(&occupied);
-    let mut sorted: Vec<greedy_mesh::VoxelCoord> = shell_occ
-        .into_iter()
-        .chain(empty_only)
-        .collect();
+    let mut sorted: Vec<greedy_mesh::VoxelCoord> =
+        shell_occ.into_iter().chain(empty_only).collect();
     if sorted.is_empty() {
         return greedy_mesh::PreviewInstancedResult::empty();
     }
@@ -817,7 +817,10 @@ pub(crate) fn query_cuboid_plane_geometry(
 // ── Stroke end ─────────���────────────────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn voxel_stroke_end(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     *state.stroke_active.lock() = false;
     *state.extrude_ray_spine.lock() = None;
     *state.wall_stroke_face_snapped.lock() = None;
@@ -964,7 +967,9 @@ pub(crate) fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandl
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&buf)));
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(
+                collab::encode_client_edit_binary(&buf),
+            ));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1320,7 +1325,9 @@ pub(crate) async fn voxel_fill_at_screen(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(
+                collab::encode_client_edit_binary(&deltas),
+            ));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1720,7 +1727,9 @@ pub(crate) async fn voxel_edit_at_screen(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(
+                collab::encode_client_edit_binary(&deltas),
+            ));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1939,13 +1948,18 @@ pub(crate) fn perform_solo_voxel_redo(
 // ── Undo / redo commands ────────��───────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn voxel_undo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool, String> {
+pub(crate) fn voxel_undo(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<bool, String> {
     let cm = Arc::clone(&state.collab);
     {
         let mut c = cm.lock();
         if c.is_client() {
             if let Some(tx) = &c.client_tx {
-                let _ = tx.try_send(collab::ClientOutgoing::Text(serde_json::to_string(&collab::ClientToHost::Undo).unwrap()));
+                let _ = tx.try_send(collab::ClientOutgoing::Text(
+                    serde_json::to_string(&collab::ClientToHost::Undo).unwrap(),
+                ));
             }
             return Ok(true);
         }
@@ -2001,13 +2015,18 @@ pub(crate) fn voxel_undo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> 
 }
 
 #[tauri::command]
-pub(crate) fn voxel_redo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<bool, String> {
+pub(crate) fn voxel_redo(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<bool, String> {
     let cm = Arc::clone(&state.collab);
     {
         let mut c = cm.lock();
         if c.is_client() {
             if let Some(tx) = &c.client_tx {
-                let _ = tx.try_send(collab::ClientOutgoing::Text(serde_json::to_string(&collab::ClientToHost::Redo).unwrap()));
+                let _ = tx.try_send(collab::ClientOutgoing::Text(
+                    serde_json::to_string(&collab::ClientToHost::Redo).unwrap(),
+                ));
             }
             return Ok(true);
         }

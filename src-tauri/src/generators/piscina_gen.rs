@@ -541,9 +541,9 @@ pub fn generate_piscina_deltas(
     color: u32,
     material: MaterialId,
 ) -> Vec<VoxelEditDelta> {
-    let l = length.max(4).min(80);
-    let w = width_param.max(1).min(40);
-    let t = thickness.max(1).min(40);
+    let l = length.clamp(4, 80);
+    let w = width_param.clamp(1, 40);
+    let t = thickness.clamp(1, 40);
     let w_half = w as f32 / 2.0;
     let t_half = t as f32 / 2.0;
 

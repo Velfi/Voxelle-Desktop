@@ -172,19 +172,13 @@ pub fn mesh_buffers_to_glb(mesh: &MeshBuffers) -> Result<Vec<u8>, String> {
     out.extend_from_slice(&(bin_total as u32).to_le_bytes());
     out.extend_from_slice(b"BIN\0");
     out.extend_from_slice(pos_bytes);
-    for _ in 0..pos_pad {
-        out.push(0);
-    }
+    out.extend(std::iter::repeat_n(0u8, pos_pad));
     if has_normals {
         out.extend_from_slice(norm_bytes);
-        for _ in 0..norm_pad {
-            out.push(0);
-        }
+        out.extend(std::iter::repeat_n(0u8, norm_pad));
     }
     out.extend_from_slice(idx_bytes);
-    for _ in 0..idx_pad {
-        out.push(0);
-    }
+    out.extend(std::iter::repeat_n(0u8, idx_pad));
 
     Ok(out)
 }

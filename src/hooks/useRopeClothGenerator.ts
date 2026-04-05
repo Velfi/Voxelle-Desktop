@@ -68,9 +68,15 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
   const ropeBrushRadiusIndexRef = useRef(ropeBrushRadiusIndex);
   const ropeBrushShapeUiRef = useRef<"sphere" | "cube">(ropeBrushShapeUi);
 
-  useEffect(() => { clothGravityDirectionRef.current = clothGravityDirection; }, [clothGravityDirection]);
-  useEffect(() => { ropeBrushRadiusIndexRef.current = ropeBrushRadiusIndex; }, [ropeBrushRadiusIndex]);
-  useEffect(() => { ropeBrushShapeUiRef.current = ropeBrushShapeUi; }, [ropeBrushShapeUi]);
+  useEffect(() => {
+    clothGravityDirectionRef.current = clothGravityDirection;
+  }, [clothGravityDirection]);
+  useEffect(() => {
+    ropeBrushRadiusIndexRef.current = ropeBrushRadiusIndex;
+  }, [ropeBrushRadiusIndex]);
+  useEffect(() => {
+    ropeBrushShapeUiRef.current = ropeBrushShapeUi;
+  }, [ropeBrushShapeUi]);
 
   // -- Rope state -------------------------------------------------------------
   const [ropeFirstScreen, setRopeFirstScreen] = useState<{ nx: number; ny: number } | null>(null);
@@ -83,10 +89,18 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
   const ropeSagRef = useRef(ropeSag);
   const ropeTensionRef = useRef(ropeTension);
 
-  useEffect(() => { ropeFirstScreenRef.current = ropeFirstScreen; }, [ropeFirstScreen]);
-  useEffect(() => { ropeFirstVoxelRef.current = ropeFirstVoxel; }, [ropeFirstVoxel]);
-  useEffect(() => { ropeSagRef.current = ropeSag; }, [ropeSag]);
-  useEffect(() => { ropeTensionRef.current = ropeTension; }, [ropeTension]);
+  useEffect(() => {
+    ropeFirstScreenRef.current = ropeFirstScreen;
+  }, [ropeFirstScreen]);
+  useEffect(() => {
+    ropeFirstVoxelRef.current = ropeFirstVoxel;
+  }, [ropeFirstVoxel]);
+  useEffect(() => {
+    ropeSagRef.current = ropeSag;
+  }, [ropeSag]);
+  useEffect(() => {
+    ropeTensionRef.current = ropeTension;
+  }, [ropeTension]);
 
   // -- Cloth state ------------------------------------------------------------
   const [clothPins, setClothPins] = useState<[number, number, number][]>([]);
@@ -103,12 +117,24 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
   const clothSimIterationsRef = useRef(clothSimIterations);
   const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
 
-  useEffect(() => { clothPinsRef.current = clothPins; }, [clothPins]);
-  useEffect(() => { clothTensionRef.current = clothTension; }, [clothTension]);
-  useEffect(() => { clothSimGravityPctRef.current = clothSimGravityPct; }, [clothSimGravityPct]);
-  useEffect(() => { clothSimStiffnessPctRef.current = clothSimStiffnessPct; }, [clothSimStiffnessPct]);
-  useEffect(() => { clothSimIterationsRef.current = clothSimIterations; }, [clothSimIterations]);
-  useEffect(() => { clothSimConstraintPassesRef.current = clothSimConstraintPasses; }, [clothSimConstraintPasses]);
+  useEffect(() => {
+    clothPinsRef.current = clothPins;
+  }, [clothPins]);
+  useEffect(() => {
+    clothTensionRef.current = clothTension;
+  }, [clothTension]);
+  useEffect(() => {
+    clothSimGravityPctRef.current = clothSimGravityPct;
+  }, [clothSimGravityPct]);
+  useEffect(() => {
+    clothSimStiffnessPctRef.current = clothSimStiffnessPct;
+  }, [clothSimStiffnessPct]);
+  useEffect(() => {
+    clothSimIterationsRef.current = clothSimIterations;
+  }, [clothSimIterations]);
+  useEffect(() => {
+    clothSimConstraintPassesRef.current = clothSimConstraintPasses;
+  }, [clothSimConstraintPasses]);
 
   // -- Rope phase -------------------------------------------------------------
   const ropePhase = useStrokePhase<{
@@ -198,22 +224,47 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
 
   return {
     // Shared
-    clothGravityDirection, setClothGravityDirection, clothGravityDirectionRef,
-    ropeBrushRadiusIndex, setRopeBrushRadiusIndex, ropeBrushRadiusIndexRef,
-    ropeBrushShapeUi, setRopeBrushShapeUi, ropeBrushShapeUiRef,
+    clothGravityDirection,
+    setClothGravityDirection,
+    clothGravityDirectionRef,
+    ropeBrushRadiusIndex,
+    setRopeBrushRadiusIndex,
+    ropeBrushRadiusIndexRef,
+    ropeBrushShapeUi,
+    setRopeBrushShapeUi,
+    ropeBrushShapeUiRef,
     // Rope
-    ropeFirstScreen, setRopeFirstScreen, ropeFirstScreenRef,
-    ropeFirstVoxel, setRopeFirstVoxel, ropeFirstVoxelRef,
-    ropeSag, ropeSagRef,
-    ropeTension, setRopeTension, ropeTensionRef,
+    ropeFirstScreen,
+    setRopeFirstScreen,
+    ropeFirstScreenRef,
+    ropeFirstVoxel,
+    setRopeFirstVoxel,
+    ropeFirstVoxelRef,
+    ropeSag,
+    ropeSagRef,
+    ropeTension,
+    setRopeTension,
+    ropeTensionRef,
     ropePhase,
     // Cloth
-    clothPins, setClothPins, clothPinsRef,
-    clothTension, setClothTension, clothTensionRef,
-    clothSimGravityPct, setClothSimGravityPct, clothSimGravityPctRef,
-    clothSimStiffnessPct, setClothSimStiffnessPct, clothSimStiffnessPctRef,
-    clothSimIterations, setClothSimIterations, clothSimIterationsRef,
-    clothSimConstraintPasses, setClothSimConstraintPasses, clothSimConstraintPassesRef,
+    clothPins,
+    setClothPins,
+    clothPinsRef,
+    clothTension,
+    setClothTension,
+    clothTensionRef,
+    clothSimGravityPct,
+    setClothSimGravityPct,
+    clothSimGravityPctRef,
+    clothSimStiffnessPct,
+    setClothSimStiffnessPct,
+    clothSimStiffnessPctRef,
+    clothSimIterations,
+    setClothSimIterations,
+    clothSimIterationsRef,
+    clothSimConstraintPasses,
+    setClothSimConstraintPasses,
+    clothSimConstraintPassesRef,
     clothPhase,
     handleClothPinClick,
   };

@@ -31,11 +31,11 @@ pub fn squishy_metaball_at_screen(
     else {
         return Ok(Vec::new());
     };
-    let r = radius.max(2).min(10) as f32;
+    let r = radius.clamp(2, 10) as f32;
     let cx = anchor.0 as f32 + 0.5;
     let cy = anchor.1 as f32 + 0.5;
     let cz = anchor.2 as f32 + 0.5;
-    let ri = radius.max(2).min(10);
+    let ri = radius.clamp(2, 10);
     let threshold = 1.15_f32;
     let mut out = Vec::new();
     let mut seen: HashSet<VoxelCoord> = HashSet::new();

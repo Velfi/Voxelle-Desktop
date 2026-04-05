@@ -190,12 +190,24 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
         let mut min_z = i32::MAX;
         let mut max_z = i32::MIN;
         for &(x, y, z) in sel.iter() {
-            if x < min_x { min_x = x; }
-            if x > max_x { max_x = x; }
-            if y < min_y { min_y = y; }
-            if y > max_y { max_y = y; }
-            if z < min_z { min_z = z; }
-            if z > max_z { max_z = z; }
+            if x < min_x {
+                min_x = x;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+            if z < min_z {
+                min_z = z;
+            }
+            if z > max_z {
+                max_z = z;
+            }
         }
         drop(sel);
         glam::Vec3::new(
@@ -308,7 +320,13 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
             // Extrude style: thicker shaft + sphere ball tip
             let ball_r = cone_r * 1.6;
             let ball_center = tip;
-            quad(&mut lv, pivot, ball_center - dir * ball_r, shaft_hw * 1.6, col);
+            quad(
+                &mut lv,
+                pivot,
+                ball_center - dir * ball_r,
+                shaft_hw * 1.6,
+                col,
+            );
             const N_LON: usize = 8;
             const N_LAT: usize = 6;
             for lat in 0..N_LAT {
@@ -319,9 +337,7 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
                     let p1 = (lon + 1) as f32 * 2.0 * std::f32::consts::PI / N_LON as f32;
                     let sph = |t: f32, p: f32| -> glam::Vec3 {
                         ball_center
-                            + (u * (t.sin() * p.cos())
-                                + v_ax * (t.sin() * p.sin())
-                                + dir * t.cos())
+                            + (u * (t.sin() * p.cos()) + v_ax * (t.sin() * p.sin()) + dir * t.cos())
                                 * ball_r
                     };
                     let (a, b, c, d) = (sph(t0, p0), sph(t0, p1), sph(t1, p0), sph(t1, p1));
@@ -379,7 +395,7 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
     if let Some(radius) = *state.generator_gizmo_ring_radius.lock() {
         const RING_N: usize = 32;
         let ring_col = [1.0_f32, 0.7, 0.2]; // orange/gold
-        // Camera-facing ring: use view-space right/up as the ring plane.
+                                            // Camera-facing ring: use view-space right/up as the ring plane.
         let cam_right = inv_view.x_axis.truncate().normalize();
         let cam_up = inv_view.y_axis.truncate().normalize();
         let r = radius.max(dist * 0.015); // minimum screen size
@@ -419,9 +435,9 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
             };
             let tip = pivot + dir * arm;
             let (vw, vh) = viewer.viewport_size();
-            if let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(
-                cam, vw as f32, vh as f32, tip.x, tip.y, tip.z,
-            ) {
+            if let Some((sx, sy)) =
+                voxel_edit::world_to_viewport_pixels(cam, vw as f32, vh as f32, tip.x, tip.y, tip.z)
+            {
                 viewer.upload_gizmo_delta_label(Some(GpuPeerLabel {
                     name: text,
                     color_rgb: 0x9FD8FF,
@@ -547,7 +563,11 @@ pub(crate) fn lerp_presence(
 }
 
 /// Build screen-space peer labels and upload to the GPU renderer (replaces IPC polling).
-pub(crate) fn sync_collab_peer_labels(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
+pub(crate) fn sync_collab_peer_labels(
+    viewer: &mut WgpuViewer,
+    state: &ViewerState,
+    cam: &OrbitCamera,
+) {
     let (w, h) = {
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
@@ -589,7 +609,11 @@ pub(crate) fn sync_collab_peer_labels(viewer: &mut WgpuViewer, state: &ViewerSta
     viewer.upload_peer_labels(labels);
 }
 
-pub(crate) fn sync_collab_peer_avatars(viewer: &mut WgpuViewer, state: &Arc<ViewerState>, cam: &crate::camera::OrbitCamera) {
+pub(crate) fn sync_collab_peer_avatars(
+    viewer: &mut WgpuViewer,
+    state: &Arc<ViewerState>,
+    cam: &crate::camera::OrbitCamera,
+) {
     const SMOOTH_T: f32 = 0.12;
 
     let (local_id, roster, presence, avatar_names, avatar_data) = {
@@ -653,10 +677,7 @@ pub(crate) fn sync_collab_peer_avatars(viewer: &mut WgpuViewer, state: &Arc<View
             continue;
         }
 
-        let avatar_name = avatar_names
-            .get(&pid)
-            .cloned()
-            .unwrap_or_default();
+        let avatar_name = avatar_names.get(&pid).cloned().unwrap_or_default();
 
         // Tint: peer accent color for default glow dot; neutral white for named avatars.
         let tint = if avatar_name.is_empty() {
@@ -705,19 +726,29 @@ pub(crate) fn sync_collab_peer_avatars(viewer: &mut WgpuViewer, state: &Arc<View
         // Extract rotation columns for the normal matrix (std140: each column padded to vec4).
         // Columns match the rot matrix: [right, up, -forward].
         let rot_cols = [
-            [right.x,    right.y,    right.z,    0.0],
-            [up.x,       up.y,       up.z,       0.0],
+            [right.x, right.y, right.z, 0.0],
+            [up.x, up.y, up.z, 0.0],
             [-forward.x, -forward.y, -forward.z, 0.0],
         ];
 
-        viewer.update_avatar_peer(pid, avatar_name.clone(), mvp.to_cols_array_2d(), tint, rot_cols);
+        viewer.update_avatar_peer(
+            pid,
+            avatar_name.clone(),
+            mvp.to_cols_array_2d(),
+            tint,
+            rot_cols,
+        );
 
         // If the named mesh isn't cached yet, kick off a background load.
         if !avatar_name.is_empty() && !viewer.avatar_mesh_cache.contains_key(&avatar_name) {
             if super::embedded_avatar_bytes(&avatar_name).is_some() {
                 super::spawn_load_avatar_mesh(Arc::clone(state), &avatar_name);
             } else if let Some(bytes) = avatar_data.get(&avatar_name) {
-                super::spawn_load_avatar_from_bytes(Arc::clone(state), avatar_name.clone(), bytes.clone());
+                super::spawn_load_avatar_from_bytes(
+                    Arc::clone(state),
+                    avatar_name.clone(),
+                    bytes.clone(),
+                );
             }
         }
     }

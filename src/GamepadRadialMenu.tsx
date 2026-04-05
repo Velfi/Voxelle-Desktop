@@ -11,12 +11,7 @@ interface Props {
   title?: string;
 }
 
-export default function GamepadRadialMenu({
-  visible,
-  slices,
-  selectedIndex,
-  title,
-}: Props) {
+export default function GamepadRadialMenu({ visible, slices, selectedIndex, title }: Props) {
   if (!visible || slices.length === 0) return null;
 
   return (
@@ -78,14 +73,9 @@ export default function GamepadRadialMenu({
               alignItems: "center",
               justifyContent: "center",
               borderRadius: "50%",
-              background: isSelected
-                ? "rgba(255,255,255,0.22)"
-                : "rgba(255,255,255,0.06)",
-              border: isSelected
-                ? "2px solid rgba(255,255,255,0.5)"
-                : "2px solid transparent",
-              transition:
-                "background 0.1s ease, border 0.1s ease, transform 0.1s ease",
+              background: isSelected ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.06)",
+              border: isSelected ? "2px solid rgba(255,255,255,0.5)" : "2px solid transparent",
+              transition: "background 0.1s ease, border 0.1s ease, transform 0.1s ease",
               transform: isSelected ? "scale(1.15)" : "scale(1)",
               pointerEvents: "none",
               userSelect: "none",
@@ -95,9 +85,7 @@ export default function GamepadRadialMenu({
             <span
               style={{
                 fontSize: 9,
-                color: isSelected
-                  ? "rgba(255,255,255,0.9)"
-                  : "rgba(255,255,255,0.6)",
+                color: isSelected ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.6)",
                 marginTop: 2,
                 fontWeight: isSelected ? 700 : 400,
                 whiteSpace: "nowrap",

@@ -98,12 +98,16 @@ mod tests {
 
     #[test]
     fn visible_voxels_for_meshing_respects_hidden_and_is_object_visible() {
-        let mut a = SceneObject::default();
-        a.id = 1;
-        a.visible = false;
-        let mut b = SceneObject::default();
-        b.id = 2;
-        b.visible = true;
+        let a = SceneObject {
+            id: 1,
+            visible: false,
+            ..Default::default()
+        };
+        let b = SceneObject {
+            id: 2,
+            visible: true,
+            ..Default::default()
+        };
         let objects = vec![a, b];
         let voxels = vec![
             Voxel {
@@ -140,9 +144,11 @@ mod tests {
 
     #[test]
     fn visible_voxels_for_meshing_keeps_legacy_voxels_when_object_id_not_in_list() {
-        let mut o = SceneObject::default();
-        o.id = 1;
-        o.visible = true;
+        let o = SceneObject {
+            id: 1,
+            visible: true,
+            ..Default::default()
+        };
         let objects = vec![o];
         let voxels = vec![Voxel {
             x: 0,
@@ -159,12 +165,16 @@ mod tests {
 
     #[test]
     fn matrices_by_id_matches_legacy_per_id() {
-        let mut a = SceneObject::default();
-        a.id = 0;
-        let mut b = SceneObject::default();
-        b.id = 1;
-        b.parent_id = Some(0);
-        b.translation = [1.0, 0.0, 0.0];
+        let a = SceneObject {
+            id: 0,
+            ..Default::default()
+        };
+        let b = SceneObject {
+            id: 1,
+            parent_id: Some(0),
+            translation: [1.0, 0.0, 0.0],
+            ..Default::default()
+        };
         let objects = vec![a, b];
         let map = object_world_matrices_by_id(&objects);
         for o in &objects {

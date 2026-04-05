@@ -1,0 +1,4 @@
+# CI runs `cargo clippy ... -D warnings`. Relax thresholds that are noisy for this
+# codebase (many Tauri command handlers and mesh pipelines naturally have long arg lists).
+too-many-arguments-threshold = 50
+type-complexity-threshold = 600

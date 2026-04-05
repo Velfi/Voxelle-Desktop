@@ -191,76 +191,75 @@ pub(crate) fn create_bind_group_layouts(device: &wgpu::Device) -> BindGroupLayou
         ],
     });
 
-    let post_composite_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("post_composite"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
+    let post_composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("post_composite"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
+                count: None,
+            },
+            // depth texture for world-space mood effects
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                // depth texture for world-space mood effects
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                count: None,
+            },
+            // GlobalState (storage) for camera matrices
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                    count: None,
-                },
-                // GlobalState (storage) for camera matrices
-                wgpu::BindGroupLayoutEntry {
-                    binding: 6,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
+                count: None,
+            },
+        ],
+    });
 
     BindGroupLayouts {
         scene_layout0,
@@ -394,41 +393,40 @@ pub(crate) fn create_scene_pipelines(
             cache: None,
         });
 
-    let pipeline_preview_front =
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("preview_front"),
-            layout: Some(&pl_opaque),
-            vertex: wgpu::VertexState {
-                module: &shader_scene,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_layout()],
-                compilation_options: Default::default(),
+    let pipeline_preview_front = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("preview_front"),
+        layout: Some(&pl_opaque),
+        vertex: wgpu::VertexState {
+            module: &shader_scene,
+            entry_point: Some("vs_main"),
+            buffers: &[vertex_layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_scene,
+            entry_point: Some("fs_preview_front_mrt"),
+            targets: preview_targets,
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: false,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState {
+                constant: -2,
+                slope_scale: -0.5,
+                clamp: 0.0,
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_scene,
-                entry_point: Some("fs_preview_front_mrt"),
-                targets: preview_targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: -2,
-                    slope_scale: -0.5,
-                    clamp: 0.0,
-                },
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
 
     let pipeline_preview_front_wire =
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1080,20 +1078,19 @@ pub(crate) fn create_avatar_pipeline(device: &wgpu::Device) -> AvatarPipeline {
         source: wgpu::ShaderSource::Wgsl(gpu::avatar::WGSL.into()),
     });
 
-    let avatar_bind_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("avatar_uniform"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+    let avatar_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("avatar_uniform"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
     let avatar_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("avatar"),
         bind_group_layouts: &[&avatar_bind_layout],
@@ -1216,28 +1213,27 @@ pub(crate) fn create_sky_pipelines(
         label: Some("start_screen_bg"),
         source: wgpu::ShaderSource::Wgsl(gpu::start_screen_bg::WGSL.into()),
     });
-    let pipeline_start_screen_bg =
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("start_screen_bg"),
-            layout: Some(&pl_opaque),
-            vertex: wgpu::VertexState {
-                module: &shader_start_screen_bg,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_start_screen_bg,
-                entry_point: Some("fs_start_screen_mrt"),
-                targets: mrt_targets,
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: sky_depth,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+    let pipeline_start_screen_bg = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("start_screen_bg"),
+        layout: Some(&pl_opaque),
+        vertex: wgpu::VertexState {
+            module: &shader_start_screen_bg,
+            entry_point: Some("vs_fullscreen"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_start_screen_bg,
+            entry_point: Some("fs_start_screen_mrt"),
+            targets: mrt_targets,
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: sky_depth,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
 
     SkyPipelines {
         pipeline_sky,
@@ -1345,89 +1341,87 @@ pub(crate) fn create_oit_pipelines(
         label: Some("oit_composite"),
         source: wgpu::ShaderSource::Wgsl(gpu::oit_composite::WGSL.into()),
     });
-    let oit_composite_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("oit_composite"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
+    let oit_composite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("oit_composite"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
                 },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        multisampled: false,
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                    },
-                    count: None,
-                },
-            ],
-        });
+                count: None,
+            },
+        ],
+    });
     let pl_oit_composite = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("pl_oit_composite"),
         bind_group_layouts: &[&oit_composite_layout],
         push_constant_ranges: &[],
     });
-    let pipeline_oit_composite =
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("oit_composite"),
-            layout: Some(&pl_oit_composite),
-            vertex: wgpu::VertexState {
-                module: &shader_oit_composite,
-                entry_point: Some("vs_fullscreen"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_oit_composite,
-                entry_point: Some("fs_oit_composite"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: vf,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+    let pipeline_oit_composite = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("oit_composite"),
+        layout: Some(&pl_oit_composite),
+        vertex: wgpu::VertexState {
+            module: &shader_oit_composite,
+            entry_point: Some("vs_fullscreen"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_oit_composite,
+            entry_point: Some("fs_oit_composite"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: vf,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
 
     OitPipelines {
         pipeline_oit_accum,
@@ -1550,8 +1544,14 @@ pub(crate) fn create_post_pipelines(
         write_mask: wgpu::ColorWrites::ALL,
     })];
 
-    let pipeline_bloom_extract =
-        fullscreen_pipeline(device, &pl_blur, &shader_bloom_ex, "fs_bloom_extract", hdr_target, None);
+    let pipeline_bloom_extract = fullscreen_pipeline(
+        device,
+        &pl_blur,
+        &shader_bloom_ex,
+        "fs_bloom_extract",
+        hdr_target,
+        None,
+    );
     let pipeline_blur =
         fullscreen_pipeline(device, &pl_blur, &shader_blur, "fs_blur", hdr_target, None);
     let pipeline_blit =
@@ -1841,20 +1841,19 @@ pub(crate) fn create_mascot_pipeline(
     device: &wgpu::Device,
     sdr_format: wgpu::TextureFormat,
 ) -> MascotPipelineResult {
-    let mascot_bind_layout =
-        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mascot_uniform"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+    let mascot_bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mascot_uniform"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
     let mascot_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("mascot"),
         bind_group_layouts: &[&mascot_bind_layout],
@@ -1930,46 +1929,44 @@ pub(crate) fn create_speech_bubble_pipeline(
                 count: None,
             }],
         });
-    let speech_bubble_pl_layout =
-        device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("speech_bubble"),
-            bind_group_layouts: &[&speech_bubble_bind_layout],
-            push_constant_ranges: &[],
-        });
+    let speech_bubble_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("speech_bubble"),
+        bind_group_layouts: &[&speech_bubble_bind_layout],
+        push_constant_ranges: &[],
+    });
     let shader_speech_bubble = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("speech_bubble"),
         source: wgpu::ShaderSource::Wgsl(gpu::speech_bubble::WGSL.into()),
     });
-    let speech_bubble_pipeline =
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("speech_bubble"),
-            layout: Some(&speech_bubble_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &shader_speech_bubble,
-                entry_point: Some("vs_bubble"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader_speech_bubble,
-                entry_point: Some("fs_bubble"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: sdr_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+    let speech_bubble_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("speech_bubble"),
+        layout: Some(&speech_bubble_pl_layout),
+        vertex: wgpu::VertexState {
+            module: &shader_speech_bubble,
+            entry_point: Some("vs_bubble"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader_speech_bubble,
+            entry_point: Some("fs_bubble"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: sdr_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    });
 
     SpeechBubblePipelineResult {
         speech_bubble_pipeline,

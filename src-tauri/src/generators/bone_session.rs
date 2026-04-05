@@ -253,10 +253,9 @@ fn ray_capsule_intersect(o: Vec3, d: Vec3, a: Vec3, b: Vec3, r: f32) -> Option<f
 
     let mut best: Option<f32> = None;
     let mut consider = |t: f32| {
-        if t >= 0.0
-            && best.map(|bt| t < bt).unwrap_or(true) {
-                best = Some(t);
-            }
+        if t >= 0.0 && best.map(|bt| t < bt).unwrap_or(true) {
+            best = Some(t);
+        }
     };
 
     // Cylinder body
@@ -403,7 +402,10 @@ pub fn min_grid_size_for_joints(joints: &[Joint], current_gs: i32) -> i32 {
             .max((j.z.round() as i32 + r_pad).abs());
     }
     let need = (2 * (max_abs + 1)).max(1);
-    current_gs.max(1).max(need).min(crate::voxel_edit::MAX_GRID_SIZE)
+    current_gs
+        .max(1)
+        .max(need)
+        .min(crate::voxel_edit::MAX_GRID_SIZE)
 }
 
 /// Generate voxel coordinates for the entire armature (capsule fills along bones,

@@ -59,8 +59,8 @@ mod gpu {
 }
 
 mod mood;
-pub use mood::MoodParams;
 use mood::hex_to_linear_rgb;
+pub use mood::MoodParams;
 
 mod uniforms;
 use uniforms::*;
@@ -70,8 +70,8 @@ pub use speech_bubble_impl::SpeechBubble;
 
 mod mesh_upload;
 pub(crate) use mesh_upload::{
-    compute_greedy_rebuild_cpu, OpaqueChunkDraw, PreparedGreedyRebuild,
-    PreparedOpaqueUpload, RemeshOpaquePerf,
+    compute_greedy_rebuild_cpu, OpaqueChunkDraw, PreparedGreedyRebuild, PreparedOpaqueUpload,
+    RemeshOpaquePerf,
 };
 
 mod mesh_greedy;
@@ -144,11 +144,6 @@ fn debug_log(hypothesis_id: &str, location: &str, message: &str, data: serde_jso
         let _ = writeln!(f, "{}", payload);
     }
 }
-
-
-
-
-
 
 pub struct WgpuViewer {
     pub(crate) surface: wgpu::Surface<'static>,
@@ -508,13 +503,6 @@ pub struct WgpuViewer {
     pub(crate) speech_bubble_glyphon_viewport: GlyphonViewport,
 }
 
-
-
-
-
-
-
-
 /// Uses [`Mat4::orthographic_rh`], which glam documents as \([0,1]\) depth for WebGPU (do not apply an extra OpenGL→wgpu Z remap).
 fn light_view_proj(bounds: &MeshBounds, light_dir: Vec3) -> Mat4 {
     let center = bounds.center();
@@ -555,8 +543,6 @@ fn preview_hdr_blend() -> wgpu::BlendState {
         },
     }
 }
-
-
 
 impl WgpuViewer {
     pub async fn new(window: impl wgpu::WindowHandle + 'static) -> Result<Self, String> {
@@ -628,10 +614,11 @@ impl WgpuViewer {
         // WebGPU defaults cap a single storage buffer at 128 MiB; GPU greedy mesh scratch can exceed that.
         // Ask for the adapter maximum so large scenes can still use the compute path when hardware allows.
         let adapter_limits = adapter.limits();
-        let mut required_limits = wgpu::Limits::default();
-        required_limits.max_storage_buffer_binding_size =
-            adapter_limits.max_storage_buffer_binding_size;
-        required_limits.max_buffer_size = adapter_limits.max_buffer_size;
+        let required_limits = wgpu::Limits {
+            max_storage_buffer_binding_size: adapter_limits.max_storage_buffer_binding_size,
+            max_buffer_size: adapter_limits.max_buffer_size,
+            ..Default::default()
+        };
 
         let (device, queue) = adapter
             .request_device(
@@ -729,7 +716,6 @@ impl WgpuViewer {
             pipeline_gizmo_lines_always,
             pipeline_gizmo_tris_always,
         } = create_overlay_pipelines(&device, &scene_layout0);
-
 
         let AvatarPipeline {
             pipeline_avatar,
@@ -2026,7 +2012,6 @@ impl WgpuViewer {
         }
     }
 
-
     pub fn set_start_screen_transparent(&mut self, v: bool) {
         self.start_screen_transparent = v;
     }
@@ -2511,7 +2496,6 @@ impl WgpuViewer {
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         (tex, view)
     }
-
 }
 
 #[cfg(test)]

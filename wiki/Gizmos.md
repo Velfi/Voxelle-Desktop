@@ -4,12 +4,12 @@ Voxelle Desktop has four gizmos for manipulating objects, selections, and the ca
 
 ## Overview
 
-| Gizmo | Purpose | Handles | Activation |
-|-------|---------|---------|------------|
-| [Selection](#selection-gizmo) | Translate + rotate selected voxels | 6 arrows + 3 rotation rings | Any mode except Extrude |
-| [Extrude](#extrude-gizmo) | Extend/retract selection along an axis | 6 arrows | Extrude mode only |
-| [Squishy](#squishy-gizmo) | Move/scale metaballs | 3 arrows + 1 scale handle per ball | Squishy edit mode |
-| [Orbit](#orbit-gizmo) | Control camera angles | 6 axis indicators + edge band | Always visible in HUD |
+| Gizmo                         | Purpose                                | Handles                            | Activation              |
+| ----------------------------- | -------------------------------------- | ---------------------------------- | ----------------------- |
+| [Selection](#selection-gizmo) | Translate + rotate selected voxels     | 6 arrows + 3 rotation rings        | Any mode except Extrude |
+| [Extrude](#extrude-gizmo)     | Extend/retract selection along an axis | 6 arrows                           | Extrude mode only       |
+| [Squishy](#squishy-gizmo)     | Move/scale metaballs                   | 3 arrows + 1 scale handle per ball | Squishy edit mode       |
+| [Orbit](#orbit-gizmo)         | Control camera angles                  | 6 axis indicators + edge band      | Always visible in HUD   |
 
 ## Gesture Priority
 
@@ -49,22 +49,24 @@ The main transform gizmo. Appears when voxels are selected (outside of Extrude m
 
 ### Tauri Commands
 
-| Command | Purpose |
-|---------|---------|
-| `gizmo_pointer_down` | Hit-test arrows and rings; returns `true` if a handle was hit |
+| Command              | Purpose                                                             |
+| -------------------- | ------------------------------------------------------------------- |
+| `gizmo_pointer_down` | Hit-test arrows and rings; returns `true` if a handle was hit       |
 | `gizmo_pointer_move` | Accumulate screen-space delta into voxel translation/rotation steps |
-| `gizmo_pointer_up` | Commit the transform (apply pending dx/dy/dz or rotation) |
-| `gizmo_hit_test` | Hover feedback — stores which axis (0=X, 1=Y, 2=Z, 255=none) |
+| `gizmo_pointer_up`   | Commit the transform (apply pending dx/dy/dz or rotation)           |
+| `gizmo_hit_test`     | Hover feedback — stores which axis (0=X, 1=Y, 2=Z, 255=none)        |
 
 ### Drag Mechanics
 
 **Translation:**
+
 1. On pointer-down, the hit arrow's world axis is projected to screen space → `axis_sx, axis_sy`.
 2. Each pointer-move accumulates screen pixels along that projected direction.
 3. When `accum` exceeds `step_threshold` (DPR-adjusted CSS pixels), a voxel step is queued.
 4. On pointer-up, pending steps (`pending_dx/dy/dz`) are committed as a voxel edit.
 
 **Rotation:**
+
 1. On pointer-down, the hit ring's tangent at the click point is projected to screen space.
 2. Pointer-move accumulates pixels along the tangent direction.
 3. Each threshold crossing triggers a 90° rotation step.
@@ -90,12 +92,12 @@ Simpler variant of the Selection Gizmo — arrows only, no rotation rings. Activ
 
 ### Tauri Commands
 
-| Command | Purpose |
-|---------|---------|
-| `extrude_gizmo_pointer_down` | Hit-test arrows; returns `true` if hit |
+| Command                      | Purpose                                                                              |
+| ---------------------------- | ------------------------------------------------------------------------------------ |
+| `extrude_gizmo_pointer_down` | Hit-test arrows; returns `true` if hit                                               |
 | `extrude_gizmo_pointer_move` | Accumulate delta, call `extrude_gizmo_preview_inner()` with current color + material |
-| `extrude_gizmo_pointer_up` | Update base depth for next drag |
-| `extrude_gizmo_hit_test` | Hover feedback (axis 0–2, 255=none) |
+| `extrude_gizmo_pointer_up`   | Update base depth for next drag                                                      |
+| `extrude_gizmo_hit_test`     | Hover feedback (axis 0–2, 255=none)                                                  |
 
 ### Drag Mechanics
 
@@ -120,20 +122,20 @@ Manipulates individual metaballs in the Squishy procedural generator.
 
 Each selected metaball gets 4 handles:
 
-| Handle | Color | Direction | Action |
-|--------|-------|-----------|--------|
-| `MoveX` | Red | X axis | Translate along X |
-| `MoveY` | Green | Y axis | Translate along Y |
-| `MoveZ` | Blue | Z axis | Translate along Z |
+| Handle  | Color | Direction        | Action               |
+| ------- | ----- | ---------------- | -------------------- |
+| `MoveX` | Red   | X axis           | Translate along X    |
+| `MoveY` | Green | Y axis           | Translate along Y    |
+| `MoveZ` | Blue  | Z axis           | Translate along Z    |
 | `Scale` | White | Diagonal (1,1,1) | Uniform radius scale |
 
 ### Tauri Commands
 
-| Command | Purpose |
-|---------|---------|
-| `squishy_gizmo_pointer_down` | Hit-test + initialize drag plane |
+| Command                      | Purpose                                                  |
+| ---------------------------- | -------------------------------------------------------- |
+| `squishy_gizmo_pointer_down` | Hit-test + initialize drag plane                         |
 | `squishy_gizmo_pointer_move` | Ray-plane intersection → update metaball position/radius |
-| `squishy_gizmo_pointer_up` | Clear drag state |
+| `squishy_gizmo_pointer_up`   | Clear drag state                                         |
 
 ### Drag Mechanics
 
@@ -168,22 +170,22 @@ An always-visible camera control widget in the top-left corner of the viewport (
 
 ### Interactions
 
-| Action | Behavior |
-|--------|----------|
-| Click axis label | Snap camera to that cardinal view (`camera_snap_orbit_axis`) |
-| Drag center | Full orbit rotation (`camera_orbit_gizmo_drag` with `thetaOnly: false`) |
-| Drag edge band | Azimuth-only rotation (`camera_orbit_gizmo_drag` with `thetaOnly: true`) |
+| Action           | Behavior                                                                 |
+| ---------------- | ------------------------------------------------------------------------ |
+| Click axis label | Snap camera to that cardinal view (`camera_snap_orbit_axis`)             |
+| Drag center      | Full orbit rotation (`camera_orbit_gizmo_drag` with `thetaOnly: false`)  |
+| Drag edge band   | Azimuth-only rotation (`camera_orbit_gizmo_drag` with `thetaOnly: true`) |
 
 ### Tauri Commands
 
-| Command | Purpose |
-|---------|---------|
+| Command                      | Purpose                                               |
+| ---------------------------- | ----------------------------------------------------- |
 | `get_orbit_gizmo_projection` | Returns 6 projected screen positions (called ~60 fps) |
-| `camera_snap_orbit_axis` | Snap to axis-aligned view (axis 0–5) |
-| `camera_orbit_gizmo_drag` | Apply rotation delta |
-| `camera_zoom_step` | Zoom in/out |
-| `camera_fit_to_scene` | Frame all content |
-| `camera_reset_view` | Reset to default viewpoint |
+| `camera_snap_orbit_axis`     | Snap to axis-aligned view (axis 0–5)                  |
+| `camera_orbit_gizmo_drag`    | Apply rotation delta                                  |
+| `camera_zoom_step`           | Zoom in/out                                           |
+| `camera_fit_to_scene`        | Frame all content                                     |
+| `camera_reset_view`          | Reset to default viewpoint                            |
 
 ### Rendering
 
@@ -195,9 +197,9 @@ Drawn entirely in a Canvas 2D overlay — not part of the GPU pipeline. The 3D a
 
 ### `gizmoOnTop` Preference
 
-| Setting | Behavior |
-|---------|----------|
-| `true` (default) | Gizmo renders on top of all geometry, ignoring depth |
-| `false` | Gizmo respects depth testing and can be occluded by voxels |
+| Setting          | Behavior                                                   |
+| ---------------- | ---------------------------------------------------------- |
+| `true` (default) | Gizmo renders on top of all geometry, ignoring depth       |
+| `false`          | Gizmo respects depth testing and can be occluded by voxels |
 
 Set via the `set_gizmo_on_top` Tauri command. Stored in `WgpuViewer.gizmo_on_top`.

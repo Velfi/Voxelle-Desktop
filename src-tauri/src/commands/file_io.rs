@@ -214,7 +214,10 @@ fn unsaved_autosave_anchor_path(app: &AppHandle) -> Result<PathBuf, String> {
 /// Logical document path for autosave keys and rotation. Saved projects use the real file path;
 /// unsaved labels (e.g. `New project (…)`) use a stable app-local anchor so backups work before
 /// "Save As…".
-pub(crate) fn autosave_document_path_for_label(app: &AppHandle, label: &str) -> Result<PathBuf, String> {
+pub(crate) fn autosave_document_path_for_label(
+    app: &AppHandle,
+    label: &str,
+) -> Result<PathBuf, String> {
     if label.ends_with(".voxelle") {
         Ok(PathBuf::from(label))
     } else {
@@ -225,7 +228,11 @@ pub(crate) fn autosave_document_path_for_label(app: &AppHandle, label: &str) -> 
 /// `file_label` after restoring from the unsaved-work autosave bucket (not a real on-disk project path).
 const ONGOING_UNSAVED_PROJECT_LABEL: &str = "An unsaved project";
 
-pub(crate) fn try_initial_autosave_after_new_project(app: &AppHandle, state: &Arc<ViewerState>, label: &str) {
+pub(crate) fn try_initial_autosave_after_new_project(
+    app: &AppHandle,
+    state: &Arc<ViewerState>,
+    label: &str,
+) {
     let enabled = *state.autosave_enabled.lock();
     let interval = *state.autosave_interval_secs.lock();
     if !enabled || interval == 0 {
@@ -382,12 +389,7 @@ pub(crate) fn load_voxelle_recovery(
     }
     *state.file_label.lock() = args.document_path.clone();
     let _ = app.emit("voxelle-load-start", args.document_path.clone());
-    spawn_decode_and_mesh_with_label(
-        Arc::clone(&*state),
-        app,
-        read_from,
-        args.document_path,
-    );
+    spawn_decode_and_mesh_with_label(Arc::clone(&*state), app, read_from, args.document_path);
     Ok(())
 }
 
@@ -410,7 +412,10 @@ pub(crate) fn load_voxelle_path(
 // ── Tauri commands: save ────────────────────────────────────────────────────
 
 #[tauri::command]
-pub(crate) fn save_voxelle(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+pub(crate) fn save_voxelle(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<(), String> {
     let label = state.file_label.lock();
     if label.starts_with("New project") || !label.ends_with(".voxelle") {
         return Err("Use \u{201c}Save As\u{2026}\u{201d} for new or unsaved projects.".into());
@@ -428,7 +433,10 @@ pub(crate) fn save_voxelle(app: AppHandle, state: State<'_, Arc<ViewerState>>) -
 }
 
 #[tauri::command]
-pub(crate) fn save_voxelle_as(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn save_voxelle_as(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     let state_c = Arc::clone(&*state);
     let app_c = app.clone();
     let mut builder = app
@@ -485,7 +493,10 @@ fn mesh_for_export(state: &Arc<ViewerState>) -> Result<greedy_mesh::MeshBuffers,
 }
 
 #[tauri::command]
-pub(crate) fn export_mesh_glb(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn export_mesh_glb(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     let state_c = Arc::clone(&*state);
     let app_c = app.clone();
     let mut builder = app
@@ -593,7 +604,10 @@ fn show_file_picker(app: AppHandle, state: Arc<ViewerState>) {
 }
 
 #[tauri::command]
-pub(crate) fn open_voxelle_dialog(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn open_voxelle_dialog(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     open_voxelle_file_dialog(app, Arc::clone(&*state));
     Ok(())
 }
@@ -615,7 +629,10 @@ pub(crate) fn close_project_dialog(app: AppHandle, state: Arc<ViewerState>) {
     use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
     // Nothing to close — already on the start screen.
-    if !state.active_project.load(std::sync::atomic::Ordering::Relaxed) {
+    if !state
+        .active_project
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
         return;
     }
 
@@ -727,7 +744,9 @@ pub(crate) struct AutosaveSettings {
 }
 
 #[tauri::command]
-pub(crate) fn get_autosave_settings(state: State<'_, Arc<ViewerState>>) -> Result<AutosaveSettings, String> {
+pub(crate) fn get_autosave_settings(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<AutosaveSettings, String> {
     Ok(AutosaveSettings {
         enabled: *state.autosave_enabled.lock(),
         interval_secs: *state.autosave_interval_secs.lock(),
@@ -750,7 +769,7 @@ pub(crate) fn set_autosave_settings(
 ) -> Result<(), String> {
     *state.autosave_enabled.lock() = args.enabled;
     *state.autosave_interval_secs.lock() = args.interval_secs;
-    let k = args.keep_count.max(1).min(64);
+    let k = args.keep_count.clamp(1, 64);
     *state.autosave_keep_count.lock() = k;
     Ok(())
 }
@@ -762,9 +781,10 @@ pub(crate) fn clear_autosaves_and_session(app: &AppHandle) -> Result<(), String>
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("voxelle")
-                && std::fs::remove_file(&path).is_ok() {
-                    deleted += 1;
-                }
+                && std::fs::remove_file(&path).is_ok()
+            {
+                deleted += 1;
+            }
         }
     }
     if let Ok(session_path) = session_state_path(app) {

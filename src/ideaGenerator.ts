@@ -1,8 +1,14 @@
 import adjectivesRaw from "./adjectives.txt?raw";
 import nounsRaw from "./nouns.txt?raw";
 
-const ADJECTIVES = adjectivesRaw.split("\n").map((s) => s.trim()).filter(Boolean);
-const NOUNS = nounsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
+const ADJECTIVES = adjectivesRaw
+  .split("\n")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const NOUNS = nounsRaw
+  .split("\n")
+  .map((s) => s.trim())
+  .filter(Boolean);
 
 /** Each template must contain exactly one {a} and one {n}. */
 const TEMPLATES = [

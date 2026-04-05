@@ -215,7 +215,6 @@ fn dist_sq_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f
     (px - (ax + t * dx)).powi(2) + (py - (ay + t * dy)).powi(2)
 }
 
-
 /// Compute gizmo projected positions. Shared by `get_selection_gizmo_projected`,
 /// `gizmo_pointer_down`, and `gizmo_hit_test`.
 fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
@@ -234,12 +233,24 @@ fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
         let mut min_z = i32::MAX;
         let mut max_z = i32::MIN;
         for &(x, y, z) in sel.iter() {
-            if x < min_x { min_x = x; }
-            if x > max_x { max_x = x; }
-            if y < min_y { min_y = y; }
-            if y > max_y { max_y = y; }
-            if z < min_z { min_z = z; }
-            if z > max_z { max_z = z; }
+            if x < min_x {
+                min_x = x;
+            }
+            if x > max_x {
+                max_x = x;
+            }
+            if y < min_y {
+                min_y = y;
+            }
+            if y > max_y {
+                max_y = y;
+            }
+            if z < min_z {
+                min_z = z;
+            }
+            if z > max_z {
+                max_z = z;
+            }
         }
         drop(sel);
         (
@@ -637,8 +648,7 @@ fn extrude_gizmo_preview_inner(
     color: u32,
     material: &str,
 ) -> Result<(), String> {
-    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
-        state.selection_cells.lock().clone();
+    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> = state.selection_cells.lock().clone();
     if selection.is_empty() {
         return Ok(());
     }
@@ -767,7 +777,10 @@ pub(crate) fn selection_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Resu
 }
 
 #[tauri::command]
-pub(crate) fn selection_stroke_end(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+pub(crate) fn selection_stroke_end(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<(), String> {
     // NOTE: Do NOT clear selection_stroke_accum here — a fire-and-forget
     // selection_stroke_at_screen invoke may still be in flight and needs the
     // accumulator.  The accum is overwritten by the next selection_stroke_begin.
@@ -1060,7 +1073,12 @@ pub(crate) fn selection_toggle_at_screen(
 }
 
 #[tauri::command]
-pub(crate) fn gizmo_pointer_down(state: State<'_, Arc<ViewerState>>, sx: f32, sy: f32, dpr: f32) -> bool {
+pub(crate) fn gizmo_pointer_down(
+    state: State<'_, Arc<ViewerState>>,
+    sx: f32,
+    sy: f32,
+    dpr: f32,
+) -> bool {
     let Some(proj) = compute_gizmo_proj(&state) else {
         return false;
     };
@@ -1178,7 +1196,12 @@ pub(crate) fn gizmo_pointer_move(
             selection_rotate_inner(state.inner(), &app, ring, steps)?;
             Ok(())
         }
-        SelectionGizmoDrag::Scale { center_sx, center_sy, start_dist, mut start_radius } => {
+        SelectionGizmoDrag::Scale {
+            center_sx,
+            center_sy,
+            start_dist,
+            mut start_radius,
+        } => {
             // Map horizontal pixel drag to radius change.
             // px_per_world converts world units to screen pixels.
             let proj = compute_gizmo_proj(&state);
@@ -1191,7 +1214,10 @@ pub(crate) fn gizmo_pointer_move(
             *state.preview_overlay_cache_key.lock() = None;
             crate::edit_pipeline::wake_viewport_loop(&app);
             *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Scale {
-                center_sx, center_sy, start_dist, start_radius,
+                center_sx,
+                center_sy,
+                start_dist,
+                start_radius,
             };
             Ok(())
         }
@@ -1199,7 +1225,10 @@ pub(crate) fn gizmo_pointer_move(
 }
 
 #[tauri::command]
-pub(crate) fn gizmo_pointer_up(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> Result<(), String> {
+pub(crate) fn gizmo_pointer_up(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+) -> Result<(), String> {
     let drag = state.selection_gizmo_drag.lock().clone();
     // Clear drag state before the translate so the overlay fingerprint (which reads pending)
     // won't double-apply the offset after selection_cells is updated.
@@ -1244,7 +1273,12 @@ pub(crate) fn gizmo_pointer_up(state: State<'_, Arc<ViewerState>>, app: AppHandl
 }
 
 #[tauri::command]
-pub(crate) fn gizmo_hit_test(state: State<'_, Arc<ViewerState>>, sx: f32, sy: f32, dpr: f32) -> bool {
+pub(crate) fn gizmo_hit_test(
+    state: State<'_, Arc<ViewerState>>,
+    sx: f32,
+    sy: f32,
+    dpr: f32,
+) -> bool {
     let Some(proj) = compute_gizmo_proj(&state) else {
         state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
         return false;
@@ -1504,7 +1538,10 @@ pub(crate) fn selection_scale(
 }
 
 #[tauri::command]
-pub(crate) fn selection_clear(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+pub(crate) fn selection_clear(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<(), String> {
     state.selection_cells.lock().clear();
     emit_selection_updated(&app, state.inner());
     Ok(())
@@ -1561,7 +1598,9 @@ pub(crate) fn selection_delete_selected_voxels(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(
+                collab::encode_client_edit_binary(&deltas),
+            ));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1782,7 +1821,10 @@ pub(crate) fn selection_add_coplanar_empty_at_screen(
 }
 
 #[tauri::command]
-pub(crate) fn selection_select_all(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+pub(crate) fn selection_select_all(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
     let vm = state.voxel_map.lock();
     let Some(vmap) = vm.as_ref() else {
         return Err("voxel index not ready".into());
@@ -1797,7 +1839,10 @@ pub(crate) fn selection_select_all(app: AppHandle, state: State<'_, Arc<ViewerSt
 }
 
 #[tauri::command]
-pub(crate) fn selection_invert(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+pub(crate) fn selection_invert(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
     let vm = state.voxel_map.lock();
     let Some(vmap) = vm.as_ref() else {
         return Err("voxel index not ready".into());
@@ -1813,7 +1858,10 @@ pub(crate) fn selection_invert(app: AppHandle, state: State<'_, Arc<ViewerState>
 }
 
 #[tauri::command]
-pub(crate) fn selection_grow(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+pub(crate) fn selection_grow(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
     let grid_size = {
         let fg = state.current_file.lock();
         let Some(file) = fg.as_ref() else {
@@ -1845,7 +1893,10 @@ pub(crate) fn selection_grow(app: AppHandle, state: State<'_, Arc<ViewerState>>)
 }
 
 #[tauri::command]
-pub(crate) fn selection_shrink(app: AppHandle, state: State<'_, Arc<ViewerState>>) -> Result<u32, String> {
+pub(crate) fn selection_shrink(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<u32, String> {
     let grid_size = {
         let fg = state.current_file.lock();
         let Some(file) = fg.as_ref() else {

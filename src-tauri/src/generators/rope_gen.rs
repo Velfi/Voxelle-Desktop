@@ -25,7 +25,11 @@ fn voxel_line_segment(a: VoxelCoord, b: VoxelCoord) -> impl Iterator<Item = Voxe
     let (bx, by, bz) = (b.0, b.1, b.2);
     let steps = (bx - ax).abs().max((by - ay).abs()).max((bz - az).abs());
     (0..=steps).map(move |i| {
-        let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
+        let t = if steps == 0 {
+            0.0
+        } else {
+            i as f32 / steps as f32
+        };
         let x = (ax as f32 + (bx - ax) as f32 * t).round() as i32;
         let y = (ay as f32 + (by - ay) as f32 * t).round() as i32;
         let z = (az as f32 + (bz - az) as f32 * t).round() as i32;
@@ -42,7 +46,7 @@ pub fn catenary_voxel_arc(
     segments: i32,
     gravity_direction: &str,
 ) -> Vec<VoxelCoord> {
-    let n = segments.max(4).min(128);
+    let n = segments.clamp(4, 128);
     let ax = a.0 as f32;
     let ay = a.1 as f32;
     let az = a.2 as f32;
