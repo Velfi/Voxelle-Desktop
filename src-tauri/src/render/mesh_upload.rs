@@ -732,14 +732,14 @@ impl WgpuViewer {
     }
 
     pub fn upload_selection_overlay_lines(&mut self, verts: &[f32]) {
-        if verts.is_empty() || verts.len() % 6 != 0 {
+        if verts.is_empty() || !verts.len().is_multiple_of(6) {
             self.selection_overlay_line_vertex_buffer = None;
             self.selection_overlay_line_vertex_count = 0;
             return;
         }
         let n_floats = verts.len();
         let vertex_count = (n_floats / 6) as u32;
-        let nbytes = (n_floats * std::mem::size_of::<f32>()) as u64;
+        let nbytes = std::mem::size_of_val(verts) as u64;
         if let Some(ref buf) = self.selection_overlay_line_vertex_buffer {
             if buf.size() == nbytes {
                 self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
@@ -764,11 +764,11 @@ impl WgpuViewer {
         label: &str,
         data: &[f32],
     ) -> u32 {
-        if data.is_empty() || data.len() % 6 != 0 {
+        if data.is_empty() || !data.len().is_multiple_of(6) {
             *buf = None;
             return 0;
         }
-        let nbytes = (data.len() * std::mem::size_of::<f32>()) as u64;
+        let nbytes = std::mem::size_of_val(data) as u64;
         if let Some(ref b) = buf {
             if b.size() == nbytes {
                 queue.write_buffer(b, 0, bytemuck::cast_slice(data));
@@ -806,14 +806,14 @@ impl WgpuViewer {
     }
 
     pub fn upload_grid_border_lines(&mut self, verts: &[f32], indices: &[u32]) {
-        if verts.is_empty() || verts.len() % 6 != 0 || indices.is_empty() {
+        if verts.is_empty() || !verts.len().is_multiple_of(6) || indices.is_empty() {
             self.grid_border_line_vertex_buffer = None;
             self.grid_border_line_index_buffer = None;
             self.grid_border_line_index_count = 0;
             return;
         }
         // Vertex buffer
-        let vbytes = (verts.len() * std::mem::size_of::<f32>()) as u64;
+        let vbytes = std::mem::size_of_val(verts) as u64;
         if let Some(ref buf) = self.grid_border_line_vertex_buffer {
             if buf.size() == vbytes {
                 self.queue.write_buffer(buf, 0, bytemuck::cast_slice(verts));
@@ -836,7 +836,7 @@ impl WgpuViewer {
             ));
         }
         // Index buffer
-        let ibytes = (indices.len() * std::mem::size_of::<u32>()) as u64;
+        let ibytes = std::mem::size_of_val(indices) as u64;
         if let Some(ref buf) = self.grid_border_line_index_buffer {
             if buf.size() == ibytes {
                 self.queue

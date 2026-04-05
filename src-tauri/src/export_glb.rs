@@ -3,7 +3,7 @@
 use crate::greedy_mesh::MeshBuffers;
 
 fn pad_json(mut v: Vec<u8>) -> Vec<u8> {
-    while v.len() % 4 != 0 {
+    while !v.len().is_multiple_of(4) {
         v.push(b' ');
     }
     v
@@ -50,7 +50,7 @@ pub fn mesh_buffers_to_glb(mesh: &MeshBuffers) -> Result<Vec<u8>, String> {
     };
 
     let pos_bytes: &[u8] = bytemuck::cast_slice(&mesh.positions);
-    let idx_u32: Vec<u32> = mesh.indices.iter().map(|&i| i as u32).collect();
+    let idx_u32: Vec<u32> = mesh.indices.to_vec();
     let idx_bytes: &[u8] = bytemuck::cast_slice(&idx_u32);
 
     let has_normals = mesh.normals.len() == mesh.positions.len() && mesh.normals.len() >= 9;

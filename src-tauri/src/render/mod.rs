@@ -1580,12 +1580,12 @@ impl WgpuViewer {
             last_mesh_route: String::new(),
 
             // ── Glyphon (initialized below) ──
-            glyphon_font_system: glyphon_font_system,
-            glyphon_swash_cache: glyphon_swash_cache,
-            glyphon_cache: glyphon_cache,
-            glyphon_atlas: glyphon_atlas,
-            glyphon_text_renderer: glyphon_text_renderer,
-            glyphon_viewport: glyphon_viewport,
+            glyphon_font_system,
+            glyphon_swash_cache,
+            glyphon_cache,
+            glyphon_atlas,
+            glyphon_text_renderer,
+            glyphon_viewport,
             peer_label_data: Vec::new(),
             ping_label_data: None,
             gizmo_delta_label: None,

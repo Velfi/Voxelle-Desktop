@@ -378,7 +378,7 @@ fn marching_cubes_bucket(
                 let tri_offset = cube_index as usize * 16;
                 let mut ti = 0;
                 loop {
-                    let t0 = TRI_TABLE[tri_offset + ti] as i32;
+                    let t0 = TRI_TABLE[tri_offset + ti];
                     if t0 < 0 {
                         break;
                     }
@@ -842,7 +842,7 @@ fn dual_contour_bucket(
                 let mut nny = (ny_sum / nh) as f32;
                 let mut nnz = (nz_sum / nh) as f32;
                 let gn = (nnx * nnx + nny * nny + nnz * nnz).sqrt();
-                if gn > EPS as f32 {
+                if gn > EPS {
                     nnx /= gn;
                     nny /= gn;
                     nnz /= gn;

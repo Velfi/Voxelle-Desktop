@@ -106,7 +106,7 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 /// Golden angle in radians: PI * (3 − √5).  Used for evenly-distributed
 /// spiral distributions (branches, canopy scatter, etc.).
-pub const GOLDEN_ANGLE_RAD: f32 = std::f32::consts::PI * (3.0 - 2.2360679_f32);
+pub const GOLDEN_ANGLE_RAD: f32 = std::f32::consts::PI * (3.0 - 2.236_068_f32);
 
 // ---------------------------------------------------------------------------
 // Deterministic spatial hash

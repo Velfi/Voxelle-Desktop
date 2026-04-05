@@ -1290,7 +1290,7 @@ pub(crate) fn squishy_metaball_add_at_screen(
     let cam = state.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let id = generators::squishy_add_ball_at_screen(
-        &mut *sg,
+        &mut sg,
         file,
         vmap,
         &cam,
@@ -1948,7 +1948,7 @@ pub(crate) fn generator_shape_at_screen(
     let shape = StartShape::from_str_id(&args.shape);
     // Use the explicit gizmo center from the frontend args (avoids race with
     // clear_generator_gizmo_center). Fall back to the state if not provided.
-    let gen_center = args.gizmo_center.or_else(|| state.generator_gizmo_center.lock().clone());
+    let gen_center = args.gizmo_center.or_else(|| *state.generator_gizmo_center.lock());
     let deltas = if let Some([gx, gy, gz]) = gen_center {
         let mut fg = state.current_file.lock();
         let mut vm = state.voxel_map.lock();

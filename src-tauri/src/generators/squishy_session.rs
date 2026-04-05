@@ -68,17 +68,14 @@ pub struct Metaball {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum SquishyMode {
+    #[default]
     Add,
     Edit,
     Delete,
 }
 
-impl Default for SquishyMode {
-    fn default() -> Self {
-        Self::Add
-    }
-}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

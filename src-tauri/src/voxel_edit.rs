@@ -865,11 +865,7 @@ pub fn pick_extrude_start(
     // Add-position: the empty cell just before the solid hit (or hit itself if no prev)
     let add_pos = prev.unwrap_or(hit);
     // Face normal: difference between add-position and the solid hit
-    let face_n = if let Some(p) = prev {
-        Some((p.0 - hit.0, p.1 - hit.1, p.2 - hit.2))
-    } else {
-        None
-    };
+    let face_n = prev.map(|p| (p.0 - hit.0, p.1 - hit.1, p.2 - hit.2));
     Some((add_pos, face_n))
 }
 
@@ -1122,16 +1118,15 @@ pub fn flood_fill_empty_at_screen(
 
     while let Some(c) = queue.pop_front() {
         steps += 1;
-        if steps % FILL_BFS_CANCEL_CHECK_INTERVAL == 0 {
-            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        if steps.is_multiple_of(FILL_BFS_CANCEL_CHECK_INTERVAL)
+            && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                 return Ok(FloodFillEditOutcome {
                     deltas: out,
                     cancelled: true,
                     hit_absolute_cap: false,
                 });
             }
-        }
-        if steps % FILL_BFS_PROGRESS_INTERVAL == 0 {
+        if steps.is_multiple_of(FILL_BFS_PROGRESS_INTERVAL) {
             on_progress(out.len());
         }
         if visited.contains(&c) {
@@ -1438,7 +1433,7 @@ pub fn brush_offset_cells_for_size(
             vec![(0, 0, 0)]
         };
     }
-    let even = size % 2 == 0;
+    let even = size.is_multiple_of(2);
     let half = size as i32 / 2;
     let (lo, hi) = if even {
         (-(half - 1), half)
@@ -2792,16 +2787,15 @@ pub fn flood_fill_selection_coords_with_control(
 
     while let Some(c) = queue.pop_front() {
         steps += 1;
-        if steps % FILL_BFS_CANCEL_CHECK_INTERVAL == 0 {
-            if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
+        if steps.is_multiple_of(FILL_BFS_CANCEL_CHECK_INTERVAL)
+            && cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                 return FillCoordOutcome {
                     coords: out,
                     cancelled: true,
                     hit_absolute_cap: false,
                 };
             }
-        }
-        if steps % FILL_BFS_PROGRESS_INTERVAL == 0 {
+        if steps.is_multiple_of(FILL_BFS_PROGRESS_INTERVAL) {
             on_progress(out.len());
         }
         if visited.contains(&c) {
@@ -2812,11 +2806,10 @@ pub fn flood_fill_selection_coords_with_control(
             continue;
         };
         let v = file.voxels[idx];
-        if respect_color {
-            if v.color != tc || (match_material && v.material != tm) {
+        if respect_color
+            && (v.color != tc || (match_material && v.material != tm)) {
                 continue;
             }
-        }
         if out.len() >= FILL_ABSOLUTE_MAX_CELLS {
             return FillCoordOutcome {
                 coords: out,
@@ -2894,7 +2887,7 @@ pub fn flood_fill_selection_region_exceeds_threshold(
 
     while let Some(c) = queue.pop_front() {
         steps += 1;
-        if steps % FILL_THRESHOLD_PROBE_CANCEL_INTERVAL == 0 {
+        if steps.is_multiple_of(FILL_THRESHOLD_PROBE_CANCEL_INTERVAL) {
             if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                 return Err(());
             }
@@ -2908,11 +2901,10 @@ pub fn flood_fill_selection_region_exceeds_threshold(
             continue;
         };
         let v = file.voxels[idx];
-        if respect_color {
-            if v.color != tc || (match_material && v.material != tm) {
+        if respect_color
+            && (v.color != tc || (match_material && v.material != tm)) {
                 continue;
             }
-        }
         matched += 1;
         if matched > threshold {
             return Ok(true);
@@ -2982,7 +2974,7 @@ pub fn flood_fill_empty_region_exceeds_threshold(
 
     while let Some(c) = queue.pop_front() {
         steps += 1;
-        if steps % FILL_THRESHOLD_PROBE_CANCEL_INTERVAL == 0 {
+        if steps.is_multiple_of(FILL_THRESHOLD_PROBE_CANCEL_INTERVAL) {
             if cancel.map(|c| c.load(Ordering::Relaxed)).unwrap_or(false) {
                 return Err(());
             }
@@ -3256,12 +3248,7 @@ fn column_max_y(
     z: i32,
 ) -> Option<i32> {
     let (y_lo, y_hi) = grid_valid_range(grid_size);
-    for y in (y_lo..=y_hi).rev() {
-        if voxel_map.contains_key(&(x, y, z)) {
-            return Some(y);
-        }
-    }
-    None
+    (y_lo..=y_hi).rev().find(|&y| voxel_map.contains_key(&(x, y, z)))
 }
 
 /// Particle-based hydraulic erosion on the local heightfield patch.
@@ -3500,7 +3487,7 @@ pub fn collect_sculpt_stroke_footprint(
     // For 2D shapes (Square/Circle), determine the face-normal axis so offsets stay in the tangent plane.
     let face_axis = if matches!(brush_shape, BrushShape::Square | BrushShape::Circle) {
         outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy)
-            .map(|n| face_normal_to_axis(n))
+            .map(face_normal_to_axis)
     } else {
         None
     };
@@ -4246,11 +4233,10 @@ fn add_flat_cylinder_segment(
                 let wy = qy - ty * axial;
                 let wz = qz - tz * axial;
                 let perp2 = wx * wx + wy * wy + wz * wz;
-                if perp2 <= r2 {
-                    if seen.insert((x, y, z)) {
+                if perp2 <= r2
+                    && seen.insert((x, y, z)) {
                         out.push((x, y, z));
                     }
-                }
             }
         }
     }
@@ -4295,11 +4281,10 @@ fn add_capsule_segment(
                 let dx = x as f32 - px;
                 let dy = y as f32 - py;
                 let dz = z as f32 - pz;
-                if dx * dx + dy * dy + dz * dz <= r2 {
-                    if seen.insert((x, y, z)) {
+                if dx * dx + dy * dy + dz * dz <= r2
+                    && seen.insert((x, y, z)) {
                         out.push((x, y, z));
                     }
-                }
             }
         }
     }
@@ -4336,11 +4321,10 @@ fn add_disk_slab(
                 let px = wx - tx * axial;
                 let py = wy - ty * axial;
                 let pz = wz - tz * axial;
-                if px * px + py * py + pz * pz <= r2 {
-                    if seen.insert((x, y, z)) {
+                if px * px + py * py + pz * pz <= r2
+                    && seen.insert((x, y, z)) {
                         out.push((x, y, z));
                     }
-                }
             }
         }
     }

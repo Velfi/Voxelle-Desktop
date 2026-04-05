@@ -85,7 +85,7 @@ fn fbm_value3(
     let mut sum = 0.0_f32;
     let mut norm = 0.0_f32;
     for o in 0..n_oct {
-        let s = seed.wrapping_add((o as u32).wrapping_mul(0x9e37_79b1));
+        let s = seed.wrapping_add(o.wrapping_mul(0x9e37_79b1));
         sum += amp * value_noise3(s, x * freq, y * freq, z * freq);
         norm += amp;
         amp *= persistence;

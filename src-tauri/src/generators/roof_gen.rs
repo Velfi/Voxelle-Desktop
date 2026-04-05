@@ -230,7 +230,7 @@ fn roof_height_for_style(
     }
 
     let h = max_height.max(1) as f64;
-    let t = thickness.max(1) as i32;
+    let t = thickness.max(1);
 
     match style {
         // -- Flat styles --

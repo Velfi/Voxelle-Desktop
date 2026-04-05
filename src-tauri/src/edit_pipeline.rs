@@ -358,7 +358,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
         }
     } else {
-        let cached_stats = state.voxel_edit_stats_cache.lock().clone();
+        let cached_stats = *state.voxel_edit_stats_cache.lock();
         let voxel_stats = resolve_voxel_edit_stats_batch(&file.voxels, deltas, cached_stats);
         let origin_new = voxel_stats.aabb_min;
         let single_object = voxel_stats.common_object_id.is_some();

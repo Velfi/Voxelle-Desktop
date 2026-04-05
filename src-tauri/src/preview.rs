@@ -1466,7 +1466,7 @@ pub(crate) fn prepare_preview_mesh(
                     "shape" => {
                         // Shape with gizmo center — cursor is None but we can
                         // still render at the gizmo position.
-                        let gen_center = state.generator_gizmo_center.lock().clone();
+                        let gen_center = *state.generator_gizmo_center.lock();
                         if let Some([gx, gy, gz]) = gen_center {
                             let shape = StartShape::from_str_id(&ctx.generator_shape_kind);
                             let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
@@ -2510,7 +2510,7 @@ pub(crate) fn prepare_preview_mesh(
                     // at that center rather than raycasting from the cursor.  Also
                     // account for any in-flight gizmo drag offset so the preview
                     // moves in real-time while dragging the movement arrows.
-                    let gen_center = state.generator_gizmo_center.lock().clone();
+                    let gen_center = *state.generator_gizmo_center.lock();
                     let mut cells = if let Some([gx, gy, gz]) = gen_center {
                         let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
                         let origin = (

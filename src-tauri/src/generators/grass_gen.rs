@@ -116,8 +116,7 @@ pub fn generate_grass_on_face_deltas(
                 continue;
             }
             let blade_seed =
-                (seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663))
-                    & 0xFFFF_FFFF;
+                seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663) ;
             let mut rng = Rng::new(blade_seed);
             if rng.next() > dens {
                 continue;
@@ -190,8 +189,7 @@ pub fn preview_grass_coords(
                 continue;
             }
             let blade_seed =
-                (seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663))
-                    & 0xFFFF_FFFF;
+                seed_u ^ (i as u32).wrapping_mul(73856093) ^ (j as u32).wrapping_mul(19349663) ;
             let mut rng = Rng::new(blade_seed);
             if rng.next() > dens {
                 continue;

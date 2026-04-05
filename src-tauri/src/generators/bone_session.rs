@@ -253,11 +253,10 @@ fn ray_capsule_intersect(o: Vec3, d: Vec3, a: Vec3, b: Vec3, r: f32) -> Option<f
 
     let mut best: Option<f32> = None;
     let mut consider = |t: f32| {
-        if t >= 0.0 {
-            if best.map(|bt| t < bt).unwrap_or(true) {
+        if t >= 0.0
+            && best.map(|bt| t < bt).unwrap_or(true) {
                 best = Some(t);
             }
-        }
     };
 
     // Cylinder body

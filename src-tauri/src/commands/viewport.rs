@@ -135,7 +135,7 @@ pub(crate) fn viewport_pointer(
     // Check if logo overlay is active (use viewer lock, not camera lock).
     let logo_active = {
         let v = state.viewer.lock();
-        v.as_ref().map_or(false, |viewer| viewer.logo_overlay_visible())
+        v.as_ref().is_some_and(|viewer| viewer.logo_overlay_visible())
     };
 
     if logo_active {
@@ -216,7 +216,7 @@ pub(crate) fn viewport_wheel(
     // Ignore scroll when logo overlay is active.
     {
         let v = state.viewer.lock();
-        if v.as_ref().map_or(false, |viewer| viewer.logo_overlay_visible()) {
+        if v.as_ref().is_some_and(|viewer| viewer.logo_overlay_visible()) {
             return Ok(());
         }
     }
@@ -475,7 +475,7 @@ pub(crate) fn get_raytrace_mode(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<bool, String> {
     let v = state.viewer.lock();
-    Ok(v.as_ref().map_or(false, |viewer| viewer.raytrace_enabled))
+    Ok(v.as_ref().is_some_and(|viewer| viewer.raytrace_enabled))
 }
 
 #[tauri::command]

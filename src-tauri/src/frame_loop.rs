@@ -162,7 +162,7 @@ pub(crate) fn gizmo_highlighted_axis(state: &ViewerState) -> u8 {
 
 pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
     let mode = *state.preview_mode.lock();
-    let gen_center = state.generator_gizmo_center.lock().clone();
+    let gen_center = *state.generator_gizmo_center.lock();
     let sel = state.selection_cells.lock();
     if gen_center.is_none()
         && (sel.is_empty() || matches!(mode, PreviewMode::Stamp | PreviewMode::Punch))
@@ -572,7 +572,7 @@ pub(crate) fn sync_collab_peer_labels(viewer: &mut WgpuViewer, state: &ViewerSta
             continue;
         }
         let eye = collab::presence_eye(pr);
-        let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(&cam, w, h, eye.x, eye.y, eye.z)
+        let Some((sx, sy)) = voxel_edit::world_to_viewport_pixels(cam, w, h, eye.x, eye.y, eye.z)
         else {
             continue;
         };

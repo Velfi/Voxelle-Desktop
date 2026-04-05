@@ -761,11 +761,10 @@ pub(crate) fn clear_autosaves_and_session(app: &AppHandle) -> Result<(), String>
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("voxelle") {
-                if std::fs::remove_file(&path).is_ok() {
+            if path.extension().and_then(|e| e.to_str()) == Some("voxelle")
+                && std::fs::remove_file(&path).is_ok() {
                     deleted += 1;
                 }
-            }
         }
     }
     if let Ok(session_path) = session_state_path(app) {

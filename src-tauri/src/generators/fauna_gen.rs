@@ -273,8 +273,8 @@ fn fill_sphere(
     for dx in -r..=r {
         for dy in -r..=r {
             for dz in -r..=r {
-                if (dx * dx + dy * dy + dz * dz) as f32 <= r2 {
-                    if !place_voxel(
+                if (dx * dx + dy * dy + dz * dz) as f32 <= r2
+                    && !place_voxel(
                         file,
                         voxel_map,
                         seen,
@@ -287,7 +287,6 @@ fn fill_sphere(
                     ) {
                         return;
                     }
-                }
             }
         }
     }

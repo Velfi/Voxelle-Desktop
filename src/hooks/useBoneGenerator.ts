@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
 
+interface BoneSession {
+  selected?: { joint?: number; bone?: number } | null;
+  bones?: Array<{ id: number; jointA: number }>;
+}
+
 interface BoneGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
@@ -71,12 +76,12 @@ export function useBoneGenerator(ctx: BoneGeneratorContext): BoneGeneratorState 
     const unlisten = listen<[number, number, number]>("generator-gizmo-moved", (ev) => {
       const [x, y, z] = ev.payload;
       // Get the selected joint and update its position to match the gizmo.
-      void invoke<any>("bone_session_get")
-        .then((session: any) => {
+      void invoke<BoneSession>("bone_session_get")
+        .then((session) => {
           const sel = session?.selected;
           if (!sel) return;
           const jointId = sel.joint ?? (sel.bone != null
-            ? session.bones?.find((b: any) => b.id === sel.bone)?.jointA
+            ? session.bones?.find((b) => b.id === sel.bone)?.jointA
             : null);
           if (jointId == null) return;
           return invoke("bone_set_joint_position", {
@@ -92,8 +97,8 @@ export function useBoneGenerator(ctx: BoneGeneratorContext): BoneGeneratorState 
   useEffect(() => {
     const unlisten = listen<number>("generator-gizmo-scaled", (ev) => {
       const radius = ev.payload;
-      void invoke<any>("bone_session_get")
-        .then((session: any) => {
+      void invoke<BoneSession>("bone_session_get")
+        .then((session) => {
           const sel = session?.selected;
           if (!sel?.joint) return;
           return invoke("bone_set_joint_radius", {

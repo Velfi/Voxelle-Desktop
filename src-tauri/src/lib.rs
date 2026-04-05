@@ -906,7 +906,7 @@ pub fn run() {
                     }
                 }
             } else if event.id() == "debug_clear_autosaves" {
-                let _ = clear_autosaves_and_session(&app);
+                let _ = clear_autosaves_and_session(app);
             } else if event.id() == "debug_test_crash" {
                 panic!("Test crash triggered from Debug menu");
             } else if event.id() == "view_render_greedy"
@@ -919,8 +919,8 @@ pub fn run() {
                     _ => (RenderingMode::DualContour, "dualContour"),
                 };
                 let state = app.state::<Arc<ViewerState>>();
-                let _ = apply_rendering_mode(&state, &app, mode);
-                wake_viewport_loop(&app);
+                let _ = apply_rendering_mode(&state, app, mode);
+                wake_viewport_loop(app);
                 let _ = app.emit_to(
                     EventTarget::webview_window("main"),
                     "voxelle-rendering-mode-changed",
@@ -941,7 +941,7 @@ pub fn run() {
                     if let Some(viewer) = state.viewer.lock().as_mut() {
                         viewer.set_raytrace_mode(enabled);
                     }
-                    wake_viewport_loop(&app);
+                    wake_viewport_loop(app);
                     let _ = app.emit_to(
                         EventTarget::webview_window("main"),
                         "voxelle-raytrace-changed",
@@ -954,7 +954,7 @@ pub fn run() {
                     if let Ok(checked) = sel.ortho_toggle.is_checked() {
                         let state = app.state::<Arc<ViewerState>>();
                         let _ = apply_orthographic(&state, checked);
-                        wake_viewport_loop(&app);
+                        wake_viewport_loop(app);
                     }
                 }
             } else if event.id() == "menu_view_show_borders" {
@@ -970,7 +970,7 @@ pub fn run() {
                             "voxelle-show-grid-borders",
                             checked,
                         );
-                        wake_viewport_loop(&app);
+                        wake_viewport_loop(app);
                     }
                 }
             } else if event.id() == "menu_view_hide_ui" {
@@ -1600,7 +1600,7 @@ pub fn run() {
                     {
                         let label = state.file_label.lock().clone();
                         if !label.is_empty() {
-                            if let Ok(doc) = autosave_document_path_for_label(&app, &label) {
+                            if let Ok(doc) = autosave_document_path_for_label(app, &label) {
                                 let now = Instant::now();
                                 let last = state.last_autosave.lock();
                                 let do_save = last
@@ -1609,7 +1609,7 @@ pub fn run() {
                                 if do_save {
                                     drop(last);
                                     if let Ok(dest) =
-                                        next_rotating_autosave_path(&app, Arc::as_ref(&state), &doc)
+                                        next_rotating_autosave_path(app, Arc::as_ref(&state), &doc)
                                     {
                                         if write_voxelle_file_to_path(None, &state, &dest).is_ok() {
                                             *state.last_autosave.lock() = Some(now);
@@ -1627,16 +1627,16 @@ pub fn run() {
                 // may throttle RAF; fly movement uses native loop dt, not the webview clock.
                 // Keep spinning while fly is on so the viewport and FPS/status UI stay live.
                 // Raytrace mode: accumulation requires one sample per frame, so spin continuously.
-                let rt_active = v.as_ref().map_or(false, |viewer| viewer.raytrace_enabled);
+                let rt_active = v.as_ref().is_some_and(|viewer| viewer.raytrace_enabled);
                 let mascots_active = v
                     .as_ref()
-                    .map_or(false, |viewer| viewer.any_mascot_visible());
+                    .is_some_and(|viewer| viewer.any_mascot_visible());
                 let logo_active = v
                     .as_ref()
-                    .map_or(false, |viewer| viewer.logo_overlay_visible());
+                    .is_some_and(|viewer| viewer.logo_overlay_visible());
                 let bubbles_active = v
                     .as_ref()
-                    .map_or(false, |viewer| viewer.has_visible_speech_bubbles());
+                    .is_some_and(|viewer| viewer.has_visible_speech_bubbles());
                 drop(v);
                 let fly_on = *state.fly_mode.lock();
                 let walk_on = *state.walk_mode.lock();

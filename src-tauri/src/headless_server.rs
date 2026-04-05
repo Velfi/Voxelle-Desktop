@@ -68,11 +68,8 @@ async fn handle_connection(mut stream: TcpStream) {
 
 pub async fn accept_loop(listener: TcpListener) {
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
-                tokio::spawn(handle_connection(stream));
-            }
-            Err(_) => {}
+        if let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(handle_connection(stream));
         }
     }
 }

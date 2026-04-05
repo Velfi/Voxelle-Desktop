@@ -8,6 +8,15 @@ export default tseslint.config(
     ignores: ["dist/", "src-tauri/"],
   },
   {
+    files: ["scripts/**"],
+    languageOptions: {
+      globals: {
+        process: "readonly",
+        console: "readonly",
+      },
+    },
+  },
+  {
     rules: {
       // Allow underscore-prefixed unused vars (common convention for intentionally unused bindings)
       "@typescript-eslint/no-unused-vars": [

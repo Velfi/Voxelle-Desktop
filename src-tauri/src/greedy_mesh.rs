@@ -603,8 +603,8 @@ pub fn pack_gpu_greedy_slices(
             let height = (max_v - min_v + 1) as u32;
 
             // Tile slices larger than 64×64 into GPU-sized sub-bitmaps (same plane).
-            let tile_u = (width + 63) / 64;
-            let tile_v = (height + 63) / 64;
+            let tile_u = width.div_ceil(64);
+            let tile_v = height.div_ceil(64);
             for tu in 0..tile_u {
                 for tv in 0..tile_v {
                     let u0 = min_u + (tu * 64) as i32;
@@ -616,7 +616,7 @@ pub fn pack_gpu_greedy_slices(
                     debug_assert!(w <= 64 && h <= 64);
 
                     let ncells = w as usize * h as usize;
-                    let bit_word_count = (ncells + 31) / 32;
+                    let bit_word_count = ncells.div_ceil(32);
                     let bit_start = all_bits.len() as u32;
                     all_bits.resize(all_bits.len() + bit_word_count, 0u32);
 
@@ -2347,7 +2347,7 @@ pub fn build_greedy_mesh(voxels: &[Voxel], objects: &[SceneObject]) -> (MeshBuff
     append_object_meshes_sorted(voxels, &map, objs, &mut combined);
     let bounds = mesh_bounds_from_voxels_world(voxels, objs)
         .or_else(|| mesh_bounds_from_voxels(voxels))
-        .unwrap_or_else(|| MeshBounds {
+        .unwrap_or(MeshBounds {
             min: glam::Vec3::ZERO,
             max: glam::Vec3::ZERO,
         });
@@ -2368,7 +2368,7 @@ pub fn build_naive_mesh(voxels: &[Voxel], objects: &[SceneObject]) -> (MeshBuffe
     append_naive_object_meshes_sorted(voxels, &map, objs, &mut combined);
     let bounds = mesh_bounds_from_voxels_world(voxels, objs)
         .or_else(|| mesh_bounds_from_voxels(voxels))
-        .unwrap_or_else(|| MeshBounds {
+        .unwrap_or(MeshBounds {
             min: glam::Vec3::ZERO,
             max: glam::Vec3::ZERO,
         });
@@ -2432,7 +2432,7 @@ pub fn ping_ripple_line_vertices(
     for wave_idx in 0..5 {
         let t = elapsed * WAVE_SPEED - (wave_idx as f32) * WAVE_GAP;
         let r = t.rem_euclid(MAX_R);
-        if r < 0.05 || r > MAX_R - 0.03 {
+        if !(0.05..=MAX_R - 0.03).contains(&r) {
             continue;
         }
         let fade = (1.0 - r / MAX_R).clamp(0.2, 1.0);

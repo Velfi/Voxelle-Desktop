@@ -3,6 +3,7 @@
 use super::*;
 
 /// Reused GPU buffers for greedy mesh compute (grow-only scratch).
+#[derive(Default)]
 pub(crate) struct MeshGreedyPool {
     pub(crate) counters: Option<wgpu::Buffer>,
     pub(crate) readback: Option<wgpu::Buffer>,
@@ -12,18 +13,6 @@ pub(crate) struct MeshGreedyPool {
     pub(crate) idx_cap: u64,
 }
 
-impl Default for MeshGreedyPool {
-    fn default() -> Self {
-        Self {
-            counters: None,
-            readback: None,
-            vtx_scratch: None,
-            idx_scratch: None,
-            vtx_cap: 0,
-            idx_cap: 0,
-        }
-    }
-}
 
 impl MeshGreedyPool {
     pub(crate) fn ensure_counters(&mut self, device: &wgpu::Device) {
@@ -198,7 +187,7 @@ impl WgpuViewer {
                     greedy_gpu_ms += t_pack.elapsed().as_secs_f64() * 1000.0;
                     if !headers.is_empty() {
                         let t_compute = Instant::now();
-                        match Self::mesh_greedy_dispatch(
+                        if let Ok((v_tot, i_tot)) = Self::mesh_greedy_dispatch(
                             &self.device,
                             &self.queue,
                             &mut self.mesh_greedy_pool,
@@ -211,20 +200,17 @@ impl WgpuViewer {
                             mo,
                             md,
                         ) {
-                            Ok((v_tot, i_tot)) => {
-                                greedy_gpu_ms += t_compute.elapsed().as_secs_f64() * 1000.0;
-                                let t_u = Instant::now();
-                                if v_tot == 0 || i_tot == 0 {
-                                    self.opaque_chunks.remove(key);
-                                } else {
-                                    self.upload_or_replace_chunk_mesh_from_gpu_scratch(
-                                        *key, v_tot, i_tot,
-                                    );
-                                }
-                                perf.chunk_buffers_ms += t_u.elapsed().as_secs_f64() * 1000.0;
-                                used_gpu = true;
+                            greedy_gpu_ms += t_compute.elapsed().as_secs_f64() * 1000.0;
+                            let t_u = Instant::now();
+                            if v_tot == 0 || i_tot == 0 {
+                                self.opaque_chunks.remove(key);
+                            } else {
+                                self.upload_or_replace_chunk_mesh_from_gpu_scratch(
+                                    *key, v_tot, i_tot,
+                                );
                             }
-                            Err(_) => {}
+                            perf.chunk_buffers_ms += t_u.elapsed().as_secs_f64() * 1000.0;
+                            used_gpu = true;
                         }
                     }
                 } else {
@@ -608,7 +594,7 @@ impl WgpuViewer {
                 self.spatial_mesh_cache = None;
                 Err("empty voxels".into())
             }
-            PreparedGreedyRebuild::AllHidden { .. } => {
+            PreparedGreedyRebuild::AllHidden => {
                 self.vertex_buffer = None;
                 self.index_buffer = None;
                 self.index_count = 0;
@@ -733,14 +719,14 @@ impl WgpuViewer {
                 label: Some("mesh_copy_draw_bufs"),
             });
         enc3.copy_buffer_to_buffer(
-            &vtx_out,
+            vtx_out,
             0,
             &vb_final,
             0,
             (v_total as u64).saturating_mul(VTX_STRIDE),
         );
         enc3.copy_buffer_to_buffer(
-            &idx_out,
+            idx_out,
             0,
             &ib_final,
             0,

@@ -420,11 +420,11 @@ fn parse_lighting_from_scene_optional(scene: &Document) -> Option<LightingSettin
     Some(LightingSettings {
         ambient_intensity: m
             .get("ambientIntensity")
-            .and_then(|b| bson_f32(b))
+            .and_then(bson_f32)
             .unwrap_or(1.0),
         sunlight_intensity: m
             .get("sunlightIntensity")
-            .and_then(|b| bson_f32(b))
+            .and_then(bson_f32)
             .unwrap_or(1.0),
         light_color: m
             .get_str("lightColor")
@@ -434,11 +434,11 @@ fn parse_lighting_from_scene_optional(scene: &Document) -> Option<LightingSettin
             .unwrap_or_else(|| "#ffffff".to_string()),
         light_angle_deg: m
             .get("lightAngle")
-            .and_then(|b| bson_f32(b))
+            .and_then(bson_f32)
             .unwrap_or(45.0),
         light_elevation_deg: m
             .get("lightElevation")
-            .and_then(|b| bson_f32(b))
+            .and_then(bson_f32)
             .unwrap_or(45.0),
         enable_shadows: m.get_bool("enableShadows").unwrap_or(true),
         enable_sky: m.get_bool("enableSky").unwrap_or(true),
@@ -448,7 +448,7 @@ fn parse_lighting_from_scene_optional(scene: &Document) -> Option<LightingSettin
             .map(|s| s.to_string())
             .filter(|s| s.starts_with('#'))
             .unwrap_or_else(|| "#0a0b0e".to_string()),
-        exposure_ev: m.get("exposureEv").and_then(|b| bson_f32(b)).unwrap_or(0.0),
+        exposure_ev: m.get("exposureEv").and_then(bson_f32).unwrap_or(0.0),
         auto_exposure: m.get_bool("autoExposure").unwrap_or(false),
     })
 }
@@ -562,14 +562,14 @@ pub fn parse_mood_from_scene_optional(scene: &Document) -> Option<MoodSettings> 
     // Detect old format: bare `grain` float at top level with no `grainEnabled` key.
     let is_old = m.get("grainEnabled").is_none() && m.get("grain").is_some();
     if is_old {
-        let grain_v = m.get("grain").and_then(|b| bson_f32(b)).unwrap_or(0.0);
-        let vig_v = m.get("vignette").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let grain_v = m.get("grain").and_then(bson_f32).unwrap_or(0.0);
+        let vig_v = m.get("vignette").and_then(bson_f32).unwrap_or(0.0);
         let dt_v = m
             .get("distanceTint")
-            .and_then(|b| bson_f32(b))
+            .and_then(bson_f32)
             .unwrap_or(0.0);
-        let atm_v = m.get("atmosphere").and_then(|b| bson_f32(b)).unwrap_or(0.0);
-        let ss_v = m.get("sunShafts").and_then(|b| bson_f32(b)).unwrap_or(0.0);
+        let atm_v = m.get("atmosphere").and_then(bson_f32).unwrap_or(0.0);
+        let ss_v = m.get("sunShafts").and_then(bson_f32).unwrap_or(0.0);
         let mut ms = MoodSettings::default();
         ms.vignette = vig_v;
         if grain_v > 0.001 {
@@ -787,7 +787,7 @@ fn infer_v3_wire_record_size(
             Err(ParseError::InvalidV3)
         };
     }
-    if body_byte_len % total != 0 {
+    if !body_byte_len.is_multiple_of(total) {
         return Err(ParseError::InvalidV3);
     }
     let per = body_byte_len / total;
@@ -1413,11 +1413,7 @@ pub fn empty_collab_placeholder() -> VoxelleFile {
 /// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner).
 /// Kept for backward-compatible exports and collab snapshots; prefer [`encode_payload_v5`] for normal saves.
 pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
-    let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {
-        build_v3_wire_payload(file)?
-    } else {
-        build_bson_v4_payload(file)?
-    };
+    let inner = build_v3_wire_payload(file)?;
     let crc = crc32fast::hash(&inner);
     let ulen = inner.len() as u32;
     let mut gz = GzEncoder::new(Vec::new(), Compression::default());
@@ -1435,11 +1431,7 @@ pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
 /// Encode as **v5 container** (VX5 magic + zstd + CRC32 of uncompressed inner).
 /// Same inner payload as V4 but with zstd compression for 3-5x faster load/save.
 pub fn encode_payload_v5(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
-    let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {
-        build_v3_wire_payload(file)?
-    } else {
-        build_bson_v4_payload(file)?
-    };
+    let inner = build_v3_wire_payload(file)?;
     let crc = crc32fast::hash(&inner);
     let ulen = inner.len() as u32;
     let compressed = zstd::encode_all(inner.as_slice(), 3).map_err(EncodeError::Io)?;

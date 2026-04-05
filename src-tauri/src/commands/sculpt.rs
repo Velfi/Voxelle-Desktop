@@ -216,7 +216,7 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
             args.terrain_smooth_radius,
             args.terrain_flatten_use_base_y,
             args.terrain_sub_voxel,
-            &mut *state.terrain_accum.lock(),
+            &mut state.terrain_accum.lock(),
             args.smooth_neighbor_passes,
             args.brush_strength,
             args.brush_falloff,

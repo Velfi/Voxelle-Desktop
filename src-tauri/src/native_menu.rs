@@ -164,7 +164,7 @@ fn place_voxelle_custom_top_level_menus<R: tauri::Runtime>(
                 )
             })?;
         menu.insert(debug_menu, help_idx + 1)?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "macos"))]

@@ -367,7 +367,7 @@ pub(crate) fn stroke_preview_meshes_for_union(
     let shell_occ = greedy_mesh::filter_voxel_set_to_shell(&occupied);
     let mut sorted: Vec<greedy_mesh::VoxelCoord> = shell_occ
         .into_iter()
-        .chain(empty_only.into_iter())
+        .chain(empty_only)
         .collect();
     if sorted.is_empty() {
         return greedy_mesh::PreviewInstancedResult::empty();
@@ -1092,7 +1092,7 @@ fn run_voxel_fill_paint_blocking(
     let mut on_progress = move |n: usize| {
         emit_work_progress(&app_pb, 0.25, format!("Fill — {n} cells"));
         progress_ticks = progress_ticks.wrapping_add(1);
-        if progress_ticks % 4 == 0 {
+        if progress_ticks.is_multiple_of(4) {
             std::thread::yield_now();
         }
     };
@@ -1195,7 +1195,7 @@ fn run_fill_deltas_blocking(
     let mut on_progress = move |n: usize| {
         emit_work_progress(&app_pb, 0.25, format!("Fill — {n} cells"));
         progress_ticks = progress_ticks.wrapping_add(1);
-        if progress_ticks % 4 == 0 {
+        if progress_ticks.is_multiple_of(4) {
             std::thread::yield_now();
         }
     };
@@ -1299,9 +1299,8 @@ pub(crate) async fn voxel_fill_at_screen(
     })
     .await
     .map_err(|e| e.to_string())?;
-    let deltas = deltas_result.map_err(|e| {
+    let deltas = deltas_result.inspect_err(|_e| {
         emit_work_progress(&app, 1.0, "");
-        e
     })?;
     if deltas.is_empty() {
         emit_work_progress(&app, 1.0, "");
@@ -1608,9 +1607,8 @@ pub(crate) async fn voxel_edit_at_screen(
         .await
         .map_err(|e| e.to_string())?;
         let (deltas_res, apply_edit_ms) = blocking;
-        let deltas = deltas_res.map_err(|e| {
+        let deltas = deltas_res.inspect_err(|_e| {
             emit_work_progress(&app, 1.0, "");
-            e
         })?;
         (deltas, apply_edit_ms)
     } else {

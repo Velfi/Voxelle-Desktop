@@ -1267,8 +1267,8 @@ function App() {
     clothGravityDirection, setClothGravityDirection, clothGravityDirectionRef,
     ropeBrushRadiusIndex, setRopeBrushRadiusIndex, ropeBrushRadiusIndexRef,
     ropeBrushShapeUi, setRopeBrushShapeUi, ropeBrushShapeUiRef,
-    ropeFirstScreen, setRopeFirstScreen, ropeFirstScreenRef,
-    ropeFirstVoxel, setRopeFirstVoxel, ropeFirstVoxelRef,
+    ropeFirstScreen, setRopeFirstScreen, _ropeFirstScreenRef,
+    _ropeFirstVoxel, setRopeFirstVoxel, ropeFirstVoxelRef,
     ropeSag,
     ropeTension, setRopeTension, ropeTensionRef,
     ropePhase,
@@ -2551,6 +2551,7 @@ function App() {
   });
 
   // ── Viewport pointer handlers (extracted to useViewportPointer) ──
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const _vpLocalsRef = useRef<any>(null);
   _vpLocalsRef.current = {
     activeColorRef,

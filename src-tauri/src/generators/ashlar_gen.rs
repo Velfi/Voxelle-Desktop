@@ -49,7 +49,7 @@ pub fn ashlar_world_coords(
     let fn_z = (face_empty.2 - solid.2).signum();
 
     // Resolve thickness axis: use explicit value, or auto-detect from face normal.
-    let resolved_axis = thickness_axis.or_else(|| {
+    let resolved_axis = thickness_axis.or({
         if fn_x != 0 {
             Some(0)
         } else if fn_y != 0 {

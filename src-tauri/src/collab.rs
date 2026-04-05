@@ -1051,11 +1051,11 @@ pub fn process_inbox_items_batched<R: Runtime>(
 
 /// Pushes the current host scene to all guests (after load, new project, or open file).
 pub fn broadcast_snapshot_to_guests(state: &Arc<ViewerState>) {
-    let bytes: Result<Vec<u8>, String> = (|| {
+    let bytes: Result<Vec<u8>, String> = {
         let g = state.current_file.lock();
         let file = g.as_ref().cloned().unwrap_or_else(empty_collab_placeholder);
         encode_payload_v4(&file).map_err(|e| e.to_string())
-    })();
+    };
     let Ok(bytes) = bytes else {
         return;
     };
@@ -1205,11 +1205,11 @@ async fn handle_host_connection<R: Runtime>(
     collab_mtx.lock().roster = roster.clone();
     broadcast_roster_to_guests(&app, &collab_mtx, &roster);
 
-    let snap_result: Result<Vec<u8>, String> = (|| {
+    let snap_result: Result<Vec<u8>, String> = {
         let g = state.current_file.lock();
         let file = g.as_ref().cloned().unwrap_or_else(empty_collab_placeholder);
         encode_payload_v4(&file).map_err(|e| format!("snapshot encode failed: {e}"))
-    })();
+    };
     let snap = match snap_result {
         Ok(bytes) => bytes,
         Err(reason) => {
@@ -1315,11 +1315,11 @@ async fn handle_host_connection<R: Runtime>(
                             log::warn!(
                                 "collab: peer {peer_id} lagged {n} broadcast messages — sending resync snapshot"
                             );
-                            let snap_result: Result<Vec<u8>, String> = (|| {
+                            let snap_result: Result<Vec<u8>, String> = {
                                 let g = state.current_file.lock();
                                 let file = g.as_ref().cloned().unwrap_or_else(empty_collab_placeholder);
                                 encode_payload_v4(&file).map_err(|e| e.to_string())
-                            })();
+                            };
                             if let Ok(snap) = snap_result {
                                 if snap.len() <= SNAPSHOT_CHUNK_THRESHOLD {
                                     if let Ok(json) = serde_json::to_string(&HostToClient::Snapshot { bytes: snap }) {

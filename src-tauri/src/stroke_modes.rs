@@ -1287,7 +1287,7 @@ pub fn axis_aligned_cuboid_from_plane(
     let dir = if depth > 0 { step } else { -step };
     if dir != 0 {
         for k in 1..=layers {
-            let dk = dir * k as i32;
+            let dk = dir * k;
             for &(px, py, pz) in &plane_positions {
                 let p = match fixed_axis {
                     0 => (px + dk, py, pz),
@@ -1428,7 +1428,7 @@ pub fn axis_aligned_cylinder_from_plane(
     let mut positions: Vec<VoxelCoord> = Vec::new();
 
     for k in 0..=layers {
-        let w = base_w + dir * k as i32;
+        let w = base_w + dir * k;
         let r_sq_i64: i64 = if taper > 0 && layers > 0 {
             let scale = 1.0 - (taper as f64 / 100.0) * (k as f64 / layers as f64);
             let s2 = scale * scale;

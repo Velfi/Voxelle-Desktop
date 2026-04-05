@@ -219,7 +219,7 @@ fn dist_sq_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f
 /// Compute gizmo projected positions. Shared by `get_selection_gizmo_projected`,
 /// `gizmo_pointer_down`, and `gizmo_hit_test`.
 fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
-    let gen_center = state.generator_gizmo_center.lock().clone();
+    let gen_center = *state.generator_gizmo_center.lock();
     let (cx, cy, cz) = if let Some([gx, gy, gz]) = gen_center {
         (gx, gy, gz)
     } else {
@@ -586,7 +586,7 @@ fn selection_fill_flood_coords_blocking(
     let mut on_progress = move |n: usize| {
         emit_work_progress(&app_pb, 0.25, format!("Selection fill — {n} cells"));
         progress_ticks = progress_ticks.wrapping_add(1);
-        if progress_ticks % 4 == 0 {
+        if progress_ticks.is_multiple_of(4) {
             std::thread::yield_now();
         }
     };
@@ -842,9 +842,8 @@ pub(crate) async fn selection_stroke_at_screen(
                     })
                     .await
                     .map_err(|e| e.to_string())?;
-                    let coords_inner = res.map_err(|e| {
+                    let coords_inner = res.inspect_err(|_e| {
                         emit_work_progress(&app, 1.0, "");
-                        e
                     })?;
                     emit_work_progress(&app, 1.0, "");
                     coords_inner

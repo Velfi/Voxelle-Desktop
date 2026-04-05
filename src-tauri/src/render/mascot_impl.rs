@@ -547,7 +547,7 @@ impl WgpuViewer {
         let visible = self
             .logo_overlay
             .as_ref()
-            .map_or(false, |l| l.visible && l.vertex_buffer.is_some());
+            .is_some_and(|l| l.visible && l.vertex_buffer.is_some());
         if !visible {
             return;
         }
@@ -614,6 +614,6 @@ impl WgpuViewer {
     pub fn logo_overlay_visible(&self) -> bool {
         self.logo_overlay
             .as_ref()
-            .map_or(false, |l| l.visible && l.vertex_buffer.is_some())
+            .is_some_and(|l| l.visible && l.vertex_buffer.is_some())
     }
 }
