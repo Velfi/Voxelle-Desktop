@@ -1,3 +1,19 @@
+## 0.2.8 — 2026-04-05
+
+### Added
+- A mouselook sensitivity slider (0.1–5.0×) is now available in Preferences, letting you tune fly and walk camera rotation speed.
+- After clicking to place a metaball in Add mode, you can now drag to set its radius: the ball grows or shrinks to match the world-space distance from its center to the cursor.
+
+### Changed
+- Fly and walk camera navigation now bundles mouse-look input with movement in a single IPC call per frame instead of two, reducing input latency at high frame rates. On macOS, raw mouse deltas are now read directly via CGGetLastMouseDelta for smoother pointer-lock behavior.
+- Stroke preview rendering now uses a two-pass GPU compute pipeline to filter the visible shell of large stroke previews on the GPU, reducing CPU overhead during painting and sculpting on dense geometry.
+- Ambient occlusion is now computed once per shared mesh vertex rather than redundantly for each adjacent face, speeding up meshing on dense geometry.
+- The Squishy (Metaballs) sidebar panel now shows Add / Pick / Delete mode buttons and a live ball count with a contextual hint, replacing the single unlabeled mode button.
+
+### Fixed
+- Auto-exposure metering no longer stalls the render thread waiting for the GPU; luminance readback is now asynchronous, eliminating periodic frame hitches on scenes with auto-exposure enabled.
+- The metaball selection gizmo now correctly disappears when switching away from Pick mode, deleting the selected ball, or clearing the session.
+
 ## 0.2.7 — 2026-04-05
 
 ### Added
