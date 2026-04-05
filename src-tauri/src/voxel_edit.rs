@@ -578,6 +578,30 @@ pub enum VoxelEditDelta {
     },
 }
 
+impl VoxelEditDelta {
+    /// Coordinate of the affected voxel.
+    pub fn coord(&self) -> (i32, i32, i32) {
+        match self {
+            Self::Added(v) | Self::Removed { voxel: v } => (v.x, v.y, v.z),
+            Self::Painted { after, .. } => (after.x, after.y, after.z),
+        }
+    }
+
+    /// Clone this delta but move it to a different coordinate.
+    pub fn with_coord(&self, x: i32, y: i32, z: i32) -> Self {
+        match self {
+            Self::Added(v) => Self::Added(Voxel { x, y, z, ..*v }),
+            Self::Removed { voxel } => Self::Removed {
+                voxel: Voxel { x, y, z, ..*voxel },
+            },
+            Self::Painted { before, after } => Self::Painted {
+                before: Voxel { x, y, z, ..*before },
+                after: Voxel { x, y, z, ..*after },
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum EditTool {
@@ -1583,7 +1607,7 @@ pub fn pick_voxel_at_screen(
 
 /// Flip a coordinate tuple by an axis-flip mask (bit 0 = X, bit 1 = Y, bit 2 = Z).
 #[inline]
-fn flip_coord(x: i32, y: i32, z: i32, flip_mask: u8) -> (i32, i32, i32) {
+pub fn flip_coord(x: i32, y: i32, z: i32, flip_mask: u8) -> (i32, i32, i32) {
     (
         if flip_mask & 1 != 0 { -x } else { x },
         if flip_mask & 2 != 0 { -y } else { y },
@@ -1607,6 +1631,29 @@ pub fn extend_with_mirror_targets(targets: &mut Vec<VoxelCoord>, mirror_axes: u8
             let m = flip_coord(x, y, z, flip_mask);
             if seen.insert(m) {
                 targets.push(m);
+            }
+        }
+    }
+}
+
+/// Like [`extend_with_mirror_targets`] but for `(VoxelCoord, u32)` pairs (coord + color).
+pub fn extend_with_mirror_targets_colored(
+    targets: &mut Vec<(VoxelCoord, u32)>,
+    mirror_axes: u8,
+) {
+    if mirror_axes == 0 {
+        return;
+    }
+    let original: Vec<(VoxelCoord, u32)> = targets.clone();
+    let mut seen: HashSet<VoxelCoord> = original.iter().map(|&(c, _)| c).collect();
+    for flip_mask in 1u8..=7u8 {
+        if flip_mask & mirror_axes != flip_mask {
+            continue;
+        }
+        for &((x, y, z), color) in &original {
+            let m = flip_coord(x, y, z, flip_mask);
+            if seen.insert(m) {
+                targets.push((m, color));
             }
         }
     }

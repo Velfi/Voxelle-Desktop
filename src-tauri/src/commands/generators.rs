@@ -89,7 +89,7 @@ pub(crate) fn generator_rocks_at_screen(
             args.sink_amount,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 #[derive(serde::Deserialize)]
@@ -163,7 +163,7 @@ pub(crate) fn generator_grass_at_screen(
             material,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 #[derive(serde::Deserialize)]
@@ -245,7 +245,7 @@ pub(crate) fn generator_rope_at_screen(
             &args.gravity_direction,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 #[derive(serde::Deserialize)]
@@ -331,7 +331,7 @@ pub(crate) fn generator_cloth_from_pins_cmd(
             sim,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 #[derive(serde::Deserialize)]
@@ -388,7 +388,7 @@ pub(crate) fn generator_squishy_metaball_at_screen(
             material,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Ashlar generator ──────────────────────────────────────────────────────────
@@ -455,7 +455,7 @@ pub(crate) fn generator_ashlar_at_screen(
             args.thickness_axis,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Flora generator ───────────────────────────────────────────────────────────
@@ -571,7 +571,7 @@ pub(crate) fn generator_flora_at_screen(
             material,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Roof generator ────────────────────────────────────────────────────────────
@@ -657,7 +657,7 @@ pub(crate) fn generator_roof_from_pins_cmd(
             material,
         )
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Piscina (fish) generator ──────────────────────────────────────────────────
@@ -788,7 +788,7 @@ pub(crate) fn generator_piscina_at_screen(
             material,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Insecta (insect) generator ────────────────────────────────────────────────
@@ -997,7 +997,7 @@ pub(crate) fn generator_insecta_at_screen(
             material,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Fauna (creature) generator ────────────────────────────────────────────────
@@ -1195,7 +1195,7 @@ pub(crate) fn generator_fauna_at_screen(
             material,
         )?
     };
-    commit_voxel_edits(&state, &app, deltas)
+    commit_generator_edits(&state, &app, deltas)
 }
 
 // ── Squishy session commands ─────────────────────────────────────────────────
@@ -1471,4 +1471,569 @@ pub(crate) fn squishy_gizmo_pointer_move(
 pub(crate) fn squishy_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
     *state.squishy_gizmo_drag.lock() = None;
     Ok(())
+}
+
+// ── Bone session commands ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub(crate) fn bone_session_get(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<generators::BoneSession, String> {
+    Ok(state.bone_session.lock().clone())
+}
+
+#[tauri::command]
+pub(crate) fn bone_session_clear(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    state.bone_session.lock().clear();
+    *state.bone_gizmo_drag.lock() = None;
+    *state.bone_ik_drag.lock() = None;
+    *state.generator_gizmo_center.lock() = None;
+    *state.generator_gizmo_ring_radius.lock() = None;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneCommitArgs {
+    color: u32,
+    material: String,
+}
+
+#[tauri::command]
+pub(crate) fn bone_session_commit(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: BoneCommitArgs,
+) -> Result<bool, String> {
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let deltas = {
+        let bs = state.bone_session.lock();
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        generators::bone_commit_session(&bs, file, vmap, args.color, material)?
+    };
+    if deltas.is_empty() {
+        return Ok(false);
+    }
+    commit_voxel_edits(&state, &app, deltas)?;
+    state.bone_session.lock().clear();
+    *state.bone_gizmo_drag.lock() = None;
+    *state.bone_ik_drag.lock() = None;
+    Ok(true)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneAddJointArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default = "default_bone_radius")]
+    radius: f32,
+}
+
+fn default_bone_radius() -> f32 {
+    3.0
+}
+
+#[tauri::command]
+pub(crate) fn bone_add_joint_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneAddJointArgs,
+) -> Result<Option<u32>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let fg = state.current_file.lock();
+    let vm = state.voxel_map.lock();
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let cam = state.camera.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let Some(pos) = generators::bone_screen_to_world_pos(file, vmap, &cam, w, h, sx, sy) else {
+        return Ok(None);
+    };
+    let mut bs = state.bone_session.lock();
+    let id = bs.add_joint(pos.x, pos.y, pos.z, args.radius);
+    Ok(Some(id))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneMoveJointArgs {
+    id: u32,
+    nx: f32,
+    ny: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_move_joint_to_screen(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneMoveJointArgs,
+) -> Result<bool, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let fg = state.current_file.lock();
+    let vm = state.voxel_map.lock();
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    let Some(vmap) = vm.as_ref() else {
+        return Err("voxel index not ready".into());
+    };
+    let cam = state.camera.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let Some(pos) = generators::bone_screen_to_world_pos(file, vmap, &cam, w, h, sx, sy) else {
+        return Ok(false);
+    };
+    let mut bs = state.bone_session.lock();
+    let ok = bs.set_joint_position(args.id, pos.x, pos.y, pos.z);
+    if ok {
+        wake_viewport_loop(&app);
+    }
+    Ok(ok)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneConnectArgs {
+    joint_a: u32,
+    joint_b: u32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_connect_joints(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneConnectArgs,
+) -> Result<Option<u32>, String> {
+    let mut bs = state.bone_session.lock();
+    Ok(bs.add_bone(args.joint_a, args.joint_b))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BonePickArgs {
+    nx: f32,
+    ny: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_pick_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    args: BonePickArgs,
+) -> Result<Option<generators::BoneSelection>, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let bs = state.bone_session.lock();
+    let cam = state.camera.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    Ok(generators::bone_pick_at_screen(&bs, &cam, w, h, sx, sy))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneSelectArgs {
+    selection: Option<generators::BoneSelection>,
+}
+
+#[tauri::command]
+pub(crate) fn bone_select(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneSelectArgs,
+) -> Result<(), String> {
+    let mut bs = state.bone_session.lock();
+    bs.selected = args.selection;
+    // Show the shared move gizmo at the selected joint's position.
+    let (center, ring_radius) = match args.selection {
+        Some(generators::BoneSelection::Joint(id)) => {
+            let j = bs.find_joint(id);
+            (j.map(|j| [j.x, j.y, j.z]), j.map(|j| j.radius))
+        }
+        Some(generators::BoneSelection::Bone(bone_id)) => {
+            let c = bs.bones.iter().find(|b| b.id == bone_id).and_then(|bone| {
+                let ja = bs.find_joint(bone.joint_a)?;
+                let jb = bs.find_joint(bone.joint_b)?;
+                Some([
+                    (ja.x + jb.x) * 0.5,
+                    (ja.y + jb.y) * 0.5,
+                    (ja.z + jb.z) * 0.5,
+                ])
+            });
+            (c, None) // no radius ring for bone selection
+        }
+        None => (None, None),
+    };
+    drop(bs);
+    *state.generator_gizmo_center.lock() = center;
+    *state.generator_gizmo_ring_radius.lock() = ring_radius;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneRemoveArgs {
+    selection: generators::BoneSelection,
+}
+
+#[tauri::command]
+pub(crate) fn bone_remove(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneRemoveArgs,
+) -> Result<bool, String> {
+    let mut bs = state.bone_session.lock();
+    let ok = match args.selection {
+        generators::BoneSelection::Joint(id) => bs.remove_joint(id),
+        generators::BoneSelection::Bone(bone_id) => {
+            // Find the joints at each end before removing the bone.
+            let endpoints: Option<(u32, u32)> = bs
+                .bones
+                .iter()
+                .find(|b| b.id == bone_id)
+                .map(|b| (b.joint_a, b.joint_b));
+            let removed = bs.remove_bone(bone_id);
+            if removed {
+                // Remove joints that are now orphaned (no remaining bones).
+                if let Some((ja, jb)) = endpoints {
+                    if bs.connected_bones(ja).is_empty() {
+                        bs.remove_joint(ja);
+                    }
+                    if bs.connected_bones(jb).is_empty() {
+                        bs.remove_joint(jb);
+                    }
+                }
+            }
+            removed
+        }
+    };
+    if ok {
+        *state.generator_gizmo_center.lock() = None;
+    }
+    Ok(ok)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneSetJointRadiusArgs {
+    id: u32,
+    radius: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_set_joint_radius(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneSetJointRadiusArgs,
+) -> Result<bool, String> {
+    let mut bs = state.bone_session.lock();
+    Ok(bs.set_joint_radius(args.id, args.radius))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneSetJointPositionArgs {
+    id: u32,
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_set_joint_position(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneSetJointPositionArgs,
+) -> Result<bool, String> {
+    let mut bs = state.bone_session.lock();
+    let ok = bs.set_joint_position(args.id, args.x, args.y, args.z);
+    if ok {
+        // Keep the shared gizmo centered on the joint as it moves.
+        *state.generator_gizmo_center.lock() = Some([args.x, args.y, args.z]);
+    }
+    Ok(ok)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneGizmoPointerArgs {
+    nx: f32,
+    ny: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_gizmo_pointer_down(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneGizmoPointerArgs,
+) -> Result<bool, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let cam = state.camera.lock();
+    let bs = state.bone_session.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let Some((handle, joint_id)) =
+        generators::pick_bone_gizmo_handle(&bs, &cam, w, h, sx, sy)
+    else {
+        return Ok(false);
+    };
+    let Some(drag) =
+        generators::bone_gizmo_begin_drag(&bs, &cam, w, h, sx, sy, handle, joint_id)
+    else {
+        return Ok(false);
+    };
+    drop(bs);
+    drop(cam);
+    *state.bone_gizmo_drag.lock() = Some(drag);
+    wake_viewport_loop(&app);
+    Ok(true)
+}
+
+#[tauri::command]
+pub(crate) fn bone_gizmo_pointer_move(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneGizmoPointerArgs,
+) -> Result<(), String> {
+    let gizmo_drag = state.bone_gizmo_drag.lock().clone();
+    if let Some(drag) = gizmo_drag {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Ok(());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let cam = state.camera.lock();
+        let mut bs = state.bone_session.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        generators::bone_gizmo_apply_drag(&mut bs, &cam, w, h, sx, sy, &drag);
+        wake_viewport_loop(&app);
+        return Ok(());
+    }
+    let ik_drag = state.bone_ik_drag.lock().clone();
+    if let Some(drag) = ik_drag {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Ok(());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let cam = state.camera.lock();
+        let mut bs = state.bone_session.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        generators::ik_drag_update(&mut bs, &cam, w, h, sx, sy, &drag);
+        wake_viewport_loop(&app);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn bone_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    *state.bone_gizmo_drag.lock() = None;
+    *state.bone_ik_drag.lock() = None;
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BoneIkDragStartArgs {
+    joint_id: u32,
+    nx: f32,
+    ny: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_ik_drag_start(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneIkDragStartArgs,
+) -> Result<bool, String> {
+    let (w, h) = {
+        let v = state.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let cam = state.camera.lock();
+    let bs = state.bone_session.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let Some(drag) =
+        generators::ik_drag_begin(&bs, &cam, w, h, sx, sy, args.joint_id)
+    else {
+        return Ok(false);
+    };
+    drop(bs);
+    drop(cam);
+    *state.bone_ik_drag.lock() = Some(drag);
+    Ok(true)
+}
+
+// ── Shape generator ─────────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GeneratorShapeArgs {
+    nx: f32,
+    ny: f32,
+    #[serde(default = "default_shape_kind")]
+    shape: String,
+    #[serde(default = "default_shape_size")]
+    size: i32,
+    #[serde(default)]
+    rot_x: f32,
+    #[serde(default)]
+    rot_y: f32,
+    #[serde(default)]
+    rot_z: f32,
+    color: u32,
+    material: String,
+    #[serde(default = "crate::preview::default_true")]
+    overwrite: bool,
+    /// Explicit gizmo center passed from the frontend to avoid race conditions.
+    #[serde(default)]
+    gizmo_center: Option<[f32; 3]>,
+}
+
+fn default_shape_kind() -> String {
+    "cube".into()
+}
+
+pub(crate) fn default_shape_size() -> i32 {
+    8
+}
+
+#[tauri::command]
+pub(crate) fn generator_shape_at_screen(
+    state: State<'_, Arc<ViewerState>>,
+    app: AppHandle,
+    args: GeneratorShapeArgs,
+) -> Result<bool, String> {
+    use crate::voxelle::start_shape::StartShape;
+    use crate::voxel_edit::{ensure_grid_fits_coords, VoxelEditDelta};
+    let material = voxelle::MaterialId::from_str_id(&args.material);
+    let shape = StartShape::from_str_id(&args.shape);
+    // Use the explicit gizmo center from the frontend args (avoids race with
+    // clear_generator_gizmo_center). Fall back to the state if not provided.
+    let gen_center = args.gizmo_center.or_else(|| state.generator_gizmo_center.lock().clone());
+    let deltas = if let Some([gx, gy, gz]) = gen_center {
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let origin = (gx as i32, gy as i32, gz as i32);
+        let positions = crate::generators::compute_shape_positions(
+            shape,
+            args.size,
+            origin,
+            (args.rot_x, args.rot_y, args.rot_z),
+        );
+        if positions.is_empty() {
+            Vec::new()
+        } else {
+            ensure_grid_fits_coords(file, positions.iter().copied());
+            let mut deltas = Vec::with_capacity(positions.len());
+            for (x, y, z) in positions {
+                if !args.overwrite && vmap.contains_key(&(x, y, z)) {
+                    continue;
+                }
+                deltas.push(VoxelEditDelta::Added(voxelle::Voxel {
+                    x, y, z,
+                    color: args.color,
+                    material,
+                    object_id: 0,
+                }));
+            }
+            deltas
+        }
+    } else {
+        let (w, h) = {
+            let v = state.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Err("viewer not ready".into());
+            };
+            let (w, h) = viewer.viewport_size();
+            (w as f32, h as f32)
+        };
+        let mut fg = state.current_file.lock();
+        let mut vm = state.voxel_map.lock();
+        let Some(file) = fg.as_mut() else {
+            return Err("no model loaded".into());
+        };
+        let Some(vmap) = vm.as_mut() else {
+            return Err("voxel index not ready".into());
+        };
+        let cam = state.camera.lock();
+        let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+        crate::generators::generator_shape_at_screen(
+            file,
+            vmap,
+            &cam,
+            w,
+            h,
+            sx,
+            sy,
+            shape,
+            args.size,
+            args.rot_x,
+            args.rot_y,
+            args.rot_z,
+            args.color,
+            material,
+            args.overwrite,
+        )?
+    };
+    commit_generator_edits(&state, &app, deltas)
+}
+
+// ── Generator gizmo override ────────────────────────────────────────────
+
+#[tauri::command]
+pub(crate) fn set_generator_gizmo_center(
+    state: State<'_, Arc<ViewerState>>,
+    center: [f32; 3],
+) {
+    *state.generator_gizmo_center.lock() = Some(center);
+}
+
+#[tauri::command]
+pub(crate) fn clear_generator_gizmo_center(state: State<'_, Arc<ViewerState>>) {
+    *state.generator_gizmo_center.lock() = None;
 }

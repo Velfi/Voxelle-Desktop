@@ -261,11 +261,7 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
-                deltas: deltas.clone(),
-            })
-            .unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;

@@ -155,54 +155,55 @@ pub(crate) fn gizmo_highlighted_axis(state: &ViewerState) -> u8 {
     match &*state.selection_gizmo_drag.lock() {
         SelectionGizmoDrag::Move { world_axis, .. } => *world_axis,
         SelectionGizmoDrag::Rotate { ring, .. } => *ring,
+        SelectionGizmoDrag::Scale { .. } => 255, // no axis highlight for scale ring
         SelectionGizmoDrag::None => state.hovered_gizmo_axis.load(Ordering::Relaxed),
     }
 }
 
 pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
     let mode = *state.preview_mode.lock();
+    let gen_center = state.generator_gizmo_center.lock().clone();
     let sel = state.selection_cells.lock();
-    if sel.is_empty() || matches!(mode, PreviewMode::Stamp | PreviewMode::Punch) {
+    if gen_center.is_none()
+        && (sel.is_empty() || matches!(mode, PreviewMode::Stamp | PreviewMode::Punch))
+    {
         drop(sel);
         viewer.upload_gizmo_lines(&[]);
         viewer.upload_gizmo_tris(&[]);
         viewer.upload_gizmo_delta_label(None);
         return;
     }
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut min_y = i32::MAX;
-    let mut max_y = i32::MIN;
-    let mut min_z = i32::MAX;
-    let mut max_z = i32::MIN;
-    for &(x, y, z) in sel.iter() {
-        if x < min_x {
-            min_x = x;
-        }
-        if x > max_x {
-            max_x = x;
-        }
-        if y < min_y {
-            min_y = y;
-        }
-        if y > max_y {
-            max_y = y;
-        }
-        if z < min_z {
-            min_z = z;
-        }
-        if z > max_z {
-            max_z = z;
-        }
-    }
-    drop(sel);
 
     let pending = pending_gizmo_translate(state);
-    let pivot = glam::Vec3::new(
-        (min_x + max_x) as f32 * 0.5 + pending.0 as f32,
-        (min_y + max_y) as f32 * 0.5 + pending.1 as f32,
-        (min_z + max_z) as f32 * 0.5 + pending.2 as f32,
-    );
+    let pivot = if let Some([gx, gy, gz]) = gen_center {
+        drop(sel);
+        glam::Vec3::new(
+            gx + pending.0 as f32,
+            gy + pending.1 as f32,
+            gz + pending.2 as f32,
+        )
+    } else {
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
+        for &(x, y, z) in sel.iter() {
+            if x < min_x { min_x = x; }
+            if x > max_x { max_x = x; }
+            if y < min_y { min_y = y; }
+            if y > max_y { max_y = y; }
+            if z < min_z { min_z = z; }
+            if z > max_z { max_z = z; }
+        }
+        drop(sel);
+        glam::Vec3::new(
+            (min_x + max_x) as f32 * 0.5 + pending.0 as f32,
+            (min_y + max_y) as f32 * 0.5 + pending.1 as f32,
+            (min_z + max_z) as f32 * 0.5 + pending.2 as f32,
+        )
+    };
     let inv_view = cam.view_matrix().inverse();
     let cam_eye = glam::Vec3::new(inv_view.w_axis.x, inv_view.w_axis.y, inv_view.w_axis.z);
     let dist = (cam_eye - pivot).length().max(1.0);
@@ -357,8 +358,8 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
         }
     }
 
-    // Rotation rings — only for the translate gizmo, not the extrude gizmo
-    if !is_extrude {
+    // Rotation rings — only for the selection translate gizmo, not extrude or generator-override gizmos
+    if !is_extrude && gen_center.is_none() {
         const RING_N: usize = 24;
         let ring_r = arm * 0.72;
         for ring in 0..3usize {
@@ -371,6 +372,23 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
                 let p1 = pivot + (u * a1.cos() + v_ax * a1.sin()) * ring_r;
                 quad(&mut lv, p0, p1, ring_hw, col);
             }
+        }
+    }
+
+    // Scale ring — camera-facing circle at the joint radius (bone tool).
+    if let Some(radius) = *state.generator_gizmo_ring_radius.lock() {
+        const RING_N: usize = 32;
+        let ring_col = [1.0_f32, 0.7, 0.2]; // orange/gold
+        // Camera-facing ring: use view-space right/up as the ring plane.
+        let cam_right = inv_view.x_axis.truncate().normalize();
+        let cam_up = inv_view.y_axis.truncate().normalize();
+        let r = radius.max(dist * 0.015); // minimum screen size
+        for i in 0..RING_N {
+            let a0 = i as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+            let a1 = (i + 1) as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+            let p0 = pivot + (cam_right * a0.cos() + cam_up * a0.sin()) * r;
+            let p1 = pivot + (cam_right * a1.cos() + cam_up * a1.sin()) * r;
+            quad(&mut lv, p0, p1, ring_hw * 1.5, ring_col);
         }
     }
 

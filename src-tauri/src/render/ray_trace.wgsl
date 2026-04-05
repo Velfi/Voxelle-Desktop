@@ -44,7 +44,7 @@ struct RtUniform {
     frame_seed:   u32,  // different every frame for decorrelated jitter
     sample_n:     u32,  // accumulated samples so far (0 = first frame / reset)
     fast_preview: u32,  // 1 when camera moved this frame: 1 shadow ray, no bounces
-    _pad1:        u32,
+    surface_mode: u32,  // 0 = blocky, 1 = smooth, 2 = puffy
 }
 
 @group(1) @binding(0) var accum_prev: texture_2d<f32>;
@@ -356,6 +356,51 @@ fn dda(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, skip_trans: bool, max_s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Smooth / puffy surface normals
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Occupancy as a float: 1.0 if the voxel at `c` is solid, 0.0 otherwise.
+fn occ(c: vec3<i32>) -> f32 {
+    return select(0.0, 1.0, is_occupied(brick_fetch(c)));
+}
+
+/// Gradient-based smooth normal from the occupancy field (central differences).
+/// Points outward (from solid toward empty). Falls back to `face_n` if the
+/// gradient is degenerate.
+fn smooth_normal(cell: vec3<i32>, face_n: vec3<f32>) -> vec3<f32> {
+    let gx = occ(cell - vec3<i32>(1, 0, 0)) - occ(cell + vec3<i32>(1, 0, 0));
+    let gy = occ(cell - vec3<i32>(0, 1, 0)) - occ(cell + vec3<i32>(0, 1, 0));
+    let gz = occ(cell - vec3<i32>(0, 0, 1)) - occ(cell + vec3<i32>(0, 0, 1));
+    let grad = vec3<f32>(gx, gy, gz);
+    let len2 = dot(grad, grad);
+    if (len2 < 1e-8) { return face_n; }
+    return grad * inverseSqrt(len2);
+}
+
+/// Puffy normal: blend the gradient-based normal with a spherical component
+/// (voxel center → hit point), giving rounder / more inflated edges.
+fn puffy_normal(cell: vec3<i32>, face_n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    let sn = smooth_normal(cell, face_n);
+    let centre = vec3<f32>(f32(cell.x), f32(cell.y), f32(cell.z));
+    let sphere_dir = world_pos - centre;
+    let slen2 = dot(sphere_dir, sphere_dir);
+    if (slen2 < 1e-8) { return sn; }
+    let sphere_n = sphere_dir * inverseSqrt(slen2);
+    // 60% gradient, 40% spherical gives a visibly rounded look.
+    let blended = sn * 0.6 + sphere_n * 0.4;
+    let blen2 = dot(blended, blended);
+    if (blen2 < 1e-8) { return sn; }
+    return blended * inverseSqrt(blen2);
+}
+
+/// Apply the current surface_mode to a DDA hit, returning the adjusted normal.
+fn surface_normal(cell: vec3<i32>, face_n: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    if (rt.surface_mode == 1u) { return smooth_normal(cell, face_n); }
+    if (rt.surface_mode == 2u) { return puffy_normal(cell, face_n, world_pos); }
+    return face_n;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Lighting / shading
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -472,12 +517,13 @@ fn shade_secondary(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
     // In fast_preview: half the distance, quarter the steps — coarse but shows geometry.
     let sec_steps = select(1024, 256, rt.fast_preview != 0u);
     let sec_dist  = select(1024.0, 512.0, rt.fast_preview != 0u);
-    let h = dda(origin, dir, sec_dist, false, sec_steps);
+    var h = dda(origin, dir, sec_dist, false, sec_steps);
     if (!h.hit) { return sky_color(dir); }
 
     let mat   = unpack_mat(h.packed);
     let color = unpack_rgb(h.packed);
     let wp    = origin + dir * h.t;
+    h.normal = surface_normal(h.cell, h.normal, wp);
 
     if (mat == MAT_GLOW) { return color * 8.0; }
 
@@ -510,13 +556,14 @@ fn shade_secondary(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
             let enter    = wp - h.normal * 0.06;
             // Trace through all transmissive media; dual Beer-Lambert so each
             // material is absorbed at its own rate (glass 2.5, water 24.0).
-            let hit2 = dda(enter, refr_dir, 128.0, true, 512);
+            var hit2 = dda(enter, refr_dir, 128.0, true, 512);
             if (hit2.hit) {
                 let hmat = unpack_mat(hit2.packed);
+                let hw = enter + refr_dir * hit2.t;
+                hit2.normal = surface_normal(hit2.cell, hit2.normal, hw);
                 if (hmat == MAT_GLOW) {
                     refr_col = unpack_rgb(hit2.packed) * 8.0;
                 } else {
-                    let hw = enter + refr_dir * hit2.t;
                     refr_col = shade_diffuse(hw, hit2.normal, unpack_rgb(hit2.packed), seed ^ 0x7777u);
                 }
             } else {
@@ -1038,11 +1085,12 @@ fn shade_transmissive(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
         // and apply Beer-Lambert a second time).
         let sec_steps = select(1024, 256, rt.fast_preview != 0u);
         let sec_dist  = select(1024.0, 512.0, rt.fast_preview != 0u);
-        let thr = dda(enter, refr_dir, sec_dist, true, sec_steps);
+        var thr = dda(enter, refr_dir, sec_dist, true, sec_steps);
 
         if (thr.hit) {
             let hmat = unpack_mat(thr.packed);
             let hw   = enter + refr_dir * thr.t;
+            thr.normal = surface_normal(thr.cell, thr.normal, hw);
             if (hmat == MAT_GLOW) {
                 refr_col = unpack_rgb(thr.packed) * 8.0;
             } else {
@@ -1072,7 +1120,7 @@ fn shade_transmissive(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
 /// Primary shade: full material dispatch.
 fn shade(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
     let max_steps = select(2048, 1024, rt.fast_preview != 0u);
-    let h = dda(origin, dir, 4096.0, false, max_steps);
+    var h = dda(origin, dir, 4096.0, false, max_steps);
 
     // t_hit for fog march: actual hit distance, or capped sky distance.
     let t_hit = select(256.0, h.t, h.hit);
@@ -1084,6 +1132,7 @@ fn shade(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
         let mat   = unpack_mat(h.packed);
         let color = unpack_rgb(h.packed);
         let wp    = origin + dir * h.t;
+        h.normal = surface_normal(h.cell, h.normal, wp);
 
         if (mat == MAT_GLOW) {
             rgb = color * 8.0;

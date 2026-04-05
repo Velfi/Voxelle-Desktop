@@ -3,16 +3,19 @@ use bson::{Bson, Document};
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
+use rayon::prelude::*;
 use std::io::{Read, Write};
 use thiserror::Error;
 
 pub const V3_MAGIC: [u8; 4] = [0x56, 0x58, 0x33, 0x1a];
 pub const V4_MAGIC: [u8; 4] = [0x56, 0x58, 0x34, 0x1a];
+/// V5 container: same inner payload as V4 but compressed with zstd instead of gzip.
+pub const V5_MAGIC: [u8; 4] = [0x56, 0x58, 0x35, 0x1a];
 pub const V3_RECORD_SIZE: usize = 20;
 /// Dense **VX3 wire version 4** body: `object_id` `u32` after the legacy 20-byte fields (24 bytes total).
 pub const V4_WIRE_RECORD_SIZE: usize = 24;
-/// Use dense v3-style body when at least this many voxels (matches web / prior tooling).
-pub const V3_WIRE_VOXEL_THRESHOLD: usize = 50_000;
+/// Always use dense wire format for the voxel array (faster and more compact than BSON-per-voxel).
+pub const V3_WIRE_VOXEL_THRESHOLD: usize = 0;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
@@ -26,6 +29,8 @@ pub enum ParseError {
     InvalidV4,
     #[error("v4 crc mismatch")]
     V4CrcMismatch,
+    #[error("zstd decompress: {0}")]
+    Zstd(std::io::Error),
     #[error("bson: {0}")]
     Bson(bson::de::Error),
     #[error("raw bson: {0}")]
@@ -921,20 +926,48 @@ fn parse_v3(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     let objects = parse_objects_from_document(&doc).unwrap_or_else(default_scene_objects);
     let active_object_id = doc_u32(&doc, "activeObjectId").unwrap_or(0);
 
-    let mut voxels = Vec::with_capacity(voxel_count as usize);
-    let mut o = 12 + header_len;
-    for i in 0..voxel_count {
-        let v = if rec_size == V4_WIRE_RECORD_SIZE {
-            read_v4_wire_record(bytes, o)?
-        } else {
-            read_v3_record(bytes, o)?
-        };
-        voxels.push(v);
-        o += rec_size;
-        if i & 0x7fff == 0x7fff {
-            std::thread::yield_now();
+    let body_start = 12 + header_len;
+    let body = &bytes[body_start..];
+    let total = voxel_count as usize;
+    let voxels: Vec<Voxel> = if rec_size == V4_WIRE_RECORD_SIZE && total >= 4096 {
+        // Parallel parse: records are fixed-size and record-aligned.
+        body[..total * rec_size]
+            .par_chunks_exact(rec_size)
+            .map(|chunk| {
+                let x = i32::from_le_bytes(chunk[0..4].try_into().unwrap());
+                let y = i32::from_le_bytes(chunk[4..8].try_into().unwrap());
+                let z = i32::from_le_bytes(chunk[8..12].try_into().unwrap());
+                let color = u32::from_le_bytes(chunk[12..16].try_into().unwrap()) & 0xffffff;
+                let mi = chunk[16];
+                let object_id = u32::from_le_bytes(chunk[20..24].try_into().unwrap());
+                Voxel {
+                    x,
+                    y,
+                    z,
+                    color,
+                    material: MaterialId::from_index(mi),
+                    object_id,
+                }
+            })
+            .collect()
+    } else {
+        // Sequential fallback for V3 records or small files.
+        let mut voxels = Vec::with_capacity(total);
+        let mut o = body_start;
+        for i in 0..voxel_count {
+            let v = if rec_size == V4_WIRE_RECORD_SIZE {
+                read_v4_wire_record(bytes, o)?
+            } else {
+                read_v3_record(bytes, o)?
+            };
+            voxels.push(v);
+            o += rec_size;
+            if i & 0x7fff == 0x7fff {
+                std::thread::yield_now();
+            }
         }
-    }
+        voxels
+    };
     let mood = scene_extra
         .as_ref()
         .and_then(parse_mood_from_scene_optional);
@@ -1159,14 +1192,27 @@ fn is_v4_file(bytes: &[u8]) -> bool {
         && bytes[3] == V4_MAGIC[3]
 }
 
-fn parse_v4_container(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
+fn is_v5_file(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && bytes[0] == V5_MAGIC[0]
+        && bytes[1] == V5_MAGIC[1]
+        && bytes[2] == V5_MAGIC[2]
+        && bytes[3] == V5_MAGIC[3]
+}
+
+/// Decompress the inner payload of a V4/V5 container, then parse.
+fn parse_v4v5_container(bytes: &[u8], use_zstd: bool) -> Result<VoxelleFile, ParseError> {
     if bytes.len() < 12 {
         return Err(ParseError::InvalidV4);
     }
     let ulen = u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize;
     let crc_exp = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
     let tail = &bytes[12..];
-    let inner = decompress_if_gzipped(tail)?;
+    let inner = if use_zstd {
+        zstd::decode_all(tail).map_err(ParseError::Zstd)?
+    } else {
+        decompress_if_gzipped(tail)?
+    };
     if inner.len() != ulen {
         return Err(ParseError::InvalidV4);
     }
@@ -1364,7 +1410,8 @@ pub fn empty_collab_placeholder() -> VoxelleFile {
     }
 }
 
-/// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner). Inner is BSON or VX3 dense wire v4.
+/// Encode as **v4 container** (VX4 magic + gzip + CRC32 of uncompressed inner).
+/// Kept for backward-compatible exports and collab snapshots; prefer [`encode_payload_v5`] for normal saves.
 pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {
         build_v3_wire_payload(file)?
@@ -1385,13 +1432,36 @@ pub fn encode_payload_v4(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
     Ok(out)
 }
 
-/// After optional gzip: BSON or v3 wire, or **v4 container** at outer level.
+/// Encode as **v5 container** (VX5 magic + zstd + CRC32 of uncompressed inner).
+/// Same inner payload as V4 but with zstd compression for 3-5x faster load/save.
+pub fn encode_payload_v5(file: &VoxelleFile) -> Result<Vec<u8>, EncodeError> {
+    let inner = if file.voxels.len() >= V3_WIRE_VOXEL_THRESHOLD {
+        build_v3_wire_payload(file)?
+    } else {
+        build_bson_v4_payload(file)?
+    };
+    let crc = crc32fast::hash(&inner);
+    let ulen = inner.len() as u32;
+    let compressed = zstd::encode_all(inner.as_slice(), 3).map_err(EncodeError::Io)?;
+
+    let mut out = Vec::with_capacity(12 + compressed.len());
+    out.extend_from_slice(&V5_MAGIC);
+    out.extend_from_slice(&ulen.to_le_bytes());
+    out.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&compressed);
+    Ok(out)
+}
+
+/// After optional gzip/zstd: BSON or v3 wire, or **v4/v5 container** at outer level.
 pub fn decode_payload(bytes: &[u8]) -> Result<VoxelleFile, ParseError> {
     if bytes.is_empty() {
         return Err(ParseError::Empty);
     }
+    if is_v5_file(bytes) {
+        return parse_v4v5_container(bytes, true);
+    }
     if is_v4_file(bytes) {
-        return parse_v4_container(bytes);
+        return parse_v4v5_container(bytes, false);
     }
     let payload = decompress_if_gzipped(bytes)?;
     let slice = payload.as_slice();

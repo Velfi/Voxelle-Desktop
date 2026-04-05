@@ -342,6 +342,8 @@ pub struct WgpuViewer {
     pub(crate) rt_prev_inv_view: [[f32; 4]; 4],
     /// True when the camera moved this frame; shader uses cheap shading path.
     pub(crate) rt_fast_preview: bool,
+    /// Surface normal mode for ray tracing: 0=blocky, 1=smooth, 2=puffy.
+    pub(crate) rt_surface_mode: u32,
 
     // ── Screen-space reflections ───────────────────────────────────────────
     pub(crate) ssr_opts_buf: wgpu::Buffer,
@@ -1193,7 +1195,7 @@ impl WgpuViewer {
                 frame_seed: 0,
                 sample_n: 0,
                 fast_preview: 0,
-                _pad1: 0,
+                surface_mode: 0,
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1498,6 +1500,7 @@ impl WgpuViewer {
             rt_prev_eye: [0.0; 3],
             rt_prev_inv_view: [[0.0; 4]; 4],
             rt_fast_preview: false,
+            rt_surface_mode: 0,
             exposure_user_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
             auto_exposure_enabled: default_lit.auto_exposure,
             auto_exposure_smoothed: 0.0,
@@ -2012,6 +2015,15 @@ impl WgpuViewer {
     pub fn set_raytrace_mode(&mut self, enabled: bool) {
         self.raytrace_enabled = enabled;
         self.rt_sample_n = 0;
+    }
+
+    /// Update the surface-normal style used by the ray tracer.
+    /// 0 = blocky (greedy), 1 = smooth (marching cubes), 2 = puffy (dual contour).
+    pub fn set_rt_surface_mode(&mut self, mode: u32) {
+        if self.rt_surface_mode != mode {
+            self.rt_surface_mode = mode;
+            self.rt_sample_n = 0;
+        }
     }
 
 

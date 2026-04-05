@@ -17,6 +17,22 @@ pub enum StartShape {
     Empty,
 }
 
+impl StartShape {
+    /// Parse a camelCase shape name (matching the web `StartShape` union).
+    pub fn from_str_id(s: &str) -> Self {
+        match s {
+            "cube" => Self::Cube,
+            "orb" => Self::Orb,
+            "cylinder" => Self::Cylinder,
+            "hollowCube" => Self::HollowCube,
+            "plane" => Self::Plane,
+            "circle" => Self::Circle,
+            "empty" => Self::Empty,
+            _ => Self::Cube,
+        }
+    }
+}
+
 fn grid_bounds(size: i32) -> (i32, i32) {
     let lo = -size / 2;
     let hi = (size - 1) / 2;

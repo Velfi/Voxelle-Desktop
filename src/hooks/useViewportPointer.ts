@@ -31,6 +31,8 @@ export function useViewportPointer(
 ) {
   // Stable ref owned by the hook
   const planeStrokeDebugEnabledRef = useRef(true);
+  const bonePendingJointRef = useRef<number | null>(null);
+  const bonePlacingJointRef = useRef<number | null>(null);
 
   // Destructure all App locals
   // (refreshed each render; handlers close over the latest snapshot)
@@ -143,6 +145,11 @@ export function useViewportPointer(
     setRoofFirstClick,
     setRoofPins,
     setRopeFirstScreen,
+    setRopeFirstVoxel,
+    setShapeSize,
+    setShapeRotX,
+    setShapeRotY,
+    setShapeRotZ,
     setSelectionCount,
     setSquishyBallCount,
     setStrokePolygonVerts,
@@ -160,7 +167,15 @@ export function useViewportPointer(
     grassPhase,
     rocksPhase,
     ropePhase,
+    shapePhase,
+    shapeGizmoPosRef,
     squishyPhase,
+    bonePhase,
+    boneModeRef,
+    boneDefaultRadiusRef,
+    ikEnabledRef: _ikEnabledRef,
+    setBoneJointCount,
+    setBoneBoneCount,
     loading,
     workBusy,
     fillOperationPending,
@@ -405,10 +420,11 @@ const onPointerDown = async (e: React.PointerEvent) => {
     (mode === "punch" && e.button !== 0 && e.button !== 2) ||
     (mode === "sculpt" && e.button !== 0) ||
     (mode === "generator" && e.button !== 0 && e.button !== 2) ||
-    (mode === "squishy" && e.button !== 0);
+    (mode === "squishy" && e.button !== 0) ||
+    (mode === "bone" && e.button !== 0);
 
   const logoSplashPointer =
-    startScreenLogoLoadedRef.current && !loading && !workBusy && e.button === 0;
+    startScreenLogoLoadedRef.current && !loading && !workBusy && e.button === 0 && mode !== "bone";
 
   if (
     mode === "squishy" &&
@@ -430,6 +446,31 @@ const onPointerDown = async (e: React.PointerEvent) => {
       }
     } catch {
       /* fall through to pick / camera */
+    }
+  }
+
+  // Bone gizmo intercept (pose-phase edit mode)
+  if (
+    mode === "bone" &&
+    boneModeRef.current === "edit" &&
+    bonePhase.ref.current?.phase === "pose" &&
+    e.button === 0 &&
+    !loading &&
+    !workBusy &&
+    !logoSplashPointer
+  ) {
+    try {
+      const consumed = await invoke<boolean>("bone_gizmo_pointer_down", {
+        args: { nx, ny },
+      });
+      if (consumed) {
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "boneGizmo" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
+    } catch {
+      /* fall through */
     }
   }
 
@@ -462,6 +503,7 @@ const onPointerDown = async (e: React.PointerEvent) => {
 
   // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
   // Exclude selectExtrude — in that mode we use the extrude gizmo instead.
+  // In bone mode, intercept the shared gizmo drag to move joints instead of voxels.
   if (
     e.button === 0 &&
     !loading &&
@@ -528,7 +570,8 @@ const onPointerDown = async (e: React.PointerEvent) => {
       mode === "punch" ||
       mode === "sculpt" ||
       mode === "generator" ||
-      mode === "squishy") &&
+      mode === "squishy" ||
+      mode === "bone") &&
     e.button === 0;
   // All draw/select modes run the async pick probe. Pointer-up events that
   // arrive while probing are deferred and replayed after the probe resolves
@@ -551,9 +594,49 @@ const onPointerDown = async (e: React.PointerEvent) => {
     return;
   }
 
+  let gestureMode: string = forceCamera || navigate || !hitSolid ? "camera" : "voxel";
+
+  // Bone pose phase: always allow camera orbit on drag. Selection/delete
+  // happens on pointer-up with a click threshold, so we force camera gesture
+  // here and handle bone interactions in the pointer-up path.
+  if (
+    mode === "bone" &&
+    bonePhase.ref.current?.phase === "pose" &&
+    boneModeRef.current !== "add"
+  ) {
+    gestureMode = "camera";
+  }
+
+  // Bone build+add: place joint immediately on pointer-down and start drag gesture.
+  if (
+    mode === "bone" &&
+    boneModeRef.current === "add" &&
+    (!bonePhase.ref.current || bonePhase.ref.current.phase === "build") &&
+    e.button === 0 &&
+    !forceCamera &&
+    !navigate &&
+    !loading &&
+    !workBusy
+  ) {
+    if (!bonePhase.active) {
+      bonePhase.enter("build", {});
+    }
+    try {
+      const newId = await invoke<number | null>("bone_add_joint_at_screen", {
+        args: { nx, ny, radius: boneDefaultRadiusRef.current },
+      });
+      if (newId != null) {
+        gestureMode = "bonePlacing";
+        bonePlacingJointRef.current = newId;
+      }
+    } catch {
+      /* fall through to camera */
+    }
+  }
+
   gestureRef.current = {
     pointerId,
-    mode: forceCamera || navigate || !hitSolid ? "camera" : "voxel",
+    mode: gestureMode,
   };
   logPlaneStrokeDebug("down:gesture-assigned", e, {
     hitSolid,
@@ -874,6 +957,16 @@ const onPointerMove = (e: React.PointerEvent) => {
     }
   }
   if (
+    gestureRef.current?.mode === "bonePlacing" &&
+    gestureRef.current.pointerId === e.pointerId &&
+    bonePlacingJointRef.current != null
+  ) {
+    void invoke("bone_move_joint_to_screen", {
+      args: { id: bonePlacingJointRef.current, nx: px, ny: py },
+    }).catch(() => {});
+    return;
+  }
+  if (
     gestureRef.current?.mode === "squishyGizmo" &&
     gestureRef.current.pointerId === e.pointerId
   ) {
@@ -940,7 +1033,9 @@ const onPointerMove = (e: React.PointerEvent) => {
     rocksPhase.active ||
     grassPhase.active ||
     ashlarPhase.active ||
-    floraPhase.active;
+    floraPhase.active ||
+    shapePhase.active ||
+    bonePhase.active;
   if (
     !overGizmo &&
     !probingRef.current &&
@@ -953,6 +1048,7 @@ const onPointerMove = (e: React.PointerEvent) => {
       interactionModeRef.current === "selectCoplanar" ||
       interactionModeRef.current === "selectCoplanarEmpty" ||
       interactionModeRef.current === "squishy" ||
+      interactionModeRef.current === "bone" ||
       interactionModeRef.current === "generator" ||
       interactionModeRef.current === "stamp" ||
       interactionModeRef.current === "punch" ||
@@ -964,9 +1060,11 @@ const onPointerMove = (e: React.PointerEvent) => {
     void invoke("sync_preview_input", {
       args: buildSyncPreviewPayload(px, py, m),
     }).catch(() => {});
-  } else if (overGizmo) {
+  } else if (overGizmo && !shapePhase.active && !bonePhase.active) {
     // Preserve selectExtrude mode when hovering the extrude gizmo so the
     // GPU gizmo continues rendering in extrude style (balls, no rings).
+    // Skip when the shape/bone phase is active — the gizmo is part of the
+    // workflow, so hovering it should not clear the preview.
     const hoverMode =
       interactionModeRef.current === "selectExtrude" ? "selectExtrude" : "navigate";
     void invoke("sync_preview_input", {
@@ -1414,6 +1512,32 @@ const onPointerUp = (e: React.PointerEvent) => {
   }
 
   if (
+    gestureRef.current?.mode === "bonePlacing" &&
+    gestureRef.current.pointerId === e.pointerId
+  ) {
+    const placedId = bonePlacingJointRef.current;
+    bonePlacingJointRef.current = null;
+    if (placedId != null) {
+      const prev = bonePendingJointRef.current;
+      if (prev != null) {
+        void invoke("bone_connect_joints", {
+          args: { jointA: prev, jointB: placedId },
+        }).catch(() => {});
+      }
+      bonePendingJointRef.current = placedId;
+      void invoke<any>("bone_session_get")
+        .then((s: any) => {
+          setBoneJointCount(s.joints?.length ?? 0);
+          setBoneBoneCount(s.bones?.length ?? 0);
+        })
+        .catch(() => {});
+    }
+    resetPointerGesture("bone-placing-up", e);
+    return;
+  }
+
+
+  if (
     gestureRef.current?.mode === "squishyGizmo" &&
     gestureRef.current.pointerId === e.pointerId
   ) {
@@ -1521,6 +1645,9 @@ const onPointerUp = (e: React.PointerEvent) => {
             // Already in settings phase — ignore clicks
           } else if (!ropeFirstScreen) {
             setRopeFirstScreen({ nx, ny });
+            void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+              args: { nx, ny, tool: "add", strokeSnapToSurface: false },
+            }).then((v) => { if (v) setRopeFirstVoxel(v); }).catch(() => {});
           } else {
             // Enter settings phase instead of immediately generating
             void invoke("lock_generator_preview_camera").catch(() => {});
@@ -1540,6 +1667,20 @@ const onPointerUp = (e: React.PointerEvent) => {
           if (!floraPhase.active) {
             void invoke("lock_generator_preview_camera").catch(() => {});
             floraPhase.enter("settings", { nx, ny, seed: floraPreviewSeedRef.current });
+          }
+        } else if (gk === "shape") {
+          if (!shapePhase.active) {
+            void invoke("lock_generator_preview_camera").catch(() => {});
+            // Resolve click to world coord for gizmo placement.
+            void invoke<[number, number, number] | null>("voxel_stroke_anchor_coord_at_screen", {
+              args: { nx, ny, tool: "add" },
+            }).then((c) => {
+              if (c) {
+                shapeGizmoPosRef.current = c;
+                void invoke("set_generator_gizmo_center", { center: [c[0], c[1], c[2]] }).catch(() => {});
+              }
+            }).catch(() => {});
+            shapePhase.enter("settings", { nx, ny });
           }
         } else if (gk === "roof") {
           // Square/circle use drag-to-define (handled in pointer move/up).
@@ -1790,6 +1931,43 @@ const onPointerUp = (e: React.PointerEvent) => {
     });
   }
 
+  // Bone tool: pick/select/delete on click (works in camera gesture mode so
+  // dragging orbits and only short clicks trigger selection).
+  if (
+    isThisPointer &&
+    interactionModeRef.current === "bone" &&
+    moved < 20 &&
+    e.button === 0
+  ) {
+    const { nx, ny } = clientToViewportNormalized(e);
+    const phase = bonePhase.ref.current?.phase ?? "build";
+    const bm = boneModeRef.current;
+    let action: Promise<void> | null = null;
+    if (bm === "delete") {
+      action = invoke<any>("bone_pick_at_screen", { args: { nx, ny } })
+        .then((sel) => {
+          if (sel != null) {
+            bonePendingJointRef.current = null;
+            return invoke("bone_remove", { args: { selection: sel } }).then(() => {});
+          }
+        });
+    } else if (phase === "pose" && bm === "edit") {
+      action = invoke<any>("bone_pick_at_screen", { args: { nx, ny } })
+        .then((sel) =>
+          invoke("bone_select", { args: { selection: sel ?? null } }).then(() => {}),
+        );
+    }
+    if (action) {
+      void action
+        .then(() => invoke<any>("bone_session_get"))
+        .then((s: any) => {
+          setBoneJointCount(s.joints?.length ?? 0);
+          setBoneBoneCount(s.bones?.length ?? 0);
+        })
+        .catch(() => {});
+    }
+  }
+
   if (isThisPointer && g?.mode === "camera" && interactionModeRef.current !== "fly") {
     const { nx, ny } = clientToViewportNormalized(e);
     void invoke("viewport_pointer", {
@@ -1836,6 +2014,7 @@ const onPointerLeave = (e: React.PointerEvent) => {
     im !== "selectCoplanarEmpty" &&
     im !== "selectExtrude" &&
     im !== "squishy" &&
+    im !== "bone" &&
     im !== "generator"
   ) {
     clearPreview();
@@ -1875,6 +2054,28 @@ const onLostPointerCapture = (e: React.PointerEvent) => {
 const onWheel = (e: React.WheelEvent) => {
   e.preventDefault();
   if (interactionModeRef.current === "fly" || interactionModeRef.current === "walk") return;
+  // Shape generator wheel shortcuts
+  if (
+    interactionModeRef.current === "generator" &&
+    generatorKindRef.current === "shape" &&
+    (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey)
+  ) {
+    const delta = e.deltaY > 0 ? -1 : 1;
+    if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
+      // Ctrl+Wheel → size ±1
+      setShapeSize((v: number) => Math.max(1, Math.min(256, v + delta)));
+    } else if (e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey) {
+      // Shift+Wheel → rotX ±15°
+      setShapeRotX((v: number) => ((v + delta * 15) % 360 + 360) % 360);
+    } else if (e.altKey && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      // Alt+Wheel → rotY ±15°
+      setShapeRotY((v: number) => ((v + delta * 15) % 360 + 360) % 360);
+    } else if (e.shiftKey && e.altKey && !e.ctrlKey && !e.metaKey) {
+      // Shift+Alt+Wheel → rotZ ±15°
+      setShapeRotZ((v: number) => ((v + delta * 15) % 360 + 360) % 360);
+    }
+    return;
+  }
   void invoke("viewport_wheel", {
     ev: { delta_x: e.deltaX, delta_y: e.deltaY },
   });

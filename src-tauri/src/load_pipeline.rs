@@ -488,6 +488,7 @@ pub(crate) fn unload_current_project<R: Runtime>(
     *state.preview_cursor.lock() = None;
 
     state.squishy_session.lock().clear();
+    state.bone_session.lock().clear();
 
     log::info!(target: "voxelle_load", "unload_current_project: done");
     #[cfg(desktop)]

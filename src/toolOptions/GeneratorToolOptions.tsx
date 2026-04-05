@@ -2,7 +2,7 @@
 // Extracted from App.tsx to reduce file size (~1 600 lines of JSX).
 
 import { invoke } from "@tauri-apps/api/core";
-import type { GeneratorKindId, ClothGravityDirectionId } from "../types";
+import type { GeneratorKindId, ClothGravityDirectionId, StartShapeId } from "../types";
 import {
   FLORA_PRESETS,
 } from "../generatorPresets";
@@ -102,6 +102,13 @@ export interface GeneratorToolOptionsProps {
   roofHollow: boolean;
   setRoofHollow: (v: boolean) => void;
 
+  // Shape
+  shapeKind: StartShapeId;
+  setShapeKind: (s: StartShapeId) => void;
+  shapeSize: number;
+  setShapeSize: (n: number) => void;
+  shapeOverwrite: boolean;
+  setShapeOverwrite: (v: boolean) => void;
 }
 
 // ── Component ────────────────────────────────────────────────────────
@@ -184,6 +191,12 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
     setRoofHeight,
     roofHollow,
     setRoofHollow,
+    shapeKind,
+    setShapeKind,
+    shapeSize,
+    setShapeSize,
+    shapeOverwrite,
+    setShapeOverwrite,
   } = props;
 
   const disabled = loading || workBusy;
@@ -193,7 +206,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
       <div className="tool-options-heading">Generator</div>
       {generatorKind === "rocks" ? (
         <>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Size</span>
             <input
               type="range"
@@ -204,7 +217,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Roughness</span>
             <input
               type="range"
@@ -216,7 +229,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Count</span>
             <input
               type="range"
@@ -228,7 +241,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
             />
           </label>
           {rockCount > 1 ? (
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Spread</span>
               <input
                 type="range"
@@ -240,9 +253,9 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               />
             </label>
           ) : null}
-          <div className="tool-options-range-label">
+          <div className="tool-options-range-label tool-options-range-with-value">
             <span>Sink</span>
-            <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2 }}>
+            <div className="stroke-mode-buttons" style={{ display: "flex", gap: 2, flex: "1 1 auto" }}>
               {(["over", "none", "under"] as const).map((dir) => (
                 <button
                   key={dir}
@@ -262,7 +275,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
             </div>
           </div>
           {rockSinkDirection !== "none" ? (
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Layers</span>
               <input
                 type="range"
@@ -278,7 +291,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
       ) : null}
       {generatorKind === "grass" ? (
         <>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Radius</span>
             <input
               type="range"
@@ -290,7 +303,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Density</span>
             <input
               type="range"
@@ -302,7 +315,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Height</span>
             <input
               type="range"
@@ -317,7 +330,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
       ) : null}
       {generatorKind === "rope" ? (
         <>
-          <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Gravity</span>
             <select
               aria-label="Rope gravity direction"
@@ -326,6 +339,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 setClothGravityDirection(ev.target.value as ClothGravityDirectionId)
               }
               disabled={disabled}
+              style={{ flex: "1 1 auto", minWidth: 0 }}
             >
               <option value="down">Down (-Y)</option>
               <option value="up">Up (+Y)</option>
@@ -341,7 +355,6 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
               gap: "0.25rem",
-              marginTop: "0.35rem",
             }}
             role="group"
             aria-label="Shape"
@@ -387,7 +400,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
       ) : null}
       {generatorKind === "cloth" ? (
         <>
-          <label className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Gravity</span>
             <select
               aria-label="Cloth gravity direction"
@@ -396,6 +409,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 setClothGravityDirection(ev.target.value as ClothGravityDirectionId)
               }
               disabled={disabled}
+              style={{ flex: "1 1 auto", minWidth: 0 }}
             >
               <option value="down">Down (-Y)</option>
               <option value="up">Up (+Y)</option>
@@ -411,7 +425,6 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               display: "grid",
               gridTemplateColumns: "1fr 1fr",
               gap: "0.25rem",
-              marginTop: "0.35rem",
             }}
             role="group"
             aria-label="Shape"
@@ -513,7 +526,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
       ) : null}
       {generatorKind === "ashlar" ? (
         <>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Size</span>
             <input
               type="range"
@@ -524,7 +537,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Roughness</span>
             <input
               type="range"
@@ -536,7 +549,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Thickness</span>
             <input
               type="range"
@@ -590,7 +603,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
           </div>
           <div className="gen-card">
             <div className="gen-card-title">Stem</div>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Height</span>
               <input
                 type="range"
@@ -604,7 +617,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Girth</span>
               <input
                 type="range"
@@ -618,7 +631,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Wobble</span>
               <input
                 type="range"
@@ -633,7 +646,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Taper</span>
               <input
                 type="range"
@@ -651,7 +664,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
           </div>
           <div className="gen-card">
             <div className="gen-card-title">Stems</div>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Count</span>
               <input
                 type="range"
@@ -665,7 +678,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Cluster r</span>
               <input
                 type="range"
@@ -682,7 +695,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
           </div>
           <div className="gen-card">
             <div className="gen-card-title">Branches</div>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Count</span>
               <input
                 type="range"
@@ -696,7 +709,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Depth</span>
               <input
                 type="range"
@@ -710,7 +723,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Start</span>
               <input
                 type="range"
@@ -725,7 +738,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Spread</span>
               <input
                 type="range"
@@ -743,7 +756,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
           </div>
           <div className="gen-card">
             <div className="gen-card-title">Braid</div>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Strands</span>
               <input
                 type="range"
@@ -757,7 +770,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Twist</span>
               <input
                 type="range"
@@ -772,7 +785,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 disabled={disabled}
               />
             </label>
-            <label className="tool-options-range-label">
+            <label className="tool-options-range-label tool-options-range-with-value">
               <span>Canopy</span>
               <input
                 type="range"
@@ -792,12 +805,13 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
       ) : null}
       {generatorKind === "roof" ? (
         <>
-          <div className="tool-options-range-label" style={{ marginTop: "0.35rem" }}>
+          <div className="tool-options-range-label tool-options-range-with-value">
             <span>Area</span>
             <div
               className="tool-options-shape-row"
               role="group"
               aria-label="Roof area shape"
+              style={{ flex: "1 1 auto" }}
             >
               {(["polygon", "square", "circle"] as const).map((shape) => (
                 <button
@@ -824,12 +838,13 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               ))}
             </div>
           </div>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Style</span>
             <select
               value={roofStyle}
               onChange={(ev) => setRoofStyle(ev.target.value)}
               disabled={disabled}
+              style={{ flex: "1 1 auto", minWidth: 0 }}
             >
               <option value="flat">Flat</option>
               <option value="flat_parapet">Flat Parapet</option>
@@ -846,7 +861,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               <option value="dutch_gable">Dutch Gable</option>
             </select>
           </label>
-          <label className="tool-options-range-label">
+          <label className="tool-options-range-label tool-options-range-with-value">
             <span>Height</span>
             <input
               type="range"
@@ -866,12 +881,72 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
             />
             <span>Hollow</span>
           </label>
+          {roofPins.length >= 2 ? (
+            <div className="tool-options-range-label">
+              <button
+                type="button"
+                className="tool-options-shape-btn"
+                disabled={disabled}
+                onClick={() => {
+                  const flipped = [...roofPins].reverse();
+                  setRoofPins(flipped);
+                  roofPinsRef.current = flipped;
+                }}
+              >
+                Flip
+              </button>
+            </div>
+          ) : null}
           <p className="sidebar-pane-hint" style={{ marginTop: "0.25rem" }}>
             {roofAreaShape === "polygon"
               ? `Click surface to add pins (${roofPins.length} placed).`
               : roofAreaShape === "square"
                 ? "Drag on a face to define the rectangle."
                 : "Drag from center to set radius."}
+          </p>
+        </>
+      ) : null}
+      {generatorKind === "shape" ? (
+        <>
+          <label className="tool-options-range-label tool-options-range-with-value">
+            <span>Shape</span>
+            <select
+              value={shapeKind}
+              onChange={(ev) => setShapeKind(ev.target.value as StartShapeId)}
+              disabled={disabled}
+              style={{ flex: "1 1 auto", minWidth: 0 }}
+            >
+              <option value="cube">Cube</option>
+              <option value="orb">Orb</option>
+              <option value="cylinder">Cylinder</option>
+              <option value="hollowCube">Hollow Cube</option>
+              <option value="plane">Plane</option>
+              <option value="circle">Circle</option>
+            </select>
+          </label>
+          <label className="tool-options-range-label tool-options-range-with-value">
+            <span>Size</span>
+            <input
+              type="range"
+              min={1}
+              max={256}
+              value={shapeSize}
+              onChange={(ev) => setShapeSize(Number(ev.target.value))}
+              disabled={disabled}
+            />
+            <span className="tool-options-range-value">{shapeSize}</span>
+          </label>
+          <label className="tool-options-checkbox-row">
+            <input
+              type="checkbox"
+              checked={shapeOverwrite}
+              onChange={(ev) => setShapeOverwrite(ev.target.checked)}
+              disabled={disabled}
+            />
+            <span>Overwrite existing</span>
+          </label>
+          <p className="sidebar-pane-hint" style={{ marginTop: "0.25rem" }}>
+            Click a surface to place the shape.
           </p>
         </>
       ) : null}

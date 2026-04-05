@@ -219,40 +219,35 @@ fn dist_sq_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f
 /// Compute gizmo projected positions. Shared by `get_selection_gizmo_projected`,
 /// `gizmo_pointer_down`, and `gizmo_hit_test`.
 fn compute_gizmo_proj(state: &ViewerState) -> Option<SelectionGizmoProjected> {
-    let sel = state.selection_cells.lock();
-    if sel.is_empty() {
-        return None;
-    }
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut min_y = i32::MAX;
-    let mut max_y = i32::MIN;
-    let mut min_z = i32::MAX;
-    let mut max_z = i32::MIN;
-    for &(x, y, z) in sel.iter() {
-        if x < min_x {
-            min_x = x;
+    let gen_center = state.generator_gizmo_center.lock().clone();
+    let (cx, cy, cz) = if let Some([gx, gy, gz]) = gen_center {
+        (gx, gy, gz)
+    } else {
+        let sel = state.selection_cells.lock();
+        if sel.is_empty() {
+            return None;
         }
-        if x > max_x {
-            max_x = x;
+        let mut min_x = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        let mut min_z = i32::MAX;
+        let mut max_z = i32::MIN;
+        for &(x, y, z) in sel.iter() {
+            if x < min_x { min_x = x; }
+            if x > max_x { max_x = x; }
+            if y < min_y { min_y = y; }
+            if y > max_y { max_y = y; }
+            if z < min_z { min_z = z; }
+            if z > max_z { max_z = z; }
         }
-        if y < min_y {
-            min_y = y;
-        }
-        if y > max_y {
-            max_y = y;
-        }
-        if z < min_z {
-            min_z = z;
-        }
-        if z > max_z {
-            max_z = z;
-        }
-    }
-    drop(sel);
-    let cx = (min_x + max_x) as f32 * 0.5;
-    let cy = (min_y + max_y) as f32 * 0.5;
-    let cz = (min_z + max_z) as f32 * 0.5;
+        drop(sel);
+        (
+            (min_x + max_x) as f32 * 0.5,
+            (min_y + max_y) as f32 * 0.5,
+            (min_z + max_z) as f32 * 0.5,
+        )
+    };
     let center = glam::Vec3::new(cx, cy, cz);
     let (vw, vh) = {
         let v = state.viewer.lock();
@@ -397,13 +392,14 @@ fn push_selection_transform_undo(
         return;
     }
     drop(cb);
-    state
-        .solo_undo
-        .lock()
-        .push(SoloUndoEntry::SelectionTransform {
+    {
+        let mut stack = state.solo_undo.lock();
+        stack.push(SoloUndoEntry::SelectionTransform {
             before: before_sel,
             deltas,
         });
+        crate::commands::edit::enforce_solo_undo_cap(&mut stack);
+    }
     state.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::register_solo_edit_completed(app, state);
@@ -1069,6 +1065,24 @@ pub(crate) fn gizmo_pointer_down(state: State<'_, Arc<ViewerState>>, sx: f32, sy
     let Some(proj) = compute_gizmo_proj(&state) else {
         return false;
     };
+    // Check scale ring first (generator_gizmo_ring_radius).
+    if let Some(radius) = *state.generator_gizmo_ring_radius.lock() {
+        let ring_hit = GIZMO_RING_HIT_CSS * dpr;
+        let dx = sx - proj.center_sx;
+        let dy = sy - proj.center_sy;
+        let cursor_dist = dx.hypot(dy);
+        // The ring is at `radius` world units; project to screen pixels.
+        let ring_screen_r = radius * proj.px_per_world;
+        if (cursor_dist - ring_screen_r).abs() <= ring_hit {
+            *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Scale {
+                center_sx: proj.center_sx,
+                center_sy: proj.center_sy,
+                start_dist: cursor_dist,
+                start_radius: radius,
+            };
+            return true;
+        }
+    }
     let Some(drag) = gizmo_hit_test_inner(&proj, sx, sy, dpr) else {
         return false;
     };
@@ -1111,6 +1125,13 @@ pub(crate) fn gizmo_pointer_move(
                 }
                 // Invalidate overlay so render loop rebuilds it at the new preview position.
                 *state.selection_overlay_cache_key.lock() = None;
+                // When the generator gizmo is active (shape settings phase), also
+                // invalidate the preview overlay cache so the shape preview mesh
+                // rebuilds at the new offset, and wake the frame loop.
+                if state.generator_gizmo_center.lock().is_some() {
+                    *state.preview_overlay_cache_key.lock() = None;
+                    crate::edit_pipeline::wake_viewport_loop(&app);
+                }
             }
             *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Move {
                 axis_sx,
@@ -1145,7 +1166,34 @@ pub(crate) fn gizmo_pointer_move(
             if steps == 0 {
                 return Ok(());
             }
+            // When the generator gizmo is active (shape settings phase),
+            // emit a rotation event for the frontend instead of rotating
+            // the selection. Each step = 15° of shape rotation.
+            if state.generator_gizmo_center.lock().is_some() {
+                let degrees = steps * 15;
+                let _ = app.emit("generator-gizmo-rotated", (ring, degrees));
+                *state.preview_overlay_cache_key.lock() = None;
+                crate::edit_pipeline::wake_viewport_loop(&app);
+                return Ok(());
+            }
             selection_rotate_inner(state.inner(), &app, ring, steps)?;
+            Ok(())
+        }
+        SelectionGizmoDrag::Scale { center_sx, center_sy, start_dist, mut start_radius } => {
+            // Map horizontal pixel drag to radius change.
+            // px_per_world converts world units to screen pixels.
+            let proj = compute_gizmo_proj(&state);
+            let ppw = proj.map(|p| p.px_per_world).unwrap_or(10.0);
+            let delta_world = dcx / ppw.max(0.1);
+            start_radius = (start_radius + delta_world).clamp(0.5, 64.0);
+            // Update the ring radius state and emit event.
+            *state.generator_gizmo_ring_radius.lock() = Some(start_radius);
+            let _ = app.emit("generator-gizmo-scaled", start_radius);
+            *state.preview_overlay_cache_key.lock() = None;
+            crate::edit_pipeline::wake_viewport_loop(&app);
+            *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::Scale {
+                center_sx, center_sy, start_dist, start_radius,
+            };
             Ok(())
         }
     }
@@ -1158,16 +1206,40 @@ pub(crate) fn gizmo_pointer_up(state: State<'_, Arc<ViewerState>>, app: AppHandl
     // won't double-apply the offset after selection_cells is updated.
     *state.selection_gizmo_drag.lock() = SelectionGizmoDrag::None;
     *state.selection_overlay_cache_key.lock() = None;
-    if let SelectionGizmoDrag::Move {
-        pending_dx,
-        pending_dy,
-        pending_dz,
-        ..
-    } = drag
-    {
-        if pending_dx != 0 || pending_dy != 0 || pending_dz != 0 {
-            selection_translate_inner(state.inner(), &app, pending_dx, pending_dy, pending_dz)?;
+    match drag {
+        SelectionGizmoDrag::Move {
+            pending_dx,
+            pending_dy,
+            pending_dz,
+            ..
+        } => {
+            if pending_dx != 0 || pending_dy != 0 || pending_dz != 0 {
+                // If generator gizmo override is active, update the override center
+                // and emit an event instead of translating the selection.
+                let mut gen = state.generator_gizmo_center.lock();
+                if let Some(ref mut center) = *gen {
+                    center[0] += pending_dx as f32;
+                    center[1] += pending_dy as f32;
+                    center[2] += pending_dz as f32;
+                    let _ = app.emit("generator-gizmo-moved", [center[0], center[1], center[2]]);
+                    return Ok(());
+                }
+                drop(gen);
+                selection_translate_inner(state.inner(), &app, pending_dx, pending_dy, pending_dz)?;
+            }
         }
+        SelectionGizmoDrag::Rotate { .. } => {
+            // When generator gizmo is active, rotation was applied incrementally
+            // during the drag. Just refresh the preview to ensure final state is shown.
+            if state.generator_gizmo_center.lock().is_some() {
+                *state.preview_overlay_cache_key.lock() = None;
+                crate::edit_pipeline::wake_viewport_loop(&app);
+            }
+        }
+        SelectionGizmoDrag::Scale { .. } => {
+            // Scale was applied incrementally during drag via events.
+        }
+        SelectionGizmoDrag::None => {}
     }
     Ok(())
 }
@@ -1178,6 +1250,18 @@ pub(crate) fn gizmo_hit_test(state: State<'_, Arc<ViewerState>>, sx: f32, sy: f3
         state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
         return false;
     };
+    // Check scale ring hover.
+    if let Some(radius) = *state.generator_gizmo_ring_radius.lock() {
+        let ring_hit = GIZMO_RING_HIT_CSS * dpr;
+        let dx = sx - proj.center_sx;
+        let dy = sy - proj.center_sy;
+        let cursor_dist = dx.hypot(dy);
+        let ring_screen_r = radius * proj.px_per_world;
+        if (cursor_dist - ring_screen_r).abs() <= ring_hit {
+            state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+            return true;
+        }
+    }
     match gizmo_hit_test_inner(&proj, sx, sy, dpr) {
         Some(SelectionGizmoDrag::Move { world_axis, .. }) => {
             state
@@ -1187,6 +1271,10 @@ pub(crate) fn gizmo_hit_test(state: State<'_, Arc<ViewerState>>, sx: f32, sy: f3
         }
         Some(SelectionGizmoDrag::Rotate { ring, .. }) => {
             state.hovered_gizmo_axis.store(ring, Ordering::Relaxed);
+            true
+        }
+        Some(SelectionGizmoDrag::Scale { .. }) => {
+            state.hovered_gizmo_axis.store(255, Ordering::Relaxed);
             true
         }
         Some(SelectionGizmoDrag::None) | None => {
@@ -1474,11 +1562,7 @@ pub(crate) fn selection_delete_selected_voxels(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
-                deltas: deltas.clone(),
-            })
-            .unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;

@@ -25,6 +25,9 @@ export interface RopeClothGeneratorState {
   ropeFirstScreen: { nx: number; ny: number } | null;
   setRopeFirstScreen: React.Dispatch<React.SetStateAction<{ nx: number; ny: number } | null>>;
   ropeFirstScreenRef: React.MutableRefObject<{ nx: number; ny: number } | null>;
+  ropeFirstVoxel: [number, number, number] | null;
+  setRopeFirstVoxel: React.Dispatch<React.SetStateAction<[number, number, number] | null>>;
+  ropeFirstVoxelRef: React.MutableRefObject<[number, number, number] | null>;
   ropeSag: number;
   ropeSagRef: React.MutableRefObject<number>;
   ropeTension: number;
@@ -71,14 +74,17 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
 
   // -- Rope state -------------------------------------------------------------
   const [ropeFirstScreen, setRopeFirstScreen] = useState<{ nx: number; ny: number } | null>(null);
+  const [ropeFirstVoxel, setRopeFirstVoxel] = useState<[number, number, number] | null>(null);
   const [ropeSag, _setRopeSag] = useState(2.5);
   const [ropeTension, setRopeTension] = useState(0.5);
 
   const ropeFirstScreenRef = useRef<{ nx: number; ny: number } | null>(null);
+  const ropeFirstVoxelRef = useRef<[number, number, number] | null>(null);
   const ropeSagRef = useRef(ropeSag);
   const ropeTensionRef = useRef(ropeTension);
 
   useEffect(() => { ropeFirstScreenRef.current = ropeFirstScreen; }, [ropeFirstScreen]);
+  useEffect(() => { ropeFirstVoxelRef.current = ropeFirstVoxel; }, [ropeFirstVoxel]);
   useEffect(() => { ropeSagRef.current = ropeSag; }, [ropeSag]);
   useEffect(() => { ropeTensionRef.current = ropeTension; }, [ropeTension]);
 
@@ -115,6 +121,7 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
     onCancel: () => {
       void invoke("unlock_generator_preview_camera").catch(() => {});
       setRopeFirstScreen(null);
+      setRopeFirstVoxel(null);
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
@@ -135,6 +142,7 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
         },
       }).catch(() => {});
       setRopeFirstScreen(null);
+      setRopeFirstVoxel(null);
     },
   });
 
@@ -195,6 +203,7 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
     ropeBrushShapeUi, setRopeBrushShapeUi, ropeBrushShapeUiRef,
     // Rope
     ropeFirstScreen, setRopeFirstScreen, ropeFirstScreenRef,
+    ropeFirstVoxel, setRopeFirstVoxel, ropeFirstVoxelRef,
     ropeSag, ropeSagRef,
     ropeTension, setRopeTension, ropeTensionRef,
     ropePhase,

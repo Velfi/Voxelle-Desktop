@@ -25,7 +25,7 @@ pub(crate) fn write_voxelle_file_to_path(
     if let Some(app) = progress {
         emit_work_progress(app, 0.35, "Saving — encoding…");
     }
-    let bytes = encode_payload_v4(&file).map_err(|e| e.to_string())?;
+    let bytes = encode_payload_v5(&file).map_err(|e| e.to_string())?;
     if let Some(app) = progress {
         emit_work_progress(app, 0.7, "Saving — writing file…");
     }
@@ -562,7 +562,7 @@ fn leave_collab_guest(state: &Arc<ViewerState>, app: &AppHandle) {
     if c.is_client() {
         if let Some(tx) = &c.client_tx {
             let msg = serde_json::to_string(&collab::ClientToHost::Leave).unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
         }
         c.leave();
         drop(c);

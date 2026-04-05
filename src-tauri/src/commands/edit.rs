@@ -136,6 +136,14 @@ pub(crate) fn voxel_stroke_anchor_coord_at_screen(
 
 // ── Undo helpers ──────────��─────────────────────────────────────────────────
 
+/// Trim the solo undo stack to the configured maximum, discarding the oldest entries.
+pub(crate) fn enforce_solo_undo_cap(stack: &mut Vec<SoloUndoEntry>) {
+    if stack.len() > SOLO_UNDO_MAX_ENTRIES {
+        let excess = stack.len() - SOLO_UNDO_MAX_ENTRIES;
+        stack.drain(..excess);
+    }
+}
+
 pub(crate) fn push_solo_undo_step(
     state: &Arc<ViewerState>,
     app: &AppHandle,
@@ -144,10 +152,10 @@ pub(crate) fn push_solo_undo_step(
     if deltas.is_empty() {
         return Ok(());
     }
-    state
-        .solo_undo
-        .lock()
-        .push(SoloUndoEntry::VoxelDeltas(deltas));
+    let mut stack = state.solo_undo.lock();
+    stack.push(SoloUndoEntry::VoxelDeltas(deltas));
+    enforce_solo_undo_cap(&mut stack);
+    drop(stack);
     state.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::register_solo_edit_completed(app, state);
@@ -159,14 +167,48 @@ pub(crate) fn push_solo_selection_undo_step(
     app: &AppHandle,
     before: AHashSet<greedy_mesh::VoxelCoord>,
 ) -> Result<(), String> {
-    state
-        .solo_undo
-        .lock()
-        .push(SoloUndoEntry::SelectionBefore(before));
+    let mut stack = state.solo_undo.lock();
+    stack.push(SoloUndoEntry::SelectionBefore(before));
+    enforce_solo_undo_cap(&mut stack);
+    drop(stack);
     state.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::register_solo_edit_completed(app, state);
     Ok(())
+}
+
+/// Like `commit_voxel_edits` but reads `mirror_axes` from `PreviewHoverContext`
+/// and expands deltas with mirrored copies.  Used by generators so they all
+/// respect the active symmetry axes automatically.
+pub(crate) fn commit_generator_edits(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    mut deltas: Vec<voxel_edit::VoxelEditDelta>,
+) -> Result<bool, String> {
+    let mirror_axes = state.preview_hover.lock().mirror_axes;
+    if mirror_axes != 0 && !deltas.is_empty() {
+        let base: Vec<_> = deltas.clone();
+        let mut seen: std::collections::HashSet<(i32, i32, i32)> = base
+            .iter()
+            .map(|d| {
+                let v = d.coord();
+                (v.0, v.1, v.2)
+            })
+            .collect();
+        for flip_mask in 1u8..=7u8 {
+            if flip_mask & mirror_axes != flip_mask {
+                continue;
+            }
+            for d in &base {
+                let (x, y, z) = d.coord();
+                let (mx, my, mz) = voxel_edit::flip_coord(x, y, z, flip_mask);
+                if seen.insert((mx, my, mz)) {
+                    deltas.push(d.with_coord(mx, my, mz));
+                }
+            }
+        }
+    }
+    commit_voxel_edits(state, app, deltas)
 }
 
 pub(crate) fn commit_voxel_edits(
@@ -195,11 +237,7 @@ pub(crate) fn commit_voxel_edits(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
-                deltas: deltas.clone(),
-            })
-            .unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -926,11 +964,7 @@ pub(crate) fn voxel_stroke_end(state: State<'_, Arc<ViewerState>>, app: AppHandl
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
-                deltas: buf.clone(),
-            })
-            .unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&buf)));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1287,11 +1321,7 @@ pub(crate) async fn voxel_fill_at_screen(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
-                deltas: deltas.clone(),
-            })
-            .unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1692,11 +1722,7 @@ pub(crate) async fn voxel_edit_at_screen(
     let mut cb = cm.lock();
     if cb.is_client() {
         if let Some(tx) = &cb.client_tx {
-            let msg = serde_json::to_string(&collab::ClientToHost::Edit {
-                deltas: deltas.clone(),
-            })
-            .unwrap();
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Binary(collab::encode_client_edit_binary(&deltas)));
         }
     } else if cb.is_host() {
         cb.next_seq += 1;
@@ -1921,7 +1947,7 @@ pub(crate) fn voxel_undo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> 
         let mut c = cm.lock();
         if c.is_client() {
             if let Some(tx) = &c.client_tx {
-                let _ = tx.try_send(serde_json::to_string(&collab::ClientToHost::Undo).unwrap());
+                let _ = tx.try_send(collab::ClientOutgoing::Text(serde_json::to_string(&collab::ClientToHost::Undo).unwrap()));
             }
             return Ok(true);
         }
@@ -1983,7 +2009,7 @@ pub(crate) fn voxel_redo(state: State<'_, Arc<ViewerState>>, app: AppHandle) -> 
         let mut c = cm.lock();
         if c.is_client() {
             if let Some(tx) = &c.client_tx {
-                let _ = tx.try_send(serde_json::to_string(&collab::ClientToHost::Redo).unwrap());
+                let _ = tx.try_send(collab::ClientOutgoing::Text(serde_json::to_string(&collab::ClientToHost::Redo).unwrap()));
             }
             return Ok(true);
         }

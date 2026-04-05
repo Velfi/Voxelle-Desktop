@@ -1,6 +1,9 @@
 //! Procedural generators (web parity). Face placement uses ray hit + inward normal.
 
 mod ashlar_gen;
+mod bone_gizmo;
+mod bone_ik;
+mod bone_session;
 mod cloth_gen;
 pub(super) mod common;
 mod fauna_gen;
@@ -11,6 +14,7 @@ mod piscina_gen;
 mod rocks;
 mod roof_gen;
 mod rope_gen;
+mod shape_gen;
 mod squishy_gen;
 mod squishy_gizmo;
 mod squishy_pick_rings;
@@ -26,6 +30,7 @@ pub use piscina_gen::{generator_piscina_at_screen, preview_piscina_at_screen};
 pub use rocks::{generator_rocks_at_screen, preview_rock_at_screen};
 pub use roof_gen::{generate_roof_from_pins, preview_roof_voxels};
 pub use rope_gen::{generator_rope_between_screens, preview_rope_voxels_between_screens};
+pub use shape_gen::{compute_shape_positions, generator_shape_at_screen, preview_shape_at_screen};
 pub use squishy_gen::squishy_metaball_at_screen;
 pub use squishy_gizmo::{
     append_squishy_gizmo_wire, pick_squishy_gizmo_handle, squishy_gizmo_apply_drag,
@@ -36,4 +41,15 @@ pub use squishy_session::{
     pick_metaball_at_screen, squishy_add_ball_at_screen,
     squishy_commit_session, voxel_coords_for_session_with_limit, Metaball, SquishyMode,
     SquishySession,
+};
+pub use bone_gizmo::{
+    append_bone_skeleton_wire, bone_gizmo_apply_drag,
+    bone_gizmo_begin_drag, pick_bone_gizmo_handle, BoneGizmoDrag,
+};
+pub use bone_ik::{ik_drag_begin, ik_drag_update, IkDrag};
+pub use bone_session::{
+    bone_commit_session, pick_at_screen as bone_pick_at_screen,
+    screen_to_world_pos as bone_screen_to_world_pos,
+    voxel_coords_for_session as bone_voxel_coords_for_session,
+    BoneSelection, BoneSession,
 };

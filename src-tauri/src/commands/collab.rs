@@ -72,7 +72,7 @@ pub(crate) fn collab_leave(state: State<'_, Arc<ViewerState>>, app: AppHandle) -
         if wc {
             if let Some(tx) = &c.client_tx {
                 let msg = serde_json::to_string(&collab::ClientToHost::Leave).unwrap();
-                let _ = tx.try_send(msg);
+                let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
             }
         }
         c.leave();
@@ -124,7 +124,7 @@ pub(crate) fn collab_update_profile(
         })
         .unwrap();
         if let Some(tx) = &c.client_tx {
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
         }
         return Ok(());
     }
@@ -157,7 +157,7 @@ pub(crate) fn collab_set_can_edit(
     let mut c = state.collab.lock();
     if c.is_client() {
         if let Some(tx) = &c.client_tx {
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
         }
     } else if c.is_host() {
         for r in &mut c.roster {
@@ -196,7 +196,7 @@ pub(crate) fn collab_push_camera(state: State<'_, Arc<ViewerState>>, app: AppHan
     if c.is_client() {
         let msg = serde_json::to_string(&collab::ClientToHost::Camera { presence }).unwrap();
         if let Some(tx) = &c.client_tx {
-            let _ = tx.try_send(msg);
+            let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
         }
     } else if c.is_host() {
         // Guests only receive camera updates via WebSocket; without this broadcast the host's
@@ -267,7 +267,7 @@ pub(crate) fn collab_send_chat(
     }
     if let Some(tx) = &c.client_tx {
         let msg = serde_json::to_string(&collab::ClientToHost::Chat { text }).unwrap();
-        let _ = tx.try_send(msg);
+        let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
     }
     Ok(())
 }
@@ -325,7 +325,7 @@ pub(crate) fn collab_send_ping(
     }
     if let Some(tx) = &c.client_tx {
         let msg = serde_json::to_string(&collab::ClientToHost::Ping { x, y, z, emoji }).unwrap();
-        let _ = tx.try_send(msg);
+        let _ = tx.try_send(collab::ClientOutgoing::Text(msg));
     }
     Ok(())
 }

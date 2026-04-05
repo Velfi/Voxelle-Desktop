@@ -10,6 +10,7 @@ use crate::render::WgpuViewer;
 use crate::stroke_modes;
 use crate::voxel_edit;
 use crate::voxelle;
+use crate::voxelle::start_shape::StartShape;
 use crate::{
     append_polygon_vertex_marker_meshes, build_color_resolver, preview_single_cell_world,
     preview_tool_colors, stroke_preview_meshes_for_union, viewport_texels_from_norm,
@@ -36,7 +37,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
-/// `texel_s*` included because single-cell hover is anchored at the ray face hit (moves within a cell).
+/// Cache key for single-cell preview.  Keyed on the discrete voxel cell
+/// `(cx, cy, cz)` so the cache stays valid while the cursor remains in the
+/// same cell — sub-pixel `texel_s*` coordinates are intentionally excluded
+/// because the preview mesh is grid-snapped and does not vary within a cell.
 pub(crate) fn hash_single_cell_preview(
     mode: PreviewMode,
     cx: i32,
@@ -46,8 +50,6 @@ pub(crate) fn hash_single_cell_preview(
     debug_overlay: bool,
     palette_color: u32,
     object_id: u32,
-    texel_sx: f32,
-    texel_sy: f32,
 ) -> u64 {
     let mut h = AHasher::default();
     mode.hash(&mut h);
@@ -58,8 +60,6 @@ pub(crate) fn hash_single_cell_preview(
     debug_overlay.hash(&mut h);
     palette_color.hash(&mut h);
     object_id.hash(&mut h);
-    texel_sx.to_bits().hash(&mut h);
-    texel_sy.to_bits().hash(&mut h);
     h.finish()
 }
 
@@ -110,6 +110,39 @@ pub(crate) fn hash_squishy_preview(
     } else {
         0x5Eu8.hash(&mut h);
     }
+    h.finish()
+}
+
+fn hash_bone_preview(
+    session: &generators::BoneSession,
+    sx: f32,
+    sy: f32,
+    gizmo_drag: bool,
+    debug_overlay: bool,
+    palette_color: u32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = AHasher::default();
+    PreviewMode::Bone.hash(&mut h);
+    debug_overlay.hash(&mut h);
+    palette_color.hash(&mut h);
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    gizmo_drag.hash(&mut h);
+    for j in &session.joints {
+        j.id.hash(&mut h);
+        j.x.to_bits().hash(&mut h);
+        j.y.to_bits().hash(&mut h);
+        j.z.to_bits().hash(&mut h);
+        j.radius.to_bits().hash(&mut h);
+    }
+    for b in &session.bones {
+        b.id.hash(&mut h);
+        b.joint_a.hash(&mut h);
+        b.joint_b.hash(&mut h);
+    }
+    session.selected.hash(&mut h);
+    session.pending_joint.hash(&mut h);
     h.finish()
 }
 
@@ -182,9 +215,7 @@ pub(crate) struct SyncPreviewInput {
     #[serde(default)]
     generator_kind: Option<String>,
     #[serde(default)]
-    generator_rope_first_nx: Option<f32>,
-    #[serde(default)]
-    generator_rope_first_ny: Option<f32>,
+    generator_rope_first_voxel: Option<[i32; 3]>,
     #[serde(default = "default_rope_sag")]
     generator_rope_sag: f32,
     #[serde(default = "default_rope_tension")]
@@ -447,6 +478,22 @@ pub(crate) struct SyncPreviewInput {
     stamp_origin_x: i32,
     #[serde(default)]
     stamp_origin_z: i32,
+    /// Symmetry bitmask: bit 0 = X, bit 1 = Y, bit 2 = Z. 0 = no mirroring.
+    #[serde(default)]
+    mirror_axes: u8,
+    // Shape
+    #[serde(default = "default_shape_kind")]
+    generator_shape_kind: String,
+    #[serde(default = "default_shape_size")]
+    generator_shape_size: i32,
+    #[serde(default)]
+    generator_shape_rot_x: f32,
+    #[serde(default)]
+    generator_shape_rot_y: f32,
+    #[serde(default)]
+    generator_shape_rot_z: f32,
+    #[serde(default = "default_true")]
+    generator_shape_overwrite: bool,
 }
 
 pub(crate) fn default_ashlar_roughness() -> f32 {
@@ -541,6 +588,14 @@ pub(crate) fn default_cloth_constraint_passes_u32() -> u32 {
     2
 }
 
+pub(crate) fn default_shape_kind() -> String {
+    "cube".into()
+}
+
+pub(crate) fn default_shape_size() -> i32 {
+    8
+}
+
 #[tauri::command]
 pub(crate) fn sync_preview_input(
     app: AppHandle,
@@ -571,8 +626,7 @@ pub(crate) fn sync_preview_input(
         ph.match_material = args.match_material;
         ph.use_brush_preview = args.use_brush_preview;
         ph.generator_kind = args.generator_kind.clone();
-        ph.generator_rope_first_nx = args.generator_rope_first_nx;
-        ph.generator_rope_first_ny = args.generator_rope_first_ny;
+        ph.generator_rope_first_voxel = args.generator_rope_first_voxel;
         ph.generator_rope_sag = args.generator_rope_sag;
         ph.generator_rope_tension = args.generator_rope_tension;
         ph.generator_rope_gravity_direction = args.generator_rope_gravity_direction.clone();
@@ -707,6 +761,14 @@ pub(crate) fn sync_preview_input(
         ph.generator_piscina_anchor_offset_v = args.generator_piscina_anchor_offset_v;
         ph.stamp_origin_x = args.stamp_origin_x;
         ph.stamp_origin_z = args.stamp_origin_z;
+        ph.mirror_axes = args.mirror_axes;
+        // Shape
+        ph.generator_shape_kind = args.generator_shape_kind.clone();
+        ph.generator_shape_size = args.generator_shape_size;
+        ph.generator_shape_rot_x = args.generator_shape_rot_x;
+        ph.generator_shape_rot_y = args.generator_shape_rot_y;
+        ph.generator_shape_rot_z = args.generator_shape_rot_z;
+        ph.generator_shape_overwrite = args.generator_shape_overwrite;
     }
     if args.nx < 0.0 {
         *state.preview_cursor.lock() = None;
@@ -778,8 +840,7 @@ pub(crate) fn brush_shape_tag(s: voxel_edit::BrushShape) -> u8 {
 }
 
 pub(crate) fn hash_generator_rope_hover(
-    sx1: f32,
-    sy1: f32,
+    h1: [i32; 3],
     sx2: f32,
     sy2: f32,
     tension: f32,
@@ -792,8 +853,7 @@ pub(crate) fn hash_generator_rope_hover(
 ) -> u64 {
     let mut h = AHasher::default();
     0x52u8.hash(&mut h);
-    sx1.to_bits().hash(&mut h);
-    sy1.to_bits().hash(&mut h);
+    h1.hash(&mut h);
     sx2.to_bits().hash(&mut h);
     sy2.to_bits().hash(&mut h);
     tension.to_bits().hash(&mut h);
@@ -870,6 +930,35 @@ pub(crate) fn hash_generator_rock_hover(
     cluster_radius.hash(&mut h);
     sink_direction.hash(&mut h);
     sink_amount.hash(&mut h);
+    h.finish()
+}
+
+pub(crate) fn hash_generator_shape_hover(
+    sx: f32,
+    sy: f32,
+    shape_kind: &str,
+    size: i32,
+    rot_x: f32,
+    rot_y: f32,
+    rot_z: f32,
+    overwrite: bool,
+    color: u32,
+    dbg: bool,
+    mesh_gen: u64,
+) -> u64 {
+    let mut h = AHasher::default();
+    0x73u8.hash(&mut h); // 's' for shape
+    sx.to_bits().hash(&mut h);
+    sy.to_bits().hash(&mut h);
+    shape_kind.hash(&mut h);
+    size.hash(&mut h);
+    rot_x.to_bits().hash(&mut h);
+    rot_y.to_bits().hash(&mut h);
+    rot_z.to_bits().hash(&mut h);
+    overwrite.hash(&mut h);
+    color.hash(&mut h);
+    dbg.hash(&mut h);
+    mesh_gen.hash(&mut h);
     h.finish()
 }
 
@@ -1264,7 +1353,7 @@ pub(crate) fn prepare_preview_mesh(
                                     .generator_cloth_constraint_passes
                                     .clamp(1, 6),
                             };
-                            let cells = crate::generators::preview_cloth_voxels(
+                            let mut cells = crate::generators::preview_cloth_voxels(
                                 &ctx.generator_cloth_pins,
                                 ctx.generator_cloth_tension,
                                 ctx.generator_cloth_gravity_direction.as_str(),
@@ -1272,6 +1361,7 @@ pub(crate) fn prepare_preview_mesh(
                                 ctx.brush_shape,
                                 &sim,
                             );
+                            voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                             if !cells.is_empty() {
                                 let key = hash_generator_cloth_hover(
                                     &ctx.generator_cloth_pins,
@@ -1310,7 +1400,7 @@ pub(crate) fn prepare_preview_mesh(
                     "roof" => {
                         if !ctx.generator_roof_pins.is_empty() {
                             let mut instanced = if ctx.generator_roof_pins.len() >= 3 {
-                                let cells = crate::generators::preview_roof_voxels(
+                                let mut cells = crate::generators::preview_roof_voxels(
                                     &ctx.generator_roof_pins,
                                     &ctx.generator_roof_style,
                                     ctx.generator_roof_height,
@@ -1323,6 +1413,7 @@ pub(crate) fn prepare_preview_mesh(
                                     ctx.generator_roof_salt_skew,
                                     ctx.generator_roof_hollow,
                                 );
+                                voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                                 if !cells.is_empty() {
                                     let set: AHashSet<_> = cells.iter().copied().collect();
                                     stroke_preview_meshes_for_union(
@@ -1372,9 +1463,128 @@ pub(crate) fn prepare_preview_mesh(
                             };
                         }
                     }
+                    "shape" => {
+                        // Shape with gizmo center — cursor is None but we can
+                        // still render at the gizmo position.
+                        let gen_center = state.generator_gizmo_center.lock().clone();
+                        if let Some([gx, gy, gz]) = gen_center {
+                            let shape = StartShape::from_str_id(&ctx.generator_shape_kind);
+                            let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
+                            let origin = (gx as i32 + pdx, gy as i32 + pdy, gz as i32 + pdz);
+                            let all = crate::generators::compute_shape_positions(
+                                shape,
+                                ctx.generator_shape_size,
+                                origin,
+                                (ctx.generator_shape_rot_x, ctx.generator_shape_rot_y, ctx.generator_shape_rot_z),
+                            );
+                            let mut cells: Vec<_> = if ctx.generator_shape_overwrite {
+                                all
+                            } else {
+                                all.into_iter().filter(|c| !vmap.contains_key(c)).collect()
+                            };
+                            voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
+                            if !cells.is_empty() {
+                                let key = hash_generator_shape_hover(
+                                    f32::from_bits((origin.0) as u32),
+                                    f32::from_bits((origin.1 as u32).wrapping_add(origin.2 as u32)),
+                                    &ctx.generator_shape_kind,
+                                    ctx.generator_shape_size,
+                                    ctx.generator_shape_rot_x,
+                                    ctx.generator_shape_rot_y,
+                                    ctx.generator_shape_rot_z,
+                                    ctx.generator_shape_overwrite,
+                                    ctx.color,
+                                    dbg,
+                                    mesh_gen,
+                                );
+                                if preview_overlay_cache_key_get(state) == Some(key) {
+                                    return PreviewMeshPrepared::Noop;
+                                }
+                                const NBRS: [(i32, i32, i32); 6] = [
+                                    (1, 0, 0), (-1, 0, 0),
+                                    (0, 1, 0), (0, -1, 0),
+                                    (0, 0, 1), (0, 0, -1),
+                                ];
+                                let set: AHashSet<_> = cells.iter().copied().collect();
+                                let visible: AHashSet<_> = set
+                                    .iter()
+                                    .filter(|&&(x, y, z)| {
+                                        NBRS.iter()
+                                            .any(|&(dx, dy, dz)| !set.contains(&(x + dx, y + dy, z + dz)))
+                                    })
+                                    .copied()
+                                    .collect();
+                                let instanced = stroke_preview_meshes_for_union(
+                                    voxel_edit::EditTool::Add,
+                                    &visible,
+                                    vmap,
+                                    file,
+                                    dbg,
+                                    ctx.color,
+                                    None,
+                                );
+                                return PreviewMeshPrepared::GenUpload {
+                                    cache_key: key,
+                                    instanced,
+                                };
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
+        }
+        return PreviewMeshPrepared::Clear;
+    }
+
+    // Bone preview: session-based, doesn't need cursor position.
+    if matches!(mode, PreviewMode::Bone) {
+        let gizmo_drag = state.bone_gizmo_drag.lock().is_some();
+        let max_v = if gizmo_drag { 12_000 } else { 24_000 };
+        let session_snap = state.bone_session.lock().clone();
+        let hover = state.preview_hover.lock();
+        let (csx, csy) = cursor
+            .map(|(nx, ny)| viewport_texels_from_norm(nx, ny, viewport_w as f32, viewport_h as f32))
+            .unwrap_or((-1.0, -1.0));
+        let key = hash_bone_preview(
+            &session_snap,
+            csx,
+            csy,
+            gizmo_drag,
+            dbg,
+            hover.color,
+        );
+        if preview_overlay_cache_key_get(state) == Some(key) {
+            return PreviewMeshPrepared::Noop;
+        }
+        if session_snap.joints.is_empty() {
+            return PreviewMeshPrepared::Clear;
+        }
+        let file_guard = state.current_file.lock();
+        let map_guard = state.voxel_map.lock();
+        let cam = state.camera.lock();
+        if let (Some(file), Some(vmap)) = (file_guard.as_ref(), map_guard.as_ref()) {
+            let coords = generators::bone_voxel_coords_for_session(
+                &session_snap,
+                file.grid_size.max(1),
+                max_v,
+            );
+            let set: AHashSet<_> = coords.iter().copied().collect();
+            let mut instanced = stroke_preview_meshes_for_union(
+                voxel_edit::EditTool::Add,
+                &set,
+                vmap,
+                file,
+                dbg,
+                hover.color,
+                None,
+            );
+            generators::append_bone_skeleton_wire(&session_snap, &cam, &mut instanced.extra_wire);
+            // Move gizmo is rendered by the shared gizmo system (generator_gizmo_center).
+            return PreviewMeshPrepared::Upload {
+                cache_key: key,
+                instanced,
+            };
         }
         return PreviewMeshPrepared::Clear;
     }
@@ -1504,18 +1714,15 @@ pub(crate) fn prepare_preview_mesh(
             let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
             match gk.as_str() {
                 "rope" => {
-                    if let (Some(n1x), Some(n1y)) =
-                        (ctx.generator_rope_first_nx, ctx.generator_rope_first_ny)
-                    {
-                        let (sx1, sy1) = viewport_texels_from_norm(n1x, n1y, w, h);
-                        let cells = crate::generators::preview_rope_voxels_between_screens(
+                    if let Some([vx1, vy1, vz1]) = ctx.generator_rope_first_voxel {
+                        let h1 = (vx1, vy1, vz1);
+                        let mut cells = crate::generators::preview_rope_voxels_between_screens(
                             file,
                             vmap,
                             cam,
                             w,
                             h,
-                            sx1,
-                            sy1,
+                            h1,
                             sx,
                             sy,
                             ctx.generator_rope_tension,
@@ -1523,10 +1730,10 @@ pub(crate) fn prepare_preview_mesh(
                             ctx.brush_shape,
                             &ctx.generator_rope_gravity_direction,
                         );
+                        voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                         if !cells.is_empty() {
                             let key = hash_generator_rope_hover(
-                                sx1,
-                                sy1,
+                                [vx1, vy1, vz1],
                                 sx,
                                 sy,
                                 ctx.generator_rope_tension,
@@ -1569,7 +1776,7 @@ pub(crate) fn prepare_preview_mesh(
                             },
                             constraint_passes: ctx.generator_cloth_constraint_passes.clamp(1, 6),
                         };
-                        let cells = crate::generators::preview_cloth_voxels(
+                        let mut cells = crate::generators::preview_cloth_voxels(
                             &ctx.generator_cloth_pins,
                             ctx.generator_cloth_tension,
                             ctx.generator_cloth_gravity_direction.as_str(),
@@ -1577,6 +1784,7 @@ pub(crate) fn prepare_preview_mesh(
                             ctx.brush_shape,
                             &sim,
                         );
+                        voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                         if !cells.is_empty() {
                             let key = hash_generator_cloth_hover(
                                 &ctx.generator_cloth_pins,
@@ -1613,7 +1821,7 @@ pub(crate) fn prepare_preview_mesh(
                     }
                 }
                 "rocks" => {
-                    let cells = crate::generators::preview_rock_at_screen(
+                    let mut cells = crate::generators::preview_rock_at_screen(
                         file,
                         vmap,
                         cam,
@@ -1629,6 +1837,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.generator_rock_sink_direction,
                         ctx.generator_rock_sink_amount,
                     );
+                    voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_rock_hover(
                             sx,
@@ -1680,7 +1889,7 @@ pub(crate) fn prepare_preview_mesh(
                     }
                 }
                 "grass" => {
-                    let cells = crate::generators::preview_grass_at_screen(
+                    let mut cells = crate::generators::preview_grass_at_screen(
                         file,
                         vmap,
                         cam,
@@ -1693,6 +1902,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.generator_grass_density,
                         ctx.generator_grass_max_height,
                     );
+                    voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_grass_hover(
                             sx,
@@ -1741,7 +1951,7 @@ pub(crate) fn prepare_preview_mesh(
                     }
                 }
                 "ashlar" => {
-                    let cells = crate::generators::preview_ashlar_at_screen(
+                    let mut cells = crate::generators::preview_ashlar_at_screen(
                         file,
                         vmap,
                         cam,
@@ -1754,6 +1964,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.generator_ashlar_roughness,
                         ctx.generator_ashlar_thickness,
                     );
+                    voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_ashlar_hover(
                             sx,
@@ -1803,7 +2014,7 @@ pub(crate) fn prepare_preview_mesh(
                 }
                 "flora" => {
                     let material = voxelle::MaterialId::from_str_id(&ctx.material);
-                    let cells = crate::generators::preview_flora_at_screen(
+                    let mut cells = crate::generators::preview_flora_at_screen(
                         file,
                         vmap,
                         cam,
@@ -1828,6 +2039,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.color,
                         material,
                     );
+                    voxel_edit::extend_with_mirror_targets_colored(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_flora_hover(
                             sx,
@@ -1890,7 +2102,7 @@ pub(crate) fn prepare_preview_mesh(
                 }
                 "insecta" => {
                     let material = voxelle::MaterialId::from_str_id(&ctx.material);
-                    let cells = crate::generators::preview_insecta_at_screen(
+                    let mut cells = crate::generators::preview_insecta_at_screen(
                         file,
                         vmap,
                         cam,
@@ -1935,6 +2147,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.color,
                         material,
                     );
+                    voxel_edit::extend_with_mirror_targets_colored(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_insecta_hover(
                             sx,
@@ -2017,7 +2230,7 @@ pub(crate) fn prepare_preview_mesh(
                 }
                 "fauna" => {
                     let material = voxelle::MaterialId::from_str_id(&ctx.material);
-                    let cells = crate::generators::preview_fauna_at_screen(
+                    let mut cells = crate::generators::preview_fauna_at_screen(
                         file,
                         vmap,
                         cam,
@@ -2052,6 +2265,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.color,
                         material,
                     );
+                    voxel_edit::extend_with_mirror_targets_colored(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_fauna_hover(
                             sx,
@@ -2124,7 +2338,7 @@ pub(crate) fn prepare_preview_mesh(
                 }
                 "piscina" => {
                     let material = voxelle::MaterialId::from_str_id(&ctx.material);
-                    let cells = crate::generators::preview_piscina_at_screen(
+                    let mut cells = crate::generators::preview_piscina_at_screen(
                         file,
                         vmap,
                         cam,
@@ -2156,6 +2370,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.color,
                         material,
                     );
+                    voxel_edit::extend_with_mirror_targets_colored(&mut cells, ctx.mirror_axes);
                     if !cells.is_empty() {
                         let key = hash_generator_piscina_hover(
                             sx,
@@ -2226,7 +2441,7 @@ pub(crate) fn prepare_preview_mesh(
                 "roof" => {
                     if !ctx.generator_roof_pins.is_empty() {
                         let mut instanced = if ctx.generator_roof_pins.len() >= 3 {
-                            let cells = crate::generators::preview_roof_voxels(
+                            let mut cells = crate::generators::preview_roof_voxels(
                                 &ctx.generator_roof_pins,
                                 &ctx.generator_roof_style,
                                 ctx.generator_roof_height,
@@ -2239,6 +2454,7 @@ pub(crate) fn prepare_preview_mesh(
                                 ctx.generator_roof_salt_skew,
                                 ctx.generator_roof_hollow,
                             );
+                            voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
                             if !cells.is_empty() {
                                 let set: AHashSet<_> = cells.iter().copied().collect();
                                 stroke_preview_meshes_for_union(
@@ -2283,6 +2499,115 @@ pub(crate) fn prepare_preview_mesh(
                             return PreviewMeshPrepared::Noop;
                         }
                         return PreviewMeshPrepared::Upload {
+                            cache_key: key,
+                            instanced,
+                        };
+                    }
+                }
+                "shape" => {
+                    let shape = StartShape::from_str_id(&ctx.generator_shape_kind);
+                    // When the gizmo center is set (settings phase), place the shape
+                    // at that center rather than raycasting from the cursor.  Also
+                    // account for any in-flight gizmo drag offset so the preview
+                    // moves in real-time while dragging the movement arrows.
+                    let gen_center = state.generator_gizmo_center.lock().clone();
+                    let mut cells = if let Some([gx, gy, gz]) = gen_center {
+                        let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
+                        let origin = (
+                            gx as i32 + pdx,
+                            gy as i32 + pdy,
+                            gz as i32 + pdz,
+                        );
+                        let all = crate::generators::compute_shape_positions(
+                            shape,
+                            ctx.generator_shape_size,
+                            origin,
+                            (ctx.generator_shape_rot_x, ctx.generator_shape_rot_y, ctx.generator_shape_rot_z),
+                        );
+                        if ctx.generator_shape_overwrite {
+                            all
+                        } else {
+                            all.into_iter().filter(|c| !vmap.contains_key(c)).collect()
+                        }
+                    } else {
+                        crate::generators::preview_shape_at_screen(
+                            file,
+                            vmap,
+                            cam,
+                            w,
+                            h,
+                            sx,
+                            sy,
+                            shape,
+                            ctx.generator_shape_size,
+                            ctx.generator_shape_rot_x,
+                            ctx.generator_shape_rot_y,
+                            ctx.generator_shape_rot_z,
+                            ctx.generator_shape_overwrite,
+                        )
+                    };
+                    voxel_edit::extend_with_mirror_targets(&mut cells, ctx.mirror_axes);
+                    if !cells.is_empty() {
+                        // Include gizmo center + drag offset in the cache key so the
+                        // preview rebuilds when the gizmo moves.
+                        let (hash_x, hash_y) = if gen_center.is_some() {
+                            let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
+                            let gc = gen_center.unwrap();
+                            // Pack center + pending into two f32s for the hash.
+                            (
+                                f32::from_bits(
+                                    (gc[0] as i32 + pdx) as u32
+                                ),
+                                f32::from_bits(
+                                    ((gc[1] as i32 + pdy) as u32).wrapping_add((gc[2] as i32 + pdz) as u32)
+                                ),
+                            )
+                        } else {
+                            (sx, sy)
+                        };
+                        let key = hash_generator_shape_hover(
+                            hash_x,
+                            hash_y,
+                            &ctx.generator_shape_kind,
+                            ctx.generator_shape_size,
+                            ctx.generator_shape_rot_x,
+                            ctx.generator_shape_rot_y,
+                            ctx.generator_shape_rot_z,
+                            ctx.generator_shape_overwrite,
+                            ctx.color,
+                            dbg,
+                            mesh_gen,
+                        );
+                        if preview_overlay_cache_key_get(state) == Some(key) {
+                            return PreviewMeshPrepared::Noop;
+                        }
+                        const NBRS: [(i32, i32, i32); 6] = [
+                            (1, 0, 0),
+                            (-1, 0, 0),
+                            (0, 1, 0),
+                            (0, -1, 0),
+                            (0, 0, 1),
+                            (0, 0, -1),
+                        ];
+                        let set: AHashSet<_> = cells.iter().copied().collect();
+                        let visible: AHashSet<_> = set
+                            .iter()
+                            .filter(|&&(x, y, z)| {
+                                NBRS.iter()
+                                    .any(|&(dx, dy, dz)| !set.contains(&(x + dx, y + dy, z + dz)))
+                            })
+                            .copied()
+                            .collect();
+                        let instanced = stroke_preview_meshes_for_union(
+                            voxel_edit::EditTool::Add,
+                            &visible,
+                            vmap,
+                            file,
+                            dbg,
+                            ctx.color,
+                            None,
+                        );
+                        return PreviewMeshPrepared::GenUpload {
                             cache_key: key,
                             instanced,
                         };
@@ -2360,7 +2685,7 @@ pub(crate) fn prepare_preview_mesh(
         let key_cell = voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy);
         let key = match key_cell {
             Some(((cx, cy, cz), oid)) => {
-                hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0, oid, sx, sy)
+                hash_single_cell_preview(mode, cx, cy, cz, 3, dbg, 0, oid)
             }
             None => hash_preview_miss(mode, dbg),
         };
@@ -2473,6 +2798,7 @@ pub(crate) fn prepare_preview_mesh(
         | PreviewMode::Select
         | PreviewMode::SelectExtrude
         | PreviewMode::Squishy
+        | PreviewMode::Bone
         | PreviewMode::Stamp
         | PreviewMode::Punch => {
             unreachable!()
@@ -2495,7 +2821,7 @@ pub(crate) fn prepare_preview_mesh(
         };
         let key = match key_cell {
             Some(((cx, cy, cz), oid)) => {
-                hash_single_cell_preview(mode, cx, cy, cz, mode_tag, dbg, ctx.color, oid, sx, sy)
+                hash_single_cell_preview(mode, cx, cy, cz, mode_tag, dbg, ctx.color, oid)
             }
             None => hash_preview_miss(mode, dbg),
         };

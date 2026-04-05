@@ -19,7 +19,22 @@ fn gravity_unit(dir: &str) -> [f32; 3] {
     }
 }
 
+/// Fill all voxels on a straight line between two voxel coords (3D DDA, no gaps).
+fn voxel_line_segment(a: VoxelCoord, b: VoxelCoord) -> impl Iterator<Item = VoxelCoord> {
+    let (ax, ay, az) = (a.0, a.1, a.2);
+    let (bx, by, bz) = (b.0, b.1, b.2);
+    let steps = (bx - ax).abs().max((by - ay).abs()).max((bz - az).abs());
+    (0..=steps).map(move |i| {
+        let t = if steps == 0 { 0.0 } else { i as f32 / steps as f32 };
+        let x = (ax as f32 + (bx - ax) as f32 * t).round() as i32;
+        let y = (ay as f32 + (by - ay) as f32 * t).round() as i32;
+        let z = (az as f32 + (bz - az) as f32 * t).round() as i32;
+        (x, y, z)
+    })
+}
+
 /// Discrete voxel samples along a catenary between `a` and `b` in world space (grid coords).
+/// Consecutive samples are connected with a 3D DDA so no gaps appear at size 1.
 pub fn catenary_voxel_arc(
     a: VoxelCoord,
     b: VoxelCoord,
@@ -35,18 +50,26 @@ pub fn catenary_voxel_arc(
     let by = b.1 as f32;
     let bz = b.2 as f32;
     let [gx, gy, gz] = gravity_unit(gravity_direction);
-    let mut out = Vec::new();
-    for i in 0..=n {
-        let t = i as f32 / n as f32;
-        let sag_factor = sag * (1.0 - (2.0 * t - 1.0).powi(2)).max(0.0);
-        let x = ax + (bx - ax) * t + gx * sag_factor;
-        let y = ay + (by - ay) * t + gy * sag_factor;
-        let z = az + (bz - az) * t + gz * sag_factor;
-        let vx = x.round() as i32;
-        let vy = y.round() as i32;
-        let vz = z.round() as i32;
-        if out.last().copied() != Some((vx, vy, vz)) {
-            out.push((vx, vy, vz));
+
+    // Sample the curve at `n` points.
+    let samples: Vec<VoxelCoord> = (0..=n)
+        .map(|i| {
+            let t = i as f32 / n as f32;
+            let sag_factor = sag * (1.0 - (2.0 * t - 1.0).powi(2)).max(0.0);
+            let x = ax + (bx - ax) * t + gx * sag_factor;
+            let y = ay + (by - ay) * t + gy * sag_factor;
+            let z = az + (bz - az) * t + gz * sag_factor;
+            (x.round() as i32, y.round() as i32, z.round() as i32)
+        })
+        .collect();
+
+    // Connect consecutive samples with 3D DDA lines to close any gaps.
+    let mut out: Vec<VoxelCoord> = Vec::new();
+    for pair in samples.windows(2) {
+        for p in voxel_line_segment(pair[0], pair[1]) {
+            if out.last().copied() != Some(p) {
+                out.push(p);
+            }
         }
     }
     out
@@ -87,19 +110,20 @@ fn rope_sag_from_hits(h1: VoxelCoord, h2: VoxelCoord, tension: f32) -> f32 {
     let dy = (h2.1 - h1.1) as f32;
     let dz = (h2.2 - h1.2) as f32;
     let dist = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
-    // 15% of rope length at tension=0, shrinks to 0.75% at tension=1.
+    // ~29% of rope length at tension=-1, 15% at tension=0, shrinks to 0.75% at tension=1.
     dist * 0.15 * (1.0 - tension * 0.95).max(0.05)
 }
 
 /// Rope voxel footprint for hover preview (no file mutation).
+/// `h1` is the pre-resolved world-space anchor voxel (from the first click).
+/// `sx2/sy2` is the current hover screen position used to resolve `h2`.
 pub fn preview_rope_voxels_between_screens(
     file: &VoxelleFile,
     voxel_map: &AHashMap<VoxelCoord, usize>,
     camera: &OrbitCamera,
     width: f32,
     height: f32,
-    sx1: f32,
-    sy1: f32,
+    h1: VoxelCoord,
     sx2: f32,
     sy2: f32,
     tension: f32,
@@ -108,15 +132,11 @@ pub fn preview_rope_voxels_between_screens(
     gravity_direction: &str,
 ) -> Vec<VoxelCoord> {
     let grid_size = effective_ray_grid_size(file);
-    let (o1, d1) = screen_to_world_ray(camera, width, height, sx1, sy1);
     let (o2, d2) = screen_to_world_ray(camera, width, height, sx2, sy2);
-    let Some((h1, _)) = ray_first_solid(o1, d1, voxel_map, grid_size) else {
-        return Vec::new();
-    };
     let Some((h2, _)) = ray_first_solid(o2, d2, voxel_map, grid_size) else {
         return Vec::new();
     };
-    let t = tension.clamp(0.0, 1.0);
+    let t = tension.clamp(-1.0, 1.0);
     let sag_eff = rope_sag_from_hits(h1, h2, t);
     let path = catenary_voxel_arc(h1, h2, sag_eff, 48, gravity_direction);
     thicken_centerline_voxels(&path, brush_radius_index, brush_shape)
@@ -149,7 +169,7 @@ pub fn generator_rope_between_screens(
     let Some((h2, _)) = ray_first_solid(o2, d2, voxel_map, grid_size) else {
         return Ok(Vec::new());
     };
-    let t = tension.clamp(0.0, 1.0);
+    let t = tension.clamp(-1.0, 1.0);
     let sag_eff = rope_sag_from_hits(h1, h2, t);
     let path = catenary_voxel_arc(h1, h2, sag_eff, 48, gravity_direction);
     let cells = thicken_centerline_voxels(&path, brush_radius_index, brush_shape);

@@ -25,6 +25,52 @@ use tokio_util::sync::CancellationToken;
 
 type WsTcp = WebSocketStream<TcpStream>;
 
+// ── Binary edit framing ─────────────────────────────────────────────────────
+
+/// Binary frame: client → host edit deltas (bincode `Vec<VoxelEditDelta>`).
+const BIN_TAG_CLIENT_EDIT: u8 = 0x45; // 'E'
+/// Binary frame: host → client edit broadcast (bincode `(u64, u32, Vec<VoxelEditDelta>)`).
+const BIN_TAG_HOST_EDIT: u8 = 0x48; // 'H'
+
+pub fn encode_client_edit_binary(deltas: &[voxel_edit::VoxelEditDelta]) -> Vec<u8> {
+    let payload = bincode::serialize(deltas).expect("bincode serialize");
+    let mut buf = Vec::with_capacity(1 + payload.len());
+    buf.push(BIN_TAG_CLIENT_EDIT);
+    buf.extend_from_slice(&payload);
+    buf
+}
+
+fn decode_client_edit_binary(data: &[u8]) -> Option<Vec<voxel_edit::VoxelEditDelta>> {
+    if data.first() != Some(&BIN_TAG_CLIENT_EDIT) {
+        return None;
+    }
+    bincode::deserialize(&data[1..]).ok()
+}
+
+fn encode_host_edit_binary(seq: u64, peer_id: u32, deltas: &[voxel_edit::VoxelEditDelta]) -> Vec<u8> {
+    let payload = bincode::serialize(&(seq, peer_id, deltas)).expect("bincode serialize");
+    let mut buf = Vec::with_capacity(1 + payload.len());
+    buf.push(BIN_TAG_HOST_EDIT);
+    buf.extend_from_slice(&payload);
+    buf
+}
+
+fn decode_host_edit_binary(data: &[u8]) -> Option<(u64, u32, Vec<voxel_edit::VoxelEditDelta>)> {
+    if data.first() != Some(&BIN_TAG_HOST_EDIT) {
+        return None;
+    }
+    bincode::deserialize(&data[1..]).ok()
+}
+
+/// Payload sent through the client → host outbound channel.
+#[derive(Clone)]
+pub enum ClientOutgoing {
+    /// JSON text frame (non-edit messages).
+    Text(String),
+    /// Binary frame (edit deltas, bincode-encoded with tag prefix).
+    Binary(Vec<u8>),
+}
+
 /// Broadcast channel capacity.  Large enough that a slow guest has time to drain
 /// before messages are overwritten; we handle [`broadcast::error::RecvError::Lagged`]
 /// explicitly rather than silently dropping the guest.
@@ -351,7 +397,7 @@ pub struct CollabRuntime {
     /// Host → all connected guest websockets.  Carries [`Message`] so we can send both
     /// JSON text frames and raw binary snapshot chunks.
     pub host_broadcast: Option<broadcast::Sender<Message>>,
-    pub client_tx: Option<mpsc::Sender<String>>,
+    pub client_tx: Option<mpsc::Sender<ClientOutgoing>>,
     /// Per connected guest (peer id ≥ 2): send [`Some`] with kick reason to close the socket.
     pub host_peer_kick_tx: HashMap<u32, watch::Sender<Option<String>>>,
     /// Last inbound activity from each guest (any message or heartbeat). Host only.
@@ -734,29 +780,23 @@ fn replace_file_on_main<R: Runtime>(
     }
 }
 
-fn emit_and_broadcast<R: Runtime>(collab: &Mutex<CollabRuntime>, _app: &AppHandle<R>, json: &str) {
+fn broadcast_edit_binary(collab: &Mutex<CollabRuntime>, seq: u64, peer_id: u32, deltas: &[voxel_edit::VoxelEditDelta]) {
+    let bin = encode_host_edit_binary(seq, peer_id, deltas);
     let g = collab.lock();
     if let Some(tx) = &g.host_broadcast {
-        let _ = tx.send(Message::Text(json.to_string()));
+        let _ = tx.send(Message::Binary(bin));
     }
 }
 
 /// Host local edit after GPU sync: notify guests + UI.
 pub fn host_emit_edit_batch<R: Runtime>(
     collab_mtx: &Mutex<CollabRuntime>,
-    app: &AppHandle<R>,
+    _app: &AppHandle<R>,
     seq: u64,
     peer_id: u32,
     deltas: &[voxel_edit::VoxelEditDelta],
 ) {
-    let br = HostToClient::Edit {
-        seq,
-        peer_id,
-        deltas: deltas.to_vec(),
-    };
-    if let Ok(json) = serde_json::to_string(&br) {
-        emit_and_broadcast(collab_mtx, app, &json);
-    }
+    broadcast_edit_binary(collab_mtx, seq, peer_id, deltas);
 }
 
 /// Process one queued guest edit/undo/redo on the main thread.
@@ -816,14 +856,7 @@ pub fn process_inbox_item<R: Runtime>(
                 c.host_redo.remove(&peer_id);
                 c.next_seq
             };
-            let br = HostToClient::Edit {
-                seq,
-                peer_id,
-                deltas,
-            };
-            if let Ok(json) = serde_json::to_string(&br) {
-                emit_and_broadcast(collab_mtx, app, &json);
-            }
+            broadcast_edit_binary(collab_mtx, seq, peer_id, &deltas);
         }
         CollabInboxItem::Undo { peer_id } => {
             // Pop from the undo stack (brief lock).
@@ -874,14 +907,7 @@ pub fn process_inbox_item<R: Runtime>(
                 c.host_redo.entry(peer_id).or_default().push(original);
                 c.next_seq
             };
-            let br = HostToClient::Edit {
-                seq,
-                peer_id,
-                deltas: mesh_refresh,
-            };
-            if let Ok(json) = serde_json::to_string(&br) {
-                emit_and_broadcast(collab_mtx, app, &json);
-            }
+            broadcast_edit_binary(collab_mtx, seq, peer_id, &mesh_refresh);
         }
         CollabInboxItem::Redo { peer_id } => {
             // Pop from the redo stack (brief lock).
@@ -933,14 +959,7 @@ pub fn process_inbox_item<R: Runtime>(
                     .push(forward.clone());
                 c.next_seq
             };
-            let br = HostToClient::Edit {
-                seq,
-                peer_id,
-                deltas: forward,
-            };
-            if let Ok(json) = serde_json::to_string(&br) {
-                emit_and_broadcast(collab_mtx, app, &json);
-            }
+            broadcast_edit_binary(collab_mtx, seq, peer_id, &forward);
         }
     }
 }
@@ -1003,10 +1022,7 @@ fn flush_edit_batch<R: Runtime>(
             c.host_redo.remove(&peer_id);
             c.next_seq
         };
-        let br = HostToClient::Edit { seq, peer_id, deltas };
-        if let Ok(json) = serde_json::to_string(&br) {
-            emit_and_broadcast(collab_mtx, app, &json);
-        }
+        broadcast_edit_binary(collab_mtx, seq, peer_id, &deltas);
     }
 }
 
@@ -1340,13 +1356,22 @@ async fn handle_host_connection<R: Runtime>(
                     Ok(m) => m,
                     Err(_) => break,
                 };
-                let t = match msg {
-                    Message::Text(t) => t,
+                let cmd = match msg {
+                    Message::Text(t) => {
+                        match serde_json::from_str::<ClientToHost>(&t) {
+                            Ok(c) => c,
+                            Err(_) => continue,
+                        }
+                    }
+                    Message::Binary(data) => {
+                        if let Some(deltas) = decode_client_edit_binary(&data) {
+                            ClientToHost::Edit { deltas }
+                        } else {
+                            continue;
+                        }
+                    }
                     Message::Ping(_) | Message::Pong(_) => continue,
-                    Message::Close(_) | Message::Binary(_) | Message::Frame(_) => break,
-                };
-                let Ok(cmd) = serde_json::from_str::<ClientToHost>(&t) else {
-                    continue;
+                    Message::Close(_) | Message::Frame(_) => break,
                 };
                 touch_guest_activity(&collab_mtx, peer_id);
                 match cmd {
@@ -1394,14 +1419,7 @@ async fn handle_host_connection<R: Runtime>(
                         c.host_redo.remove(&peer_id);
                         c.next_seq
                     };
-                    let br = HostToClient::Edit {
-                        seq,
-                        peer_id,
-                        deltas,
-                    };
-                    if let Ok(json) = serde_json::to_string(&br) {
-                        emit_and_broadcast(&collab_mtx, &app, &json);
-                    }
+                    broadcast_edit_binary(&collab_mtx, seq, peer_id, &deltas);
                 } else {
                     // Queue for the main-thread render loop — never block
                     // the tokio task on GPU work or hold collab_mtx across it.
@@ -1944,11 +1962,12 @@ pub async fn client_connect_blocking<R: Runtime>(
         }
     }
 
-    let (tx, mut rx) = mpsc::channel::<String>(512);
+    let (tx, mut rx) = mpsc::channel::<ClientOutgoing>(512);
     let tx_hb = tx.clone();
     let tx_probe = tx.clone();
     collab_mtx.lock().client_tx = Some(tx);
-    let heartbeat_msg = serde_json::to_string(&ClientToHost::Heartbeat).unwrap();
+    let heartbeat_msg =
+        ClientOutgoing::Text(serde_json::to_string(&ClientToHost::Heartbeat).unwrap());
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(CLIENT_HEARTBEAT_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1968,7 +1987,9 @@ pub async fn client_connect_blocking<R: Runtime>(
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64;
-            let msg = serde_json::to_string(&ClientToHost::LatencyProbe { sent_ms }).unwrap();
+            let msg = ClientOutgoing::Text(
+                serde_json::to_string(&ClientToHost::LatencyProbe { sent_ms }).unwrap(),
+            );
             if tx_probe.try_send(msg).is_err() {
                 break;
             }
@@ -1978,7 +1999,11 @@ pub async fn client_connect_blocking<R: Runtime>(
     let mut write_w = write;
     tauri::async_runtime::spawn(async move {
         while let Some(m) = rx.recv().await {
-            if write_w.send(Message::Text(m)).await.is_err() {
+            let ws_msg = match m {
+                ClientOutgoing::Text(t) => Message::Text(t),
+                ClientOutgoing::Binary(b) => Message::Binary(b),
+            };
+            if write_w.send(ws_msg).await.is_err() {
                 break;
             }
         }
@@ -2005,8 +2030,17 @@ pub async fn client_connect_blocking<R: Runtime>(
             match msg {
                 Message::Close(_) => break,
                 Message::Binary(data) => {
-                    // Binary frames are snapshot chunks; accumulate them.
-                    if let Some((expected, ref mut received, ref mut buf)) = pending_snapshot {
+                    // Tagged binary edit frame from host?
+                    if let Some((seq, peer_id, deltas)) = decode_host_edit_binary(&data) {
+                        let _ = seq;
+                        let local = cm4.lock().local_peer_id;
+                        if peer_id != local {
+                            st4.collab_edit_inbox
+                                .lock()
+                                .push_back(CollabInboxItem::Edit { peer_id, deltas });
+                        }
+                    } else if let Some((expected, ref mut received, ref mut buf)) = pending_snapshot {
+                        // Snapshot chunks: accumulate them.
                         buf.extend_from_slice(&data);
                         *received += 1;
                         if *received >= expected {
@@ -2015,7 +2049,6 @@ pub async fn client_connect_blocking<R: Runtime>(
                             let _ = replace_file_on_main(&app4, &st4, &bytes);
                         }
                     }
-                    // Binary frames outside an active chunk transfer are ignored.
                 }
                 Message::Ping(_) | Message::Pong(_) => {}
                 Message::Text(t) => {
@@ -2364,15 +2397,22 @@ mod tests {
 
         loop {
             let next = read.next().await.expect("frame").expect("ws");
-            let Message::Text(t) = next else {
-                continue;
-            };
-            let ev: HostToClient = serde_json::from_str(&t).unwrap();
-            match ev {
-                HostToClient::Roster { .. } | HostToClient::Keepalive => continue,
-                HostToClient::Deny { .. } => panic!("unexpected Deny when can_edit"),
-                HostToClient::Edit { .. } => break,
-                other => panic!("expected Edit broadcast: {other:?}"),
+            match next {
+                Message::Binary(data) => {
+                    if decode_host_edit_binary(&data).is_some() {
+                        break;
+                    }
+                }
+                Message::Text(t) => {
+                    let ev: HostToClient = serde_json::from_str(&t).unwrap();
+                    match ev {
+                        HostToClient::Roster { .. } | HostToClient::Keepalive => continue,
+                        HostToClient::Deny { .. } => panic!("unexpected Deny when can_edit"),
+                        HostToClient::Edit { .. } => break,
+                        other => panic!("expected Edit broadcast: {other:?}"),
+                    }
+                }
+                _ => continue,
             }
         }
         stop_host(&cm);
@@ -3050,5 +3090,75 @@ mod tests {
             Ok(Message::Text(t)) => assert_eq!(t, "msg1", "should receive oldest surviving message after lag"),
             other => panic!("unexpected result after lag recovery: {other:?}"),
         }
+    }
+
+    #[test]
+    fn binary_edit_encoding_is_smaller_than_json() {
+        let deltas: Vec<VoxelEditDelta> = (0..50)
+            .map(|i| {
+                VoxelEditDelta::Added(Voxel {
+                    x: i,
+                    y: i * 2,
+                    z: -i,
+                    color: 0xFF8800,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                })
+            })
+            .collect();
+
+        // JSON encoding (old path)
+        let json = serde_json::to_string(&ClientToHost::Edit {
+            deltas: deltas.clone(),
+        })
+        .unwrap();
+        let json_bytes = json.len();
+
+        // Bincode encoding (new path)
+        let bin = encode_client_edit_binary(&deltas);
+        let bin_bytes = bin.len();
+
+        assert!(
+            bin_bytes < json_bytes,
+            "binary ({bin_bytes} B) should be smaller than JSON ({json_bytes} B)"
+        );
+
+        // Verify round-trip
+        let decoded = decode_client_edit_binary(&bin).expect("should decode");
+        assert_eq!(decoded.len(), deltas.len());
+
+        // Also check host edit encoding
+        let host_json = serde_json::to_string(&HostToClient::Edit {
+            seq: 42,
+            peer_id: 3,
+            deltas: deltas.clone(),
+        })
+        .unwrap();
+        let host_bin = encode_host_edit_binary(42, 3, &deltas);
+
+        assert!(
+            host_bin.len() < host_json.len(),
+            "host binary ({} B) should be smaller than JSON ({} B)",
+            host_bin.len(),
+            host_json.len()
+        );
+
+        let (seq, peer_id, host_decoded) =
+            decode_host_edit_binary(&host_bin).expect("should decode");
+        assert_eq!(seq, 42);
+        assert_eq!(peer_id, 3);
+        assert_eq!(host_decoded.len(), deltas.len());
+
+        // Print the savings for visibility in test output
+        eprintln!(
+            "client edit: JSON {json_bytes} B → bincode {bin_bytes} B ({:.0}% smaller)",
+            (1.0 - bin_bytes as f64 / json_bytes as f64) * 100.0
+        );
+        eprintln!(
+            "host edit:   JSON {} B → bincode {} B ({:.0}% smaller)",
+            host_json.len(),
+            host_bin.len(),
+            (1.0 - host_bin.len() as f64 / host_json.len() as f64) * 100.0
+        );
     }
 }

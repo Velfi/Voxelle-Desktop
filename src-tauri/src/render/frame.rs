@@ -40,7 +40,7 @@ impl WgpuViewer {
                 frame_seed: self.rt_sample_n.wrapping_mul(2654435761).wrapping_add(1),
                 sample_n: self.rt_sample_n,
                 fast_preview: 0,
-                _pad1: 0,
+                surface_mode: self.rt_surface_mode,
             };
             self.queue
                 .write_buffer(&self.rt_uniform_buf, 0, bytemuck::bytes_of(&rt_u));
@@ -251,7 +251,7 @@ impl WgpuViewer {
                 frame_seed: self.rt_sample_n.wrapping_mul(2654435761).wrapping_add(1),
                 sample_n: self.rt_sample_n,
                 fast_preview: self.rt_fast_preview as u32,
-                _pad1: 0,
+                surface_mode: self.rt_surface_mode,
             };
             self.queue
                 .write_buffer(&self.rt_uniform_buf, 0, bytemuck::bytes_of(&rt_u));

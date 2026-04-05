@@ -670,7 +670,7 @@ pub(crate) fn set_local_avatar(
             })
             .map_err(|e| e.to_string())?;
             if let Some(tx) = &c.client_tx {
-                let _ = tx.try_send(msg.clone());
+                let _ = tx.try_send(collab::ClientOutgoing::Text(msg.clone()));
             }
             // If there are custom bytes, also send AvatarData so peers can render it.
             if let (Some(bytes), Some(tx)) = (&custom_bytes, &c.client_tx) {
@@ -678,7 +678,7 @@ pub(crate) fn set_local_avatar(
                     name: avatar_name.clone(),
                     bytes: bytes.clone(),
                 }) {
-                    let _ = tx.try_send(data_msg);
+                    let _ = tx.try_send(collab::ClientOutgoing::Text(data_msg));
                 }
             }
             // If we are the host, also record locally and broadcast to guests.

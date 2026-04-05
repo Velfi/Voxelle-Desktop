@@ -56,6 +56,8 @@ pub(crate) enum PreviewMode {
     Fly,
     /// Metaball field preview + edit gizmo (Squishy tool).
     Squishy,
+    /// Bone armature preview + skeleton/gizmo wireframe overlay.
+    Bone,
     /// Ghost overlay of clipboard entries at the add-tool anchor (empty cell in front of hit).
     Stamp,
     /// Red overlay of clipboard entries at the hit cell (voxels that would be removed).
@@ -73,6 +75,7 @@ impl PreviewMode {
             "select" => Self::Select,
             "fly" => Self::Fly,
             "squishy" => Self::Squishy,
+            "bone" => Self::Bone,
             "stamp" => Self::Stamp,
             "punch" => Self::Punch,
             "selectExtrude" => Self::SelectExtrude,
@@ -100,6 +103,15 @@ impl RenderingMode {
             RenderingMode::MarchingCubes | RenderingMode::DualContour
         )
     }
+
+    /// Surface-normal style for the ray tracer: 0=blocky, 1=smooth, 2=puffy.
+    pub(crate) fn rt_surface_mode(self) -> u32 {
+        match self {
+            RenderingMode::Greedy | RenderingMode::Ray => 0,
+            RenderingMode::MarchingCubes => 1,
+            RenderingMode::DualContour => 2,
+        }
+    }
 }
 
 /// How additive selection tools merge with the current selection (matches web Voxelle).
@@ -124,6 +136,11 @@ pub(crate) enum SoloUndoEntry {
         deltas: Vec<voxel_edit::VoxelEditDelta>,
     },
 }
+
+/// Maximum number of entries in the solo undo stack.  Matches the per-peer
+/// cap used in collaborative sessions (`MAX_UNDO_PER_PEER`).  When the stack
+/// exceeds this limit, the oldest entries are discarded.
+pub(crate) const SOLO_UNDO_MAX_ENTRIES: usize = 100;
 
 #[derive(Clone)]
 pub(crate) enum SoloRedoEntry {
@@ -469,6 +486,13 @@ pub(crate) enum SelectionGizmoDrag {
         /// GIZMO_PX_PER_ROTATE_STEP_CSS * dpr, captured at drag start
         step_threshold: f32,
     },
+    /// Scale ring drag: radial distance from center maps to radius delta.
+    Scale {
+        center_sx: f32,
+        center_sy: f32,
+        start_dist: f32,
+        start_radius: f32,
+    },
 }
 
 /// Active drag state for the selection extrude gizmo.
@@ -589,6 +613,18 @@ pub struct ViewerState {
     pub squishy_session: Mutex<generators::SquishySession>,
     /// Pointer drag on squishy move/scale handles ([`generators::squishy_gizmo`]).
     pub squishy_gizmo_drag: Mutex<Option<generators::SquishyGizmoDrag>>,
+    /// Bone armature editor session (Bone mode).
+    pub bone_session: Mutex<generators::BoneSession>,
+    /// Pointer drag on bone joint gizmo handles.
+    pub bone_gizmo_drag: Mutex<Option<generators::BoneGizmoDrag>>,
+    /// Active IK drag on a bone joint.
+    pub bone_ik_drag: Mutex<Option<generators::IkDrag>>,
+    /// When set, the move gizmo appears at this world-space position instead of
+    /// the selection AABB center.  Used by the shape generator's settings phase.
+    pub(crate) generator_gizmo_center: Mutex<Option<[f32; 3]>>,
+    /// When set, a scale ring is drawn at this world-space radius around
+    /// `generator_gizmo_center`. Dragging it emits `generator-gizmo-scaled`.
+    pub(crate) generator_gizmo_ring_radius: Mutex<Option<f32>>,
     /// Active pointer drag on the selection transform gizmo (move/rotate handles).
     pub(crate) selection_gizmo_drag: Mutex<SelectionGizmoDrag>,
     /// Active pointer drag on the selection extrude gizmo.

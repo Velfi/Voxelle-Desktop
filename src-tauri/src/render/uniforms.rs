@@ -205,5 +205,6 @@ pub(crate) struct RtUniform {
     pub sample_n: u32,
     /// 1 when the camera moved this frame: use cheap shading (1 shadow ray, no bounces).
     pub fast_preview: u32,
-    pub _pad1: u32,
+    /// 0 = blocky (greedy), 1 = smooth (marching cubes), 2 = puffy (dual contour).
+    pub surface_mode: u32,
 }

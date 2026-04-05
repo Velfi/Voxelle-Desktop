@@ -1115,6 +1115,7 @@ fn pick_cell_for_ping(
         PreviewMode::Navigate
         | PreviewMode::Fly
         | PreviewMode::Squishy
+        | PreviewMode::Bone
         | PreviewMode::SelectExtrude => {
             voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy)
                 .map(|(c, _)| c)

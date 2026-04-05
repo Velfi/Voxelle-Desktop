@@ -20,6 +20,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 ahash = "0.8"
 arboard = "3"
+bincode = "1"
 bson = "2"
 bytemuck = { version = "1.14", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -53,6 +54,7 @@ tokio-tungstenite = "0.24"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v4", "serde"] }
 wgpu = "23"
+zstd = "0.13.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
@@ -86,4 +88,8 @@ harness = false
 
 [[bench]]
 name = "preview_generation"
+harness = false
+
+[[bench]]
+name = "collab_encoding"
 harness = false

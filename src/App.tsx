@@ -14,6 +14,8 @@ import {
   useFloraGenerator,
   useRopeClothGenerator,
   useRoofGenerator,
+  useShapeGenerator,
+  useBoneGenerator,
 } from "./hooks/useGeneratorState";
 import { MascotView } from "./MascotView";
 import { SpeechBubbleOverlay, type BubbleInfo } from "./SpeechBubbleOverlay";
@@ -357,6 +359,15 @@ function App() {
         .catch(() => {});
     },
   });
+  const bone = useBoneGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    bonePhase,
+    boneMode, setBoneMode, boneModeRef,
+    boneJointCount, setBoneJointCount,
+    boneBoneCount, setBoneBoneCount,
+    boneDefaultRadius, setBoneDefaultRadius, boneDefaultRadiusRef,
+    ikEnabled, setIkEnabled, ikEnabledRef,
+  } = bone;
   const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
   const [terrainBaseY, setTerrainBaseY] = useState(0);
@@ -538,6 +549,15 @@ function App() {
   });
   const colorPalettePosRef = useRef(colorPalettePos);
   colorPalettePosRef.current = colorPalettePos;
+  const colorPaletteSizeRef = useRef(colorPaletteSize);
+  colorPaletteSizeRef.current = colorPaletteSize;
+
+  function clampPalettePos(x: number, y: number): { x: number; y: number } {
+    const { w, h } = colorPaletteSizeRef.current;
+    const maxX = window.innerWidth - w;
+    const maxY = window.innerHeight - h;
+    return { x: Math.max(0, Math.min(x, maxX)), y: Math.max(0, Math.min(y, maxY)) };
+  }
 
   const [stampBookOpen, setStampBookOpen] = useState(false);
   /** True when a stamp was loaded from the stamp book (not from the edit selection). */
@@ -937,6 +957,19 @@ function App() {
           .catch(() => {});
       }
     }
+    // Clear bone session when leaving bone mode
+    if (prev === "bone" && interactionMode !== "bone") {
+      if (bonePhase.active) {
+        bonePhase.cancel();
+      } else {
+        void invoke("bone_session_clear")
+          .then(() => {
+            setBoneJointCount(0);
+            setBoneBoneCount(0);
+          })
+          .catch(() => {});
+      }
+    }
   }, [interactionMode]);
 
   const prevInteractionModeForEyedropperRef = useRef<InteractionMode>(interactionMode);
@@ -1235,6 +1268,7 @@ function App() {
     ropeBrushRadiusIndex, setRopeBrushRadiusIndex, ropeBrushRadiusIndexRef,
     ropeBrushShapeUi, setRopeBrushShapeUi, ropeBrushShapeUiRef,
     ropeFirstScreen, setRopeFirstScreen, ropeFirstScreenRef,
+    ropeFirstVoxel, setRopeFirstVoxel, ropeFirstVoxelRef,
     ropeSag,
     ropeTension, setRopeTension, ropeTensionRef,
     ropePhase,
@@ -1256,6 +1290,17 @@ function App() {
     roofAreaShape, setRoofAreaShape, roofAreaShapeRef,
     roofFirstClick, setRoofFirstClick, roofFirstClickRef,
   } = roof;
+  const shape = useShapeGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    shapeKind, setShapeKind, shapeKindRef,
+    shapeSize, setShapeSize, shapeSizeRef,
+    shapeRotX, setShapeRotX, shapeRotXRef,
+    shapeRotY, setShapeRotY, shapeRotYRef,
+    shapeRotZ, setShapeRotZ, shapeRotZRef,
+    shapeOverwrite, setShapeOverwrite, shapeOverwriteRef,
+    shapePhase,
+    shapeGizmoPosRef,
+  } = shape;
 
   useEffect(() => {
     sculptStrokeModeRef.current = sculptStrokeMode;
@@ -1632,7 +1677,8 @@ function App() {
       rocksPhase.ref.current ??
       grassPhase.ref.current ??
       ashlarPhase.ref.current ??
-      floraPhase.ref.current;
+      floraPhase.ref.current ??
+      shapePhase.ref.current;
     const nx = rSnap ? rSnap.data.nx2 : genSnap ? genSnap.data.nx : _nx;
     const ny = rSnap ? rSnap.data.ny2 : genSnap ? genSnap.data.ny : _ny;
     const im = interactionModeRef.current;
@@ -1679,8 +1725,7 @@ function App() {
       ...(isGenerator
         ? {
             generatorKind: gk,
-            generatorRopeFirstNx: ropeFirstScreenRef.current?.nx,
-            generatorRopeFirstNy: ropeFirstScreenRef.current?.ny,
+            generatorRopeFirstVoxel: ropeFirstVoxelRef.current ?? undefined,
             generatorRopeTension: ropeTensionRef.current,
             generatorRopeGravityDirection: clothGravityDirectionRef.current,
             generatorClothPins: clothPinsRef.current.map((p) => [p[0], p[1], p[2]]),
@@ -1734,6 +1779,13 @@ function App() {
             generatorFloraBraidStrands: floraBraidStrands,
             generatorFloraBraidTwist: floraBraidTwist,
             generatorFloraCanopy: floraCanopy,
+            // Shape
+            generatorShapeKind: shapeKindRef.current,
+            generatorShapeSize: shapeSizeRef.current,
+            generatorShapeRotX: shapeRotXRef.current,
+            generatorShapeRotY: shapeRotYRef.current,
+            generatorShapeRotZ: shapeRotZRef.current,
+            generatorShapeOverwrite: shapeOverwriteRef.current,
           }
         : {}),
       stampOriginX: stampOriginXRef.current,
@@ -1938,16 +1990,22 @@ function App() {
       return;
     }
     if (
-      interactionMode === "add" ||
-      interactionMode === "remove" ||
-      interactionMode === "paint" ||
-      interactionMode === "eyedropper" ||
       interactionMode === "select" ||
       interactionMode === "selectByColor" ||
       interactionMode === "selectCoplanar" ||
       interactionMode === "selectCoplanarEmpty" ||
+      interactionMode === "selectExtrude" ||
       interactionMode === "stamp" ||
       interactionMode === "punch"
+    ) {
+      setToolsPane("select");
+      return;
+    }
+    if (
+      interactionMode === "add" ||
+      interactionMode === "remove" ||
+      interactionMode === "paint" ||
+      interactionMode === "eyedropper"
     ) {
       setToolsPane("draw");
     }
@@ -1995,6 +2053,7 @@ function App() {
     if (m === "fly") return "fly";
     if (m === "walk") return "walk";
     if (m === "squishy") return "squishy";
+    if (m === "bone") return "bone";
     if (
       m === "select" ||
       m === "selectByColor" ||
@@ -2112,6 +2171,17 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem(LS_PALETTE_FLOATING, colorPaletteFloating ? "1" : "0");
+    // Clamp into view whenever the palette becomes visible
+    if (colorPaletteFloating) {
+      setColorPalettePos((p) => clampPalettePos(p.x, p.y));
+    }
+  }, [colorPaletteFloating]);
+
+  useEffect(() => {
+    if (!colorPaletteFloating) return;
+    const onResize = () => setColorPalettePos((p) => clampPalettePos(p.x, p.y));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, [colorPaletteFloating]);
 
   useEffect(() => {
@@ -2351,6 +2421,12 @@ function App() {
     roofStyle,
     roofHeight,
     roofHollow,
+    shapeKind,
+    shapeSize,
+    shapeRotX,
+    shapeRotY,
+    shapeRotZ,
+    shapeOverwrite,
   ]);
 
   useEffect(() => {
@@ -2585,6 +2661,7 @@ function App() {
     setRoofFirstClick,
     setRoofPins,
     setRopeFirstScreen,
+    setRopeFirstVoxel,
     setSelectionCount,
     setSquishyBallCount,
     setStrokePolygonVerts,
@@ -2602,7 +2679,19 @@ function App() {
     grassPhase,
     rocksPhase,
     ropePhase,
+    shapePhase,
+    shapeGizmoPosRef,
+    setShapeSize,
+    setShapeRotX,
+    setShapeRotY,
+    setShapeRotZ,
     squishyPhase,
+    bonePhase,
+    boneModeRef,
+    boneDefaultRadiusRef,
+    ikEnabledRef,
+    setBoneJointCount,
+    setBoneBoneCount,
     loading,
     workBusy,
     fillOperationPending,
@@ -2930,10 +3019,12 @@ function App() {
       grassPhase.active ||
       ashlarPhase.active ||
       floraPhase.active ||
+      shapePhase.active ||
       (generatorKind === "cloth" && clothPins.length > 0) ||
       (generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null)) ||
       showPolygonPhaseHud ||
-      showWallSculptPolygonHud);
+      showWallSculptPolygonHud ||
+      bonePhase.active);
 
   const selectionMethod = deriveSelectionMethod({
     drawStrokeMode,
@@ -3016,12 +3107,22 @@ function App() {
           grassPhase={grassPhase}
           ashlarPhase={ashlarPhase}
           floraPhase={floraPhase}
+          shapePhase={shapePhase}
           ropeFirstScreen={ropeFirstScreen}
           setRopeFirstScreen={setRopeFirstScreen}
           setClothPins={setClothPins}
           clothPinsRef={clothPinsRef}
           colorPaletteFloating={colorPaletteFloating}
           setColorPaletteFloating={setColorPaletteFloating}
+          bonePhase={bonePhase}
+          boneMode={boneMode}
+          setBoneMode={setBoneMode}
+          boneJointCount={boneJointCount}
+          boneBoneCount={boneBoneCount}
+          boneDefaultRadius={boneDefaultRadius}
+          setBoneDefaultRadius={setBoneDefaultRadius}
+          ikEnabled={ikEnabled}
+          setIkEnabled={setIkEnabled}
         />
         {colorPaletteFloating && showEditorChrome ? (
           <div
@@ -3049,10 +3150,7 @@ function App() {
                     if (moveE.pointerId !== pid) return;
                     const dx = moveE.clientX - startX;
                     const dy = moveE.clientY - startY;
-                    setColorPalettePos({
-                      x: origX + dx,
-                      y: origY + dy,
-                    });
+                    setColorPalettePos(clampPalettePos(origX + dx, origY + dy));
                   };
 
                   const handleUp = (upE: PointerEvent) => {
@@ -3360,7 +3458,7 @@ function App() {
               </div>
             ) : null}
             {showViewportTopCenterStack ? (
-              <div className="viewport-top-center-hud" onPointerDown={(e) => e.stopPropagation()}>
+              <div className="viewport-top-center-hud" onPointerDown={(e) => e.stopPropagation()} onPointerMove={(e) => e.stopPropagation()}>
                 {viewportTopCenterHud ? (
                   <div className="viewport-work-phase-chip" role="status" aria-live="polite">
                     <span className="viewport-work-phase-text">{viewportTopCenterHud.label}</span>
@@ -3717,13 +3815,13 @@ function App() {
                     </span>
                     <input
                       type="range"
-                      min={0}
+                      min={-1}
                       max={1}
                       step={0.02}
                       value={ropeTension}
                       onChange={(ev) => setRopeTension(Number(ev.target.value))}
                       style={{ width: 60 }}
-                      title="0 = loose, 1 = taut"
+                      title="-1 = very loose, 0 = loose, 1 = taut"
                     />
                     <span
                       style={{
@@ -3854,6 +3952,32 @@ function App() {
                     </button>
                   </div>
                 ) : null}
+                {shapePhase.active ? (
+                  <div
+                    className="viewport-cuboid-depth-bar"
+                    role="dialog"
+                    aria-label="Shape settings"
+                  >
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Shape</span>
+                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
+                      Adjust in sidebar — Enter to place
+                    </span>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => shapePhase.cancel()}
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      className="tool-options-shape-btn"
+                      onClick={() => shapePhase.commit()}
+                    >
+                      Done
+                    </button>
+                  </div>
+                ) : null}
                 {squishyPhase.active ? (
                   <div
                     className="viewport-cuboid-depth-bar"
@@ -3878,6 +4002,27 @@ function App() {
                     >
                       Done
                     </button>
+                  </div>
+                ) : null}
+                {bonePhase.active ? (
+                  <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Bone session">
+                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Bone</span>
+                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
+                      {bonePhase.snapshot?.phase === "build"
+                        ? "Place joints — click Next to pose"
+                        : "Pose joints — Enter to commit, Esc to cancel"}
+                    </span>
+                    {bonePhase.snapshot?.phase === "build" ? (
+                      <>
+                        <button onClick={() => bonePhase.cancel()}>Cancel</button>
+                        <button onClick={() => { setBoneMode("edit"); bonePhase.advance(); }}>Next</button>
+                      </>
+                    ) : (
+                      <>
+                        <button onClick={() => { setBoneMode("add"); bonePhase.retreat(); }}>Back</button>
+                        <button onClick={() => bonePhase.commit()}>Done</button>
+                      </>
+                    )}
                   </div>
                 ) : null}
                 {showWallSculptPolygonHud ? (
@@ -3969,7 +4114,7 @@ function App() {
               className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""}${
                 !toolsPaneFloating && sidebarExpanded ? " is-sidebar-expanded" : ""
               }${!toolsPaneFloating && !sidebarExpanded ? " is-sidebar-collapsed" : ""}${
-                toolsPane === "generators" ? " is-generator-wide" : ""
+                toolsPane === "generators" && generatorKind === "flora" ? " is-generator-wide" : ""
               }`}
               role="dialog"
               aria-label="Tool options"
@@ -4929,6 +5074,12 @@ function App() {
                   setRoofHeight={setRoofHeight}
                   roofHollow={roofHollow}
                   setRoofHollow={setRoofHollow}
+                  shapeKind={shapeKind}
+                  setShapeKind={setShapeKind}
+                  shapeSize={shapeSize}
+                  setShapeSize={setShapeSize}
+                  shapeOverwrite={shapeOverwrite}
+                  setShapeOverwrite={setShapeOverwrite}
                 />
               ) : null}
               {toolsPane === "squishy" && interactionMode === "squishy" ? (

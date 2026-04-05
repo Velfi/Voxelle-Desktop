@@ -242,7 +242,8 @@ export type InteractionMode =
   | "selectExtrude"
   | "sculpt"
   | "generator"
-  | "squishy";
+  | "squishy"
+  | "bone";
 
 export type ToolsPane =
   | "hand"
@@ -251,6 +252,7 @@ export type ToolsPane =
   | "sculpt"
   | "generators"
   | "squishy"
+  | "bone"
   | "mood"
   | "fly"
   | "walk";
@@ -267,8 +269,11 @@ export type GeneratorKindId =
   | "cloth"
   | "ashlar"
   | "flora"
-  | "roof";
+  | "roof"
+  | "shape";
 export type ClothGravityDirectionId = "down" | "up" | "left" | "right" | "forward" | "back";
+
+export type StartShapeId = "cube" | "orb" | "cylinder" | "hollowCube" | "plane" | "circle";
 
 export type BrushShape = "sphere" | "cube" | "pyramid" | "square" | "circle";
 

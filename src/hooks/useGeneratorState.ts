@@ -11,3 +11,5 @@ export { useAshlarGenerator, type AshlarGeneratorState } from "./useAshlarGenera
 export { useFloraGenerator, type FloraGeneratorState } from "./useFloraGenerator";
 export { useRopeClothGenerator, type RopeClothGeneratorState } from "./useRopeClothGenerator";
 export { useRoofGenerator, type RoofGeneratorState } from "./useRoofGenerator";
+export { useShapeGenerator, type ShapeGeneratorState } from "./useShapeGenerator";
+export { useBoneGenerator, type BoneGeneratorState } from "./useBoneGenerator";

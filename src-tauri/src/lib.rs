@@ -1,5 +1,5 @@
 mod camera;
-mod collab;
+pub mod collab;
 mod commands;
 pub mod crash_guard;
 mod edit_pipeline;
@@ -27,7 +27,7 @@ mod sculpt_mesh_smooth;
 mod smooth_mesh;
 mod state;
 mod stroke_modes;
-mod voxel_edit;
+pub mod voxel_edit;
 /// Voxel format / types (public for `cargo bench` and tests).
 pub mod voxelle;
 use commands::avatar::*;
@@ -65,7 +65,7 @@ use std::path::{Path, PathBuf};
 
 use voxelle::scene::object_world_matrix;
 use voxelle::{
-    decode_payload, encode_payload_v4, focal_length_to_fov_y_radians, start_shape::StartShape,
+    decode_payload, encode_payload_v5, focal_length_to_fov_y_radians, start_shape::StartShape,
 };
 
 /// Convert file-format `MoodSettings` → GPU-ready `MoodParams`.
@@ -130,8 +130,7 @@ pub(crate) struct PreviewHoverContext {
     use_brush_preview: bool,
     /// `Some("rope" | "cloth" | "rocks" | "grass")` when the generator tool is active (webview sync).
     generator_kind: Option<String>,
-    generator_rope_first_nx: Option<f32>,
-    generator_rope_first_ny: Option<f32>,
+    generator_rope_first_voxel: Option<[i32; 3]>,
     generator_rope_sag: f32,
     generator_rope_tension: f32,
     generator_rope_gravity_direction: String,
@@ -267,6 +266,15 @@ pub(crate) struct PreviewHoverContext {
     stamp_origin_x: i32,
     /// Stamp placement origin Z: 0 = min edge, 1 = center, 2 = max edge.
     stamp_origin_z: i32,
+    /// Symmetry bitmask: bit 0 = X, bit 1 = Y, bit 2 = Z.
+    mirror_axes: u8,
+    // Shape generator
+    generator_shape_kind: String,
+    generator_shape_size: i32,
+    generator_shape_rot_x: f32,
+    generator_shape_rot_y: f32,
+    generator_shape_rot_z: f32,
+    generator_shape_overwrite: bool,
 }
 
 impl Default for PreviewHoverContext {
@@ -285,8 +293,7 @@ impl Default for PreviewHoverContext {
             match_material: false,
             use_brush_preview: true,
             generator_kind: None,
-            generator_rope_first_nx: None,
-            generator_rope_first_ny: None,
+            generator_rope_first_voxel: None,
             generator_rope_sag: 2.5,
             generator_rope_tension: 0.5,
             generator_rope_gravity_direction: "down".into(),
@@ -420,6 +427,14 @@ impl Default for PreviewHoverContext {
             generator_piscina_anchor_offset_v: 0,
             stamp_origin_x: 0,
             stamp_origin_z: 0,
+            mirror_axes: 0,
+            // Shape
+            generator_shape_kind: "cube".into(),
+            generator_shape_size: 8,
+            generator_shape_rot_x: 0.0,
+            generator_shape_rot_y: 0.0,
+            generator_shape_rot_z: 0.0,
+            generator_shape_overwrite: true,
         }
     }
 }
@@ -717,6 +732,11 @@ pub fn run() {
         stamp_clipboard: Mutex::new(None),
         squishy_session: Mutex::new(generators::SquishySession::new()),
         squishy_gizmo_drag: Mutex::new(None),
+        bone_session: Mutex::new(generators::BoneSession::new()),
+        bone_gizmo_drag: Mutex::new(None),
+        bone_ik_drag: Mutex::new(None),
+        generator_gizmo_center: Mutex::new(None),
+        generator_gizmo_ring_radius: Mutex::new(None),
         selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
         extrude_gizmo_drag: Mutex::new(ExtrudeGizmoDrag::None),
         extrude_gizmo_base_depth: Mutex::new(0),
@@ -1298,6 +1318,9 @@ pub fn run() {
             generator_piscina_at_screen,
             generator_insecta_at_screen,
             generator_fauna_at_screen,
+            generator_shape_at_screen,
+            set_generator_gizmo_center,
+            clear_generator_gizmo_center,
             generator_squishy_metaball_at_screen,
             squishy_session_get,
             squishy_session_set_mode,
@@ -1311,6 +1334,21 @@ pub fn run() {
             squishy_gizmo_pointer_down,
             squishy_gizmo_pointer_move,
             squishy_gizmo_pointer_up,
+            bone_session_get,
+            bone_session_clear,
+            bone_session_commit,
+            bone_add_joint_at_screen,
+            bone_move_joint_to_screen,
+            bone_connect_joints,
+            bone_pick_at_screen,
+            bone_select,
+            bone_remove,
+            bone_set_joint_radius,
+            bone_set_joint_position,
+            bone_gizmo_pointer_down,
+            bone_gizmo_pointer_move,
+            bone_gizmo_pointer_up,
+            bone_ik_drag_start,
             export_mesh_glb,
             get_scene_objects,
             set_active_object,
@@ -1524,6 +1562,7 @@ pub fn run() {
                             viewer.set_spatial_mesh_cache(cache);
                         }
                     }
+                    viewer.set_rt_surface_mode(state.rendering_mode.lock().rt_surface_mode());
                     let sz_before = viewer.surface_size;
                     let _ = viewer.render();
                     let (vw, vh) = viewer.viewport_size();
@@ -1685,6 +1724,11 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
         stamp_clipboard: Mutex::new(None),
         squishy_session: Mutex::new(generators::SquishySession::new()),
         squishy_gizmo_drag: Mutex::new(None),
+        bone_session: Mutex::new(generators::BoneSession::new()),
+        bone_gizmo_drag: Mutex::new(None),
+        bone_ik_drag: Mutex::new(None),
+        generator_gizmo_center: Mutex::new(None),
+        generator_gizmo_ring_radius: Mutex::new(None),
         selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
         extrude_gizmo_drag: Mutex::new(ExtrudeGizmoDrag::None),
         extrude_gizmo_base_depth: Mutex::new(0),
