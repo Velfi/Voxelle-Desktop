@@ -5,6 +5,9 @@
  * all component-level locals the handlers need. The handler bodies are
  * verbatim copies from App.tsx; they close over the destructured locals
  * which are refreshed on every render (same closure semantics as before).
+ *
+ * **Pipeline A vs B:** Manipulator/gizmo paths (gestureRef) vs scene tools
+ * (strokes, preview, camera). See docs/agents/viewport-pointer-pipeline.md
  */
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useRef } from "react";
@@ -17,6 +20,7 @@ import type {
   ViewportCursorDebugScreen,
 } from "../types";
 import { useLatestRef } from "./useLatestRef";
+import { getViewportSceneBehavior } from "./viewportPointer/sceneBehavior";
 
 /** Opaque ref bag populated by App every render. */
 export type ViewportPointerLocals = any;
@@ -360,6 +364,329 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     });
   }
 
+  // ---- Pipeline A: manipulator pointer-down (ordered; see viewport-pointer-pipeline.md) ----
+
+  async function pipelineASquishyAddPointerDown(
+    e: React.PointerEvent,
+    nx: number,
+    ny: number,
+    pointerId: number,
+    logoSplashPointer: boolean,
+  ): Promise<boolean> {
+    const mode = interactionModeRef.current;
+    if (
+      mode !== "squishy" ||
+      squishyModeRef.current !== "add" ||
+      e.button !== 0 ||
+      loading ||
+      workBusy ||
+      logoSplashPointer
+    ) {
+      return false;
+    }
+    try {
+      await invoke("squishy_session_set_mode", { args: { mode: "add" } });
+      const id = await invoke<number | null>("squishy_metaball_add_at_screen", {
+        args: { nx, ny, radius: 4 },
+      });
+      if (id != null) {
+        if (!squishyPhase.active) squishyPhase.enter("settings", {});
+        await invoke("squishy_metaball_select", { args: { id } });
+        squishyAddDragBallIdRef.current = id;
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "squishyAddDrag" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return true;
+      }
+    } catch {
+      /* fall through to camera */
+    }
+    return false;
+  }
+
+  async function pipelineASquishyEditGizmoPointerDown(
+    e: React.PointerEvent,
+    nx: number,
+    ny: number,
+    pointerId: number,
+    logoSplashPointer: boolean,
+  ): Promise<boolean> {
+    const mode = interactionModeRef.current;
+    if (
+      mode !== "squishy" ||
+      squishyModeRef.current !== "edit" ||
+      e.button !== 0 ||
+      loading ||
+      workBusy ||
+      logoSplashPointer
+    ) {
+      return false;
+    }
+    try {
+      const consumed = await invoke<boolean>("squishy_gizmo_pointer_down", {
+        args: { nx, ny },
+      });
+      if (consumed) {
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "squishyGizmo" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return true;
+      }
+    } catch {
+      /* fall through to pick / camera */
+    }
+    return false;
+  }
+
+  async function pipelineABoneGizmoPointerDown(
+    e: React.PointerEvent,
+    nx: number,
+    ny: number,
+    pointerId: number,
+    logoSplashPointer: boolean,
+  ): Promise<boolean> {
+    const mode = interactionModeRef.current;
+    if (
+      mode !== "bone" ||
+      boneModeRef.current !== "edit" ||
+      bonePhase.ref.current?.phase !== "pose" ||
+      e.button !== 0 ||
+      loading ||
+      workBusy ||
+      logoSplashPointer
+    ) {
+      return false;
+    }
+    try {
+      const consumed = await invoke<boolean>("bone_gizmo_pointer_down", {
+        args: { nx, ny },
+      });
+      if (consumed) {
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "boneGizmo" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+    return false;
+  }
+
+  async function pipelineAExtrudeGizmoPointerDown(
+    e: React.PointerEvent,
+    pointerId: number,
+    logoSplashPointer: boolean,
+    navigate: boolean,
+    forceCamera: boolean,
+  ): Promise<boolean> {
+    const mode = interactionModeRef.current;
+    if (
+      e.button !== 0 ||
+      loading ||
+      workBusy ||
+      logoSplashPointer ||
+      navigate ||
+      forceCamera ||
+      mode !== "selectExtrude"
+    ) {
+      return false;
+    }
+    try {
+      const hit = await extrudeGizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
+      if (hit) {
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "extrudeGizmo" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+    if (extrudePhase.ref.current) {
+      extrudePhase.cancel();
+    }
+    return false;
+  }
+
+  async function pipelineASelectionGizmoPointerDown(
+    e: React.PointerEvent,
+    pointerId: number,
+    logoSplashPointer: boolean,
+    navigate: boolean,
+    forceCamera: boolean,
+  ): Promise<boolean> {
+    const mode = interactionModeRef.current;
+    if (
+      e.button !== 0 ||
+      loading ||
+      workBusy ||
+      logoSplashPointer ||
+      navigate ||
+      forceCamera ||
+      mode === "selectExtrude"
+    ) {
+      return false;
+    }
+    try {
+      const hit = await gizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
+      if (hit) {
+        probingRef.current = false;
+        gestureRef.current = { pointerId, mode: "selectionGizmo" };
+        lastRef.current = { x: e.clientX, y: e.clientY };
+        return true;
+      }
+    } catch {
+      /* fall through */
+    }
+    return false;
+  }
+
+  /** Pipeline A gesture moves: returns true if this event was handled here. */
+  function dispatchPipelineAPointerMove(
+    e: React.PointerEvent,
+    px: number,
+    py: number,
+  ): boolean {
+    if (
+      gestureRef.current?.mode === "bonePlacing" &&
+      gestureRef.current.pointerId === e.pointerId &&
+      bonePlacingJointRef.current != null
+    ) {
+      void invoke("bone_move_joint_to_screen", {
+        args: { id: bonePlacingJointRef.current, nx: px, ny: py },
+      }).catch(() => {});
+      return true;
+    }
+    if (
+      gestureRef.current?.mode === "squishyGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      void invoke("squishy_gizmo_pointer_move", {
+        args: { nx: px, ny: py },
+      }).catch(() => {});
+      return true;
+    }
+    if (
+      gestureRef.current?.mode === "squishyAddDrag" &&
+      gestureRef.current.pointerId === e.pointerId &&
+      squishyAddDragBallIdRef.current != null
+    ) {
+      void invoke("squishy_add_drag_resize", {
+        args: { ballId: squishyAddDragBallIdRef.current, nx: px, ny: py },
+      }).catch(() => {});
+      return true;
+    }
+    if (
+      gestureRef.current?.mode === "selectionGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      const last = lastRef.current;
+      const cx = e.clientX;
+      const cy = e.clientY;
+      gizmoRef.current?.pointerMove(cx, cy, last.x, last.y);
+      lastRef.current = { x: cx, y: cy };
+      return true;
+    }
+    if (
+      gestureRef.current?.mode === "extrudeGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      const last = lastRef.current;
+      const cx = e.clientX;
+      const cy = e.clientY;
+      extrudeGizmoRef.current?.pointerMove(
+        cx,
+        cy,
+        last.x,
+        last.y,
+        activeColorRef.current,
+        activeMaterialRef.current,
+      );
+      dragDidEditRef.current = true;
+      lastRef.current = { x: cx, y: cy };
+      return true;
+    }
+    return false;
+  }
+
+  /** Pipeline A pointer-up handlers that run before the main voxel/up path. Returns true if handled. */
+  function dispatchPipelineAPointerUpEarly(e: React.PointerEvent): boolean {
+    if (
+      gestureRef.current?.mode === "bonePlacing" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      const placedId = bonePlacingJointRef.current;
+      bonePlacingJointRef.current = null;
+      if (placedId != null) {
+        const prev = bonePendingJointRef.current;
+        if (prev != null) {
+          void invoke("bone_connect_joints", {
+            args: { jointA: prev, jointB: placedId },
+          }).catch(() => {});
+        }
+        bonePendingJointRef.current = placedId;
+        void invoke<any>("bone_session_get")
+          .then((s: any) => {
+            setBoneJointCount(s.joints?.length ?? 0);
+            setBoneBoneCount(s.bones?.length ?? 0);
+          })
+          .catch(() => {});
+      }
+      resetPointerGesture("bone-placing-up", e);
+      return true;
+    }
+
+    if (
+      gestureRef.current?.mode === "squishyAddDrag" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      squishyAddDragBallIdRef.current = null;
+      void invoke<{ balls: { id: number }[] }>("squishy_session_get")
+        .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
+        .catch(() => {});
+      resetPointerGesture("squishy-add-drag-up", e);
+      return true;
+    }
+
+    if (
+      gestureRef.current?.mode === "squishyGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      void invoke("squishy_gizmo_pointer_up").catch(() => {});
+      resetPointerGesture("squishy-gizmo-up", e);
+      return true;
+    }
+
+    if (
+      gestureRef.current?.mode === "selectionGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      gizmoRef.current?.pointerUp();
+      resetPointerGesture("selection-gizmo-up", e);
+      return true;
+    }
+    if (
+      gestureRef.current?.mode === "extrudeGizmo" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      extrudeGizmoRef.current?.pointerUp();
+      void invoke("sync_preview_input", {
+        args: buildSyncPreviewPayload(-1, 0, "selectExtrude"),
+      }).catch(() => {});
+      if (dragDidEditRef.current) {
+        extrudePhase.enter("settings", {} as Record<string, never>);
+        lastStrokeNormRef.current = null;
+      } else {
+        void invoke("voxel_stroke_preview_reset").catch(() => {});
+        lastStrokeNormRef.current = null;
+      }
+      resetPointerGesture("extrude-gizmo-up", e);
+      return true;
+    }
+    return false;
+  }
+
   // ---- Event handlers (verbatim from App.tsx) ----
 
   const onPointerDown = async (e: React.PointerEvent) => {
@@ -442,133 +769,13 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       e.button === 0 &&
       mode !== "bone";
 
-    // Squishy add-drag: place on voxel hit, resize by dragging; fall through to orbit if no hit.
-    if (
-      mode === "squishy" &&
-      squishyModeRef.current === "add" &&
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer
-    ) {
-      try {
-        await invoke("squishy_session_set_mode", { args: { mode: "add" } });
-        const id = await invoke<number | null>("squishy_metaball_add_at_screen", {
-          args: { nx, ny, radius: 4 },
-        });
-        if (id != null) {
-          if (!squishyPhase.active) squishyPhase.enter("settings", {});
-          await invoke("squishy_metaball_select", { args: { id } });
-          squishyAddDragBallIdRef.current = id;
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "squishyAddDrag" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through to camera */
-      }
-    }
-
-    if (
-      mode === "squishy" &&
-      squishyModeRef.current === "edit" &&
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer
-    ) {
-      try {
-        const consumed = await invoke<boolean>("squishy_gizmo_pointer_down", {
-          args: { nx, ny },
-        });
-        if (consumed) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "squishyGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through to pick / camera */
-      }
-    }
-
-    // Bone gizmo intercept (pose-phase edit mode)
-    if (
-      mode === "bone" &&
-      boneModeRef.current === "edit" &&
-      bonePhase.ref.current?.phase === "pose" &&
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer
-    ) {
-      try {
-        const consumed = await invoke<boolean>("bone_gizmo_pointer_down", {
-          args: { nx, ny },
-        });
-        if (consumed) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "boneGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through */
-      }
-    }
-
-    // Extrude gizmo: check in selectExtrude mode before falling through to camera.
-    if (
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer &&
-      !navigate &&
-      !forceCamera &&
-      mode === "selectExtrude"
-    ) {
-      try {
-        const hit = await extrudeGizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
-        if (hit) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "extrudeGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through */
-      }
-      // Gizmo wasn't hit — cancel the settings phase if active.
-      if (extrudePhase.ref.current) {
-        extrudePhase.cancel();
-      }
-    }
-
-    // Selection gizmo: check before pick probe so arrow/ring drags don't fall through.
-    // Exclude selectExtrude — in that mode we use the extrude gizmo instead.
-    // In bone mode, intercept the shared gizmo drag to move joints instead of voxels.
-    if (
-      e.button === 0 &&
-      !loading &&
-      !workBusy &&
-      !logoSplashPointer &&
-      !navigate &&
-      !forceCamera &&
-      mode !== "selectExtrude"
-    ) {
-      try {
-        const hit = await gizmoRef.current?.startDragIfHit(e.clientX, e.clientY);
-        if (hit) {
-          probingRef.current = false;
-          gestureRef.current = { pointerId, mode: "selectionGizmo" };
-          lastRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-      } catch {
-        /* fall through */
-      }
-    }
+    if (await pipelineASquishyAddPointerDown(e, nx, ny, pointerId, logoSplashPointer)) return;
+    if (await pipelineASquishyEditGizmoPointerDown(e, nx, ny, pointerId, logoSplashPointer)) return;
+    if (await pipelineABoneGizmoPointerDown(e, nx, ny, pointerId, logoSplashPointer)) return;
+    if (await pipelineAExtrudeGizmoPointerDown(e, pointerId, logoSplashPointer, navigate, forceCamera))
+      return;
+    if (await pipelineASelectionGizmoPointerDown(e, pointerId, logoSplashPointer, navigate, forceCamera))
+      return;
 
     // Stamp/punch right-click is handled in onContextMenu (fires reliably on all platforms).
     // Still return early here to avoid setting a camera gesture if pointerdown does fire.
@@ -1022,65 +1229,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
         });
       }
     }
-    if (
-      gestureRef.current?.mode === "bonePlacing" &&
-      gestureRef.current.pointerId === e.pointerId &&
-      bonePlacingJointRef.current != null
-    ) {
-      void invoke("bone_move_joint_to_screen", {
-        args: { id: bonePlacingJointRef.current, nx: px, ny: py },
-      }).catch(() => {});
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "squishyGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      void invoke("squishy_gizmo_pointer_move", {
-        args: { nx: px, ny: py },
-      }).catch(() => {});
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "squishyAddDrag" &&
-      gestureRef.current.pointerId === e.pointerId &&
-      squishyAddDragBallIdRef.current != null
-    ) {
-      void invoke("squishy_add_drag_resize", {
-        args: { ballId: squishyAddDragBallIdRef.current, nx: px, ny: py },
-      }).catch(() => {});
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "selectionGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      const last = lastRef.current;
-      const cx = e.clientX;
-      const cy = e.clientY;
-      gizmoRef.current?.pointerMove(cx, cy, last.x, last.y);
-      lastRef.current = { x: cx, y: cy };
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "extrudeGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      const last = lastRef.current;
-      const cx = e.clientX;
-      const cy = e.clientY;
-      extrudeGizmoRef.current?.pointerMove(
-        cx,
-        cy,
-        last.x,
-        last.y,
-        activeColorRef.current,
-        activeMaterialRef.current,
-      );
-      dragDidEditRef.current = true;
-      lastRef.current = { x: cx, y: cy };
-      return;
-    }
+    if (dispatchPipelineAPointerMove(e, px, py)) return;
     if (!gestureRef.current) {
       if (interactionModeRef.current === "selectExtrude") {
         extrudeGizmoRef.current
@@ -1112,24 +1261,12 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       floraPhase.active ||
       shapePhase.active ||
       bonePhase.active;
+    const sceneBehavior = getViewportSceneBehavior(interactionModeRef.current);
     if (
       (!overGizmo || interactionModeRef.current === "squishy") &&
       gestureRef.current?.mode !== "camera" &&
       !probingRef.current &&
-      (interactionModeRef.current === "add" ||
-        interactionModeRef.current === "remove" ||
-        interactionModeRef.current === "paint" ||
-        interactionModeRef.current === "sculpt" ||
-        interactionModeRef.current === "select" ||
-        interactionModeRef.current === "selectByColor" ||
-        interactionModeRef.current === "selectCoplanar" ||
-        interactionModeRef.current === "selectCoplanarEmpty" ||
-        interactionModeRef.current === "squishy" ||
-        interactionModeRef.current === "bone" ||
-        interactionModeRef.current === "generator" ||
-        interactionModeRef.current === "stamp" ||
-        interactionModeRef.current === "punch" ||
-        interactionModeRef.current === "selectExtrude") &&
+      sceneBehavior.allowsIdleHoverPreviewSync &&
       !interactionBlockedRef.current &&
       !anyGenPhaseActive
     ) {
@@ -1607,79 +1744,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       return;
     }
 
-    if (
-      gestureRef.current?.mode === "bonePlacing" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      const placedId = bonePlacingJointRef.current;
-      bonePlacingJointRef.current = null;
-      if (placedId != null) {
-        const prev = bonePendingJointRef.current;
-        if (prev != null) {
-          void invoke("bone_connect_joints", {
-            args: { jointA: prev, jointB: placedId },
-          }).catch(() => {});
-        }
-        bonePendingJointRef.current = placedId;
-        void invoke<any>("bone_session_get")
-          .then((s: any) => {
-            setBoneJointCount(s.joints?.length ?? 0);
-            setBoneBoneCount(s.bones?.length ?? 0);
-          })
-          .catch(() => {});
-      }
-      resetPointerGesture("bone-placing-up", e);
-      return;
-    }
-
-    if (
-      gestureRef.current?.mode === "squishyAddDrag" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      squishyAddDragBallIdRef.current = null;
-      void invoke<{ balls: { id: number }[] }>("squishy_session_get")
-        .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-        .catch(() => {});
-      resetPointerGesture("squishy-add-drag-up", e);
-      return;
-    }
-
-    if (
-      gestureRef.current?.mode === "squishyGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      void invoke("squishy_gizmo_pointer_up").catch(() => {});
-      resetPointerGesture("squishy-gizmo-up", e);
-      return;
-    }
-
-    if (
-      gestureRef.current?.mode === "selectionGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      gizmoRef.current?.pointerUp();
-      resetPointerGesture("selection-gizmo-up", e);
-      return;
-    }
-    if (
-      gestureRef.current?.mode === "extrudeGizmo" &&
-      gestureRef.current.pointerId === e.pointerId
-    ) {
-      extrudeGizmoRef.current?.pointerUp();
-      // Restore selectExtrude preview_mode so the GPU gizmo keeps its extrude style.
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, "selectExtrude"),
-      }).catch(() => {});
-      if (dragDidEditRef.current) {
-        extrudePhase.enter("settings", {} as Record<string, never>);
-        lastStrokeNormRef.current = null;
-      } else {
-        void invoke("voxel_stroke_preview_reset").catch(() => {});
-        lastStrokeNormRef.current = null;
-      }
-      resetPointerGesture("extrude-gizmo-up", e);
-      return;
-    }
+    if (dispatchPipelineAPointerUpEarly(e)) return;
 
     const g = gestureRef.current;
     const start = pointerStartRef.current;
@@ -2105,17 +2170,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       extrudePhase.ref.current !== null ||
       ropePhase.ref.current !== null ||
       clothPhase.ref.current !== null;
-    if (
-      !anyPhaseActive &&
-      im !== "select" &&
-      im !== "selectByColor" &&
-      im !== "selectCoplanar" &&
-      im !== "selectCoplanarEmpty" &&
-      im !== "selectExtrude" &&
-      im !== "squishy" &&
-      im !== "bone" &&
-      im !== "generator"
-    ) {
+    if (!anyPhaseActive && !getViewportSceneBehavior(im).preservePreviewOnPointerLeave) {
       clearPreview();
     }
     if (viewportCursorDebugEnabled) {

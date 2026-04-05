@@ -3,8 +3,12 @@
  *
  * Each hook encapsulates the useState/useRef/useEffect/useStrokePhase cluster
  * for a single generator, keeping App.tsx focused on orchestration.
+ *
+ * `useGeneratorToolState` composes all generators + `generatorToolOptionsModel` for the tools pane.
  */
 
+export { useGeneratorToolState } from "./useGeneratorToolState";
+export type { GeneratorToolContext } from "./useGeneratorToolState";
 export { useRocksGenerator, type RocksGeneratorState } from "./useRocksGenerator";
 export { useGrassGenerator, type GrassGeneratorState } from "./useGrassGenerator";
 export { useAshlarGenerator, type AshlarGeneratorState } from "./useAshlarGenerator";

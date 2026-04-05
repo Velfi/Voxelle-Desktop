@@ -8,6 +8,9 @@ import { SCULPT_BRUSH_MAX_INDEX } from "../constants";
 
 // ── Props ────────────────────────────────────────────────────────────
 
+/** Props for generator UI minus loading flags — built by `useGeneratorToolState`. */
+export type GeneratorToolOptionsModel = Omit<GeneratorToolOptionsProps, "loading" | "workBusy">;
+
 export interface GeneratorToolOptionsProps {
   loading: boolean;
   workBusy: boolean;

@@ -11,16 +11,10 @@ import {
   useTauriEventListeners,
   type SelectionCombineModeApi,
 } from "./hooks/useTauriEventListeners";
-import {
-  useRocksGenerator,
-  useGrassGenerator,
-  useAshlarGenerator,
-  useFloraGenerator,
-  useRopeClothGenerator,
-  useRoofGenerator,
-  useShapeGenerator,
-  useBoneGenerator,
-} from "./hooks/useGeneratorState";
+import { useBoneGenerator } from "./hooks/useGeneratorState";
+import { useGeneratorToolState } from "./hooks/useGeneratorToolState";
+import { useSculptToolState } from "./hooks/useSculptToolState";
+import { useSquishyToolState } from "./hooks/useSquishyToolState";
 import { MascotView } from "./MascotView";
 import { SpeechBubbleOverlay, type BubbleInfo } from "./SpeechBubbleOverlay";
 import { loadRecentJoinUrls } from "./joinRecent";
@@ -78,13 +72,7 @@ import type {
   ChatToast,
   InteractionMode,
   ToolsPane,
-  SculptStrokeModeApi,
-  TerrainSculptOpApi,
-  GeneratorKindId,
   BrushShape,
-  SculptBrushShapeUi,
-  WallAreaShapeApi,
-  SculptSmoothVariantApi,
   SprayDirectionApi,
 } from "./types";
 import { defaultMoodState, moodWith } from "./types";
@@ -241,17 +229,251 @@ function App() {
   const fillRespectsColorRef = useLatestRef(fillRespectsColor);
   const selectionStrokeBegunRef = useRef(false);
   const [toolsPane, setToolsPane] = useState<ToolsPane>("draw");
-  const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
-  const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("rocks");
-  const [squishyMode, setSquishyMode] = useState<"add" | "edit" | "delete">("add");
-  const squishyModeRef = useLatestRef(squishyMode);
-  const [squishyHollow, setSquishyHollow] = useState(false);
-  const [squishyWallThickness, setSquishyWallThickness] = useState(1);
-  const [squishySnapToSurface, setSquishySnapToSurface] = useState(true);
   const [selectionStrokeSnapToSurface, setSelectionStrokeSnapToSurface] = useState(true);
   const [selectionStrokeAxisAlign, setSelectionStrokeAxisAlign] = useState(true);
   const selectionStrokeSnapToSurfaceRef = useLatestRef(selectionStrokeSnapToSurface);
   const selectionStrokeAxisAlignRef = useLatestRef(selectionStrokeAxisAlign);
+
+  const sculpt = useSculptToolState();
+  const squishyTool = useSquishyToolState({ activeColorRef, activeMaterialRef });
+  const {
+    squishyMode,
+    setSquishyMode,
+    squishyModeRef,
+    squishyHollow,
+    setSquishyHollow,
+    squishyWallThickness,
+    setSquishyWallThickness,
+    squishySnapToSurface,
+    setSquishySnapToSurface,
+    squishyBallCount,
+    setSquishyBallCount,
+    squishyPhase,
+  } = squishyTool;
+
+  const gen = useGeneratorToolState({
+    activeColorRef,
+    activeMaterialRef,
+    selectionStrokeSnapToSurfaceRef,
+  });
+  const {
+    generatorKind,
+    setGeneratorKind,
+    generatorKindRef,
+    generatorSphereRadius,
+    generatorSphereRadiusRef,
+    generatorToolOptionsModel,
+    rocksPhase,
+    grassPhase,
+    ashlarPhase,
+    floraPhase,
+    ropePhase,
+    clothPhase,
+    shapePhase,
+    shapeGizmoPosRef,
+    rockPreviewSeedRef,
+    grassPreviewSeedRef,
+    ashlarPreviewSeedRef,
+    floraPreviewSeedRef,
+    ropeFirstScreen,
+    setRopeFirstScreen,
+    setRopeFirstVoxel,
+    ropeFirstVoxelRef,
+    ropeSag,
+    ropeTension,
+    setRopeTension,
+    ropeTensionRef,
+    ropeBrushRadiusIndex,
+    ropeBrushRadiusIndexRef,
+    ropeBrushShapeUi,
+    ropeBrushShapeUiRef,
+    clothPins,
+    setClothPins,
+    clothPinsRef,
+    clothTension,
+    setClothTension,
+    clothTensionRef,
+    clothGravityDirection,
+    clothGravityDirectionRef,
+    clothSimGravityPct,
+    clothSimGravityPctRef,
+    clothSimStiffnessPct,
+    clothSimStiffnessPctRef,
+    clothSimIterations,
+    clothSimIterationsRef,
+    clothSimConstraintPasses,
+    clothSimConstraintPassesRef,
+    rockRoughness,
+    rockRoughnessRef,
+    grassDensity,
+    grassDensityRef,
+    grassMaxHeight,
+    grassMaxHeightRef,
+    rockCount,
+    rockCountRef,
+    rockClusterRadius,
+    rockClusterRadiusRef,
+    rockSinkDirection,
+    rockSinkDirectionRef,
+    rockSinkAmount,
+    rockSinkAmountRef,
+    ashlarThickness,
+    ashlarThicknessRef,
+    roofPins,
+    setRoofPins,
+    roofStyle,
+    roofStyleRef,
+    roofHeight,
+    roofHeightRef,
+    roofHollow,
+    roofHollowRef,
+    roofAreaShape,
+    roofFirstClick,
+    setRoofFirstClick,
+    shapeKind,
+    shapeKindRef,
+    shapeSize,
+    setShapeSize,
+    shapeSizeRef,
+    shapeRotX,
+    setShapeRotX,
+    shapeRotXRef,
+    shapeRotY,
+    setShapeRotY,
+    shapeRotYRef,
+    shapeRotZ,
+    setShapeRotZ,
+    shapeRotZRef,
+    shapeOverwrite,
+    shapeOverwriteRef,
+    floraHeight,
+    floraGirth,
+    floraWobble,
+    floraTaper,
+    floraStemCount,
+    floraClusterRadius,
+    floraBranchCount,
+    floraBranchDepth,
+    floraBranchStart,
+    floraBranchSpread,
+    floraBraidStrands,
+    floraBraidTwist,
+    floraCanopy,
+    handleClothPinClick,
+    roofAreaShapeRef,
+    roofFirstClickRef,
+    roofPinsRef,
+  } = gen;
+
+  const {
+    sculptStrokeMode,
+    setSculptStrokeMode,
+    terrainSculptOp,
+    setTerrainSculptOp,
+    terrainBaseY,
+    setTerrainBaseY,
+    terrainSmoothRadius,
+    setTerrainSmoothRadius,
+    terrainFlattenUseBaseY,
+    setTerrainFlattenUseBaseY,
+    terrainSubVoxel,
+    setTerrainSubVoxel,
+    terrainHoverY,
+    setTerrainHoverY,
+    sculptSmoothPasses,
+    setSculptSmoothPasses,
+    sculptBrushRadius,
+    setSculptBrushRadius,
+    sculptBrushStrength,
+    setSculptBrushStrength,
+    sculptBrushFalloff,
+    setSculptBrushFalloff,
+    sculptBrushShapeUi,
+    setSculptBrushShapeUi,
+    extrudeDirectionRef,
+    setExtrudeDirectionRef,
+    extrudeProfile,
+    setExtrudeProfile,
+    extrudeEndCap,
+    setExtrudeEndCap,
+    extrudeTaper,
+    setExtrudeTaper,
+    extrudeTaperStart,
+    setExtrudeTaperStart,
+    extrudeTaperEnd,
+    setExtrudeTaperEnd,
+    wallAreaShape,
+    setWallAreaShape,
+    sprayDirection,
+    setSprayDirection,
+    wallWidthIndex,
+    setWallWidthIndex,
+    wallHeightVox,
+    setWallHeightVox,
+    wallLockStartHeight,
+    setWallLockStartHeight,
+    wallAxisAlign,
+    setWallAxisAlign,
+    sculptSmoothVariant,
+    setSculptSmoothVariant,
+    smoothNeighborRadius,
+    setSmoothNeighborRadius,
+    smoothAggressiveness,
+    setSmoothAggressiveness,
+    smoothLaplacianIterations,
+    setSmoothLaplacianIterations,
+    smoothLaplacianRelaxPct,
+    setSmoothLaplacianRelaxPct,
+    wallSculptPolygonVerts,
+    setWallSculptPolygonVerts,
+    extrudeDirectionRefRef,
+    extrudeProfileRef,
+    extrudeEndCapRef,
+    extrudeTaperRef,
+    extrudeTaperStartRef,
+    extrudeTaperEndRef,
+    terrainSculptOpRef,
+    terrainBaseYRef,
+    terrainSmoothRadiusRef,
+    terrainFlattenUseBaseYRef,
+    terrainSubVoxelRef,
+    lastTerrainHoverMsRef,
+    sculptSmoothPassesRef,
+    sculptBrushRadiusRef,
+    sculptBrushStrengthRef,
+    sculptBrushFalloffRef,
+    sculptBrushShapeUiRef,
+    wallAreaShapeRef,
+    sprayDirectionRef,
+    wallWidthIndexRef,
+    wallHeightVoxRef,
+    wallLockStartHeightRef,
+    wallAxisAlignRef,
+    sculptSmoothVariantRef,
+    smoothNeighborRadiusRef,
+    smoothAggressivenessRef,
+    smoothLaplacianIterationsRef,
+    smoothLaplacianRelaxPctRef,
+    wallSculptPolygonVertsRef,
+  } = sculpt;
+
+  const bone = useBoneGenerator({ activeColorRef, activeMaterialRef });
+  const {
+    bonePhase,
+    boneMode,
+    setBoneMode,
+    boneModeRef,
+    boneJointCount,
+    setBoneJointCount,
+    boneBoneCount,
+    setBoneBoneCount,
+    boneDefaultRadius,
+    setBoneDefaultRadius,
+    boneDefaultRadiusRef,
+    ikEnabled,
+    setIkEnabled,
+    ikEnabledRef,
+  } = bone;
   const [surfacePlaneHollow, setSurfacePlaneHollow] = useState(false);
   const surfacePlaneHollowRef = useLatestRef(surfacePlaneHollow);
   const [sprayConstrainToPlane, setSprayConstrainToPlane] = useState(false);
@@ -275,7 +497,6 @@ function App() {
   const sprayConstrainToPlaneRefRef = useLatestRef(sprayConstrainToPlaneRef_);
   const [fillConstrainToPlane, setFillConstrainToPlane] = useState(false);
   const fillConstrainToPlaneRef = useLatestRef(fillConstrainToPlane);
-  const [squishyBallCount, setSquishyBallCount] = useState(0);
   const [strokePolygonVerts, setStrokePolygonVerts] = useState<[number, number, number][]>([]);
   /** Kept in sync with `strokePolygonVerts` for `sync_preview_input` / `mergedStrokeAux` (no stale closure). */
   const strokePolygonVertsRef = useLatestRef(strokePolygonVerts);
@@ -341,85 +562,6 @@ function App() {
   const [extrusionDepthEditing, setExtrusionDepthEditing] = useState(false);
   const [extrusionDepthDraft, setExtrusionDepthDraft] = useState("");
   const strokePolygonLastScreenRef = useRef<{ nx: number; ny: number } | null>(null);
-  // Rope/cloth state now in useRopeClothGenerator hook.
-  // Generator useStrokePhase + useState blocks now live in per-generator hooks.
-  /** Squishy (metaball) session phase: Enter commits, Escape cancels. */
-  const squishyPhase = useStrokePhase<Record<string, never>>({
-    phases: ["settings"],
-    onCancel: () => {
-      void invoke("squishy_session_clear")
-        .then(() => setSquishyBallCount(0))
-        .catch(() => {});
-    },
-    onCommit: () => {
-      void invoke("squishy_session_commit", {
-        args: {
-          color: activeColorRef.current,
-          material: activeMaterialRef.current,
-        },
-      })
-        .then(() => invoke("squishy_session_clear"))
-        .then(() => setSquishyBallCount(0))
-        .catch(() => {});
-    },
-  });
-  const bone = useBoneGenerator({ activeColorRef, activeMaterialRef });
-  const {
-    bonePhase,
-    boneMode,
-    setBoneMode,
-    boneModeRef,
-    boneJointCount,
-    setBoneJointCount,
-    boneBoneCount,
-    setBoneBoneCount,
-    boneDefaultRadius,
-    setBoneDefaultRadius,
-    boneDefaultRadiusRef,
-    ikEnabled,
-    setIkEnabled,
-    ikEnabledRef,
-  } = bone;
-  const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
-  const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
-  const [terrainBaseY, setTerrainBaseY] = useState(0);
-  const [terrainSmoothRadius, setTerrainSmoothRadius] = useState(2);
-  const [terrainFlattenUseBaseY, setTerrainFlattenUseBaseY] = useState(false);
-  const [terrainSubVoxel, setTerrainSubVoxel] = useState(false);
-  const [terrainHoverY, setTerrainHoverY] = useState<number | null>(null);
-  const [sculptSmoothPasses, setSculptSmoothPasses] = useState(1);
-  /** Web `sculptBrushRadius` index (display = index + 1 voxel span). */
-  const [sculptBrushRadius, setSculptBrushRadius] = useState(2);
-  const [sculptBrushStrength, setSculptBrushStrength] = useState(100);
-  const [sculptBrushFalloff, setSculptBrushFalloff] = useState(0);
-  const [sculptBrushShapeUi, setSculptBrushShapeUi] = useState<SculptBrushShapeUi>("circle");
-  // Extrude-specific params
-  const [extrudeDirectionRef, setExtrudeDirectionRef] = useState<
-    "camera" | "auto" | "x" | "y" | "z"
-  >("camera");
-  const extrudeDirectionRefRef = useLatestRef(extrudeDirectionRef);
-  const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">("cube");
-  const [extrudeEndCap, setExtrudeEndCap] = useState<"flat" | "rounded" | "pointed">("flat");
-  const [extrudeTaper, setExtrudeTaper] = useState(false);
-  const [extrudeTaperStart, setExtrudeTaperStart] = useState(3);
-  const [extrudeTaperEnd, setExtrudeTaperEnd] = useState(0);
-  const [wallAreaShape, setWallAreaShape] = useState<WallAreaShapeApi>("brush");
-  const [sprayDirection, setSprayDirection] = useState<SprayDirectionApi>("auto");
-  const [wallWidthIndex, setWallWidthIndex] = useState(0);
-  const [wallHeightVox, setWallHeightVox] = useState(2);
-  const [wallLockStartHeight, setWallLockStartHeight] = useState(false);
-  const [wallAxisAlign, setWallAxisAlign] = useState(false);
-  const [sculptSmoothVariant, setSculptSmoothVariant] =
-    useState<SculptSmoothVariantApi>("majority");
-  /** Web `smoothNeighborRadius` 0–6 (inclusive). */
-  const [smoothNeighborRadius, setSmoothNeighborRadius] = useState(0);
-  const [smoothAggressiveness, setSmoothAggressiveness] = useState(100);
-  const [smoothLaplacianIterations, setSmoothLaplacianIterations] = useState(4);
-  const [smoothLaplacianRelaxPct, setSmoothLaplacianRelaxPct] = useState(50);
-  /** Wall + polygon area: corner voxels (object-local), then Done commits a wall stroke. */
-  const [wallSculptPolygonVerts, setWallSculptPolygonVerts] = useState<[number, number, number][]>(
-    [],
-  );
   const [pathLabel, setPathLabel] = useState("");
   /** Mascots loaded for the start screen. Set to true once mascot_load commands have fired. */
   const [mascotsLoaded, setMascotsLoaded] = useState(false);
@@ -1154,199 +1296,6 @@ function App() {
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
   }, [activeMaterial]);
-  const generatorSphereRadiusRef = useLatestRef(generatorSphereRadius);
-  const generatorKindRef = useLatestRef(generatorKind);
-  const terrainSculptOpRef = useLatestRef(terrainSculptOp);
-  const terrainBaseYRef = useLatestRef(terrainBaseY);
-  const terrainSmoothRadiusRef = useLatestRef(terrainSmoothRadius);
-  const terrainFlattenUseBaseYRef = useLatestRef(terrainFlattenUseBaseY);
-  const terrainSubVoxelRef = useLatestRef(terrainSubVoxel);
-  const lastTerrainHoverMsRef = useRef(0);
-  const sculptSmoothPassesRef = useLatestRef(sculptSmoothPasses);
-  const sculptBrushRadiusRef = useLatestRef(sculptBrushRadius);
-  const sculptBrushStrengthRef = useLatestRef(sculptBrushStrength);
-  const sculptBrushFalloffRef = useLatestRef(sculptBrushFalloff);
-  const sculptBrushShapeUiRef = useLatestRef(sculptBrushShapeUi);
-  const extrudeProfileRef = useLatestRef(extrudeProfile);
-  const extrudeEndCapRef = useLatestRef(extrudeEndCap);
-  const extrudeTaperRef = useLatestRef(extrudeTaper);
-  const extrudeTaperStartRef = useLatestRef(extrudeTaperStart);
-  const extrudeTaperEndRef = useLatestRef(extrudeTaperEnd);
-  const wallAreaShapeRef = useLatestRef(wallAreaShape);
-  const sprayDirectionRef = useLatestRef(sprayDirection);
-  const wallWidthIndexRef = useLatestRef(wallWidthIndex);
-  const wallHeightVoxRef = useLatestRef(wallHeightVox);
-  const wallLockStartHeightRef = useLatestRef(wallLockStartHeight);
-  const wallAxisAlignRef = useLatestRef(wallAxisAlign);
-  const sculptSmoothVariantRef = useLatestRef(sculptSmoothVariant);
-  const smoothNeighborRadiusRef = useLatestRef(smoothNeighborRadius);
-  const smoothAggressivenessRef = useLatestRef(smoothAggressiveness);
-  const smoothLaplacianIterationsRef = useLatestRef(smoothLaplacianIterations);
-  const smoothLaplacianRelaxPctRef = useLatestRef(smoothLaplacianRelaxPct);
-  const wallSculptPolygonVertsRef = useLatestRef(wallSculptPolygonVerts);
-  // -- Generator hooks --------------------------------------------------------
-  const _genCtx = { activeColorRef, activeMaterialRef, generatorSphereRadiusRef };
-  const rocks = useRocksGenerator(_genCtx);
-  const {
-    rockRoughness,
-    setRockRoughness,
-    rockRoughnessRef,
-    rockCount,
-    setRockCount,
-    rockCountRef,
-    rockClusterRadius,
-    setRockClusterRadius,
-    rockClusterRadiusRef,
-    rockSinkDirection,
-    setRockSinkDirection,
-    rockSinkDirectionRef,
-    rockSinkAmount,
-    setRockSinkAmount,
-    rockSinkAmountRef,
-    rockPreviewSeedRef,
-    rocksPhase,
-  } = rocks;
-  const grass = useGrassGenerator(_genCtx);
-  const {
-    grassDensity,
-    setGrassDensity,
-    grassDensityRef,
-    grassMaxHeight,
-    setGrassMaxHeight,
-    grassMaxHeightRef,
-    grassPreviewSeedRef,
-    grassPhase,
-  } = grass;
-  const ashlar = useAshlarGenerator({ ..._genCtx, rockRoughnessRef });
-  const {
-    ashlarThickness,
-    setAshlarThickness,
-    ashlarThicknessRef,
-    ashlarPreviewSeedRef,
-    ashlarPhase,
-  } = ashlar;
-  const flora = useFloraGenerator({ activeColorRef, activeMaterialRef });
-  const {
-    floraPreset,
-    setFloraPreset,
-    floraHeight,
-    setFloraHeight,
-    floraGirth,
-    setFloraGirth,
-    floraWobble,
-    setFloraWobble,
-    floraTaper,
-    setFloraTaper,
-    floraStemCount,
-    setFloraStemCount,
-    floraClusterRadius,
-    setFloraClusterRadius,
-    floraBranchCount,
-    setFloraBranchCount,
-    floraBranchDepth,
-    setFloraBranchDepth,
-    floraBranchStart,
-    setFloraBranchStart,
-    floraBranchSpread,
-    setFloraBranchSpread,
-    floraBraidStrands,
-    setFloraBraidStrands,
-    floraBraidTwist,
-    setFloraBraidTwist,
-    floraCanopy,
-    setFloraCanopy,
-    floraPreviewSeedRef,
-    floraPhase,
-  } = flora;
-  const ropeCloth = useRopeClothGenerator({
-    activeColorRef,
-    activeMaterialRef,
-    selectionStrokeSnapToSurfaceRef,
-  });
-  const {
-    clothGravityDirection,
-    setClothGravityDirection,
-    clothGravityDirectionRef,
-    ropeBrushRadiusIndex,
-    setRopeBrushRadiusIndex,
-    ropeBrushRadiusIndexRef,
-    ropeBrushShapeUi,
-    setRopeBrushShapeUi,
-    ropeBrushShapeUiRef,
-    ropeFirstScreen,
-    setRopeFirstScreen,
-    setRopeFirstVoxel,
-    ropeFirstVoxelRef,
-    ropeSag,
-    ropeTension,
-    setRopeTension,
-    ropeTensionRef,
-    ropePhase,
-    clothPins,
-    setClothPins,
-    clothPinsRef,
-    clothTension,
-    setClothTension,
-    clothTensionRef,
-    clothSimGravityPct,
-    setClothSimGravityPct,
-    clothSimGravityPctRef,
-    clothSimStiffnessPct,
-    setClothSimStiffnessPct,
-    clothSimStiffnessPctRef,
-    clothSimIterations,
-    setClothSimIterations,
-    clothSimIterationsRef,
-    clothSimConstraintPasses,
-    setClothSimConstraintPasses,
-    clothSimConstraintPassesRef,
-    clothPhase,
-    handleClothPinClick,
-  } = ropeCloth;
-  const roof = useRoofGenerator();
-  const {
-    roofStyle,
-    setRoofStyle,
-    roofStyleRef,
-    roofHeight,
-    setRoofHeight,
-    roofHeightRef,
-    roofHollow,
-    setRoofHollow,
-    roofHollowRef,
-    roofPins,
-    setRoofPins,
-    roofPinsRef,
-    roofAreaShape,
-    setRoofAreaShape,
-    roofAreaShapeRef,
-    roofFirstClick,
-    setRoofFirstClick,
-    roofFirstClickRef,
-  } = roof;
-  const shape = useShapeGenerator({ activeColorRef, activeMaterialRef });
-  const {
-    shapeKind,
-    setShapeKind,
-    shapeKindRef,
-    shapeSize,
-    setShapeSize,
-    shapeSizeRef,
-    shapeRotX,
-    setShapeRotX,
-    shapeRotXRef,
-    shapeRotY,
-    setShapeRotY,
-    shapeRotYRef,
-    shapeRotZ,
-    setShapeRotZ,
-    shapeRotZRef,
-    shapeOverwrite,
-    setShapeOverwrite,
-    shapeOverwriteRef,
-    shapePhase,
-    shapeGizmoPosRef,
-  } = shape;
 
   useEffect(() => {
     if (wallAreaShape !== "polygon" || sculptStrokeMode !== "wall") {
@@ -1369,16 +1318,6 @@ function App() {
     strokePolygonVertsRef.current = [];
     strokePolygonLastScreenRef.current = null;
   }, [drawStrokeMode]);
-  // Generator refs + useEffect syncs now live in per-generator hooks.
-  useEffect(() => {
-    void invoke("squishy_session_set_flags", {
-      args: {
-        hollow: squishyHollow,
-        addSnapToSurface: squishySnapToSurface,
-        wallThickness: Math.max(1, squishyWallThickness | 0),
-      },
-    }).catch(() => {});
-  }, [squishyHollow, squishySnapToSurface, squishyWallThickness]);
 
   function mergedStrokeAux(base: Record<string, unknown> = {}): Record<string, unknown> {
     const sm = drawStrokeModeRef.current;
@@ -4456,86 +4395,7 @@ function App() {
                     <GeneratorToolOptions
                       loading={loading}
                       workBusy={workBusy}
-                      generatorKind={generatorKind}
-                      generatorSphereRadius={generatorSphereRadius}
-                      setGeneratorSphereRadius={setGeneratorSphereRadius}
-                      rockRoughness={rockRoughness}
-                      setRockRoughness={setRockRoughness}
-                      rockCount={rockCount}
-                      setRockCount={setRockCount}
-                      rockClusterRadius={rockClusterRadius}
-                      setRockClusterRadius={setRockClusterRadius}
-                      rockSinkDirection={rockSinkDirection}
-                      setRockSinkDirection={setRockSinkDirection}
-                      rockSinkAmount={rockSinkAmount}
-                      setRockSinkAmount={setRockSinkAmount}
-                      grassDensity={grassDensity}
-                      setGrassDensity={setGrassDensity}
-                      grassMaxHeight={grassMaxHeight}
-                      setGrassMaxHeight={setGrassMaxHeight}
-                      clothGravityDirection={clothGravityDirection}
-                      setClothGravityDirection={setClothGravityDirection}
-                      ropeBrushShapeUi={ropeBrushShapeUi}
-                      setRopeBrushShapeUi={setRopeBrushShapeUi}
-                      ropeBrushRadiusIndex={ropeBrushRadiusIndex}
-                      setRopeBrushRadiusIndex={setRopeBrushRadiusIndex}
-                      clothSimGravityPct={clothSimGravityPct}
-                      setClothSimGravityPct={setClothSimGravityPct}
-                      clothSimStiffnessPct={clothSimStiffnessPct}
-                      setClothSimStiffnessPct={setClothSimStiffnessPct}
-                      clothSimIterations={clothSimIterations}
-                      setClothSimIterations={setClothSimIterations}
-                      clothSimConstraintPasses={clothSimConstraintPasses}
-                      setClothSimConstraintPasses={setClothSimConstraintPasses}
-                      ashlarThickness={ashlarThickness}
-                      setAshlarThickness={setAshlarThickness}
-                      floraPreset={floraPreset}
-                      setFloraPreset={setFloraPreset}
-                      floraHeight={floraHeight}
-                      setFloraHeight={setFloraHeight}
-                      floraGirth={floraGirth}
-                      setFloraGirth={setFloraGirth}
-                      floraWobble={floraWobble}
-                      setFloraWobble={setFloraWobble}
-                      floraTaper={floraTaper}
-                      setFloraTaper={setFloraTaper}
-                      floraStemCount={floraStemCount}
-                      setFloraStemCount={setFloraStemCount}
-                      floraClusterRadius={floraClusterRadius}
-                      setFloraClusterRadius={setFloraClusterRadius}
-                      floraBranchCount={floraBranchCount}
-                      setFloraBranchCount={setFloraBranchCount}
-                      floraBranchDepth={floraBranchDepth}
-                      setFloraBranchDepth={setFloraBranchDepth}
-                      floraBranchStart={floraBranchStart}
-                      setFloraBranchStart={setFloraBranchStart}
-                      floraBranchSpread={floraBranchSpread}
-                      setFloraBranchSpread={setFloraBranchSpread}
-                      floraBraidStrands={floraBraidStrands}
-                      setFloraBraidStrands={setFloraBraidStrands}
-                      floraBraidTwist={floraBraidTwist}
-                      setFloraBraidTwist={setFloraBraidTwist}
-                      floraCanopy={floraCanopy}
-                      setFloraCanopy={setFloraCanopy}
-                      roofAreaShape={roofAreaShape}
-                      setRoofAreaShape={setRoofAreaShape}
-                      roofPins={roofPins}
-                      setRoofPins={setRoofPins}
-                      roofPinsRef={roofPinsRef}
-                      roofFirstClickRef={roofFirstClickRef}
-                      setRoofFirstClick={setRoofFirstClick}
-                      roofStyle={roofStyle}
-                      setRoofStyle={setRoofStyle}
-                      roofHeight={roofHeight}
-                      setRoofHeight={setRoofHeight}
-                      roofHollow={roofHollow}
-                      setRoofHollow={setRoofHollow}
-                      shapeKind={shapeKind}
-                      setShapeKind={setShapeKind}
-                      shapeSize={shapeSize}
-                      setShapeSize={setShapeSize}
-                      shapeOverwrite={shapeOverwrite}
-                      setShapeOverwrite={setShapeOverwrite}
+                      {...generatorToolOptionsModel}
                     />
                   ) : null}
                   {toolsPane === "squishy" && interactionMode === "squishy" ? (
