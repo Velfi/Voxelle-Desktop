@@ -12,9 +12,9 @@ use crate::voxel_edit;
 use crate::voxelle;
 use crate::voxelle::start_shape::StartShape;
 use crate::{
-    append_polygon_vertex_marker_meshes, build_color_resolver, preview_single_cell_world,
-    preview_tool_colors, stroke_preview_meshes_for_union, viewport_texels_from_norm,
-    wake_viewport_loop, PreviewHoverContext, PreviewMode, ViewerState,
+    append_polygon_vertex_marker_meshes, build_color_resolver, build_raw_voxel_upload,
+    preview_single_cell_world, preview_tool_colors, stroke_preview_meshes_for_union,
+    viewport_texels_from_norm, wake_viewport_loop, PreviewHoverContext, PreviewMode, ViewerState,
 };
 // Default-value functions referenced by `#[serde(default = "...")]` on `SyncPreviewInput`.
 // They live in lib.rs (shared with the generator command structs).
@@ -604,7 +604,7 @@ pub(crate) fn sync_preview_input(
 ) -> Result<(), String> {
     let new_mode = PreviewMode::parse(&args.mode);
     {
-        let mut pm = state.preview_mode.lock();
+        let mut pm = state.preview.preview_mode.lock();
         let changed = *pm != new_mode;
         *pm = new_mode;
         if changed {
@@ -612,7 +612,7 @@ pub(crate) fn sync_preview_input(
         }
     }
     {
-        let mut ph = state.preview_hover.lock();
+        let mut ph = state.preview.preview_hover.lock();
         ph.brush_radius = args.brush_radius;
         ph.brush_shape = args.brush_shape;
         ph.spray_density = args.spray_density;
@@ -771,9 +771,9 @@ pub(crate) fn sync_preview_input(
         ph.generator_shape_overwrite = args.generator_shape_overwrite;
     }
     if args.nx < 0.0 {
-        *state.preview_cursor.lock() = None;
+        *state.preview.preview_cursor.lock() = None;
     } else {
-        *state.preview_cursor.lock() = Some((args.nx, args.ny));
+        *state.preview.preview_cursor.lock() = Some((args.nx, args.ny));
     }
     Ok(())
 }
@@ -789,8 +789,8 @@ pub(crate) fn lock_generator_preview_camera(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<(), String> {
-    let cam = state.camera.lock().clone();
-    *state.generator_preview_locked_camera.lock() = Some(cam);
+    let cam = state.cam.camera.lock().clone();
+    *state.gizmos.generator_preview_locked_camera.lock() = Some(cam);
     wake_viewport_loop(&app);
     Ok(())
 }
@@ -804,7 +804,7 @@ pub(crate) fn unlock_generator_preview_camera(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<(), String> {
-    *state.generator_preview_locked_camera.lock() = None;
+    *state.gizmos.generator_preview_locked_camera.lock() = None;
     wake_viewport_loop(&app);
     Ok(())
 }
@@ -822,11 +822,18 @@ pub(crate) enum PreviewMeshPrepared {
         cache_key: u64,
         instanced: greedy_mesh::PreviewInstancedResult,
     },
+    /// Large-stroke preview processed entirely on the GPU (compute shell filter).
+    /// Replaces `Upload` when the union exceeds [`greedy_mesh::PREVIEW_COMPUTE_THRESHOLD`]
+    /// and all other GPU-path requirements are met.
+    RawVoxelUpload {
+        cache_key: u64,
+        raw: greedy_mesh::RawVoxelUpload,
+    },
 }
 
 #[inline]
 pub(crate) fn preview_overlay_cache_key_get(state: &ViewerState) -> Option<u64> {
-    *state.preview_overlay_cache_key.lock()
+    *state.gpu.preview_overlay_cache_key.lock()
 }
 
 pub(crate) fn brush_shape_tag(s: voxel_edit::BrushShape) -> u8 {
@@ -1310,15 +1317,15 @@ pub(crate) fn prepare_preview_mesh(
     viewport_h: u32,
 ) -> PreviewMeshPrepared {
     if state
-        .stroke_preview_suppresses_hover
+        .file.stroke_preview_suppresses_hover
         .load(Ordering::Relaxed)
     {
         return PreviewMeshPrepared::Noop;
     }
-    let dbg = state.viewport_cursor_debug_overlay.load(Ordering::Relaxed);
+    let dbg = state.gpu.viewport_cursor_debug_overlay.load(Ordering::Relaxed);
     let (cursor, mode) = {
-        let c = state.preview_cursor.lock();
-        let m = state.preview_mode.lock();
+        let c = state.preview.preview_cursor.lock();
+        let m = state.preview.preview_mode.lock();
         (*c, *m)
     };
 
@@ -1329,12 +1336,12 @@ pub(crate) fn prepare_preview_mesh(
     // Pin-based generators (cloth, roof) don't need a cursor position — run
     // them even when the mouse is outside the viewport so the preview persists.
     if cursor.is_none() && matches!(mode, PreviewMode::Add) {
-        let file_guard = state.current_file.lock();
-        let map_guard = state.voxel_map.lock();
+        let file_guard = state.file.current_file.lock();
+        let map_guard = state.file.voxel_map.lock();
         if let (Some(file), Some(vmap)) = (file_guard.as_ref(), map_guard.as_ref()) {
-            let hover = state.preview_hover.lock();
+            let hover = state.preview.preview_hover.lock();
             let ctx = &*hover;
-            let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
+            let mesh_gen = state.gpu.mesh_refresh_generation.load(Ordering::Relaxed);
             if let Some(ref gk) = ctx.generator_kind {
                 match gk.as_str() {
                     "cloth" => {
@@ -1466,7 +1473,7 @@ pub(crate) fn prepare_preview_mesh(
                     "shape" => {
                         // Shape with gizmo center — cursor is None but we can
                         // still render at the gizmo position.
-                        let gen_center = *state.generator_gizmo_center.lock();
+                        let gen_center = *state.gizmos.generator_gizmo_center.lock();
                         if let Some([gx, gy, gz]) = gen_center {
                             let shape = StartShape::from_str_id(&ctx.generator_shape_kind);
                             let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
@@ -1547,10 +1554,10 @@ pub(crate) fn prepare_preview_mesh(
 
     // Bone preview: session-based, doesn't need cursor position.
     if matches!(mode, PreviewMode::Bone) {
-        let gizmo_drag = state.bone_gizmo_drag.lock().is_some();
+        let gizmo_drag = state.gizmos.bone_gizmo_drag.lock().is_some();
         let max_v = if gizmo_drag { 12_000 } else { 24_000 };
-        let session_snap = state.bone_session.lock().clone();
-        let hover = state.preview_hover.lock();
+        let session_snap = state.gizmos.bone_session.lock().clone();
+        let hover = state.preview.preview_hover.lock();
         let (csx, csy) = cursor
             .map(|(nx, ny)| viewport_texels_from_norm(nx, ny, viewport_w as f32, viewport_h as f32))
             .unwrap_or((-1.0, -1.0));
@@ -1561,9 +1568,9 @@ pub(crate) fn prepare_preview_mesh(
         if session_snap.joints.is_empty() {
             return PreviewMeshPrepared::Clear;
         }
-        let file_guard = state.current_file.lock();
-        let map_guard = state.voxel_map.lock();
-        let cam = state.camera.lock();
+        let file_guard = state.file.current_file.lock();
+        let map_guard = state.file.voxel_map.lock();
+        let cam = state.cam.camera.lock();
         if let (Some(file), Some(vmap)) = (file_guard.as_ref(), map_guard.as_ref()) {
             let coords = generators::bone_voxel_coords_for_session(
                 &session_snap,
@@ -1594,8 +1601,8 @@ pub(crate) fn prepare_preview_mesh(
         return PreviewMeshPrepared::Clear;
     };
 
-    let file_guard = state.current_file.lock();
-    let map_guard = state.voxel_map.lock();
+    let file_guard = state.file.current_file.lock();
+    let map_guard = state.file.voxel_map.lock();
     let Some(file) = file_guard.as_ref() else {
         return PreviewMeshPrepared::Clear;
     };
@@ -1608,12 +1615,11 @@ pub(crate) fn prepare_preview_mesh(
     let (sx, sy) = viewport_texels_from_norm(nx, ny, w, h);
 
     if matches!(mode, PreviewMode::Squishy) {
-        let hover = state.preview_hover.lock();
+        let hover = state.preview.preview_hover.lock();
         let preview_radius_i = hover.brush_radius.clamp(2, 64);
-        let gizmo_drag = state.squishy_gizmo_drag.lock().is_some();
-        let max_v = if gizmo_drag { 12_000 } else { 24_000 };
+        let gizmo_drag = state.gizmos.squishy_gizmo_drag.lock().is_some();
 
-        let session_snap = state.squishy_session.lock().clone();
+        let session_snap = state.gizmos.squishy_session.lock().clone();
 
         let add_anchor = if session_snap.mode == generators::SquishyMode::Add {
             if session_snap.add_snap_to_surface {
@@ -1663,7 +1669,7 @@ pub(crate) fn prepare_preview_mesh(
         let coords = generators::voxel_coords_for_session_with_limit(
             &temp_session,
             file.grid_size.max(1),
-            max_v,
+            usize::MAX,
         );
 
         let show_gizmo = session_snap.mode == generators::SquishyMode::Edit
@@ -1707,12 +1713,12 @@ pub(crate) fn prepare_preview_mesh(
         };
     }
 
-    let hover = state.preview_hover.lock();
+    let hover = state.preview.preview_hover.lock();
     let ctx = &*hover;
 
     if matches!(mode, PreviewMode::Add) {
         if let Some(ref gk) = ctx.generator_kind {
-            let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
+            let mesh_gen = state.gpu.mesh_refresh_generation.load(Ordering::Relaxed);
             match gk.as_str() {
                 "rope" => {
                     if let Some([vx1, vy1, vz1]) = ctx.generator_rope_first_voxel {
@@ -2511,7 +2517,7 @@ pub(crate) fn prepare_preview_mesh(
                     // at that center rather than raycasting from the cursor.  Also
                     // account for any in-flight gizmo drag offset so the preview
                     // moves in real-time while dragging the movement arrows.
-                    let gen_center = *state.generator_gizmo_center.lock();
+                    let gen_center = *state.gizmos.generator_gizmo_center.lock();
                     let mut cells = if let Some([gx, gy, gz]) = gen_center {
                         let (pdx, pdy, pdz) = crate::frame_loop::pending_gizmo_translate(state);
                         let origin = (gx as i32 + pdx, gy as i32 + pdy, gz as i32 + pdz);
@@ -2629,7 +2635,7 @@ pub(crate) fn prepare_preview_mesh(
             && ctx.use_brush_preview;
         if poly_placing {
             let material = voxelle::MaterialId::from_str_id(&ctx.material);
-            let spray_cp = *state.spray_constraint_plane.lock();
+            let spray_cp = *state.file.spray_constraint_plane.lock();
             let targets = voxel_edit::collect_stroke_preview_targets(
                 file,
                 vmap,
@@ -2714,7 +2720,7 @@ pub(crate) fn prepare_preview_mesh(
     }
 
     if matches!(mode, PreviewMode::Stamp | PreviewMode::Punch) {
-        let clip = state.stamp_clipboard.lock().clone();
+        let clip = state.selection.stamp_clipboard.lock().clone();
         let Some(clip) = clip else {
             return PreviewMeshPrepared::Clear;
         };
@@ -2847,7 +2853,7 @@ pub(crate) fn prepare_preview_mesh(
     }
 
     let material = voxelle::MaterialId::from_str_id(&ctx.material);
-    let spray_cp = *state.spray_constraint_plane.lock();
+    let spray_cp = *state.file.spray_constraint_plane.lock();
     let targets = voxel_edit::collect_stroke_preview_targets(
         file,
         vmap,
@@ -2894,6 +2900,19 @@ pub(crate) fn prepare_preview_mesh(
     let hover_resolver_ref: Option<&dyn Fn(i32, i32, i32) -> u32> = hover_resolver_owned
         .as_ref()
         .map(|f| f as &dyn Fn(i32, i32, i32) -> u32);
+    // For large uniform-colour strokes with no polygon-corner extras, use the
+    // GPU compute shell-filter path.  Falls back to CPU instanced otherwise.
+    if !targets.is_empty() && !poly_corners && hover_resolver_ref.is_none() {
+        if let Some(raw) =
+            build_raw_voxel_upload(tool, &set, vmap, file, dbg, ctx.color, None)
+        {
+            return PreviewMeshPrepared::RawVoxelUpload {
+                cache_key: key,
+                raw,
+            };
+        }
+    }
+
     let mut instanced = if targets.is_empty() {
         greedy_mesh::PreviewInstancedResult::empty()
     } else {
@@ -2921,7 +2940,7 @@ pub(crate) fn prepare_preview_mesh(
 
 pub(crate) fn clear_preview_mesh_sync_cache(viewer: &mut WgpuViewer, state: &ViewerState) {
     viewer.clear_preview_mesh();
-    *state.preview_overlay_cache_key.lock() = None;
+    *state.gpu.preview_overlay_cache_key.lock() = None;
 }
 
 pub(crate) fn apply_preview_mesh(
@@ -2940,7 +2959,7 @@ pub(crate) fn apply_preview_mesh(
         } => {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = Some(cache_key);
-            *state.preview_overlay_cache_key.lock() = Some(cache_key);
+            *state.gpu.preview_overlay_cache_key.lock() = Some(cache_key);
         }
         PreviewMeshPrepared::GenUpload {
             cache_key,
@@ -2948,7 +2967,12 @@ pub(crate) fn apply_preview_mesh(
         } => {
             viewer.upload_gen_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = Some(cache_key);
-            *state.preview_overlay_cache_key.lock() = Some(cache_key);
+            *state.gpu.preview_overlay_cache_key.lock() = Some(cache_key);
+        }
+        PreviewMeshPrepared::RawVoxelUpload { cache_key, raw } => {
+            viewer.upload_preview_raw_voxels(&raw);
+            viewer.preview_cache_key = Some(cache_key);
+            *state.gpu.preview_overlay_cache_key.lock() = Some(cache_key);
         }
     }
 }

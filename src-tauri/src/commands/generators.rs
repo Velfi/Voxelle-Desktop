@@ -53,22 +53,22 @@ pub(crate) fn generator_rocks_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_rocks_at_screen(
             file,
@@ -130,22 +130,22 @@ pub(crate) fn generator_grass_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_grass_at_screen(
             file,
@@ -209,22 +209,22 @@ pub(crate) fn generator_rope_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx1, sy1) = viewport_texels_from_norm(args.nx1, args.ny1, w, h);
         let (sx2, sy2) = viewport_texels_from_norm(args.nx2, args.ny2, w, h);
         crate::generators::generator_rope_between_screens(
@@ -310,8 +310,8 @@ pub(crate) fn generator_cloth_from_pins_cmd(
         constraint_passes: args.cloth_constraint_passes.clamp(1, 6),
     };
     let deltas = {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -358,22 +358,22 @@ pub(crate) fn generator_squishy_metaball_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::squishy_metaball_at_screen(
             file,
@@ -421,22 +421,22 @@ pub(crate) fn generator_ashlar_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_ashlar_at_screen(
             file,
@@ -528,22 +528,22 @@ pub(crate) fn generator_flora_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_flora_at_screen(
             file,
@@ -631,8 +631,8 @@ pub(crate) fn generator_roof_from_pins_cmd(
         return Err("roof needs at least 3 pins".into());
     }
     let deltas = {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -738,22 +738,22 @@ pub(crate) fn generator_piscina_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_piscina_at_screen(
             file,
@@ -934,22 +934,22 @@ pub(crate) fn generator_insecta_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_insecta_at_screen(
             file,
@@ -1137,22 +1137,22 @@ pub(crate) fn generator_fauna_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_fauna_at_screen(
             file,
@@ -1204,7 +1204,7 @@ pub(crate) fn generator_fauna_at_screen(
 pub(crate) fn squishy_session_get(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<generators::SquishySession, String> {
-    Ok(state.squishy_session.lock().clone())
+    Ok(state.gizmos.squishy_session.lock().clone())
 }
 
 #[derive(serde::Deserialize)]
@@ -1218,7 +1218,7 @@ pub(crate) fn squishy_session_set_mode(
     state: State<'_, Arc<ViewerState>>,
     args: SquishySetModeArgs,
 ) -> Result<(), String> {
-    let mut g = state.squishy_session.lock();
+    let mut g = state.gizmos.squishy_session.lock();
     g.mode = match args.mode.as_str() {
         "edit" => generators::SquishyMode::Edit,
         "delete" => generators::SquishyMode::Delete,
@@ -1243,7 +1243,7 @@ pub(crate) fn squishy_session_set_flags(
     state: State<'_, Arc<ViewerState>>,
     args: SquishySessionFlagsArgs,
 ) -> Result<(), String> {
-    let mut g = state.squishy_session.lock();
+    let mut g = state.gizmos.squishy_session.lock();
     if let Some(h) = args.hollow {
         g.hollow = h;
     }
@@ -1271,23 +1271,23 @@ pub(crate) fn squishy_metaball_add_at_screen(
     args: SquishyMetaballAddArgs,
 ) -> Result<Option<u32>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let mut sg = state.squishy_session.lock();
-    let fg = state.current_file.lock();
-    let vm = state.voxel_map.lock();
+    let mut sg = state.gizmos.squishy_session.lock();
+    let fg = state.file.current_file.lock();
+    let vm = state.file.voxel_map.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
     let Some(vmap) = vm.as_ref() else {
         return Err("voxel index not ready".into());
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let id = generators::squishy_add_ball_at_screen(
         &mut sg,
@@ -1314,7 +1314,7 @@ pub(crate) fn squishy_metaball_remove(
     state: State<'_, Arc<ViewerState>>,
     args: SquishyMetaballIdArgs,
 ) -> Result<bool, String> {
-    let mut g = state.squishy_session.lock();
+    let mut g = state.gizmos.squishy_session.lock();
     Ok(g.remove_ball(args.id))
 }
 
@@ -1329,16 +1329,16 @@ pub(crate) fn squishy_metaball_select(
     state: State<'_, Arc<ViewerState>>,
     args: SquishySelectArgs,
 ) -> Result<(), String> {
-    let mut g = state.squishy_session.lock();
+    let mut g = state.gizmos.squishy_session.lock();
     g.selected_id = args.id;
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) fn squishy_session_clear(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
-    let mut g = state.squishy_session.lock();
+    let mut g = state.gizmos.squishy_session.lock();
     g.clear();
-    *state.squishy_gizmo_drag.lock() = None;
+    *state.gizmos.squishy_gizmo_drag.lock() = None;
     Ok(())
 }
 
@@ -1357,9 +1357,9 @@ pub(crate) fn squishy_session_commit(
 ) -> Result<bool, String> {
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
-        let sg = state.squishy_session.lock();
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let sg = state.gizmos.squishy_session.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -1372,9 +1372,9 @@ pub(crate) fn squishy_session_commit(
         return Ok(false);
     }
     commit_voxel_edits(&state, &app, deltas)?;
-    let mut g = state.squishy_session.lock();
+    let mut g = state.gizmos.squishy_session.lock();
     g.clear();
-    *state.squishy_gizmo_drag.lock() = None;
+    *state.gizmos.squishy_gizmo_drag.lock() = None;
     Ok(true)
 }
 
@@ -1391,15 +1391,15 @@ pub(crate) fn squishy_pick_at_screen(
     args: SquishyPickArgs,
 ) -> Result<Option<u32>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let sg = state.squishy_session.lock();
-    let cam = state.camera.lock();
+    let sg = state.gizmos.squishy_session.lock();
+    let cam = state.cam.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     Ok(generators::pick_metaball_at_screen(&sg, &cam, w, h, sx, sy))
 }
@@ -1418,15 +1418,15 @@ pub(crate) fn squishy_gizmo_pointer_down(
     args: SquishyGizmoPointerArgs,
 ) -> Result<bool, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let cam = state.camera.lock();
-    let sg = state.squishy_session.lock();
+    let cam = state.cam.camera.lock();
+    let sg = state.gizmos.squishy_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let Some(handle) = generators::pick_squishy_gizmo_handle(&sg, &cam, w, h, sx, sy) else {
         return Ok(false);
@@ -1436,7 +1436,7 @@ pub(crate) fn squishy_gizmo_pointer_down(
     };
     drop(sg);
     drop(cam);
-    *state.squishy_gizmo_drag.lock() = Some(drag);
+    *state.gizmos.squishy_gizmo_drag.lock() = Some(drag);
     wake_viewport_loop(&app);
     Ok(true)
 }
@@ -1447,20 +1447,20 @@ pub(crate) fn squishy_gizmo_pointer_move(
     state: State<'_, Arc<ViewerState>>,
     args: SquishyGizmoPointerArgs,
 ) -> Result<(), String> {
-    let drag = state.squishy_gizmo_drag.lock().clone();
+    let drag = state.gizmos.squishy_gizmo_drag.lock().clone();
     let Some(drag) = drag else {
         return Ok(());
     };
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let cam = state.camera.lock();
-    let mut sg = state.squishy_session.lock();
+    let cam = state.cam.camera.lock();
+    let mut sg = state.gizmos.squishy_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     generators::squishy_gizmo_apply_drag(&mut sg, &cam, w, h, sx, sy, &drag);
     wake_viewport_loop(&app);
@@ -1469,7 +1469,7 @@ pub(crate) fn squishy_gizmo_pointer_move(
 
 #[tauri::command]
 pub(crate) fn squishy_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
-    *state.squishy_gizmo_drag.lock() = None;
+    *state.gizmos.squishy_gizmo_drag.lock() = None;
     Ok(())
 }
 
@@ -1479,16 +1479,16 @@ pub(crate) fn squishy_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Re
 pub(crate) fn bone_session_get(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<generators::BoneSession, String> {
-    Ok(state.bone_session.lock().clone())
+    Ok(state.gizmos.bone_session.lock().clone())
 }
 
 #[tauri::command]
 pub(crate) fn bone_session_clear(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
-    state.bone_session.lock().clear();
-    *state.bone_gizmo_drag.lock() = None;
-    *state.bone_ik_drag.lock() = None;
-    *state.generator_gizmo_center.lock() = None;
-    *state.generator_gizmo_ring_radius.lock() = None;
+    state.gizmos.bone_session.lock().clear();
+    *state.gizmos.bone_gizmo_drag.lock() = None;
+    *state.gizmos.bone_ik_drag.lock() = None;
+    *state.gizmos.generator_gizmo_center.lock() = None;
+    *state.gizmos.generator_gizmo_ring_radius.lock() = None;
     Ok(())
 }
 
@@ -1507,9 +1507,9 @@ pub(crate) fn bone_session_commit(
 ) -> Result<bool, String> {
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
-        let bs = state.bone_session.lock();
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let bs = state.gizmos.bone_session.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -1522,9 +1522,9 @@ pub(crate) fn bone_session_commit(
         return Ok(false);
     }
     commit_voxel_edits(&state, &app, deltas)?;
-    state.bone_session.lock().clear();
-    *state.bone_gizmo_drag.lock() = None;
-    *state.bone_ik_drag.lock() = None;
+    state.gizmos.bone_session.lock().clear();
+    *state.gizmos.bone_gizmo_drag.lock() = None;
+    *state.gizmos.bone_ik_drag.lock() = None;
     Ok(true)
 }
 
@@ -1547,27 +1547,27 @@ pub(crate) fn bone_add_joint_at_screen(
     args: BoneAddJointArgs,
 ) -> Result<Option<u32>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let vm = state.voxel_map.lock();
+    let fg = state.file.current_file.lock();
+    let vm = state.file.voxel_map.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
     let Some(vmap) = vm.as_ref() else {
         return Err("voxel index not ready".into());
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let Some(pos) = generators::bone_screen_to_world_pos(file, vmap, &cam, w, h, sx, sy) else {
         return Ok(None);
     };
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     let id = bs.add_joint(pos.x, pos.y, pos.z, args.radius);
     Ok(Some(id))
 }
@@ -1587,27 +1587,27 @@ pub(crate) fn bone_move_joint_to_screen(
     args: BoneMoveJointArgs,
 ) -> Result<bool, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
-    let vm = state.voxel_map.lock();
+    let fg = state.file.current_file.lock();
+    let vm = state.file.voxel_map.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
     let Some(vmap) = vm.as_ref() else {
         return Err("voxel index not ready".into());
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let Some(pos) = generators::bone_screen_to_world_pos(file, vmap, &cam, w, h, sx, sy) else {
         return Ok(false);
     };
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     let ok = bs.set_joint_position(args.id, pos.x, pos.y, pos.z);
     if ok {
         wake_viewport_loop(&app);
@@ -1627,7 +1627,7 @@ pub(crate) fn bone_connect_joints(
     state: State<'_, Arc<ViewerState>>,
     args: BoneConnectArgs,
 ) -> Result<Option<u32>, String> {
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     Ok(bs.add_bone(args.joint_a, args.joint_b))
 }
 
@@ -1644,15 +1644,15 @@ pub(crate) fn bone_pick_at_screen(
     args: BonePickArgs,
 ) -> Result<Option<generators::BoneSelection>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let bs = state.bone_session.lock();
-    let cam = state.camera.lock();
+    let bs = state.gizmos.bone_session.lock();
+    let cam = state.cam.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     Ok(generators::bone_pick_at_screen(&bs, &cam, w, h, sx, sy))
 }
@@ -1668,7 +1668,7 @@ pub(crate) fn bone_select(
     state: State<'_, Arc<ViewerState>>,
     args: BoneSelectArgs,
 ) -> Result<(), String> {
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     bs.selected = args.selection;
     // Show the shared move gizmo at the selected joint's position.
     let (center, ring_radius) = match args.selection {
@@ -1691,8 +1691,8 @@ pub(crate) fn bone_select(
         None => (None, None),
     };
     drop(bs);
-    *state.generator_gizmo_center.lock() = center;
-    *state.generator_gizmo_ring_radius.lock() = ring_radius;
+    *state.gizmos.generator_gizmo_center.lock() = center;
+    *state.gizmos.generator_gizmo_ring_radius.lock() = ring_radius;
     Ok(())
 }
 
@@ -1707,7 +1707,7 @@ pub(crate) fn bone_remove(
     state: State<'_, Arc<ViewerState>>,
     args: BoneRemoveArgs,
 ) -> Result<bool, String> {
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     let ok = match args.selection {
         generators::BoneSelection::Joint(id) => bs.remove_joint(id),
         generators::BoneSelection::Bone(bone_id) => {
@@ -1733,7 +1733,7 @@ pub(crate) fn bone_remove(
         }
     };
     if ok {
-        *state.generator_gizmo_center.lock() = None;
+        *state.gizmos.generator_gizmo_center.lock() = None;
     }
     Ok(ok)
 }
@@ -1750,7 +1750,7 @@ pub(crate) fn bone_set_joint_radius(
     state: State<'_, Arc<ViewerState>>,
     args: BoneSetJointRadiusArgs,
 ) -> Result<bool, String> {
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     Ok(bs.set_joint_radius(args.id, args.radius))
 }
 
@@ -1768,11 +1768,11 @@ pub(crate) fn bone_set_joint_position(
     state: State<'_, Arc<ViewerState>>,
     args: BoneSetJointPositionArgs,
 ) -> Result<bool, String> {
-    let mut bs = state.bone_session.lock();
+    let mut bs = state.gizmos.bone_session.lock();
     let ok = bs.set_joint_position(args.id, args.x, args.y, args.z);
     if ok {
         // Keep the shared gizmo centered on the joint as it moves.
-        *state.generator_gizmo_center.lock() = Some([args.x, args.y, args.z]);
+        *state.gizmos.generator_gizmo_center.lock() = Some([args.x, args.y, args.z]);
     }
     Ok(ok)
 }
@@ -1791,15 +1791,15 @@ pub(crate) fn bone_gizmo_pointer_down(
     args: BoneGizmoPointerArgs,
 ) -> Result<bool, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let cam = state.camera.lock();
-    let bs = state.bone_session.lock();
+    let cam = state.cam.camera.lock();
+    let bs = state.gizmos.bone_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let Some((handle, joint_id)) = generators::pick_bone_gizmo_handle(&bs, &cam, w, h, sx, sy)
     else {
@@ -1811,7 +1811,7 @@ pub(crate) fn bone_gizmo_pointer_down(
     };
     drop(bs);
     drop(cam);
-    *state.bone_gizmo_drag.lock() = Some(drag);
+    *state.gizmos.bone_gizmo_drag.lock() = Some(drag);
     wake_viewport_loop(&app);
     Ok(true)
 }
@@ -1822,35 +1822,35 @@ pub(crate) fn bone_gizmo_pointer_move(
     state: State<'_, Arc<ViewerState>>,
     args: BoneGizmoPointerArgs,
 ) -> Result<(), String> {
-    let gizmo_drag = state.bone_gizmo_drag.lock().clone();
+    let gizmo_drag = state.gizmos.bone_gizmo_drag.lock().clone();
     if let Some(drag) = gizmo_drag {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Ok(());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let cam = state.camera.lock();
-        let mut bs = state.bone_session.lock();
+        let cam = state.cam.camera.lock();
+        let mut bs = state.gizmos.bone_session.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         generators::bone_gizmo_apply_drag(&mut bs, &cam, w, h, sx, sy, &drag);
         wake_viewport_loop(&app);
         return Ok(());
     }
-    let ik_drag = state.bone_ik_drag.lock().clone();
+    let ik_drag = state.gizmos.bone_ik_drag.lock().clone();
     if let Some(drag) = ik_drag {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Ok(());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let cam = state.camera.lock();
-        let mut bs = state.bone_session.lock();
+        let cam = state.cam.camera.lock();
+        let mut bs = state.gizmos.bone_session.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         generators::ik_drag_update(&mut bs, &cam, w, h, sx, sy, &drag);
         wake_viewport_loop(&app);
@@ -1860,8 +1860,8 @@ pub(crate) fn bone_gizmo_pointer_move(
 
 #[tauri::command]
 pub(crate) fn bone_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
-    *state.bone_gizmo_drag.lock() = None;
-    *state.bone_ik_drag.lock() = None;
+    *state.gizmos.bone_gizmo_drag.lock() = None;
+    *state.gizmos.bone_ik_drag.lock() = None;
     Ok(())
 }
 
@@ -1879,22 +1879,22 @@ pub(crate) fn bone_ik_drag_start(
     args: BoneIkDragStartArgs,
 ) -> Result<bool, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let cam = state.camera.lock();
-    let bs = state.bone_session.lock();
+    let cam = state.cam.camera.lock();
+    let bs = state.gizmos.bone_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     let Some(drag) = generators::ik_drag_begin(&bs, &cam, w, h, sx, sy, args.joint_id) else {
         return Ok(false);
     };
     drop(bs);
     drop(cam);
-    *state.bone_ik_drag.lock() = Some(drag);
+    *state.gizmos.bone_ik_drag.lock() = Some(drag);
     Ok(true)
 }
 
@@ -1946,10 +1946,10 @@ pub(crate) fn generator_shape_at_screen(
     // clear_generator_gizmo_center). Fall back to the state if not provided.
     let gen_center = args
         .gizmo_center
-        .or_else(|| *state.generator_gizmo_center.lock());
+        .or_else(|| *state.gizmos.generator_gizmo_center.lock());
     let deltas = if let Some([gx, gy, gz]) = gen_center {
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -1985,22 +1985,22 @@ pub(crate) fn generator_shape_at_screen(
         }
     } else {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_shape_at_screen(
             file,
@@ -2027,10 +2027,10 @@ pub(crate) fn generator_shape_at_screen(
 
 #[tauri::command]
 pub(crate) fn set_generator_gizmo_center(state: State<'_, Arc<ViewerState>>, center: [f32; 3]) {
-    *state.generator_gizmo_center.lock() = Some(center);
+    *state.gizmos.generator_gizmo_center.lock() = Some(center);
 }
 
 #[tauri::command]
 pub(crate) fn clear_generator_gizmo_center(state: State<'_, Arc<ViewerState>>) {
-    *state.generator_gizmo_center.lock() = None;
+    *state.gizmos.generator_gizmo_center.lock() = None;
 }

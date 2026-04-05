@@ -330,7 +330,7 @@ pub(crate) fn scene_bounds_for_edits(
         &file.objects
     };
     if voxelle::scene::scene_objects_identity_for_bounds_fast_path(objs) {
-        let guard = state.last_scene_bounds.lock();
+        let guard = state.gpu.last_scene_bounds.lock();
         if let Some(prev) = guard.as_ref() {
             let mut bounds = *prev;
             let mut needs_full_recompute = false;
@@ -400,7 +400,7 @@ pub(crate) fn resolve_spray_constraint_plane(
 
     // Return stored plane if already established this stroke.
     {
-        let stored = state.spray_constraint_plane.lock();
+        let stored = state.file.spray_constraint_plane.lock();
         if stored.is_some() {
             return *stored;
         }
@@ -423,7 +423,7 @@ pub(crate) fn resolve_spray_constraint_plane(
     let plane_point = glam::Vec3::new(anchor.0 as f32, anchor.1 as f32, anchor.2 as f32);
 
     let plane = (plane_point, plane_normal);
-    *state.spray_constraint_plane.lock() = Some(plane);
+    *state.file.spray_constraint_plane.lock() = Some(plane);
     Some(plane)
 }
 
@@ -516,22 +516,14 @@ pub(crate) enum ExtrudeGizmoDrag {
     },
 }
 
-pub struct ViewerState {
+// ---------------------------------------------------------------------------
+// Sub-structs for ViewerState field grouping
+// ---------------------------------------------------------------------------
+
+/// GPU/render state: the wgpu viewer, rendering mode, mesh generation counters,
+/// background meshing inbox, overlay cache keys, and start-screen flags.
+pub struct GpuState {
     pub viewer: Mutex<Option<WgpuViewer>>,
-    pub camera: Mutex<camera::OrbitCamera>,
-    pub file_label: Mutex<String>,
-    /// Latest loaded model for CPU-side edits (add/remove voxels).
-    pub current_file: Mutex<Option<voxelle::VoxelleFile>>,
-    /// Spatial index: coord → index in `current_file.voxels` (kept in sync; used for raycasts + O(1) remove).
-    pub voxel_map: Mutex<Option<AHashMap<greedy_mesh::VoxelCoord, usize>>>,
-    /// Latest pointer position in physical pixels (for hover preview; updated from UI, read each frame).
-    pub preview_cursor: Mutex<Option<(f32, f32)>>,
-    /// True while the user is orbit/pan/dolly-dragging the camera via `viewport_pointer`.
-    /// Used by `prepare_preview_mesh` to suppress cursor-attached previews during orbiting.
-    pub camera_dragging: AtomicBool,
-    pub(crate) preview_mode: Mutex<PreviewMode>,
-    /// Brush / stroke params for hover preview (updated from [`sync_preview_input`]).
-    pub(crate) preview_hover: Mutex<crate::PreviewHoverContext>,
     pub rendering_mode: Mutex<RenderingMode>,
     pub(crate) fps: Mutex<FpsCounter>,
     /// Last successful edit timings (updated each time `voxel_edit_at_screen` applies a change).
@@ -544,44 +536,32 @@ pub struct ViewerState {
     pub load_generation: AtomicU64,
     /// Chunks built by background meshing thread, waiting for main-thread GPU upload.
     pub(crate) chunk_mesh_inbox: Mutex<VecDeque<(greedy_mesh::ChunkKey, greedy_mesh::MeshBuffers)>>,
-    /// Guest edit/undo/redo items waiting for main-thread processing (same pattern as `chunk_mesh_inbox`).
-    pub(crate) collab_edit_inbox: Mutex<VecDeque<collab::CollabInboxItem>>,
     /// SpatialMeshCache from background streaming load; moved to viewer after all chunks are uploaded.
     pub(crate) deferred_spatial_cache: Mutex<Option<greedy_mesh::SpatialMeshCache>>,
     /// Incremental [`greedy_mesh::voxel_aabb_min_int`] + single-object detection for chunked mesh path.
     pub(crate) voxel_edit_stats_cache: Mutex<Option<VoxelEditStatsCache>>,
-    /// Solo undo stack: voxel batches and selection snapshots (interleaved).
-    pub(crate) solo_undo: Mutex<Vec<SoloUndoEntry>>,
-    pub(crate) solo_redo: Mutex<Vec<SoloRedoEntry>>,
-    /// When true, successful edits append to `stroke_buffer` instead of pushing `solo_undo` immediately.
-    pub stroke_active: Mutex<bool>,
-    pub stroke_buffer: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
-    /// Accumulated stroke preview cells (add/remove/paint drag; committed on pointer up).
-    pub stroke_preview_union: Mutex<AHashSet<greedy_mesh::VoxelCoord>>,
-    pub(crate) stroke_preview_last_args: Mutex<Option<crate::VoxelEditAtScreen>>,
-    /// When set, hover preview must not overwrite the stroke preview mesh each frame.
-    pub stroke_preview_suppresses_hover: AtomicBool,
-    /// Throttled sculpt samples during drag; replayed on pointer up as one undo step.
-    pub(crate) sculpt_stroke_replay: Mutex<Vec<crate::SculptStrokeAtScreenArgs>>,
-    /// Stored ray spine for straight-line extrude (used by ray-based extrude preview/recompute).
-    pub(crate) extrude_ray_spine: Mutex<Option<Vec<greedy_mesh::VoxelCoord>>>,
-    pub collab: Arc<Mutex<collab::CollabRuntime>>,
-    /// Raw `.voxelle` bytes for custom avatars the local user has loaded, keyed by name.
-    /// Persists across collab sessions so the bytes can be re-sent to new peers.
-    pub local_avatar_data: Mutex<HashMap<String, Vec<u8>>>,
-    /// Smoothed peer camera presence for frustum rendering (lerped each frame).
-    pub smooth_presence: Mutex<HashMap<u32, collab::CameraPresence>>,
-    /// Short-lived voxel highlight when a peer sends a world ping (see [`collab::record_ping_flash`]).
-    pub ping_flash: Mutex<Option<collab::PingFlash>>,
-    /// Host-only autosave to app-local backups (`0` = never when disabled or interval 0).
-    pub autosave_interval_secs: Mutex<u64>,
-    pub last_autosave: Mutex<Option<Instant>>,
-    /// When false, autosave timer does not run.
-    pub autosave_enabled: Mutex<bool>,
-    /// Rotating slot count per document (`{hash}.0.voxelle` … `{hash}.(n-1).voxelle`).
-    pub autosave_keep_count: Mutex<u32>,
-    /// Next slot index per stable path hash (see `stable_path_key`).
-    pub autosave_slot: Mutex<HashMap<String, u64>>,
+    /// Bumps when start-screen overlay meshes (logo, mascots) need rebuilding; stale builds are discarded.
+    pub overlay_mesh_generation: AtomicU64,
+    /// Mirrors overlay cache keys on [`WgpuViewer`] so prepare steps can run without the viewer mutex (see frame loop).
+    pub(crate) grid_overlay_cache_key: Mutex<Option<u64>>,
+    pub(crate) selection_overlay_cache_key: Mutex<Option<u64>>,
+    pub(crate) preview_overlay_cache_key: Mutex<Option<u64>>,
+    /// When true, draw the start-screen gradient instead of the scene sky (default true; cleared when a real document loads).
+    pub start_screen_logo_transparent: AtomicBool,
+    /// Cold-start gradient: light (paper) vs dark — synced from webview appearance preference.
+    pub start_screen_light: AtomicBool,
+    /// **Debug → Viewport cursor debug overlay**: use bright red ray-hover preview (menu + webview).
+    pub viewport_cursor_debug_overlay: AtomicBool,
+    /// **View → Show borders**: per-voxel cell wireframe (matches web `showGrid` / `gridLines.ts`).
+    pub show_grid_borders: AtomicBool,
+}
+
+/// Camera and locomotion state: orbit camera, fly mode, walk physics.
+pub struct CameraState {
+    pub camera: Mutex<camera::OrbitCamera>,
+    /// True while the user is orbit/pan/dolly-dragging the camera via `viewport_pointer`.
+    /// Used by `prepare_preview_mesh` to suppress cursor-attached previews during orbiting.
+    pub camera_dragging: AtomicBool,
     /// True after a scene is fully applied ([`apply_mesh_and_camera`]); false during unload and before the first successful load.
     pub active_project: AtomicBool,
     /// When true, orbit / wheel camera IPC is ignored (WASD fly movement).
@@ -596,6 +576,48 @@ pub struct ViewerState {
     pub(crate) walk_physics: Mutex<camera::WalkPhysicsState>,
     /// Previous [`Instant`] for walk physics dt.
     pub(crate) walk_last_physics: Mutex<Option<Instant>>,
+}
+
+/// File / document state: the loaded model, voxel spatial index, undo/redo stacks,
+/// stroke buffers, and fill/spray transient state.
+pub struct FileState {
+    pub file_label: Mutex<String>,
+    /// Latest loaded model for CPU-side edits (add/remove voxels).
+    pub current_file: Mutex<Option<voxelle::VoxelleFile>>,
+    /// Spatial index: coord → index in `current_file.voxels` (kept in sync; used for raycasts + O(1) remove).
+    pub voxel_map: Mutex<Option<AHashMap<greedy_mesh::VoxelCoord, usize>>>,
+    /// Solo undo stack: voxel batches and selection snapshots (interleaved).
+    pub(crate) solo_undo: Mutex<Vec<SoloUndoEntry>>,
+    pub(crate) solo_redo: Mutex<Vec<SoloRedoEntry>>,
+    /// When true, successful edits append to `stroke_buffer` instead of pushing `solo_undo` immediately.
+    pub stroke_active: Mutex<bool>,
+    pub stroke_buffer: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
+    /// Accumulated stroke preview cells (add/remove/paint drag; committed on pointer up).
+    pub stroke_preview_union: Mutex<AHashSet<greedy_mesh::VoxelCoord>>,
+    pub(crate) stroke_preview_last_args: Mutex<Option<crate::VoxelEditAtScreen>>,
+    /// When set, hover preview must not overwrite the stroke preview mesh each frame.
+    pub stroke_preview_suppresses_hover: AtomicBool,
+    /// Throttled sculpt samples during drag; replayed on pointer up as one undo step.
+    pub(crate) sculpt_stroke_replay: Mutex<Vec<crate::SculptStrokeAtScreenArgs>>,
+    /// Guest edit/undo/redo items waiting for main-thread processing.
+    pub(crate) collab_edit_inbox: Mutex<VecDeque<collab::CollabInboxItem>>,
+    /// Set by [`voxel_fill_cancel`] during a long flood fill so BFS can exit cooperatively.
+    pub fill_operation_cancel: Arc<AtomicBool>,
+    /// Invisible hit plane for spray constrain-to-plane: `(plane_point, plane_normal)`.
+    /// Set on the first spray anchor of a stroke when constrain_to_plane is active; cleared on stroke end.
+    pub spray_constraint_plane: Mutex<Option<(glam::Vec3, glam::Vec3)>>,
+    /// Locked face normal for wall strokes. `None` = not yet captured this stroke.
+    /// `Some(v)` = locked on the first preview frame; reused for all subsequent drag frames
+    /// so the wall orientation doesn't flip as the cursor crosses different faces.
+    /// Cleared on stroke begin/end. Ignored during hover (stroke_active = false).
+    pub wall_stroke_face_snapped: Mutex<Option<Option<(i32, i32, i32)>>>,
+    /// Per-column fractional accumulation for terrain sub-voxel raise/lower precision.
+    /// Cleared on stroke begin/end; ignored when `terrain_sub_voxel` is false.
+    pub terrain_accum: Mutex<AHashMap<(i32, i32), f32>>,
+}
+
+/// Selection state: selected cells, clipboard, stroke accumulators, combine mode.
+pub struct SelectionState {
     /// Selected solid cells (world grid); used for copy / stamp source.
     pub selection_cells: Mutex<AHashSet<greedy_mesh::VoxelCoord>>,
     /// Snapshot at `selection_stroke_begin` for undo + detecting no-op end.
@@ -609,6 +631,10 @@ pub struct ViewerState {
     pub selection_match_material: Mutex<bool>,
     /// Last copy from [`Self::selection_cells`] (relative offsets).
     pub stamp_clipboard: Mutex<Option<voxel_edit::StampClipboard>>,
+}
+
+/// Gizmo state: squishy/bone sessions, drag states, extrude gizmo, generator gizmo overrides.
+pub struct GizmoState {
     /// Multi-metaball squishy editor (Squishy mode).
     pub squishy_session: Mutex<generators::SquishySession>,
     /// Pointer drag on squishy move/scale handles ([`generators::squishy_gizmo`]).
@@ -634,38 +660,54 @@ pub struct ViewerState {
     pub(crate) extrude_gizmo_base_depth: Mutex<i32>,
     /// Extrude gizmo axis (0=X,1=Y,2=Z) currently under cursor; 255=none.
     pub hovered_extrude_axis: AtomicU8,
-    /// When true, draw the start-screen gradient instead of the scene sky (default true; cleared when a real document loads).
-    pub start_screen_logo_transparent: std::sync::atomic::AtomicBool,
-    /// Cold-start gradient: light (paper) vs dark — synced from webview appearance preference.
-    pub start_screen_light: std::sync::atomic::AtomicBool,
-    /// Bumps when start-screen overlay meshes (logo, mascots) need rebuilding; stale builds are discarded.
-    pub overlay_mesh_generation: AtomicU64,
-    /// **Debug → Viewport cursor debug overlay**: use bright red ray-hover preview (menu + webview).
-    pub viewport_cursor_debug_overlay: AtomicBool,
-    /// **View → Show borders**: per-voxel cell wireframe (matches web `showGrid` / `gridLines.ts`).
-    pub show_grid_borders: AtomicBool,
     /// Gizmo axis (0=X, 1=Y, 2=Z) currently under the cursor; 255 = none.
     /// Written by `gizmo_hit_test`; read by `sync_gizmo_gpu` to brighten the hovered axis.
     pub hovered_gizmo_axis: AtomicU8,
-    /// Mirrors overlay cache keys on [`WgpuViewer`] so prepare steps can run without the viewer mutex (see frame loop).
-    pub(crate) grid_overlay_cache_key: Mutex<Option<u64>>,
-    pub(crate) selection_overlay_cache_key: Mutex<Option<u64>>,
-    pub(crate) preview_overlay_cache_key: Mutex<Option<u64>>,
+    /// Stored ray spine for straight-line extrude (used by ray-based extrude preview/recompute).
+    pub(crate) extrude_ray_spine: Mutex<Option<Vec<greedy_mesh::VoxelCoord>>>,
     /// Camera snapshot taken when a single-click generator enters its confirm phase.
     /// While set, `prepare_preview_mesh` uses this camera for all generator raycasts so that
     /// orbiting or panning the viewport does not change the preview world position.
     pub generator_preview_locked_camera: Mutex<Option<camera::OrbitCamera>>,
-    /// Set by [`voxel_fill_cancel`] during a long flood fill so BFS can exit cooperatively.
-    pub fill_operation_cancel: Arc<AtomicBool>,
-    /// Invisible hit plane for spray constrain-to-plane: `(plane_point, plane_normal)`.
-    /// Set on the first spray anchor of a stroke when constrain_to_plane is active; cleared on stroke end.
-    pub spray_constraint_plane: Mutex<Option<(glam::Vec3, glam::Vec3)>>,
-    /// Locked face normal for wall strokes. `None` = not yet captured this stroke.
-    /// `Some(v)` = locked on the first preview frame; reused for all subsequent drag frames
-    /// so the wall orientation doesn't flip as the cursor crosses different faces.
-    /// Cleared on stroke begin/end. Ignored during hover (stroke_active = false).
-    pub wall_stroke_face_snapped: Mutex<Option<Option<(i32, i32, i32)>>>,
-    /// Per-column fractional accumulation for terrain sub-voxel raise/lower precision.
-    /// Cleared on stroke begin/end; ignored when `terrain_sub_voxel` is false.
-    pub terrain_accum: Mutex<AHashMap<(i32, i32), f32>>,
+}
+
+/// Hover preview state: cursor position, preview mode, and brush/stroke parameters.
+pub struct PreviewState {
+    /// Latest pointer position in physical pixels (for hover preview; updated from UI, read each frame).
+    pub preview_cursor: Mutex<Option<(f32, f32)>>,
+    pub(crate) preview_mode: Mutex<PreviewMode>,
+    /// Brush / stroke params for hover preview (updated from [`sync_preview_input`]).
+    pub(crate) preview_hover: Mutex<crate::PreviewHoverContext>,
+}
+
+/// Autosave state: interval, enabled flag, slot tracking, last save time.
+pub struct AutosaveState {
+    /// Host-only autosave to app-local backups (`0` = never when disabled or interval 0).
+    pub autosave_interval_secs: Mutex<u64>,
+    pub last_autosave: Mutex<Option<Instant>>,
+    /// When false, autosave timer does not run.
+    pub autosave_enabled: Mutex<bool>,
+    /// Rotating slot count per document (`{hash}.0.voxelle` … `{hash}.(n-1).voxelle`).
+    pub autosave_keep_count: Mutex<u32>,
+    /// Next slot index per stable path hash (see `stable_path_key`).
+    pub autosave_slot: Mutex<HashMap<String, u64>>,
+}
+
+pub struct ViewerState {
+    pub gpu: GpuState,
+    pub cam: CameraState,
+    pub file: FileState,
+    pub selection: SelectionState,
+    pub gizmos: GizmoState,
+    pub preview: PreviewState,
+    pub autosave: AutosaveState,
+    /// Collab runtime (keep as-is: shared with network threads).
+    pub collab: Arc<Mutex<collab::CollabRuntime>>,
+    /// Raw `.voxelle` bytes for custom avatars the local user has loaded, keyed by name.
+    /// Persists across collab sessions so the bytes can be re-sent to new peers.
+    pub local_avatar_data: Mutex<HashMap<String, Vec<u8>>>,
+    /// Smoothed peer camera presence for frustum rendering (lerped each frame).
+    pub smooth_presence: Mutex<HashMap<u32, collab::CameraPresence>>,
+    /// Short-lived voxel highlight when a peer sends a world ping (see [`collab::record_ping_flash`]).
+    pub ping_flash: Mutex<Option<collab::PingFlash>>,
 }

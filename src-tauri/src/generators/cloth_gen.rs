@@ -589,3 +589,121 @@ pub fn generator_cloth_from_pins(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── rope_gravity_unit ──────────────────────────────────────────────
+
+    #[test]
+    fn rope_gravity_unit_down() {
+        let v = rope_gravity_unit("down");
+        assert!((v[1] - (-1.0)).abs() < 1e-9);
+        assert!(v[0].abs() < 1e-9);
+        assert!(v[2].abs() < 1e-9);
+    }
+
+    #[test]
+    fn rope_gravity_unit_up() {
+        assert!((rope_gravity_unit("up")[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rope_gravity_unit_right() {
+        let v = rope_gravity_unit("right");
+        assert!((v[0] - 1.0).abs() < 1e-9);
+        assert!(v[1].abs() < 1e-9);
+    }
+
+    #[test]
+    fn rope_gravity_unit_unknown_defaults_down() {
+        assert!((rope_gravity_unit("sideways")[1] - (-1.0)).abs() < 1e-9);
+    }
+
+    // ── cloth_patch_point_in_polygon_2d ────────────────────────────────
+
+    fn unit_square() -> Vec<(f64, f64)> {
+        vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    }
+
+    #[test]
+    fn point_inside_unit_square() {
+        assert!(cloth_patch_point_in_polygon_2d(0.5, 0.5, &unit_square()));
+    }
+
+    #[test]
+    fn point_outside_unit_square() {
+        assert!(!cloth_patch_point_in_polygon_2d(2.0, 2.0, &unit_square()));
+    }
+
+    #[test]
+    fn point_outside_negative_coords() {
+        assert!(!cloth_patch_point_in_polygon_2d(-0.5, 0.5, &unit_square()));
+    }
+
+    #[test]
+    fn polygon_with_fewer_than_3_points_returns_false() {
+        assert!(!cloth_patch_point_in_polygon_2d(0.5, 0.5, &[(0.0, 0.0), (1.0, 1.0)]));
+    }
+
+    #[test]
+    fn empty_polygon_returns_false() {
+        assert!(!cloth_patch_point_in_polygon_2d(0.0, 0.0, &[]));
+    }
+
+    // ── internal vector helpers ────────────────────────────────────────
+
+    #[test]
+    fn vec_len_pythagorean() {
+        assert!((vec_len([3.0, 4.0, 0.0]) - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vec_len_zero_vector() {
+        assert!(vec_len([0.0, 0.0, 0.0]) < 1e-9);
+    }
+
+    #[test]
+    fn vec_cross_unit_axes() {
+        let z = vec_cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert!(z[0].abs() < 1e-9);
+        assert!(z[1].abs() < 1e-9);
+        assert!((z[2] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vec_dot3_perpendicular_is_zero() {
+        assert!(vec_dot3([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vec_add_and_sub_roundtrip() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        let sum = vec_add(a, b);
+        let back = vec_sub(sum, b);
+        assert!((back[0] - a[0]).abs() < 1e-9);
+        assert!((back[1] - a[1]).abs() < 1e-9);
+        assert!((back[2] - a[2]).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vec_norm_produces_unit_vector() {
+        let n = vec_norm([3.0, 4.0, 0.0]);
+        assert!((vec_len(n) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn vec_norm_zero_returns_zero() {
+        assert_eq!(vec_norm([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn vec_scale_basic() {
+        let v = vec_scale([1.0, 2.0, 3.0], 3.0);
+        assert!((v[0] - 3.0).abs() < 1e-9);
+        assert!((v[1] - 6.0).abs() < 1e-9);
+        assert!((v[2] - 9.0).abs() < 1e-9);
+    }
+}

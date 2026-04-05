@@ -90,15 +90,13 @@ impl VoxelGpuRefreshReason {
 // Menu helpers
 // ---------------------------------------------------------------------------
 
-pub(crate) fn scene_menu_flags(state: &ViewerState) -> (bool, bool) {
-    let has_voxels = state
-        .current_file
-        .lock()
-        .as_ref()
-        .map(|f| !f.voxels.is_empty())
-        .unwrap_or(false);
-    let has_selection = !state.selection_cells.lock().is_empty();
-    (has_voxels, has_selection)
+pub(crate) fn scene_menu_flags(state: &ViewerState) -> (bool, bool, bool) {
+    let file = state.file.current_file.lock();
+    let has_project = file.is_some();
+    let has_voxels = file.as_ref().map(|f| !f.voxels.is_empty()).unwrap_or(false);
+    drop(file);
+    let has_selection = !state.selection.selection_cells.lock().is_empty();
+    (has_project, has_voxels, has_selection)
 }
 
 /// Disables Selection menu entries when there are no voxels and/or no active selection (same rules as web).
@@ -107,6 +105,7 @@ pub(crate) fn scene_menu_flags(state: &ViewerState) -> (bool, bool) {
 #[cfg(desktop)]
 pub(crate) fn selection_menu_sync_enabled_for_scene<R: Runtime>(
     app: &AppHandle<R>,
+    has_project: bool,
     has_voxels: bool,
     has_selection: bool,
 ) {
@@ -118,6 +117,9 @@ pub(crate) fn selection_menu_sync_enabled_for_scene<R: Runtime>(
         let _ = item.set_enabled(enabled);
     };
 
+    apply(&menu.save, has_project);
+    apply(&menu.save_as, has_project);
+    apply(&menu.close_project, has_project);
     apply(&menu.sel_all, has_voxels);
     apply(&menu.sel_by_color, has_voxels);
     apply(&menu.sel_connected, has_selection);
@@ -138,7 +140,7 @@ pub(crate) fn selection_menu_sync_enabled_for_scene<R: Runtime>(
 
 /// Returns the pending visual offset for the selection during a move drag, or `(0,0,0)`.
 pub(crate) fn pending_gizmo_translate(state: &ViewerState) -> (i32, i32, i32) {
-    match &*state.selection_gizmo_drag.lock() {
+    match &*state.gizmos.selection_gizmo_drag.lock() {
         SelectionGizmoDrag::Move {
             pending_dx,
             pending_dy,
@@ -152,18 +154,18 @@ pub(crate) fn pending_gizmo_translate(state: &ViewerState) -> (i32, i32, i32) {
 /// Returns the axis index (0=X, 1=Y, 2=Z) to highlight, or 255 for none.
 /// During an active drag the dragged axis stays highlighted; otherwise falls back to hover state.
 pub(crate) fn gizmo_highlighted_axis(state: &ViewerState) -> u8 {
-    match &*state.selection_gizmo_drag.lock() {
+    match &*state.gizmos.selection_gizmo_drag.lock() {
         SelectionGizmoDrag::Move { world_axis, .. } => *world_axis,
         SelectionGizmoDrag::Rotate { ring, .. } => *ring,
         SelectionGizmoDrag::Scale { .. } => 255, // no axis highlight for scale ring
-        SelectionGizmoDrag::None => state.hovered_gizmo_axis.load(Ordering::Relaxed),
+        SelectionGizmoDrag::None => state.gizmos.hovered_gizmo_axis.load(Ordering::Relaxed),
     }
 }
 
 pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: &OrbitCamera) {
-    let mode = *state.preview_mode.lock();
-    let gen_center = *state.generator_gizmo_center.lock();
-    let sel = state.selection_cells.lock();
+    let mode = *state.preview.preview_mode.lock();
+    let gen_center = *state.gizmos.generator_gizmo_center.lock();
+    let sel = state.selection.selection_cells.lock();
     if gen_center.is_none()
         && (sel.is_empty() || matches!(mode, PreviewMode::Stamp | PreviewMode::Punch))
     {
@@ -225,7 +227,7 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
 
     // Axis colors in linear space (HDR target): X=red, Y=green, Z=blue
     let highlight_axis = if is_extrude {
-        state.hovered_extrude_axis.load(Ordering::Relaxed)
+        state.gizmos.hovered_extrude_axis.load(Ordering::Relaxed)
     } else {
         gizmo_highlighted_axis(state)
     };
@@ -392,7 +394,7 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
     }
 
     // Scale ring — camera-facing circle at the joint radius (bone tool).
-    if let Some(radius) = *state.generator_gizmo_ring_radius.lock() {
+    if let Some(radius) = *state.gizmos.generator_gizmo_ring_radius.lock() {
         const RING_N: usize = 32;
         let ring_col = [1.0_f32, 0.7, 0.2]; // orange/gold
                                             // Camera-facing ring: use view-space right/up as the ring plane.
@@ -413,7 +415,7 @@ pub(crate) fn sync_gizmo_gpu(viewer: &mut WgpuViewer, state: &ViewerState, cam: 
 
     if is_extrude {
         // Show extrude depth label at the tip of the active axis handle.
-        let drag_info = match &*state.extrude_gizmo_drag.lock() {
+        let drag_info = match &*state.gizmos.extrude_gizmo_drag.lock() {
             ExtrudeGizmoDrag::Drag {
                 depth,
                 world_axis,
@@ -806,13 +808,13 @@ pub(crate) enum GridBorderPrepared {
 }
 
 pub(crate) fn prepare_grid_border_overlay(state: &ViewerState) -> GridBorderPrepared {
-    let show = state.show_grid_borders.load(Ordering::Relaxed);
+    let show = state.gpu.show_grid_borders.load(Ordering::Relaxed);
     if !show {
         return GridBorderPrepared::Clear;
     }
-    let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
-    let file_guard = state.current_file.lock();
-    let map_guard = state.voxel_map.lock();
+    let mesh_gen = state.gpu.mesh_refresh_generation.load(Ordering::Relaxed);
+    let file_guard = state.file.current_file.lock();
+    let map_guard = state.file.voxel_map.lock();
     let Some(file) = file_guard.as_ref() else {
         return GridBorderPrepared::Clear;
     };
@@ -828,7 +830,7 @@ pub(crate) fn prepare_grid_border_overlay(state: &ViewerState) -> GridBorderPrep
     drop(map_guard);
 
     let fp = grid_border_overlay_cache_fingerprint(&world, mesh_gen);
-    if *state.grid_overlay_cache_key.lock() == Some(fp) {
+    if *state.gpu.grid_overlay_cache_key.lock() == Some(fp) {
         return GridBorderPrepared::Unchanged;
     }
     let (verts, indices) = greedy_mesh::voxel_surface_grid_line_vertices(&world);
@@ -843,7 +845,7 @@ pub(crate) fn apply_grid_border_overlay(
     match prep {
         GridBorderPrepared::Clear => {
             viewer.clear_grid_border_lines();
-            *state.grid_overlay_cache_key.lock() = None;
+            *state.gpu.grid_overlay_cache_key.lock() = None;
         }
         GridBorderPrepared::Unchanged => {}
         GridBorderPrepared::Draw { fp, verts, indices } => {
@@ -852,7 +854,7 @@ pub(crate) fn apply_grid_border_overlay(
             }
             viewer.upload_grid_border_lines(&verts, &indices);
             viewer.grid_border_cache_key = Some(fp);
-            *state.grid_overlay_cache_key.lock() = Some(fp);
+            *state.gpu.grid_overlay_cache_key.lock() = Some(fp);
         }
     }
 }
@@ -873,14 +875,14 @@ pub(crate) enum SelectionOverlayPrepared {
 }
 
 pub(crate) fn prepare_selection_overlay(state: &ViewerState) -> SelectionOverlayPrepared {
-    let sel = state.selection_cells.lock().clone();
+    let sel = state.selection.selection_cells.lock().clone();
     if sel.is_empty() {
         return SelectionOverlayPrepared::Clear;
     }
-    let mesh_gen = state.mesh_refresh_generation.load(Ordering::Relaxed);
+    let mesh_gen = state.gpu.mesh_refresh_generation.load(Ordering::Relaxed);
     let pending = pending_gizmo_translate(state);
     let fp = selection_overlay_cache_fingerprint(&sel, mesh_gen, pending);
-    if *state.selection_overlay_cache_key.lock() == Some(fp) {
+    if *state.gpu.selection_overlay_cache_key.lock() == Some(fp) {
         return SelectionOverlayPrepared::Unchanged;
     }
     // Apply the pending drag offset to cell positions for preview rendering.
@@ -891,8 +893,8 @@ pub(crate) fn prepare_selection_overlay(state: &ViewerState) -> SelectionOverlay
     } else {
         sel
     };
-    let file_guard = state.current_file.lock();
-    let map_guard = state.voxel_map.lock();
+    let file_guard = state.file.current_file.lock();
+    let map_guard = state.file.voxel_map.lock();
     let Some(file) = file_guard.as_ref() else {
         return SelectionOverlayPrepared::Clear;
     };
@@ -927,7 +929,7 @@ pub(crate) fn apply_selection_overlay(
     match prep {
         SelectionOverlayPrepared::Clear => {
             viewer.clear_selection_overlay();
-            *state.selection_overlay_cache_key.lock() = None;
+            *state.gpu.selection_overlay_cache_key.lock() = None;
         }
         SelectionOverlayPrepared::Unchanged => {}
         SelectionOverlayPrepared::Draw {
@@ -941,7 +943,7 @@ pub(crate) fn apply_selection_overlay(
             viewer.upload_selection_overlay_solid(&solid);
             viewer.upload_selection_overlay_lines(&line_verts);
             viewer.selection_overlay_cache_key = Some(fp);
-            *state.selection_overlay_cache_key.lock() = Some(fp);
+            *state.gpu.selection_overlay_cache_key.lock() = Some(fp);
         }
     }
 }

@@ -940,3 +940,120 @@ pub fn generate_roof_from_pins(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unit_square() -> Vec<(f64, f64)> {
+        vec![(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    }
+
+    // ── point_in_polygon_2d ────────────────────────────────────────────
+
+    #[test]
+    fn point_inside_square() {
+        assert!(point_in_polygon_2d(0.5, 0.5, &unit_square()));
+    }
+
+    #[test]
+    fn point_outside_square() {
+        assert!(!point_in_polygon_2d(2.0, 2.0, &unit_square()));
+    }
+
+    #[test]
+    fn point_inside_triangle() {
+        let tri = vec![(0.0, 0.0), (4.0, 0.0), (2.0, 4.0)];
+        assert!(point_in_polygon_2d(2.0, 1.0, &tri));
+        assert!(!point_in_polygon_2d(0.0, 3.0, &tri));
+    }
+
+    #[test]
+    fn polygon_fewer_than_3_returns_false() {
+        assert!(!point_in_polygon_2d(0.5, 0.5, &[(0.0, 0.0), (1.0, 0.0)]));
+    }
+
+    // ── signed_dist_to_polygon_boundary ───────────────────────────────
+
+    #[test]
+    fn signed_dist_inside_is_positive() {
+        let d = signed_dist_to_polygon_boundary(0.5, 0.5, &unit_square());
+        assert!(d > 0.0, "expected positive distance inside, got {d}");
+    }
+
+    #[test]
+    fn signed_dist_outside_is_negative() {
+        let d = signed_dist_to_polygon_boundary(2.0, 2.0, &unit_square());
+        assert!(d < 0.0, "expected negative distance outside, got {d}");
+    }
+
+    #[test]
+    fn signed_dist_center_is_larger_than_corner() {
+        let d_center = signed_dist_to_polygon_boundary(0.5, 0.5, &unit_square());
+        let d_near_edge = signed_dist_to_polygon_boundary(0.05, 0.5, &unit_square());
+        assert!(d_center > d_near_edge, "center should be farther from boundary than near-edge");
+    }
+
+    // ── convex_hull_2d ─────────────────────────────────────────────────
+
+    #[test]
+    fn convex_hull_triangle_returns_3_points() {
+        let pts = vec![(0.0, 0.0), (4.0, 0.0), (2.0, 4.0)];
+        let hull = convex_hull_2d(&pts);
+        assert_eq!(hull.len(), 3);
+    }
+
+    #[test]
+    fn convex_hull_square_returns_4_points() {
+        let hull = convex_hull_2d(&unit_square());
+        assert_eq!(hull.len(), 4);
+    }
+
+    #[test]
+    fn convex_hull_single_point() {
+        let hull = convex_hull_2d(&[(1.0, 2.0)]);
+        assert_eq!(hull.len(), 1);
+    }
+
+    #[test]
+    fn convex_hull_two_points() {
+        let hull = convex_hull_2d(&[(0.0, 0.0), (1.0, 1.0)]);
+        assert_eq!(hull.len(), 2);
+    }
+
+    #[test]
+    fn convex_hull_interior_point_excluded() {
+        // 4 corners of a square + 1 interior point = hull should be 4
+        let mut pts = unit_square();
+        pts.push((0.5, 0.5));
+        let hull = convex_hull_2d(&pts);
+        assert_eq!(hull.len(), 4);
+    }
+
+    // ── oriented_bounding_rect ─────────────────────────────────────────
+
+    #[test]
+    fn obb_single_point_zero_extents() {
+        let (_center, half, _axes) = oriented_bounding_rect(&[(3.0, 7.0)]);
+        assert!(half.0 < 1e-9 && half.1 < 1e-9);
+    }
+
+    #[test]
+    fn obb_unit_square_center_is_half_half() {
+        let hull = convex_hull_2d(&unit_square());
+        let (center, half, _axes) = oriented_bounding_rect(&hull);
+        assert!((center.0 - 0.5).abs() < 1e-6, "center.x = {}", center.0);
+        assert!((center.1 - 0.5).abs() < 1e-6, "center.y = {}", center.1);
+        assert!((half.0 - 0.5).abs() < 1e-6);
+        assert!((half.1 - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn obb_longer_axis_is_first() {
+        // 2×1 rectangle: longer axis should be first
+        let rect = vec![(0.0, 0.0), (2.0, 0.0), (2.0, 1.0), (0.0, 1.0)];
+        let hull = convex_hull_2d(&rect);
+        let (_center, half, _axes) = oriented_bounding_rect(&hull);
+        assert!(half.0 >= half.1, "expected longer axis first: {half:?}");
+    }
+}

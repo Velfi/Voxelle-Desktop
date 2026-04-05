@@ -851,6 +851,19 @@ body,
   color: var(--app-text-strong);
 }
 
+.sidebar-mode-btn[data-mode="add"],
+.sidebar-collapsed-sub-btn[data-mode="add"] {
+  box-shadow: inset 3px 0 0 #4caf50;
+}
+.sidebar-mode-btn[data-mode="remove"],
+.sidebar-collapsed-sub-btn[data-mode="remove"] {
+  box-shadow: inset 3px 0 0 #e05252;
+}
+.sidebar-mode-btn[data-mode="paint"],
+.sidebar-collapsed-sub-btn[data-mode="paint"] {
+  box-shadow: inset 3px 0 0 #e0b84a;
+}
+
 /* Bottom bar: status text + optional FPS (solid so clicks don’t pass through). */
 .app-status-bar {
   flex: 0 0 auto;
@@ -2957,6 +2970,10 @@ body,
 
 .multi-color-clear-btn:hover {
   color: var(--app-text-strong);
+}
+
+.multi-color-hint-placeholder {
+  opacity: 0.45;
 }
 
 /* Multi-color distribution section */

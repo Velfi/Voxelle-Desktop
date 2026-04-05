@@ -84,6 +84,9 @@ pub(crate) fn rebuild_recent_submenu(app: &AppHandle, submenu: &tauri::menu::Sub
 }
 
 pub(crate) struct SelectionMenuState {
+    pub save: tauri::menu::MenuItem<tauri::Wry>,
+    pub save_as: tauri::menu::MenuItem<tauri::Wry>,
+    pub close_project: tauri::menu::MenuItem<tauri::Wry>,
     pub match_material: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub viewport_cursor_debug: tauri::menu::CheckMenuItem<tauri::Wry>,
     pub logo_light_controls: tauri::menu::CheckMenuItem<tauri::Wry>,
@@ -194,19 +197,19 @@ pub(crate) fn install_app_menu(
     let about_item = PredefinedMenuItem::about(app, None, Some(vd_about_metadata(app)?))?;
     let new_item = MenuItem::with_id(app, "new_project", "New Project…", true, None::<&str>)?;
     let open_item = MenuItem::with_id(app, "open_voxelle", "Open…", true, Some("CommandOrCtrl+O"))?;
-    let save_item = MenuItem::with_id(app, "menu_save", "Save", true, Some("CommandOrCtrl+S"))?;
+    let save_item = MenuItem::with_id(app, "menu_save", "Save", false, Some("CommandOrCtrl+S"))?;
     let save_as_item = MenuItem::with_id(
         app,
         "menu_save_as",
         "Save As…",
-        true,
+        false,
         Some("CommandOrCtrl+Shift+S"),
     )?;
     let close_project_item = MenuItem::with_id(
         app,
         "menu_close_project",
         "Close Project",
-        true,
+        false,
         Some("CommandOrCtrl+W"),
     )?;
     let export_glb_item =
@@ -316,7 +319,7 @@ pub(crate) fn install_app_menu(
         ],
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
-    let current_mode = *app.state::<Arc<ViewerState>>().rendering_mode.lock();
+    let current_mode = *app.state::<Arc<ViewerState>>().gpu.rendering_mode.lock();
     let view_render_greedy = CheckMenuItem::with_id(
         app,
         "view_render_greedy",
@@ -362,7 +365,7 @@ pub(crate) fn install_app_menu(
             &view_render_ray,
         ],
     )?;
-    let is_ortho = !app.state::<Arc<ViewerState>>().camera.lock().perspective;
+    let is_ortho = !app.state::<Arc<ViewerState>>().cam.camera.lock().perspective;
     let ortho_view_item = CheckMenuItem::with_id(
         app,
         "menu_view_ortho",
@@ -431,6 +434,19 @@ pub(crate) fn install_app_menu(
                 sub.append(&collab_submenu)?;
                 #[cfg(not(target_os = "macos"))]
                 sub.append(&check_updates_item)?;
+                // Remove the default "Close Window" predefined item injected by Tauri's Menu::default.
+                let items = sub.items()?;
+                for (idx, item) in items.iter().enumerate() {
+                    let title = match item {
+                        MenuItemKind::MenuItem(m) => m.text().ok(),
+                        MenuItemKind::Predefined(p) => p.text().ok(),
+                        _ => None,
+                    };
+                    if title.as_deref() == Some("Close Window") {
+                        sub.remove_at(idx)?;
+                        break;
+                    }
+                }
                 file_inserted = true;
             } else if text == "Edit" {
                 #[cfg(not(target_os = "macos"))]
@@ -742,6 +758,9 @@ pub(crate) fn install_app_menu(
     menu.set_as_app_menu()?;
     Ok((
         SelectionMenuState {
+            save: save_item.clone(),
+            save_as: save_as_item.clone(),
+            close_project: close_project_item.clone(),
             match_material: menu_sel_match_material.clone(),
             viewport_cursor_debug: debug_viewport_cursor.clone(),
             logo_light_controls: debug_logo_light.clone(),

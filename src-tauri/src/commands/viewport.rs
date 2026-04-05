@@ -26,7 +26,7 @@ pub(crate) struct SurfacePixelSize {
 pub(crate) fn get_viewport_pixel_size(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<ViewportPixelSize, String> {
-    let v = state.viewer.lock();
+    let v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_ref() else {
         return Err("viewer not ready".into());
     };
@@ -44,7 +44,7 @@ pub(crate) fn get_viewport_pixel_size(
 pub(crate) fn get_surface_pixel_size(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<SurfacePixelSize, String> {
-    let v = state.viewer.lock();
+    let v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_ref() else {
         return Err("viewer not ready".into());
     };
@@ -69,7 +69,7 @@ pub(crate) fn viewer_resize(
     let sw = surface_width.max(1);
     let sh = surface_height.max(1);
 
-    let mut g = state.viewer.lock();
+    let mut g = state.gpu.viewer.lock();
     if let Some(v) = g.as_mut() {
         v.resize(
             sw,
@@ -116,13 +116,13 @@ pub(crate) fn viewport_pointer(
     state: State<'_, Arc<ViewerState>>,
     ev: PointerEvent,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
     // Read size without holding `camera` — the run loop locks `viewer` then `camera`; taking
     // `camera` then `viewer` here deadlocks with the render tick and freezes orbit input.
     let (vw, vh) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(());
         };
@@ -136,20 +136,20 @@ pub(crate) fn viewport_pointer(
 
     // Check if logo overlay is active (use viewer lock, not camera lock).
     let logo_active = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         v.as_ref()
             .is_some_and(|viewer| viewer.logo_overlay_visible())
     };
 
     if logo_active {
         // Route pointer events to the logo overlay instead of the camera.
-        let mut v = state.viewer.lock();
+        let mut v = state.gpu.viewer.lock();
         if let Some(viewer) = v.as_mut() {
             if let Some(logo) = viewer.logo_overlay.as_mut() {
                 match ev.kind.as_str() {
                     "down" | "move" => {
                         state
-                            .camera_dragging
+                            .cam.camera_dragging
                             .store(ev.buttons != 0, Ordering::Relaxed);
                         logo.update_mouse_ndc(x, y, vw, vh);
                         if ev.buttons & 1 != 0 && !ev.shift_key {
@@ -159,11 +159,11 @@ pub(crate) fn viewport_pointer(
                         }
                     }
                     "up" => {
-                        state.camera_dragging.store(false, Ordering::Relaxed);
+                        state.cam.camera_dragging.store(false, Ordering::Relaxed);
                         logo.reset_orbit();
                     }
                     "leave" => {
-                        state.camera_dragging.store(false, Ordering::Relaxed);
+                        state.cam.camera_dragging.store(false, Ordering::Relaxed);
                         logo.clear_mouse_ndc();
                         logo.hover_parallax(vw * 0.5, vh * 0.5, vw, vh);
                     }
@@ -172,11 +172,11 @@ pub(crate) fn viewport_pointer(
             }
         }
     } else {
-        let mut cam = state.camera.lock();
+        let mut cam = state.cam.camera.lock();
         match ev.kind.as_str() {
             "down" | "move" => {
                 state
-                    .camera_dragging
+                    .cam.camera_dragging
                     .store(ev.buttons != 0, Ordering::Relaxed);
                 // bitmask: 1=left orbit (or shift+left pan), 2=right pan, 4=middle dolly (Three.js OrbitControls defaults)
                 if ev.buttons & 1 != 0 {
@@ -192,10 +192,10 @@ pub(crate) fn viewport_pointer(
                 }
             }
             "up" => {
-                state.camera_dragging.store(false, Ordering::Relaxed);
+                state.cam.camera_dragging.store(false, Ordering::Relaxed);
             }
             "leave" => {
-                state.camera_dragging.store(false, Ordering::Relaxed);
+                state.cam.camera_dragging.store(false, Ordering::Relaxed);
             }
             _ => {}
         }
@@ -217,19 +217,19 @@ pub(crate) fn viewport_wheel(
     state: State<'_, Arc<ViewerState>>,
     ev: WheelEvent,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
     // Ignore scroll when logo overlay is active.
     {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         if v.as_ref()
             .is_some_and(|viewer| viewer.logo_overlay_visible())
         {
             return Ok(());
         }
     }
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     // Same `deltaY` semantics as the browser / Three.js `onMouseWheel`.
     cam.dolly_delta(ev.delta_y);
     wake_viewport_loop(&app);
@@ -237,17 +237,17 @@ pub(crate) fn viewport_wheel(
 }
 
 pub(crate) fn scene_bounds_min_max_grid(state: &ViewerState) -> (glam::Vec3, glam::Vec3, i32) {
-    let guard = state.last_scene_bounds.lock();
+    let guard = state.gpu.last_scene_bounds.lock();
     if let Some(b) = guard.as_ref() {
         let grid = state
-            .current_file
+            .file.current_file
             .lock()
             .as_ref()
             .map(|file| file.grid_size)
             .unwrap_or(64);
         return (b.min, b.max, grid);
     }
-    let fg = state.current_file.lock();
+    let fg = state.file.current_file.lock();
     if let Some(ref file) = *fg {
         let b = greedy_mesh::mesh_bounds_from_voxels_world(&file.voxels, &file.objects)
             .or_else(|| greedy_mesh::mesh_bounds_from_voxels(&file.voxels))
@@ -282,7 +282,7 @@ pub(crate) struct OrbitGizmoProjectionItem {
 pub(crate) fn get_orbit_gizmo_projection(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<Vec<OrbitGizmoProjectionItem>, String> {
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let axes = cam.gizmo_axis_projections();
     const R: f32 = 40.0;
     Ok(axes
@@ -298,7 +298,7 @@ pub(crate) fn get_orbit_gizmo_projection(
 #[tauri::command]
 pub(crate) fn get_camera_zoom_percent(state: State<'_, Arc<ViewerState>>) -> Result<i32, String> {
     let (min, max, grid) = scene_bounds_min_max_grid(state.inner());
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let base = perspective_zoom_base_dist(min, max, grid);
     let r = (max - min).length() * 0.5;
     let ortho_ref = if r > 1e-3 {
@@ -314,18 +314,18 @@ pub(crate) fn camera_fit_to_scene(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
     let (min, max, _) = scene_bounds_min_max_grid(state.inner());
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(());
         };
         viewer.viewport_size()
     };
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.fit_to_aabb_preserving_view(min, max, w as f32, h as f32);
     drop(cam);
     wake_viewport_loop(&app);
@@ -337,11 +337,11 @@ pub(crate) fn camera_reset_view(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
     let (min, max, grid) = scene_bounds_min_max_grid(state.inner());
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.reset_view_to_bounds(min, max, grid as f32);
     drop(cam);
     wake_viewport_loop(&app);
@@ -362,10 +362,10 @@ pub(crate) fn camera_orbit_gizmo_drag(
     state: State<'_, Arc<ViewerState>>,
     args: OrbitGizmoDragArgs,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.orbit_gizmo_drag(args.dx, args.dy, args.theta_only);
     drop(cam);
     wake_viewport_loop(&app);
@@ -379,7 +379,7 @@ pub(crate) fn set_start_screen_light(
     state: State<'_, Arc<ViewerState>>,
     light: bool,
 ) -> Result<(), String> {
-    state.start_screen_light.store(light, Ordering::Relaxed);
+    state.gpu.start_screen_light.store(light, Ordering::Relaxed);
     Ok(())
 }
 
@@ -389,10 +389,10 @@ pub(crate) fn camera_snap_orbit_axis(
     state: State<'_, Arc<ViewerState>>,
     axis: u8,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.snap_to_axis(axis);
     drop(cam);
     wake_viewport_loop(&app);
@@ -405,10 +405,10 @@ pub(crate) fn camera_zoom_step(
     state: State<'_, Arc<ViewerState>>,
     inward: bool,
 ) -> Result<(), String> {
-    if *state.fly_mode.lock() || *state.walk_mode.lock() {
+    if *state.cam.fly_mode.lock() || *state.cam.walk_mode.lock() {
         return Ok(());
     }
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.zoom_step(inward);
     drop(cam);
     wake_viewport_loop(&app);
@@ -420,15 +420,15 @@ pub(crate) fn apply_rendering_mode(
     app: &AppHandle,
     mode: RenderingMode,
 ) -> Result<(), String> {
-    *state.rendering_mode.lock() = mode;
+    *state.gpu.rendering_mode.lock() = mode;
     // On the start screen, bump the overlay generation so in-flight smooth-mesh
     // builds are cancelled, then tell the frontend to reload logo + mascots.
     if !state
-        .active_project
+        .cam.active_project
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         state
-            .overlay_mesh_generation
+            .gpu.overlay_mesh_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = app.emit("voxelle-reload-start-screen-overlays", ());
     }
@@ -447,10 +447,10 @@ pub(crate) fn apply_orthographic(
     orthographic: bool,
 ) -> Result<(), String> {
     {
-        let mut cam = state.camera.lock();
+        let mut cam = state.cam.camera.lock();
         cam.perspective = !orthographic;
         if orthographic {
-            let g = state.last_scene_bounds.lock();
+            let g = state.gpu.last_scene_bounds.lock();
             if let Some(b) = g.as_ref() {
                 let r = b.radius().max(1.0);
                 cam.ortho_half_height = r * 1.1;
@@ -458,7 +458,7 @@ pub(crate) fn apply_orthographic(
         }
     }
     {
-        let mut fg = state.current_file.lock();
+        let mut fg = state.file.current_file.lock();
         if let Some(ref mut file) = *fg {
             file.scene.orthographic = orthographic;
         }
@@ -470,7 +470,7 @@ pub(crate) fn apply_orthographic(
 pub(crate) fn get_rendering_mode(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<RenderingMode, String> {
-    Ok(*state.rendering_mode.lock())
+    Ok(*state.gpu.rendering_mode.lock())
 }
 
 #[tauri::command]
@@ -498,7 +498,7 @@ pub(crate) fn set_rendering_mode(
 
 #[tauri::command]
 pub(crate) fn get_raytrace_mode(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
-    let v = state.viewer.lock();
+    let v = state.gpu.viewer.lock();
     Ok(v.as_ref().is_some_and(|viewer| viewer.raytrace_enabled))
 }
 
@@ -508,7 +508,7 @@ pub(crate) fn set_raytrace_mode(
     state: State<'_, Arc<ViewerState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let viewer = v.as_mut().ok_or("viewer not ready")?;
     viewer.set_raytrace_mode(enabled);
     drop(v);
@@ -530,14 +530,14 @@ pub(crate) fn benchmark_raytrace(
     state: State<'_, Arc<ViewerState>>,
     frame_count: Option<u32>,
 ) -> Result<crate::render::RaytraceBenchmarkResult, String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let viewer = v.as_mut().ok_or("viewer not ready")?;
     Ok(viewer.run_raytrace_benchmark(frame_count.unwrap_or(50)))
 }
 
 #[tauri::command]
 pub(crate) fn get_orthographic(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
-    Ok(!state.camera.lock().perspective)
+    Ok(!state.cam.camera.lock().perspective)
 }
 
 #[tauri::command]
@@ -553,7 +553,7 @@ pub(crate) fn set_orthographic(
 
 #[tauri::command]
 pub(crate) fn get_show_grid_borders(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
-    Ok(state.show_grid_borders.load(Ordering::Relaxed))
+    Ok(state.gpu.show_grid_borders.load(Ordering::Relaxed))
 }
 
 /// Keeps **View -> Show borders** in sync with webview (e.g. after restoring preferences).
@@ -563,7 +563,7 @@ pub(crate) fn view_menu_sync_show_borders(
     state: State<'_, Arc<ViewerState>>,
     show: bool,
 ) -> Result<(), String> {
-    state.show_grid_borders.store(show, Ordering::Relaxed);
+    state.gpu.show_grid_borders.store(show, Ordering::Relaxed);
     #[cfg(desktop)]
     {
         if let Some(menu) = app.try_state::<SelectionMenuState>() {
@@ -606,7 +606,7 @@ pub(crate) fn debug_menu_sync_viewport_cursor_overlay(
     enabled: bool,
 ) -> Result<(), String> {
     state
-        .viewport_cursor_debug_overlay
+        .gpu.viewport_cursor_debug_overlay
         .store(enabled, Ordering::Relaxed);
     #[cfg(desktop)]
     {
@@ -628,7 +628,7 @@ pub(crate) fn set_soft_shadows(
     state: State<'_, Arc<ViewerState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    if let Some(viewer) = state.viewer.lock().as_mut() {
+    if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
         viewer.soft_shadows = enabled;
     }
     Ok(())
@@ -639,7 +639,7 @@ pub(crate) fn set_gizmo_on_top(
     state: State<'_, Arc<ViewerState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    if let Some(viewer) = state.viewer.lock().as_mut() {
+    if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
         viewer.set_gizmo_on_top(enabled);
     }
     Ok(())
@@ -650,7 +650,7 @@ pub(crate) fn set_soft_sunshafts(
     state: State<'_, Arc<ViewerState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    if let Some(viewer) = state.viewer.lock().as_mut() {
+    if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
         viewer.set_soft_sunshafts(enabled);
     }
     Ok(())
@@ -663,11 +663,11 @@ pub(crate) fn set_emission_lighting(
 ) -> Result<(), String> {
     greedy_mesh::EMISSION_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
     // Invalidate the mesh cache so the next frame triggers a full remesh with the new setting.
-    if let Some(viewer) = state.viewer.lock().as_mut() {
+    if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
         viewer.invalidate_spatial_mesh_cache();
     }
     state
-        .mesh_refresh_generation
+        .gpu.mesh_refresh_generation
         .fetch_add(1, std::sync::atomic::Ordering::Release);
     Ok(())
 }
@@ -677,7 +677,7 @@ pub(crate) fn set_tone_mapping(
     state: State<'_, Arc<ViewerState>>,
     mode: u32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
@@ -687,7 +687,7 @@ pub(crate) fn set_tone_mapping(
 
 #[tauri::command]
 pub(crate) fn is_hdr_available(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
-    let v = state.viewer.lock();
+    let v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_ref() else {
         return Err("viewer not ready".into());
     };
@@ -699,7 +699,7 @@ pub(crate) fn set_hdr_output(
     state: State<'_, Arc<ViewerState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
@@ -756,14 +756,14 @@ pub(crate) fn set_mood_params(
     state: State<'_, Arc<ViewerState>>,
     args: MoodParams,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
     viewer.set_mood_params(&args);
     drop(v);
     {
-        let mut cf = state.current_file.lock();
+        let mut cf = state.file.current_file.lock();
         if let Some(f) = cf.as_mut() {
             f.mood = Some(mood_params_to_settings(&args));
         }
@@ -776,14 +776,14 @@ pub(crate) fn set_scene_lighting(
     state: State<'_, Arc<ViewerState>>,
     args: voxelle::LightingSettings,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
     viewer.apply_lighting_settings(&args);
     drop(v);
     {
-        let mut cf = state.current_file.lock();
+        let mut cf = state.file.current_file.lock();
         if let Some(f) = cf.as_mut() {
             f.lighting = Some(args);
         }
@@ -795,7 +795,7 @@ pub(crate) fn set_scene_lighting(
 pub(crate) fn get_scene_lighting(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<voxelle::LightingSettings, String> {
-    let g = state.current_file.lock();
+    let g = state.file.current_file.lock();
     let Some(f) = g.as_ref() else {
         return Ok(voxelle::LightingSettings::default());
     };
@@ -808,13 +808,13 @@ pub(crate) fn set_focal_length_mm(
     mm: f32,
 ) -> Result<(), String> {
     let mm = mm.clamp(15.0, 200.0);
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     if !cam.perspective {
         return Ok(());
     }
     cam.fov_y = focal_length_to_fov_y_radians(mm);
     {
-        let mut cf = state.current_file.lock();
+        let mut cf = state.file.current_file.lock();
         if let Some(f) = cf.as_mut() {
             f.scene.focal_length_mm = Some(mm);
         }
@@ -824,7 +824,7 @@ pub(crate) fn set_focal_length_mm(
 
 #[tauri::command]
 pub(crate) fn get_focal_length_mm(state: State<'_, Arc<ViewerState>>) -> Result<f32, String> {
-    let g = state.current_file.lock();
+    let g = state.file.current_file.lock();
     let Some(f) = g.as_ref() else {
         return Ok(29.0);
     };
@@ -839,11 +839,11 @@ pub(crate) fn set_fly_mode(
     state: State<'_, Arc<ViewerState>>,
     enabled: bool,
 ) -> Result<(), String> {
-    *state.fly_mode.lock() = enabled;
-    let mut cam = state.camera.lock();
+    *state.cam.fly_mode.lock() = enabled;
+    let mut cam = state.cam.camera.lock();
     cam.is_fly_mode = enabled;
     if enabled {
-        *state.fly_last_physics.lock() = None;
+        *state.cam.fly_last_physics.lock() = None;
         drop(cam);
         wake_viewport_loop(&app);
     }
@@ -852,7 +852,7 @@ pub(crate) fn set_fly_mode(
 
 #[tauri::command]
 pub(crate) fn get_fly_mode(state: State<'_, Arc<ViewerState>>) -> Result<bool, String> {
-    Ok(*state.fly_mode.lock())
+    Ok(*state.cam.fly_mode.lock())
 }
 
 #[tauri::command]
@@ -863,22 +863,22 @@ pub(crate) fn set_walk_mode(
 ) -> Result<(), String> {
     if enabled {
         // Disable fly mode when entering walk mode.
-        *state.fly_mode.lock() = false;
-        state.camera.lock().is_fly_mode = false;
+        *state.cam.fly_mode.lock() = false;
+        state.cam.camera.lock().is_fly_mode = false;
     }
-    *state.walk_mode.lock() = enabled;
-    let mut cam = state.camera.lock();
+    *state.cam.walk_mode.lock() = enabled;
+    let mut cam = state.cam.camera.lock();
     cam.is_walk_mode = enabled;
     if enabled {
         // Initialize walk physics from current camera position.
         let eye = cam.target + cam.spherical.to_offset();
         let feet = glam::Vec3::new(eye.x, eye.y - camera::WALK_EYE_HEIGHT, eye.z);
-        *state.walk_physics.lock() = camera::WalkPhysicsState {
+        *state.cam.walk_physics.lock() = camera::WalkPhysicsState {
             feet_pos: feet,
             vel_y: 0.0,
             on_ground: false,
         };
-        *state.walk_last_physics.lock() = None;
+        *state.cam.walk_last_physics.lock() = None;
         drop(cam);
         wake_viewport_loop(&app);
     }
@@ -1013,8 +1013,8 @@ pub(crate) fn sync_fly_input(
     state: State<'_, Arc<ViewerState>>,
     args: SyncFlyInputArgs,
 ) -> Result<(), String> {
-    let fly = *state.fly_mode.lock();
-    let walk = *state.walk_mode.lock();
+    let fly = *state.cam.fly_mode.lock();
+    let walk = *state.cam.walk_mode.lock();
     if !fly && !walk {
         return Ok(());
     }
@@ -1025,7 +1025,7 @@ pub(crate) fn sync_fly_input(
         1.0
     };
     let has_movement = args.forward != 0.0 || args.right != 0.0 || args.up != 0.0 || args.jump;
-    *state.fly_input.lock() = FlyInputState {
+    *state.cam.fly_input.lock() = FlyInputState {
         forward: args.forward,
         right: args.right,
         up: args.up,
@@ -1051,18 +1051,18 @@ pub(crate) fn camera_fly_look(
     state: State<'_, Arc<ViewerState>>,
     args: FlyLookArgs,
 ) -> Result<(), String> {
-    if !*state.fly_mode.lock() && !*state.walk_mode.lock() {
+    if !*state.cam.fly_mode.lock() && !*state.cam.walk_mode.lock() {
         return Ok(());
     }
     let vh = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(());
         };
         let (_, h) = viewer.viewport_size();
         h as f32
     };
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.fly_look_rotate_screen(args.dx, args.dy, vh.max(1.0));
     wake_viewport_loop(&app);
     Ok(())
@@ -1084,7 +1084,7 @@ pub(crate) fn voxel_pick_probe(
     args: PickAtScreen,
 ) -> Result<bool, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(false);
         };
@@ -1092,15 +1092,15 @@ pub(crate) fn voxel_pick_probe(
         (w as f32, h as f32)
     };
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
-    let fg = state.current_file.lock();
-    let vm = state.voxel_map.lock();
+    let fg = state.file.current_file.lock();
+    let vm = state.file.voxel_map.lock();
     let Some(file) = fg.as_ref() else {
         return Ok(false);
     };
     let Some(vmap) = vm.as_ref() else {
         return Ok(false);
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     Ok(voxel_edit::probe_solid_hit(file, vmap, &cam, w, h, sx, sy))
 }
 
@@ -1112,22 +1112,22 @@ pub(crate) fn terrain_surface_y_at_screen(
     ny: f32,
 ) -> Result<Option<i32>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(None);
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let fg = state.current_file.lock();
+    let fg = state.file.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Ok(None);
     };
-    let vm = state.voxel_map.lock();
+    let vm = state.file.voxel_map.lock();
     let Some(vmap) = vm.as_ref() else {
         return Ok(None);
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let (sx, sy) = viewport_texels_from_norm(nx, ny, w, h);
     let c = voxel_edit::anchor_for_stroke_edit(
         voxel_edit::EditTool::Remove,
@@ -1235,7 +1235,7 @@ pub(crate) fn ping_cursor_pick(
     args: PingCursorPickArgs,
 ) -> Result<PingCursorPickResult, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(PingCursorPickResult {
                 ok: false,
@@ -1247,10 +1247,10 @@ pub(crate) fn ping_cursor_pick(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let mode = *state.preview_mode.lock();
+    let mode = *state.preview.preview_mode.lock();
     let coords = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(PingCursorPickResult {
                 ok: false,
@@ -1267,7 +1267,7 @@ pub(crate) fn ping_cursor_pick(
                 z: None,
             });
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         pick_cell_for_ping(mode, file, vmap, &cam, w, h, sx, sy)
     };
@@ -1309,14 +1309,14 @@ pub(crate) fn world_to_viewport_pixels(
     args: WorldPointArgs,
 ) -> Result<Option<(f32, f32)>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(None);
         };
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     Ok(voxel_edit::world_to_viewport_pixels(
         &cam, w, h, args.x, args.y, args.z,
     ))
@@ -1339,7 +1339,7 @@ pub(crate) fn project_world_point(
     args: WorldPointArgs,
 ) -> Result<ProjectWorldPointResult, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(ProjectWorldPointResult {
                 on_screen: false,
@@ -1352,7 +1352,7 @@ pub(crate) fn project_world_point(
         let (w, h) = viewer.viewport_size();
         (w as f32, h as f32)
     };
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let view = cam.view_matrix();
     let proj = cam.proj_matrix(w.max(1.0), h.max(1.0));
     let vp = proj * view;
@@ -1407,7 +1407,7 @@ pub(crate) fn collab_peer_labels(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<Vec<PeerLabel>, String> {
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(vec![]);
         };
@@ -1417,7 +1417,7 @@ pub(crate) fn collab_peer_labels(
     if w <= 0.0 || h <= 0.0 {
         return Ok(vec![]);
     }
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let c = state.collab.lock();
     if !c.is_active() {
         return Ok(vec![]);

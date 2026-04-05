@@ -1424,6 +1424,9 @@ fn build_mesh_mapped_inner(
                 individual = cells;
             }
 
+            // Match `mesh_greedy.wgsl` pass 1: outer `vv`, inner `u` → row-major in (cu,cv).
+            mergeable.sort_unstable_by_key(|&(cu, cv)| (cv, cu));
+
             let merged = greedy_merge(&mergeable);
             let ccw = if n.x != 0.0 {
                 n.x > 0.0
@@ -1936,6 +1939,59 @@ impl PreviewInstancedResult {
             extra_wire: MeshBuffers::default(),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// GPU compute preview path (large strokes / dense generators)
+// ---------------------------------------------------------------------------
+
+/// Union-size threshold above which the GPU compute path is preferred.
+pub const PREVIEW_COMPUTE_THRESHOLD: usize = 10_000;
+/// Maximum bounding-box extent per axis for the GPU compute path.
+/// If any dimension exceeds this value, falls back to the CPU instanced path.
+pub const PREVIEW_COMPUTE_MAX_BBOX: u32 = 512;
+/// Maximum number of shell instances the GPU output buffers can hold (solid and
+/// wire each).  Caps VRAM at `MAX_PREVIEW_SHELL_INSTANCES × 80 B` per buffer.
+/// A sphere of radius ≈ 200 has ~500 K shell voxels; compact shapes are much
+/// smaller (100³ solid ≈ 60 K shell).
+pub const MAX_PREVIEW_SHELL_INSTANCES: u32 = 1 << 19; // 524_288 → 40 MB per buffer
+/// Voxel count above which per-cube wireframe is suppressed in the GPU path.
+/// At this scale the wire grid is visual noise and halving the emit work matters.
+pub const PREVIEW_NO_WIRE_THRESHOLD: u32 = 100_000;
+
+/// Raw voxel upload for the GPU compute shell-filter path.
+///
+/// Each packed voxel u32 encodes:
+/// - bits  0– 8: dx = (cx – bbox_min[0]) in [0, 511]
+/// - bits  9–17: dy = (cy – bbox_min[1]) in [0, 511]
+/// - bits 18–26: dz = (cz – bbox_min[2]) in [0, 511]
+/// - bits 27–30: object index into `obj_matrices` (0–15)
+/// - bit    31:  is_ghost (voxel is air; cursor is painting into empty space)
+///
+/// Colors are pre-multiplied by ghost dimming on the CPU and stored as
+/// `[r, g, b, mat_kind]` vecs.  The compute shader picks the colour based
+/// on the `is_ghost` bit.
+#[derive(Clone)]
+pub struct RawVoxelUpload {
+    /// Packed voxel descriptors (see bit layout above).
+    pub packed_voxels: Vec<u32>,
+    /// Column-major 4×4 matrices for each unique object in the stroke (max 16).
+    /// Stored as `[[col0_xyzw], [col1_xyzw], [col2_xyzw], [col3_xyzw]]`.
+    pub obj_matrices: Vec<[[f32; 4]; 4]>,
+    /// Absolute voxel-grid coordinate of the bbox minimum corner.
+    pub bbox_min: [i32; 3],
+    /// Bounding-box extents (each ≤ `PREVIEW_COMPUTE_MAX_BBOX`).
+    pub bbox_size: [u32; 3],
+    /// `[r, g, b, fill_mat_kind]` for solid non-ghost instances.
+    pub solid_color: [f32; 4],
+    /// `[r, g, b, fill_mat_kind]` for solid ghost instances.
+    pub solid_ghost_color: [f32; 4],
+    /// `[r, g, b, wire_mat_kind]` for wire non-ghost instances.
+    pub wire_color: [f32; 4],
+    /// `[r, g, b, wire_mat_kind]` for wire ghost instances.
+    pub wire_ghost_color: [f32; 4],
+    /// Cube half-extent used for the prototype mesh (typically 0.5).
+    pub cube_half: f32,
 }
 
 /// Unit solid cube prototype at the origin with the given half-extent.

@@ -344,6 +344,9 @@ impl WgpuViewer {
                 ext,
             );
 
+            // ── GPU compute preview shell filter (if pending) ─────────────────
+            self.dispatch_preview_compute_if_needed(&mut encoder);
+
             // Overlay pass: draw editing overlays (preview, selection, gizmo, grid) on top.
             // Depth is cleared fresh so overlays z-test against each other but not the scene.
             // All overlay pipelines write to two color targets (HDR + normal) but the normal
@@ -414,6 +417,9 @@ impl WgpuViewer {
                 pass.set_bind_group(0, &self.bind_shadow_pass, &[]);
                 self.draw_indexed_mesh_all(&mut pass);
             }
+
+            // ── GPU compute preview shell filter (if pending) ─────────────────
+            self.dispatch_preview_compute_if_needed(&mut encoder);
 
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

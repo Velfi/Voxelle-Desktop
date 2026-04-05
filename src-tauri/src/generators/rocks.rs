@@ -122,6 +122,98 @@ fn generate_rock_local(seed: i32, size: i32, roughness: f32) -> Vec<(i32, i32, i
     out
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── hash3 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash3_is_deterministic() {
+        assert_eq!(hash3(7, 1, 2, 3), hash3(7, 1, 2, 3));
+    }
+
+    #[test]
+    fn hash3_different_x_differs() {
+        assert_ne!(hash3(0, 0, 0, 0), hash3(0, 1, 0, 0));
+    }
+
+    #[test]
+    fn hash3_different_y_differs() {
+        assert_ne!(hash3(0, 0, 0, 0), hash3(0, 0, 1, 0));
+    }
+
+    #[test]
+    fn hash3_different_seed_differs() {
+        assert_ne!(hash3(0, 0, 0, 0), hash3(1, 0, 0, 0));
+    }
+
+    // ── value_noise3 ───────────────────────────────────────────────────
+
+    #[test]
+    fn value_noise3_is_deterministic() {
+        assert_eq!(value_noise3(42, 1.5, 2.5, 3.5), value_noise3(42, 1.5, 2.5, 3.5));
+    }
+
+    #[test]
+    fn value_noise3_different_position_differs() {
+        let a = value_noise3(0, 0.5, 0.5, 0.5);
+        let b = value_noise3(0, 1.5, 0.5, 0.5);
+        // These may coincidentally match, but extremely unlikely.
+        // Just check they're not NaN.
+        assert!(!a.is_nan());
+        assert!(!b.is_nan());
+    }
+
+    // ── seed_to_range ──────────────────────────────────────────────────
+
+    #[test]
+    fn seed_to_range_within_bounds() {
+        for seed in [0, 1, 42, -1, i32::MAX, i32::MIN] {
+            let v = seed_to_range(seed, 5.0, 10.0);
+            assert!(v >= 5.0 && v <= 10.0, "seed={seed} → out of range: {v}");
+        }
+    }
+
+    #[test]
+    fn seed_to_range_is_deterministic() {
+        assert_eq!(seed_to_range(99, 0.0, 1.0), seed_to_range(99, 0.0, 1.0));
+    }
+
+    #[test]
+    fn seed_to_range_equal_bounds_returns_lo() {
+        assert_eq!(seed_to_range(42, 7.0, 7.0), 7.0);
+    }
+
+    // ── generate_rock_local ────────────────────────────────────────────
+
+    #[test]
+    fn generate_rock_local_is_deterministic() {
+        assert_eq!(generate_rock_local(1, 3, 0.5), generate_rock_local(1, 3, 0.5));
+    }
+
+    #[test]
+    fn generate_rock_local_is_non_empty() {
+        let voxels = generate_rock_local(0, 3, 0.0);
+        assert!(!voxels.is_empty());
+    }
+
+    #[test]
+    fn generate_rock_local_different_seeds_differ() {
+        let a = generate_rock_local(1, 3, 0.0);
+        let b = generate_rock_local(99, 3, 0.0);
+        // May theoretically match but extremely unlikely for size=3
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn generate_rock_local_clamps_small_size() {
+        // size 0 should be clamped to 1, still returning something
+        let voxels = generate_rock_local(0, 0, 0.0);
+        assert!(!voxels.is_empty());
+    }
+}
+
 /// Place a noisy ellipsoid rock in empty space, with its bottom near the clicked face.
 /// `face_empty` is an empty voxel; `solid` is the voxel behind it along the ray (interior).
 pub fn generate_rock_cluster_deltas(

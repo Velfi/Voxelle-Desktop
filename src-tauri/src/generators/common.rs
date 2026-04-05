@@ -108,6 +108,227 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// spiral distributions (branches, canopy scatter, etc.).
 pub const GOLDEN_ANGLE_RAD: f32 = std::f32::consts::PI * (3.0 - 2.236_068_f32);
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::f32::consts::{FRAC_PI_2, PI};
+
+    const EPS: f32 = 1e-5;
+
+    fn approx_eq(a: f32, b: f32) -> bool {
+        (a - b).abs() < EPS
+    }
+
+    fn v3_approx_eq(a: V3, b: V3) -> bool {
+        approx_eq(a[0], b[0]) && approx_eq(a[1], b[1]) && approx_eq(a[2], b[2])
+    }
+
+    // ── v3 arithmetic ──────────────────────────────────────────────────
+
+    #[test]
+    fn v3_add_basic() {
+        assert!(v3_approx_eq(v3_add([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), [5.0, 7.0, 9.0]));
+    }
+
+    #[test]
+    fn v3_sub_basic() {
+        assert!(v3_approx_eq(v3_sub([4.0, 5.0, 6.0], [1.0, 2.0, 3.0]), [3.0, 3.0, 3.0]));
+    }
+
+    #[test]
+    fn v3_scale_basic() {
+        assert!(v3_approx_eq(v3_scale([1.0, 2.0, 3.0], 2.0), [2.0, 4.0, 6.0]));
+    }
+
+    #[test]
+    fn v3_dot_perpendicular_is_zero() {
+        assert!(approx_eq(v3_dot([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), 0.0));
+    }
+
+    #[test]
+    fn v3_dot_parallel_is_length_product() {
+        assert!(approx_eq(v3_dot([3.0, 0.0, 0.0], [5.0, 0.0, 0.0]), 15.0));
+    }
+
+    #[test]
+    fn v3_cross_unit_axes() {
+        // X × Y = Z
+        assert!(v3_approx_eq(v3_cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]));
+        // Y × Z = X
+        assert!(v3_approx_eq(v3_cross([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn v3_cross_parallel_is_zero() {
+        let z = v3_cross([2.0, 0.0, 0.0], [3.0, 0.0, 0.0]);
+        assert!(v3_approx_eq(z, [0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn v3_len_pythagorean() {
+        assert!(approx_eq(v3_len([3.0, 4.0, 0.0]), 5.0));
+    }
+
+    #[test]
+    fn v3_normalize_produces_unit_vector() {
+        let n = v3_normalize([3.0, 4.0, 0.0]);
+        assert!(approx_eq(v3_len(n), 1.0));
+        assert!(approx_eq(n[0], 0.6));
+        assert!(approx_eq(n[1], 0.8));
+    }
+
+    #[test]
+    fn v3_normalize_zero_returns_fallback() {
+        let n = v3_normalize([0.0, 0.0, 0.0]);
+        // Fallback is [0, 1, 0]
+        assert!(v3_approx_eq(n, [0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn v3_lerp_midpoint() {
+        let mid = v3_lerp([0.0, 0.0, 0.0], [2.0, 4.0, 6.0], 0.5);
+        assert!(v3_approx_eq(mid, [1.0, 2.0, 3.0]));
+    }
+
+    #[test]
+    fn v3_lerp_endpoints() {
+        let a = [1.0, 2.0, 3.0];
+        let b = [4.0, 5.0, 6.0];
+        assert!(v3_approx_eq(v3_lerp(a, b, 0.0), a));
+        assert!(v3_approx_eq(v3_lerp(a, b, 1.0), b));
+    }
+
+    #[test]
+    fn v3_round_basic() {
+        // -0.4 rounds toward zero → 0; 2.6 rounds up → 3
+        assert_eq!(v3_round([1.4, 2.6, -0.4]), (1, 3, 0));
+    }
+
+    #[test]
+    fn v3_rotate_around_90_degrees() {
+        // Rotate [1, 0, 0] around Z by 90° → should be near [0, 1, 0].
+        let result = v3_rotate_around([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], FRAC_PI_2);
+        assert!(v3_approx_eq(result, [0.0, 1.0, 0.0]));
+    }
+
+    #[test]
+    fn v3_rotate_around_preserves_length() {
+        let v = [1.0, 2.0, 3.0];
+        let axis = v3_normalize([1.0, 1.0, 0.0]);
+        let rotated = v3_rotate_around(v, axis, PI / 3.0);
+        assert!(approx_eq(v3_len(rotated), v3_len(v)));
+    }
+
+    // ── Scalar helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn smoothstep_at_edges_and_midpoint() {
+        assert!(approx_eq(smoothstep(0.0, 1.0, 0.0), 0.0));
+        assert!(approx_eq(smoothstep(0.0, 1.0, 1.0), 1.0));
+        // At t=0.5: smoothstep = 3*0.25 - 2*0.125 = 0.75 - 0.25 = 0.5
+        assert!(approx_eq(smoothstep(0.0, 1.0, 0.5), 0.5));
+    }
+
+    #[test]
+    fn smoothstep_clamps_outside_range() {
+        assert!(approx_eq(smoothstep(0.0, 1.0, -1.0), 0.0));
+        assert!(approx_eq(smoothstep(0.0, 1.0, 2.0), 1.0));
+    }
+
+    #[test]
+    fn lerp_basic() {
+        assert!(approx_eq(lerp(0.0, 10.0, 0.5), 5.0));
+        assert!(approx_eq(lerp(0.0, 10.0, 0.0), 0.0));
+        assert!(approx_eq(lerp(0.0, 10.0, 1.0), 10.0));
+    }
+
+    // ── hash3 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn hash3_is_deterministic() {
+        assert_eq!(hash3(1, 2, 3, 42), hash3(1, 2, 3, 42));
+    }
+
+    #[test]
+    fn hash3_different_coords_differ() {
+        assert_ne!(hash3(0, 0, 0, 0), hash3(1, 0, 0, 0));
+        assert_ne!(hash3(0, 0, 0, 0), hash3(0, 1, 0, 0));
+    }
+
+    #[test]
+    fn hash3_different_seeds_differ() {
+        assert_ne!(hash3(0, 0, 0, 0), hash3(0, 0, 0, 1));
+    }
+
+    // ── Rng ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn rng_is_deterministic() {
+        let v1 = Rng::new(42).next_f32();
+        let v2 = Rng::new(42).next_f32();
+        assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn rng_different_seeds_differ() {
+        assert_ne!(Rng::new(0).next_f32(), Rng::new(1).next_f32());
+    }
+
+    #[test]
+    fn rng_f32_in_range() {
+        let mut rng = Rng::new(99);
+        for _ in 0..100 {
+            let v = rng.next_f32();
+            assert!(v >= 0.0 && v < 1.0, "next_f32 out of [0,1): {v}");
+        }
+    }
+
+    #[test]
+    fn rng_signed_f32_in_range() {
+        let mut rng = Rng::new(7);
+        for _ in 0..100 {
+            let v = rng.next_signed_f32();
+            assert!(v >= -1.0 && v < 1.0, "next_signed_f32 out of [-1,1): {v}");
+        }
+    }
+
+    // ── PlacementFrame ────────────────────────────────────────────────
+
+    #[test]
+    fn placement_frame_axes_are_orthonormal() {
+        let f = PlacementFrame::from_normal((0, 0, 0), 0, 1, 0);
+        assert!(approx_eq(v3_len(f.up), 1.0));
+        assert!(approx_eq(v3_len(f.forward), 1.0));
+        assert!(approx_eq(v3_len(f.side), 1.0));
+        // Mutual orthogonality
+        assert!(approx_eq(v3_dot(f.up, f.forward), 0.0));
+        assert!(approx_eq(v3_dot(f.up, f.side), 0.0));
+        assert!(approx_eq(v3_dot(f.forward, f.side), 0.0));
+    }
+
+    #[test]
+    fn placement_frame_x_normal_orthonormal() {
+        let f = PlacementFrame::from_normal((5, 5, 5), 1, 0, 0);
+        assert!(approx_eq(v3_dot(f.up, f.forward), 0.0));
+        assert!(approx_eq(v3_dot(f.up, f.side), 0.0));
+    }
+
+    #[test]
+    fn placement_frame_local_to_world_origin_is_origin() {
+        let f = PlacementFrame::from_normal((3, 7, 2), 0, 1, 0);
+        let world = f.local_to_world([0.0, 0.0, 0.0]);
+        assert!(v3_approx_eq(world, f.origin));
+    }
+
+    #[test]
+    fn placement_frame_local_to_world_forward_offset() {
+        let f = PlacementFrame::from_normal((0, 0, 0), 0, 1, 0);
+        let world = f.local_to_world([1.0, 0.0, 0.0]);
+        let expected = v3_add(f.origin, f.forward);
+        assert!(v3_approx_eq(world, expected));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Deterministic spatial hash
 // ---------------------------------------------------------------------------

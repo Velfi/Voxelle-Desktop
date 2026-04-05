@@ -190,7 +190,7 @@ pub(crate) fn collab_push_camera(
     if !c.is_active() {
         return Ok(());
     }
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let presence = collab::CameraPresence {
         target: [cam.target.x, cam.target.y, cam.target.z],
         radius: cam.smooth_spherical.radius,
@@ -235,7 +235,7 @@ pub(crate) fn collab_snap_camera(
     let Some(pr) = pr else {
         return Err("no camera data for peer".into());
     };
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.target = glam::Vec3::new(pr.target[0], pr.target[1], pr.target[2]);
     cam.spherical.radius = pr.radius;
     cam.spherical.theta = pr.theta;

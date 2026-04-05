@@ -2,23 +2,15 @@
 // Extracted from App.tsx to reduce file size.
 
 import { useRef } from "react";
+import { useToolState } from "./ToolStateContext";
 import type {
   InteractionMode,
-  ToolsPane,
-  SculptStrokeModeApi,
-  GeneratorKindId,
   PaintColorDistrib,
   PaintColorMode,
   FbmParams,
   GradientParams,
   DitherParams,
 } from "./types";
-import type {
-  DrawStrokeModeApi,
-  StrokeDrawStyle,
-  StrokeFamilyVariant,
-  SelectionMethod,
-} from "./drawToolModel";
 import { selectionMethodToState } from "./drawToolModel";
 import { MATERIAL_OPTIONS } from "./constants";
 import { MATERIAL_BUILTIN_PALETTE_HEX } from "./materialBuiltinPalette";
@@ -267,6 +259,7 @@ export function PaletteSwatches(props: {
   const { activeColor, selectedColors, setActiveColor, setSelectedColors, disabled, palette } =
     props;
   const dragStartIdxRef = useRef<number | null>(null);
+  const dragEndIdxRef = useRef<number | null>(null);
   const isDraggingRef = useRef(false);
   const shiftHeldRef = useRef(false);
 
@@ -306,6 +299,7 @@ export function PaletteSwatches(props: {
     const idx = getSwatchIndex(swatchEl);
     if (idx < 0) return;
     isDraggingRef.current = true;
+    dragEndIdxRef.current = idx;
     const newRange = selectRange(
       dragStartIdxRef.current,
       idx,
@@ -318,8 +312,14 @@ export function PaletteSwatches(props: {
     if (disabled || dragStartIdxRef.current === null) return;
     const startIdx = dragStartIdxRef.current;
     dragStartIdxRef.current = null;
-    if (!isDraggingRef.current) {
-      // Single click
+    const isSingleSwatch =
+      !isDraggingRef.current ||
+      dragEndIdxRef.current === null ||
+      dragEndIdxRef.current === startIdx;
+    dragEndIdxRef.current = null;
+    isDraggingRef.current = false;
+    if (isSingleSwatch) {
+      // Single click or drag that stayed on one swatch
       const rgb = Number.parseInt(palette[startIdx]!.slice(1), 16);
       if (e.shiftKey) {
         // Toggle in selected list
@@ -336,7 +336,6 @@ export function PaletteSwatches(props: {
         setActiveColor(rgb);
       }
     }
-    isDraggingRef.current = false;
   }
 
   const selectedSet = new Set(selectedColors);
@@ -467,21 +466,25 @@ function SymmetryColorSidebarSections(props: {
             <span className="sidebar-mode-label">Eyedropper</span>
           </button>
         </div>
-        {selectedColors.length > 0 && (
-          <div className="multi-color-hint">
-            {selectedColors.length} colors selected
-            {selectedColors.length > 1 &&
-              ` · ${paintColorDistrib.mode === "whiteNoise" ? "white noise" : paintColorDistrib.mode === "randomSingle" ? "random single" : paintColorDistrib.mode === "fbmNoise" ? "FBM" : paintColorDistrib.mode === "gradient" ? "gradient" : "dither"}`}
-            <button
-              type="button"
-              className="multi-color-clear-btn"
-              onClick={() => setSelectedColors([])}
-              title="Clear multi-color selection"
-            >
-              ✕
-            </button>
-          </div>
-        )}
+        <div className="multi-color-hint">
+          {selectedColors.length > 0 ? (
+            <>
+              {selectedColors.length} colors selected
+              {selectedColors.length > 1 &&
+                ` · ${paintColorDistrib.mode === "whiteNoise" ? "white noise" : paintColorDistrib.mode === "randomSingle" ? "random single" : paintColorDistrib.mode === "fbmNoise" ? "FBM" : paintColorDistrib.mode === "gradient" ? "gradient" : "dither"}`}
+              <button
+                type="button"
+                className="multi-color-clear-btn"
+                onClick={() => setSelectedColors([])}
+                title="Clear multi-color selection"
+              >
+                ✕
+              </button>
+            </>
+          ) : (
+            <span className="multi-color-hint-placeholder">Shift+drag to multi-select</span>
+          )}
+        </div>
         <PaletteSwatches
           activeColor={activeColor}
           selectedColors={selectedColors}
@@ -521,54 +524,9 @@ export interface ToolsSidebarProps {
   toolPanePos: { x: number; y: number };
   onToolPaneDragDown: (e: React.PointerEvent) => void;
 
-  // Active tool pane
-  toolsPane: ToolsPane;
-  setToolsPane: (p: ToolsPane) => void;
-
-  // Interaction
-  interactionMode: InteractionMode;
-  setInteractionMode: (m: InteractionMode) => void;
-
-  // Fly
-  flySpeed: 1 | 2 | 4;
-  setFlySpeed: (s: 1 | 2 | 4) => void;
-
-  // Selection method state (draw stroke model)
-  selectionMethod: SelectionMethod;
-  setDrawStrokeMode: (m: DrawStrokeModeApi) => void;
-  setStrokeDrawStyle: (s: StrokeDrawStyle) => void;
-  setSprayDensity: (d: number) => void;
-  setStrokeFamilyVariant: (v: StrokeFamilyVariant) => void;
-
   // Selection / stamp
   selectionCount: number;
   stampBookPatternActive: boolean;
-
-  // Color / symmetry
-  activeColor: number;
-  setActiveColor: (n: number) => void;
-  selectedColors: number[];
-  setSelectedColors: (c: number[]) => void;
-  paintColorDistrib: PaintColorDistrib;
-  setPaintColorDistrib: (d: PaintColorDistrib) => void;
-  mirrorX: boolean;
-  setMirrorX: (v: boolean) => void;
-  mirrorY: boolean;
-  setMirrorY: (v: boolean) => void;
-  mirrorZ: boolean;
-  setMirrorZ: (v: boolean) => void;
-
-  // Material
-  activeMaterial: string;
-  setActiveMaterial: (m: string) => void;
-
-  // Sculpt
-  sculptStrokeMode: SculptStrokeModeApi;
-  setSculptStrokeMode: (m: SculptStrokeModeApi) => void;
-
-  // Generators
-  generatorKind: GeneratorKindId;
-  setGeneratorKind: (k: GeneratorKindId) => void;
 
   // Generator phase handles
   ropePhase: SidebarPhaseHandle;
@@ -614,37 +572,8 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
     setSidebarExpanded,
     toolPanePos,
     onToolPaneDragDown,
-    toolsPane,
-    setToolsPane,
-    interactionMode,
-    setInteractionMode,
-    flySpeed,
-    setFlySpeed,
-    selectionMethod,
-    setDrawStrokeMode,
-    setStrokeDrawStyle,
-    setSprayDensity,
-    setStrokeFamilyVariant,
     selectionCount,
     stampBookPatternActive,
-    activeColor,
-    setActiveColor,
-    selectedColors,
-    setSelectedColors,
-    paintColorDistrib,
-    setPaintColorDistrib,
-    mirrorX,
-    setMirrorX,
-    mirrorY,
-    setMirrorY,
-    mirrorZ,
-    setMirrorZ,
-    activeMaterial,
-    setActiveMaterial,
-    sculptStrokeMode,
-    setSculptStrokeMode,
-    generatorKind,
-    setGeneratorKind,
     ropePhase,
     clothPhase,
     rocksPhase,
@@ -668,6 +597,38 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
     colorPaletteFloating,
     setColorPaletteFloating,
   } = props;
+
+  const {
+    toolsPane,
+    setToolsPane,
+    interactionMode,
+    setInteractionMode,
+    flySpeed,
+    setFlySpeed,
+    selectionMethod,
+    setDrawStrokeMode,
+    setStrokeDrawStyle,
+    setSprayDensity,
+    setStrokeFamilyVariant,
+    activeColor,
+    setActiveColor,
+    selectedColors,
+    setSelectedColors,
+    paintColorDistrib,
+    setPaintColorDistrib,
+    mirrorX,
+    setMirrorX,
+    mirrorY,
+    setMirrorY,
+    mirrorZ,
+    setMirrorZ,
+    activeMaterial,
+    setActiveMaterial,
+    sculptStrokeMode,
+    setSculptStrokeMode,
+    generatorKind,
+    setGeneratorKind,
+  } = useToolState();
 
   if (!showEditorChrome) return null;
 
@@ -947,6 +908,7 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                           <button
                             key={m}
                             type="button"
+                            data-mode={m}
                             className={
                               interactionMode === m
                                 ? "sidebar-mode-btn is-active"
@@ -1563,6 +1525,7 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                       <button
                         key={m}
                         type="button"
+                        data-mode={m}
                         className={`sidebar-collapsed-sub-btn${interactionMode === m ? " is-active" : ""}`}
                         disabled={loading || workBusy}
                         onClick={() => setInteractionMode(m)}

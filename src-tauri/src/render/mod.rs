@@ -35,6 +35,12 @@ mod gpu {
     pub mod mesh_greedy {
         pub const WGSL: &str = include_str!("gpu/mesh_greedy.wgsl");
     }
+    pub mod preview_fill_occ {
+        pub const WGSL: &str = include_str!("gpu/preview_fill_occ.wgsl");
+    }
+    pub mod preview_shell_emit {
+        pub const WGSL: &str = include_str!("gpu/preview_shell_emit.wgsl");
+    }
     pub mod collab_peer_lines {
         pub const WGSL: &str = include_str!("collab_peer_lines.wgsl");
     }
@@ -411,6 +417,49 @@ pub struct WgpuViewer {
     pub(crate) gen_preview_solid_instance_count: u32,
     pub(crate) gen_preview_wire_instance_buf: Option<wgpu::Buffer>,
     pub(crate) gen_preview_wire_instance_count: u32,
+    // GPU compute preview (large-stroke shell filter)
+    /// Raw packed voxel positions uploaded from CPU; STORAGE | COPY_DST.
+    pub(crate) preview_compute_raw_buf: Option<wgpu::Buffer>,
+    /// Object matrices (up to 16 × mat4x4); STORAGE | COPY_DST.
+    pub(crate) preview_compute_obj_matrix_buf: Option<wgpu::Buffer>,
+    /// Flat u32 bitfield occupancy grid; STORAGE | COPY_DST.
+    pub(crate) preview_compute_occupancy_buf: Option<wgpu::Buffer>,
+    /// Output PreviewInstance array for solid cubes; STORAGE | VERTEX.
+    pub(crate) preview_compute_solid_instance_buf: Option<wgpu::Buffer>,
+    /// Output PreviewInstance array for wireframe cubes; STORAGE | VERTEX.
+    pub(crate) preview_compute_wire_instance_buf: Option<wgpu::Buffer>,
+    /// Two DrawIndexedIndirect structs (solid @ offset 0, wire @ offset 20); INDIRECT | STORAGE | COPY_DST.
+    pub(crate) preview_compute_indirect_buf: Option<wgpu::Buffer>,
+    /// PreviewUniforms uniform buffer (112 bytes); UNIFORM | COPY_DST.
+    pub(crate) preview_compute_uniform_buf: Option<wgpu::Buffer>,
+    /// Compute bind groups: [0] = fill_occ pass, [1] = shell_emit pass.
+    pub(crate) preview_compute_bgs: Option<[wgpu::BindGroup; 2]>,
+    /// Prototype VB for the GPU compute path (unit solid cube at half=0.5).
+    pub(crate) preview_compute_solid_proto_vb: Option<wgpu::Buffer>,
+    pub(crate) preview_compute_solid_proto_ib: Option<wgpu::Buffer>,
+    pub(crate) preview_compute_solid_proto_idx_count: u32,
+    /// Prototype VB for wireframe cubes.
+    pub(crate) preview_compute_wire_proto_vb: Option<wgpu::Buffer>,
+    pub(crate) preview_compute_wire_proto_ib: Option<wgpu::Buffer>,
+    pub(crate) preview_compute_wire_proto_idx_count: u32,
+    /// Number of voxels in the current compute upload (for dispatch sizing).
+    pub(crate) preview_compute_voxel_count: u32,
+    /// Allocated capacity (in voxels) of `preview_compute_raw_buf`.
+    pub(crate) preview_compute_capacity: u32,
+    /// Allocated capacity (in instances) of the solid instance buffer
+    /// (capped at [`greedy_mesh::MAX_PREVIEW_SHELL_INSTANCES`]).
+    pub(crate) preview_compute_shell_capacity: u32,
+    /// Allocated capacity (in instances) of the wire instance buffer.
+    /// Shrinks to 1 when skip-wire mode is active.
+    pub(crate) preview_compute_wire_capacity: u32,
+    /// Whether the wire instance buffer was last allocated in skip-wire mode.
+    pub(crate) preview_compute_is_skip_wire: bool,
+    /// Allocated occupancy word count (ceil(bbox_vol / 32)).
+    pub(crate) preview_compute_occ_word_count: u32,
+    /// Set to `true` when new raw voxel data has been uploaded; cleared after the
+    /// first frame that dispatches the compute passes.
+    pub(crate) preview_needs_compute: bool,
+
     pub(crate) collab_line_vertex_buffer: Option<wgpu::Buffer>,
     pub(crate) collab_line_vertex_count: u32,
 
@@ -451,6 +500,13 @@ pub struct WgpuViewer {
 
     pub(crate) mesh_greedy_pipeline: Option<wgpu::ComputePipeline>,
     pub(crate) mesh_greedy_bind_layout: Option<wgpu::BindGroupLayout>,
+    /// Compute pipeline for pass 1: fill occupancy bitfield from raw voxels.
+    pub(crate) pipeline_preview_fill_occ: wgpu::ComputePipeline,
+    /// Compute pipeline for pass 2: shell emit → write PreviewInstances.
+    pub(crate) pipeline_preview_shell_emit: wgpu::ComputePipeline,
+    /// Bind group layouts for the two compute passes.
+    pub(crate) preview_compute_fill_layout: wgpu::BindGroupLayout,
+    pub(crate) preview_compute_emit_layout: wgpu::BindGroupLayout,
     /// Must match [`MESH_GREEDY_PIPELINE_LAYOUT_VERSION`]; clears cached compute pipeline when bumped.
     pub(crate) mesh_greedy_pl_version: u32,
     pub(crate) mesh_greedy_pool: MeshGreedyPool,
@@ -704,6 +760,13 @@ impl WgpuViewer {
             pipeline_gen_preview_inst_occluded,
             pipeline_gen_preview_inst_front_wire,
         } = create_scene_pipelines(&device, &scene_layout0);
+
+        let PreviewComputePipelines {
+            pipeline_preview_fill_occ,
+            pipeline_preview_shell_emit,
+            preview_compute_fill_layout,
+            preview_compute_emit_layout,
+        } = create_preview_compute_pipelines(&device);
 
         let OverlayPipelines {
             pipeline_collab_lines_occluded,
@@ -1528,6 +1591,27 @@ impl WgpuViewer {
             gen_preview_solid_instance_count: 0,
             gen_preview_wire_instance_buf: None,
             gen_preview_wire_instance_count: 0,
+            preview_compute_raw_buf: None,
+            preview_compute_obj_matrix_buf: None,
+            preview_compute_occupancy_buf: None,
+            preview_compute_solid_instance_buf: None,
+            preview_compute_wire_instance_buf: None,
+            preview_compute_indirect_buf: None,
+            preview_compute_uniform_buf: None,
+            preview_compute_bgs: None,
+            preview_compute_solid_proto_vb: None,
+            preview_compute_solid_proto_ib: None,
+            preview_compute_solid_proto_idx_count: 0,
+            preview_compute_wire_proto_vb: None,
+            preview_compute_wire_proto_ib: None,
+            preview_compute_wire_proto_idx_count: 0,
+            preview_compute_voxel_count: 0,
+            preview_compute_capacity: 0,
+            preview_compute_shell_capacity: 0,
+            preview_compute_wire_capacity: 0,
+            preview_compute_is_skip_wire: false,
+            preview_compute_occ_word_count: 0,
+            preview_needs_compute: false,
             collab_line_vertex_buffer: None,
             collab_line_vertex_count: 0,
 
@@ -1564,6 +1648,10 @@ impl WgpuViewer {
             mesh_greedy_pl_version: 0,
             mesh_greedy_pool: MeshGreedyPool::default(),
             last_mesh_route: String::new(),
+            pipeline_preview_fill_occ,
+            pipeline_preview_shell_emit,
+            preview_compute_fill_layout,
+            preview_compute_emit_layout,
 
             // ── Glyphon (initialized below) ──
             glyphon_font_system,

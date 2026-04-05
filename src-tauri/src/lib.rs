@@ -489,9 +489,9 @@ fn debug_agent_ndjson_log(payload: serde_json::Value) {
 fn get_viewport_cursor_debug(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<ViewportCursorDebug, String> {
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let (vw, vh, wf, hf, viewport_x, viewport_y, surface_w, surface_h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Err("viewer not ready".into());
         };
@@ -508,7 +508,7 @@ fn get_viewport_cursor_debug(
             sh,
         )
     };
-    let pc = state.preview_cursor.lock();
+    let pc = state.preview.preview_cursor.lock();
     let (
         preview_nx,
         preview_ny,
@@ -563,8 +563,8 @@ fn get_viewport_cursor_debug(
     // #endregion
     let (proj_cube_nx, proj_cube_ny, proj_center_nx, proj_center_ny) = match (texel_sx, texel_sy) {
         (Some(sx), Some(sy)) => {
-            let file_guard = state.current_file.lock();
-            let vmap_guard = state.voxel_map.lock();
+            let file_guard = state.file.current_file.lock();
+            let vmap_guard = state.file.voxel_map.lock();
             match (file_guard.as_ref(), vmap_guard.as_ref()) {
                 (Some(file), Some(vmap)) if !file.voxels.is_empty() => {
                     let grid_size = voxel_edit::effective_ray_grid_size(file);
@@ -676,85 +676,99 @@ pub fn run() {
     let headless_server_port: Option<u16> = None;
 
     let viewer_state = Arc::new(ViewerState {
-        viewer: Mutex::new(None),
-        camera: Mutex::new(OrbitCamera::new()),
-        file_label: Mutex::new(String::new()),
-        current_file: Mutex::new(None),
-        voxel_map: Mutex::new(None),
-        preview_cursor: Mutex::new(None),
-        camera_dragging: AtomicBool::new(false),
-        preview_mode: Mutex::new(PreviewMode::Navigate),
-        preview_hover: Mutex::new(PreviewHoverContext::default()),
-        rendering_mode: Mutex::new(RenderingMode::Greedy),
-        fps: Mutex::new(FpsCounter {
-            period_start: None,
-            accum_frames: 0,
-            last_fps: 0,
-        }),
-        last_edit_perf: Mutex::new(None),
-        last_scene_bounds: Mutex::new(None),
-        mesh_refresh_generation: AtomicU64::new(0),
-        load_generation: AtomicU64::new(0),
-        chunk_mesh_inbox: Mutex::new(VecDeque::new()),
-        collab_edit_inbox: Mutex::new(VecDeque::new()),
-        deferred_spatial_cache: Mutex::new(None),
-        voxel_edit_stats_cache: Mutex::new(None),
-        solo_undo: Mutex::new(Vec::new()),
-        solo_redo: Mutex::new(Vec::new()),
-        stroke_active: Mutex::new(false),
-        stroke_buffer: Mutex::new(Vec::new()),
-        stroke_preview_union: Mutex::new(AHashSet::new()),
-        stroke_preview_last_args: Mutex::new(None),
-        stroke_preview_suppresses_hover: AtomicBool::new(false),
-        sculpt_stroke_replay: Mutex::new(Vec::new()),
-        extrude_ray_spine: Mutex::new(None),
+        gpu: GpuState {
+            viewer: Mutex::new(None),
+            rendering_mode: Mutex::new(RenderingMode::Greedy),
+            fps: Mutex::new(FpsCounter {
+                period_start: None,
+                accum_frames: 0,
+                last_fps: 0,
+            }),
+            last_edit_perf: Mutex::new(None),
+            last_scene_bounds: Mutex::new(None),
+            mesh_refresh_generation: AtomicU64::new(0),
+            load_generation: AtomicU64::new(0),
+            chunk_mesh_inbox: Mutex::new(VecDeque::new()),
+            deferred_spatial_cache: Mutex::new(None),
+            voxel_edit_stats_cache: Mutex::new(None),
+            overlay_mesh_generation: AtomicU64::new(0),
+            grid_overlay_cache_key: Mutex::new(None),
+            selection_overlay_cache_key: Mutex::new(None),
+            preview_overlay_cache_key: Mutex::new(None),
+            start_screen_logo_transparent: AtomicBool::new(true),
+            start_screen_light: AtomicBool::new(false),
+            viewport_cursor_debug_overlay: AtomicBool::new(false),
+            show_grid_borders: AtomicBool::new(false),
+        },
+        cam: CameraState {
+            camera: Mutex::new(OrbitCamera::new()),
+            camera_dragging: AtomicBool::new(false),
+            active_project: AtomicBool::new(false),
+            fly_mode: Mutex::new(false),
+            fly_input: Mutex::new(FlyInputState::default()),
+            fly_last_physics: Mutex::new(None),
+            walk_mode: Mutex::new(false),
+            walk_physics: Mutex::new(camera::WalkPhysicsState::default()),
+            walk_last_physics: Mutex::new(None),
+        },
+        file: FileState {
+            file_label: Mutex::new(String::new()),
+            current_file: Mutex::new(None),
+            voxel_map: Mutex::new(None),
+            solo_undo: Mutex::new(Vec::new()),
+            solo_redo: Mutex::new(Vec::new()),
+            stroke_active: Mutex::new(false),
+            stroke_buffer: Mutex::new(Vec::new()),
+            stroke_preview_union: Mutex::new(AHashSet::new()),
+            stroke_preview_last_args: Mutex::new(None),
+            stroke_preview_suppresses_hover: AtomicBool::new(false),
+            sculpt_stroke_replay: Mutex::new(Vec::new()),
+            collab_edit_inbox: Mutex::new(VecDeque::new()),
+            fill_operation_cancel: Arc::new(AtomicBool::new(false)),
+            spray_constraint_plane: Mutex::new(None),
+            wall_stroke_face_snapped: Mutex::new(None),
+            terrain_accum: Mutex::new(AHashMap::new()),
+        },
+        selection: SelectionState {
+            selection_cells: Mutex::new(AHashSet::new()),
+            selection_stroke_before: Mutex::new(None),
+            selection_stroke_accum: Mutex::new(None),
+            selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
+            selection_match_material: Mutex::new(false),
+            stamp_clipboard: Mutex::new(None),
+        },
+        gizmos: GizmoState {
+            squishy_session: Mutex::new(generators::SquishySession::new()),
+            squishy_gizmo_drag: Mutex::new(None),
+            bone_session: Mutex::new(generators::BoneSession::new()),
+            bone_gizmo_drag: Mutex::new(None),
+            bone_ik_drag: Mutex::new(None),
+            generator_gizmo_center: Mutex::new(None),
+            generator_gizmo_ring_radius: Mutex::new(None),
+            selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
+            extrude_gizmo_drag: Mutex::new(ExtrudeGizmoDrag::None),
+            extrude_gizmo_base_depth: Mutex::new(0),
+            hovered_extrude_axis: AtomicU8::new(255),
+            hovered_gizmo_axis: AtomicU8::new(255),
+            extrude_ray_spine: Mutex::new(None),
+            generator_preview_locked_camera: Mutex::new(None),
+        },
+        preview: PreviewState {
+            preview_cursor: Mutex::new(None),
+            preview_mode: Mutex::new(PreviewMode::Navigate),
+            preview_hover: Mutex::new(PreviewHoverContext::default()),
+        },
+        autosave: AutosaveState {
+            autosave_interval_secs: Mutex::new(120),
+            last_autosave: Mutex::new(None),
+            autosave_enabled: Mutex::new(true),
+            autosave_keep_count: Mutex::new(5),
+            autosave_slot: Mutex::new(HashMap::new()),
+        },
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
         local_avatar_data: Mutex::new(HashMap::new()),
         smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
-        autosave_interval_secs: Mutex::new(120),
-        last_autosave: Mutex::new(None),
-        autosave_enabled: Mutex::new(true),
-        autosave_keep_count: Mutex::new(5),
-        autosave_slot: Mutex::new(HashMap::new()),
-        active_project: AtomicBool::new(false),
-        fly_mode: Mutex::new(false),
-        fly_input: Mutex::new(FlyInputState::default()),
-        fly_last_physics: Mutex::new(None),
-        walk_mode: Mutex::new(false),
-        walk_physics: Mutex::new(camera::WalkPhysicsState::default()),
-        walk_last_physics: Mutex::new(None),
-        selection_cells: Mutex::new(AHashSet::new()),
-        selection_stroke_before: Mutex::new(None),
-        selection_stroke_accum: Mutex::new(None),
-        selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
-        selection_match_material: Mutex::new(false),
-        stamp_clipboard: Mutex::new(None),
-        squishy_session: Mutex::new(generators::SquishySession::new()),
-        squishy_gizmo_drag: Mutex::new(None),
-        bone_session: Mutex::new(generators::BoneSession::new()),
-        bone_gizmo_drag: Mutex::new(None),
-        bone_ik_drag: Mutex::new(None),
-        generator_gizmo_center: Mutex::new(None),
-        generator_gizmo_ring_radius: Mutex::new(None),
-        selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
-        extrude_gizmo_drag: Mutex::new(ExtrudeGizmoDrag::None),
-        extrude_gizmo_base_depth: Mutex::new(0),
-        hovered_extrude_axis: AtomicU8::new(255),
-        start_screen_logo_transparent: std::sync::atomic::AtomicBool::new(true),
-        start_screen_light: std::sync::atomic::AtomicBool::new(false),
-        overlay_mesh_generation: AtomicU64::new(0),
-        viewport_cursor_debug_overlay: AtomicBool::new(false),
-        show_grid_borders: AtomicBool::new(false),
-        hovered_gizmo_axis: AtomicU8::new(255),
-        grid_overlay_cache_key: Mutex::new(None),
-        selection_overlay_cache_key: Mutex::new(None),
-        preview_overlay_cache_key: Mutex::new(None),
-        generator_preview_locked_camera: Mutex::new(None),
-        fill_operation_cancel: Arc::new(AtomicBool::new(false)),
-        spray_constraint_plane: Mutex::new(None),
-        wall_stroke_face_snapped: Mutex::new(None),
-        terrain_accum: Mutex::new(AHashMap::new()),
     });
     let vs = viewer_state.clone();
 
@@ -863,7 +877,7 @@ pub fn run() {
                 }
             } else if event.id() == "debug_raytrace_benchmark" {
                 let state = app.state::<Arc<ViewerState>>();
-                let result = state.viewer.lock().as_mut().map(|viewer| viewer.run_raytrace_benchmark(50));
+                let result = state.gpu.viewer.lock().as_mut().map(|viewer| viewer.run_raytrace_benchmark(50));
                 if let Some(result) = result {
                     eprintln!(
                         "[raytrace bench] {}×{}  {} frames  avg {:.1} ms  σ {:.1}  p50 {:.1}  p95 {:.1}  p99 {:.1}  max {:.1}  {:.1} Mpix/s",
@@ -885,7 +899,7 @@ pub fn run() {
                     if let Ok(enabled) = sel.viewport_cursor_debug.is_checked() {
                         let state = app.state::<Arc<ViewerState>>();
                         state
-                            .viewport_cursor_debug_overlay
+                            .gpu.viewport_cursor_debug_overlay
                             .store(enabled, Ordering::Relaxed);
                         let _ = app.emit_to(
                             EventTarget::webview_window("main"),
@@ -938,7 +952,7 @@ pub fn run() {
                 if let Some(sel) = app.try_state::<SelectionMenuState>() {
                     let enabled = sel.render_ray.is_checked().unwrap_or(false);
                     let state = app.state::<Arc<ViewerState>>();
-                    if let Some(viewer) = state.viewer.lock().as_mut() {
+                    if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
                         viewer.set_raytrace_mode(enabled);
                     }
                     wake_viewport_loop(app);
@@ -963,7 +977,7 @@ pub fn run() {
                     if let Ok(checked) = sel.view_show_borders.is_checked() {
                         let state = app.state::<Arc<ViewerState>>();
                         state
-                            .show_grid_borders
+                            .gpu.show_grid_borders
                             .store(checked, Ordering::Relaxed);
                         let _ = app.emit_to(
                             EventTarget::webview_window("main"),
@@ -1086,7 +1100,7 @@ pub fn run() {
                 if let Some(sel) = app.try_state::<SelectionMenuState>() {
                     if let Ok(checked) = sel.match_material.is_checked() {
                         let state = app.state::<Arc<ViewerState>>();
-                        *state.selection_match_material.lock() = checked;
+                        *state.selection.selection_match_material.lock() = checked;
                         let _ = app.emit_to(
                             EventTarget::webview_window("main"),
                             "voxelle-menu-match-material",
@@ -1110,7 +1124,7 @@ pub fn run() {
                             if path.exists() {
                                 let state = app.state::<Arc<ViewerState>>();
                                 let label = path.to_string_lossy().to_string();
-                                *state.file_label.lock() = label.clone();
+                                *state.file.file_label.lock() = label.clone();
                                 let _ = app.emit("voxelle-load-start", label);
                                 spawn_decode_and_mesh(
                                     state.inner().clone(),
@@ -1134,8 +1148,8 @@ pub fn run() {
                 let (selection_menu_state, recent_menu_state) = install_app_menu(app.handle())?;
                 app.manage(selection_menu_state);
                 app.manage(recent_menu_state);
-                let (has_voxels, has_selection) = scene_menu_flags(vs.as_ref());
-                selection_menu_sync_enabled_for_scene(app.handle(), has_voxels, has_selection);
+                let (has_project, has_voxels, has_selection) = scene_menu_flags(vs.as_ref());
+                selection_menu_sync_enabled_for_scene(app.handle(), has_project, has_voxels, has_selection);
             }
 
             let window = app.get_webview_window("main").expect("main window");
@@ -1155,7 +1169,7 @@ pub fn run() {
             // toolbar / beside sidebar), not the full window. Wrong dimensions break screen→world
             // raycasts until the frontend sends `viewer_resize`.
             {
-                let mut vl = vs.viewer.lock();
+                let mut vl = vs.gpu.viewer.lock();
                 let v = vl.insert(viewer);
                 // Pre-cache the default avatar: a single white glowing voxel, tinted per-peer at runtime.
                 init_default_avatar_mesh(v);
@@ -1379,14 +1393,14 @@ pub fn run() {
                 let app_wake = app.clone();
                 let state = app.state::<Arc<ViewerState>>();
                 {
-                    let mut cam = state.camera.lock();
+                    let mut cam = state.cam.camera.lock();
                     cam.update_damping();
                 }
                 // Fly WASD: integrate here with wall-clock dt between native iterations (not webview RAF).
-                if *state.fly_mode.lock() {
+                if *state.cam.fly_mode.lock() {
                     let now = Instant::now();
                     let dt = {
-                        let mut last = state.fly_last_physics.lock();
+                        let mut last = state.cam.fly_last_physics.lock();
                         match *last {
                             None => {
                                 *last = Some(now);
@@ -1399,7 +1413,7 @@ pub fn run() {
                             }
                         }
                     };
-                    let input = *state.fly_input.lock();
+                    let input = *state.cam.fly_input.lock();
                     let scale = if input.speed_scale.is_finite() {
                         input.speed_scale.clamp(0.0, 1e6)
                     } else {
@@ -1411,7 +1425,7 @@ pub fn run() {
                             || input.up != 0.0)
                     {
                         const SPEED: f32 = 26.0;
-                        let mut cam = state.camera.lock();
+                        let mut cam = state.cam.camera.lock();
                         cam.fly_move(
                             input.forward,
                             input.right,
@@ -1422,10 +1436,10 @@ pub fn run() {
                     }
                 }
                 // Walk mode physics: gravity, collision, jumping.
-                if *state.walk_mode.lock() {
+                if *state.cam.walk_mode.lock() {
                     let now = Instant::now();
                     let dt = {
-                        let mut last = state.walk_last_physics.lock();
+                        let mut last = state.cam.walk_last_physics.lock();
                         match *last {
                             None => {
                                 *last = Some(now);
@@ -1439,16 +1453,16 @@ pub fn run() {
                         }
                     };
                     if dt > 0.0 {
-                        let input = *state.fly_input.lock();
+                        let input = *state.cam.fly_input.lock();
                         let scale = if input.speed_scale.is_finite() {
                             input.speed_scale.clamp(0.0, 1e6)
                         } else {
                             1.0
                         };
 
-                        let mut wp = state.walk_physics.lock();
+                        let mut wp = state.cam.walk_physics.lock();
                         let h_delta = {
-                            let cam = state.camera.lock();
+                            let cam = state.cam.camera.lock();
                             cam.walk_horizontal_delta(
                                 input.forward,
                                 input.right,
@@ -1473,7 +1487,7 @@ pub fn run() {
 
                         // Collision against voxel_map
                         {
-                            let vm_guard = state.voxel_map.lock();
+                            let vm_guard = state.file.voxel_map.lock();
                             if let Some(ref vm) = *vm_guard {
                                 new_feet = resolve_walk_collision(wp.feet_pos, new_feet, vm, &mut wp);
                             }
@@ -1487,7 +1501,7 @@ pub fn run() {
                         }
 
                         wp.feet_pos = new_feet;
-                        let mut cam = state.camera.lock();
+                        let mut cam = state.cam.camera.lock();
                         cam.walk_set_eye_from_feet(new_feet, camera::WALK_EYE_HEIGHT);
                     }
                 }
@@ -1495,12 +1509,12 @@ pub fn run() {
                 // while IPC may be waiting on `viewer` + `camera` (see `finish_voxel_edit_gpu_deltas`).
                 let frame_prep = {
                     let wh = {
-                        let v = state.viewer.lock();
+                        let v = state.gpu.viewer.lock();
                         v.as_ref().map(|viewer| viewer.viewport_size())
                     };
                     match wh {
                         Some((viewport_w, viewport_h)) => {
-                            let cam_snap = state.camera.lock().clone();
+                            let cam_snap = state.cam.camera.lock().clone();
                             let grid_p = prepare_grid_border_overlay(Arc::as_ref(&state));
                             let sel_p = prepare_selection_overlay(Arc::as_ref(&state));
                             let prev_p = prepare_preview_mesh(
@@ -1518,12 +1532,12 @@ pub fn run() {
                 // on the main thread, before we hold the viewer lock for the frame.
                 {
                     let items: Vec<collab::CollabInboxItem> =
-                        state.collab_edit_inbox.lock().drain(..).collect();
+                        state.file.collab_edit_inbox.lock().drain(..).collect();
                     collab::process_inbox_items_batched(app, &state, &state.collab, items);
                 }
-                let mut v = state.viewer.lock();
+                let mut v = state.gpu.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
-                    let cam = state.camera.lock();
+                    let cam = state.cam.camera.lock();
                     viewer.update_uniforms(&cam);
                     if let Some((grid_p, sel_p, prev_p)) = frame_prep {
                         apply_grid_border_overlay(viewer, Arc::as_ref(&state), grid_p);
@@ -1535,10 +1549,10 @@ pub fn run() {
                     sync_ping_flash(viewer, Arc::as_ref(&state), &cam);
                     sync_gizmo_gpu(viewer, Arc::as_ref(&state), &cam);
                     let transparent = state
-                        .start_screen_logo_transparent
+                        .gpu.start_screen_logo_transparent
                         .load(Ordering::Relaxed);
                     viewer.set_start_screen_transparent(transparent);
-                    let start_light = state.start_screen_light.load(Ordering::Relaxed);
+                    let start_light = state.gpu.start_screen_light.load(Ordering::Relaxed);
                     viewer.set_start_screen_appearance(if start_light {
                         1.0
                     } else {
@@ -1546,7 +1560,7 @@ pub fn run() {
                     });
                     // Progressive loading: move chunks from background-thread inbox to viewer queue.
                     {
-                        let mut inbox = state.chunk_mesh_inbox.lock();
+                        let mut inbox = state.gpu.chunk_mesh_inbox.lock();
                         if !inbox.is_empty() {
                             viewer.enqueue_chunk_uploads(&mut inbox);
                         }
@@ -1557,12 +1571,12 @@ pub fn run() {
                     }
                     // Once all chunks are uploaded, apply deferred spatial cache for editing.
                     if !viewer.has_pending_chunk_uploads() && !viewer.has_spatial_mesh_cache() {
-                        let mut deferred = state.deferred_spatial_cache.lock();
+                        let mut deferred = state.gpu.deferred_spatial_cache.lock();
                         if let Some(cache) = deferred.take() {
                             viewer.set_spatial_mesh_cache(cache);
                         }
                     }
-                    viewer.set_rt_surface_mode(state.rendering_mode.lock().rt_surface_mode());
+                    viewer.set_rt_surface_mode(state.gpu.rendering_mode.lock().rt_surface_mode());
                     let sz_before = viewer.surface_size;
                     let _ = viewer.render();
                     let (vw, vh) = viewer.viewport_size();
@@ -1579,7 +1593,7 @@ pub fn run() {
                             },
                         );
                     }
-                    sample_fps_and_emit(app, &state.fps);
+                    sample_fps_and_emit(app, &state.gpu.fps);
 
                     // Drain speech bubbles that completed their shake-dismiss animation.
                     // app.emit is non-blocking; holding viewer lock here is safe.
@@ -1587,8 +1601,8 @@ pub fn run() {
                         let _ = app.emit("speech-bubble-dismissed", id);
                     }
 
-                    let enabled = *state.autosave_enabled.lock();
-                    let interval = *state.autosave_interval_secs.lock();
+                    let enabled = *state.autosave.autosave_enabled.lock();
+                    let interval = *state.autosave.autosave_interval_secs.lock();
                     let (collab_on, is_host) = {
                         let c = state.collab.lock();
                         (c.is_active(), c.is_host())
@@ -1596,13 +1610,13 @@ pub fn run() {
                     if enabled
                         && interval > 0
                         && (!collab_on || is_host)
-                        && state.active_project.load(Ordering::Relaxed)
+                        && state.cam.active_project.load(Ordering::Relaxed)
                     {
-                        let label = state.file_label.lock().clone();
+                        let label = state.file.file_label.lock().clone();
                         if !label.is_empty() {
                             if let Ok(doc) = autosave_document_path_for_label(app, &label) {
                                 let now = Instant::now();
-                                let last = state.last_autosave.lock();
+                                let last = state.autosave.last_autosave.lock();
                                 let do_save = last
                                     .map(|t| now.duration_since(t).as_secs() >= interval)
                                     .unwrap_or(true);
@@ -1612,7 +1626,7 @@ pub fn run() {
                                         next_rotating_autosave_path(app, Arc::as_ref(&state), &doc)
                                     {
                                         if write_voxelle_file_to_path(None, &state, &dest).is_ok() {
-                                            *state.last_autosave.lock() = Some(now);
+                                            *state.autosave.last_autosave.lock() = Some(now);
                                         }
                                     }
                                 }
@@ -1638,16 +1652,16 @@ pub fn run() {
                     .as_ref()
                     .is_some_and(|viewer| viewer.has_visible_speech_bubbles());
                 drop(v);
-                let fly_on = *state.fly_mode.lock();
-                let walk_on = *state.walk_mode.lock();
+                let fly_on = *state.cam.fly_mode.lock();
+                let walk_on = *state.cam.walk_mode.lock();
                 let has_fly_movement = if fly_on || walk_on {
-                    let input = *state.fly_input.lock();
+                    let input = *state.cam.fly_input.lock();
                     input.forward != 0.0 || input.right != 0.0 || input.up != 0.0 || input.jump
                 } else {
                     false
                 };
                 // Walk mode always spins (gravity may be in progress even with no input).
-                let needs_next = state.camera.lock().needs_redraw()
+                let needs_next = state.cam.camera.lock().needs_redraw()
                     || fly_on
                     || walk_on
                     || has_fly_movement
@@ -1667,85 +1681,99 @@ pub fn run() {
 #[cfg(test)]
 pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
     Arc::new(ViewerState {
-        viewer: Mutex::new(None),
-        camera: Mutex::new(OrbitCamera::new()),
-        file_label: Mutex::new(String::new()),
-        current_file: Mutex::new(None),
-        voxel_map: Mutex::new(None),
-        preview_cursor: Mutex::new(None),
-        camera_dragging: AtomicBool::new(false),
-        preview_mode: Mutex::new(PreviewMode::Navigate),
-        preview_hover: Mutex::new(PreviewHoverContext::default()),
-        rendering_mode: Mutex::new(RenderingMode::Greedy),
-        fps: Mutex::new(FpsCounter {
-            period_start: None,
-            accum_frames: 0,
-            last_fps: 0,
-        }),
-        last_edit_perf: Mutex::new(None),
-        last_scene_bounds: Mutex::new(None),
-        mesh_refresh_generation: AtomicU64::new(0),
-        load_generation: AtomicU64::new(0),
-        chunk_mesh_inbox: Mutex::new(VecDeque::new()),
-        collab_edit_inbox: Mutex::new(VecDeque::new()),
-        deferred_spatial_cache: Mutex::new(None),
-        voxel_edit_stats_cache: Mutex::new(None),
-        solo_undo: Mutex::new(Vec::new()),
-        solo_redo: Mutex::new(Vec::new()),
-        terrain_accum: Mutex::new(AHashMap::new()),
-        stroke_active: Mutex::new(false),
-        stroke_buffer: Mutex::new(Vec::new()),
-        stroke_preview_union: Mutex::new(AHashSet::new()),
-        stroke_preview_last_args: Mutex::new(None),
-        stroke_preview_suppresses_hover: AtomicBool::new(false),
-        sculpt_stroke_replay: Mutex::new(Vec::new()),
-        extrude_ray_spine: Mutex::new(None),
+        gpu: GpuState {
+            viewer: Mutex::new(None),
+            rendering_mode: Mutex::new(RenderingMode::Greedy),
+            fps: Mutex::new(FpsCounter {
+                period_start: None,
+                accum_frames: 0,
+                last_fps: 0,
+            }),
+            last_edit_perf: Mutex::new(None),
+            last_scene_bounds: Mutex::new(None),
+            mesh_refresh_generation: AtomicU64::new(0),
+            load_generation: AtomicU64::new(0),
+            chunk_mesh_inbox: Mutex::new(VecDeque::new()),
+            deferred_spatial_cache: Mutex::new(None),
+            voxel_edit_stats_cache: Mutex::new(None),
+            overlay_mesh_generation: AtomicU64::new(0),
+            grid_overlay_cache_key: Mutex::new(None),
+            selection_overlay_cache_key: Mutex::new(None),
+            preview_overlay_cache_key: Mutex::new(None),
+            start_screen_logo_transparent: AtomicBool::new(true),
+            start_screen_light: AtomicBool::new(false),
+            viewport_cursor_debug_overlay: AtomicBool::new(false),
+            show_grid_borders: AtomicBool::new(false),
+        },
+        cam: CameraState {
+            camera: Mutex::new(OrbitCamera::new()),
+            camera_dragging: AtomicBool::new(false),
+            active_project: AtomicBool::new(false),
+            fly_mode: Mutex::new(false),
+            fly_input: Mutex::new(FlyInputState::default()),
+            fly_last_physics: Mutex::new(None),
+            walk_mode: Mutex::new(false),
+            walk_physics: Mutex::new(camera::WalkPhysicsState::default()),
+            walk_last_physics: Mutex::new(None),
+        },
+        file: FileState {
+            file_label: Mutex::new(String::new()),
+            current_file: Mutex::new(None),
+            voxel_map: Mutex::new(None),
+            solo_undo: Mutex::new(Vec::new()),
+            solo_redo: Mutex::new(Vec::new()),
+            stroke_active: Mutex::new(false),
+            stroke_buffer: Mutex::new(Vec::new()),
+            stroke_preview_union: Mutex::new(AHashSet::new()),
+            stroke_preview_last_args: Mutex::new(None),
+            stroke_preview_suppresses_hover: AtomicBool::new(false),
+            sculpt_stroke_replay: Mutex::new(Vec::new()),
+            collab_edit_inbox: Mutex::new(VecDeque::new()),
+            fill_operation_cancel: Arc::new(AtomicBool::new(false)),
+            spray_constraint_plane: Mutex::new(None),
+            wall_stroke_face_snapped: Mutex::new(None),
+            terrain_accum: Mutex::new(AHashMap::new()),
+        },
+        selection: SelectionState {
+            selection_cells: Mutex::new(AHashSet::new()),
+            selection_stroke_before: Mutex::new(None),
+            selection_stroke_accum: Mutex::new(None),
+            selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
+            selection_match_material: Mutex::new(false),
+            stamp_clipboard: Mutex::new(None),
+        },
+        gizmos: GizmoState {
+            squishy_session: Mutex::new(generators::SquishySession::new()),
+            squishy_gizmo_drag: Mutex::new(None),
+            bone_session: Mutex::new(generators::BoneSession::new()),
+            bone_gizmo_drag: Mutex::new(None),
+            bone_ik_drag: Mutex::new(None),
+            generator_gizmo_center: Mutex::new(None),
+            generator_gizmo_ring_radius: Mutex::new(None),
+            selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
+            extrude_gizmo_drag: Mutex::new(ExtrudeGizmoDrag::None),
+            extrude_gizmo_base_depth: Mutex::new(0),
+            hovered_extrude_axis: AtomicU8::new(255),
+            hovered_gizmo_axis: AtomicU8::new(255),
+            extrude_ray_spine: Mutex::new(None),
+            generator_preview_locked_camera: Mutex::new(None),
+        },
+        preview: PreviewState {
+            preview_cursor: Mutex::new(None),
+            preview_mode: Mutex::new(PreviewMode::Navigate),
+            preview_hover: Mutex::new(PreviewHoverContext::default()),
+        },
+        autosave: AutosaveState {
+            autosave_interval_secs: Mutex::new(120),
+            last_autosave: Mutex::new(None),
+            autosave_enabled: Mutex::new(true),
+            autosave_keep_count: Mutex::new(5),
+            autosave_slot: Mutex::new(HashMap::new()),
+        },
         collab: Arc::new(Mutex::new(collab::CollabRuntime::default())),
         local_avatar_data: Mutex::new(HashMap::new()),
         smooth_presence: Mutex::new(HashMap::new()),
         ping_flash: Mutex::new(None),
-        autosave_interval_secs: Mutex::new(120),
-        last_autosave: Mutex::new(None),
-        autosave_enabled: Mutex::new(true),
-        autosave_keep_count: Mutex::new(5),
-        autosave_slot: Mutex::new(HashMap::new()),
-        active_project: AtomicBool::new(false),
-        fly_mode: Mutex::new(false),
-        fly_input: Mutex::new(FlyInputState::default()),
-        fly_last_physics: Mutex::new(None),
-        walk_mode: Mutex::new(false),
-        walk_physics: Mutex::new(camera::WalkPhysicsState::default()),
-        walk_last_physics: Mutex::new(None),
-        selection_cells: Mutex::new(AHashSet::new()),
-        selection_stroke_before: Mutex::new(None),
-        selection_stroke_accum: Mutex::new(None),
-        selection_combine_mode: Mutex::new(SelectionCombineMode::Replace),
-        selection_match_material: Mutex::new(false),
-        stamp_clipboard: Mutex::new(None),
-        squishy_session: Mutex::new(generators::SquishySession::new()),
-        squishy_gizmo_drag: Mutex::new(None),
-        bone_session: Mutex::new(generators::BoneSession::new()),
-        bone_gizmo_drag: Mutex::new(None),
-        bone_ik_drag: Mutex::new(None),
-        generator_gizmo_center: Mutex::new(None),
-        generator_gizmo_ring_radius: Mutex::new(None),
-        selection_gizmo_drag: Mutex::new(SelectionGizmoDrag::None),
-        extrude_gizmo_drag: Mutex::new(ExtrudeGizmoDrag::None),
-        extrude_gizmo_base_depth: Mutex::new(0),
-        hovered_extrude_axis: AtomicU8::new(255),
-        start_screen_logo_transparent: std::sync::atomic::AtomicBool::new(true),
-        start_screen_light: std::sync::atomic::AtomicBool::new(false),
-        overlay_mesh_generation: AtomicU64::new(0),
-        viewport_cursor_debug_overlay: AtomicBool::new(false),
-        show_grid_borders: AtomicBool::new(false),
-        hovered_gizmo_axis: AtomicU8::new(255),
-        grid_overlay_cache_key: Mutex::new(None),
-        selection_overlay_cache_key: Mutex::new(None),
-        preview_overlay_cache_key: Mutex::new(None),
-        generator_preview_locked_camera: Mutex::new(None),
-        fill_operation_cancel: Arc::new(AtomicBool::new(false)),
-        spray_constraint_plane: Mutex::new(None),
-        wall_stroke_face_snapped: Mutex::new(None),
     })
 }
 

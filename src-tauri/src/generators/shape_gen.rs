@@ -125,6 +125,144 @@ pub fn compute_shape_positions(
 }
 
 // ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voxelle::start_shape::StartShape;
+    use std::f64::consts::PI;
+
+    const EPS: f64 = 1e-9;
+
+    fn approx_f64(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    // ── Rotation helpers ───────────────────────────────────────────────
+
+    #[test]
+    fn rotate_x_identity_near_zero() {
+        let (x, y, z) = rotate_x_rad(1.0, 2.0, 3.0, 0.0);
+        assert_eq!((x, y, z), (1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn rotate_x_quarter_turn() {
+        // (0, 1, 0) rotated 90° around X → (0, 0, 1)
+        let (x, y, z) = rotate_x_rad(0.0, 1.0, 0.0, PI / 2.0);
+        assert!(approx_f64(x, 0.0));
+        assert!(approx_f64(y, 0.0));
+        assert!(approx_f64(z, 1.0));
+    }
+
+    #[test]
+    fn rotate_y_identity_near_zero() {
+        let (x, y, z) = rotate_y_rad(5.0, 3.0, 1.0, 0.0);
+        assert_eq!((x, y, z), (5.0, 3.0, 1.0));
+    }
+
+    #[test]
+    fn rotate_y_quarter_turn() {
+        // (1, 0, 0) rotated 90° around Y → (0, 0, -1)
+        let (x, y, z) = rotate_y_rad(1.0, 0.0, 0.0, PI / 2.0);
+        assert!(approx_f64(x, 0.0));
+        assert!(approx_f64(y, 0.0));
+        assert!(approx_f64(z, -1.0));
+    }
+
+    #[test]
+    fn rotate_z_identity_near_zero() {
+        let (x, y, z) = rotate_z_rad(1.0, 2.0, 3.0, 0.0);
+        assert_eq!((x, y, z), (1.0, 2.0, 3.0));
+    }
+
+    #[test]
+    fn rotate_z_quarter_turn() {
+        // (1, 0, 0) rotated 90° around Z → (0, 1, 0)
+        let (x, y, z) = rotate_z_rad(1.0, 0.0, 0.0, PI / 2.0);
+        assert!(approx_f64(x, 0.0));
+        assert!(approx_f64(y, 1.0));
+        assert!(approx_f64(z, 0.0));
+    }
+
+    // ── rotate_position_around_origin ─────────────────────────────────
+
+    #[test]
+    fn rotate_position_identity() {
+        assert_eq!(
+            rotate_position_around_origin((3.0, -1.0, 5.0), (0.0, 0.0, 0.0)),
+            (3, -1, 5)
+        );
+    }
+
+    #[test]
+    fn rotate_position_180_around_y() {
+        // (1, 0, 0) rotated 180° around Y → (-1, 0, 0)
+        let (x, y, z) = rotate_position_around_origin((1.0, 0.0, 0.0), (0.0, 180.0, 0.0));
+        assert_eq!(x, -1);
+        assert_eq!(y, 0);
+        assert_eq!(z, 0);
+    }
+
+    // ── compute_shape_positions ────────────────────────────────────────
+
+    #[test]
+    fn compute_shape_positions_empty_shape_returns_nothing() {
+        let positions = compute_shape_positions(StartShape::Empty, 5, (0, 0, 0), (0.0, 0.0, 0.0));
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn compute_shape_positions_size_zero_returns_nothing() {
+        let positions = compute_shape_positions(StartShape::Cube, 0, (0, 0, 0), (0.0, 0.0, 0.0));
+        assert!(positions.is_empty());
+    }
+
+    #[test]
+    fn compute_shape_positions_cube_size_1() {
+        let positions = compute_shape_positions(StartShape::Cube, 1, (0, 0, 0), (0.0, 0.0, 0.0));
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0], (0, 0, 0));
+    }
+
+    #[test]
+    fn compute_shape_positions_cube_size_3() {
+        let positions = compute_shape_positions(StartShape::Cube, 3, (0, 0, 0), (0.0, 0.0, 0.0));
+        assert_eq!(positions.len(), 27);
+    }
+
+    #[test]
+    fn compute_shape_positions_origin_offset_applied() {
+        let positions = compute_shape_positions(StartShape::Cube, 1, (10, 20, 30), (0.0, 0.0, 0.0));
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0], (10, 20, 30));
+    }
+
+    #[test]
+    fn compute_shape_positions_plane_is_flat() {
+        let positions = compute_shape_positions(StartShape::Plane, 3, (0, 0, 0), (0.0, 0.0, 0.0));
+        // All y == 0
+        assert!(!positions.is_empty());
+        for &(_, y, _) in &positions {
+            assert_eq!(y, 0);
+        }
+    }
+
+    #[test]
+    fn compute_shape_positions_orb_within_sphere() {
+        let size = 5;
+        let positions = compute_shape_positions(StartShape::Orb, size, (0, 0, 0), (0.0, 0.0, 0.0));
+        let r = (size - 1) as f64 * 0.5;
+        for &(x, y, z) in &positions {
+            let d2 = (x as f64).powi(2) + (y as f64).powi(2) + (z as f64).powi(2);
+            assert!(d2 <= r * r + 1e-6, "voxel ({x},{y},{z}) outside sphere r={r}");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Preview
 // ---------------------------------------------------------------------------
 

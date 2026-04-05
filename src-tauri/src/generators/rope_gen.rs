@@ -146,6 +146,115 @@ pub fn preview_rope_voxels_between_screens(
     thicken_centerline_voxels(&path, brush_radius_index, brush_shape)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── gravity_unit ───────────────────────────────────────────────────
+
+    #[test]
+    fn gravity_unit_down() {
+        assert_eq!(gravity_unit("down"), [0.0, -1.0, 0.0]);
+    }
+
+    #[test]
+    fn gravity_unit_up() {
+        assert_eq!(gravity_unit("up"), [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn gravity_unit_left() {
+        assert_eq!(gravity_unit("left"), [-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn gravity_unit_right() {
+        assert_eq!(gravity_unit("right"), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn gravity_unit_forward() {
+        assert_eq!(gravity_unit("forward"), [0.0, 0.0, -1.0]);
+    }
+
+    #[test]
+    fn gravity_unit_back() {
+        assert_eq!(gravity_unit("back"), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn gravity_unit_unknown_defaults_to_down() {
+        assert_eq!(gravity_unit("sideways"), [0.0, -1.0, 0.0]);
+    }
+
+    // ── catenary_voxel_arc ────────────────────────────────────────────
+
+    #[test]
+    fn catenary_same_endpoints_contains_endpoint() {
+        let a = (5, 5, 5);
+        let arc = catenary_voxel_arc(a, a, 0.0, 4, "down");
+        assert!(!arc.is_empty());
+        assert!(arc.contains(&a));
+    }
+
+    #[test]
+    fn catenary_zero_sag_contains_both_endpoints() {
+        let a = (0, 5, 0);
+        let b = (10, 5, 0);
+        let arc = catenary_voxel_arc(a, b, 0.0, 8, "down");
+        assert!(arc.contains(&a));
+        assert!(arc.contains(&b));
+    }
+
+    #[test]
+    fn catenary_with_sag_droops_below_line() {
+        // With downward gravity sag, the midpoint should be at or below the start/end y
+        let a = (0, 10, 0);
+        let b = (20, 10, 0);
+        let sag = 5.0;
+        let arc = catenary_voxel_arc(a, b, sag, 16, "down");
+        let min_y = arc.iter().map(|c| c.1).min().unwrap();
+        assert!(min_y < 10, "expected arc to dip below y=10, got min_y={min_y}");
+    }
+
+    #[test]
+    fn catenary_segment_count_clamped() {
+        // segments < 4 should be clamped to 4; result should still be valid
+        let a = (0, 0, 0);
+        let b = (5, 0, 0);
+        let arc_low = catenary_voxel_arc(a, b, 0.0, 1, "down");
+        let arc_normal = catenary_voxel_arc(a, b, 0.0, 4, "down");
+        assert!(!arc_low.is_empty());
+        // Both should start at a and end at b
+        assert_eq!(arc_low[0], a);
+        assert_eq!(arc_normal[0], a);
+    }
+
+    // ── rope_sag_from_hits ────────────────────────────────────────────
+
+    #[test]
+    fn rope_sag_high_tension_less_than_low_tension() {
+        let h1 = (0, 0, 0);
+        let h2 = (20, 0, 0);
+        let sag_tight = rope_sag_from_hits(h1, h2, 1.0);
+        let sag_loose = rope_sag_from_hits(h1, h2, -1.0);
+        assert!(sag_tight < sag_loose, "tight={sag_tight} loose={sag_loose}");
+    }
+
+    #[test]
+    fn rope_sag_scales_with_distance() {
+        let short_sag = rope_sag_from_hits((0, 0, 0), (10, 0, 0), 0.0);
+        let long_sag = rope_sag_from_hits((0, 0, 0), (100, 0, 0), 0.0);
+        assert!(long_sag > short_sag);
+    }
+
+    #[test]
+    fn rope_sag_is_positive() {
+        let sag = rope_sag_from_hits((0, 0, 0), (5, 3, 2), 0.5);
+        assert!(sag > 0.0);
+    }
+}
+
 pub fn generator_rope_between_screens(
     file: &mut VoxelleFile,
     voxel_map: &mut AHashMap<VoxelCoord, usize>,

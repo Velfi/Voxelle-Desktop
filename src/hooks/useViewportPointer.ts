@@ -16,6 +16,7 @@ import type {
   ViewportCursorDebugPayload,
   ViewportCursorDebugScreen,
 } from "../types";
+import { useLatestRef } from "./useLatestRef";
 
 /** Opaque ref bag populated by App every render. */
 export type ViewportPointerLocals = any;
@@ -26,20 +27,14 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
   const bonePendingJointRef = useRef<number | null>(null);
   const bonePlacingJointRef = useRef<number | null>(null);
 
-  // Destructure all App locals
+  // Destructure App locals from ref bag
   // (refreshed each render; handlers close over the latest snapshot)
   const {
-    activeColorRef,
-    activeMaterialRef,
     activePointerIdRef,
     ashlarPreviewSeedRef,
-    brushClipBottomHalfRef,
-    brushRadiusRef,
-    brushShapeRef,
     capturedPointerIdRef,
     currentStrokeSeedRef,
     dragDidEditRef,
-    drawStrokeModeRef,
     extrudeDirectionRefRef,
     extrudeEndCapRef,
     extrudeGizmoRef,
@@ -52,14 +47,12 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     eyedropperReturnModeRef,
     floraPreviewSeedRef,
     flyMouseLookActiveRef,
-    generatorKindRef,
     generatorSphereRadiusRef,
     gestureRef,
     gizmoHoverRef,
     gizmoRef,
     grassPreviewSeedRef,
     interactionBlockedRef,
-    interactionModeRef,
     lastCursorScreenRef,
     lastRef,
     lastStrokeEditMsRef,
@@ -67,15 +60,9 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     lastTerrainHoverMsRef,
     lastViewportPickNormRef,
     lastWallHoverMsRef,
-    matchMaterialSelectColorRef,
     maxPointerMoveRef,
-    mirrorXRef,
-    mirrorYRef,
-    mirrorZRef,
     onPointerUpRef,
-    paintColorDistribRef,
     pendingPointerUpRef,
-    planeAxisRef,
     pointerStartRef,
     probingRef,
     rockPreviewSeedRef,
@@ -88,15 +75,12 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     sculptBrushStrengthRef,
     sculptSmoothPassesRef,
     sculptSmoothVariantRef,
-    sculptStrokeModeRef,
-    selectedColorsRef,
     selectionStrokeBegunRef,
     selectionStrokeSnapToSurfaceRef,
     smoothAggressivenessRef,
     smoothLaplacianIterationsRef,
     smoothLaplacianRelaxPctRef,
     smoothNeighborRadiusRef,
-    sprayDensityRef,
     sprayDirectionRef,
     squishyModeRef,
     stampOriginXRef,
@@ -106,7 +90,6 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     stampRotZRef,
     startScreenLogoLoadedRef,
     strokeClickRef,
-    strokeDrawStyleRef,
     strokePolygonLastScreenRef,
     strokePolygonVertsRef,
     strokeShiftKeyRef,
@@ -129,11 +112,8 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     wallWidthIndexRef,
     cuboidDepthRef,
     cylinderDepthRef,
-    setActiveColor,
-    setActiveMaterial,
     setCuboidDepthUi,
     setCylinderDepthUi,
-    setInteractionMode,
     setRoofFirstClick,
     setRoofPins,
     setRopeFirstScreen,
@@ -181,7 +161,49 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     handleClothPinClick,
     activateFlyMouseLook,
     releaseFlyMouseLook,
+    // Tool state values (passed from App alongside context)
+    interactionMode: _interactionMode,
+    activeColor: _activeColor,
+    activeMaterial: _activeMaterial,
+    brushRadius: _brushRadius,
+    brushShape: _brushShape,
+    brushClipBottomHalf: _brushClipBottomHalf,
+    mirrorX: _mirrorX,
+    mirrorY: _mirrorY,
+    mirrorZ: _mirrorZ,
+    strokeDrawStyle: _strokeDrawStyle,
+    drawStrokeMode: _drawStrokeMode,
+    planeAxis: _planeAxis,
+    sprayDensity: _sprayDensity,
+    selectedColors: _selectedColors,
+    paintColorDistrib: _paintColorDistrib,
+    matchMaterialSelectColor: _matchMaterialSelectColor,
+    generatorKind: _generatorKind,
+    sculptStrokeMode: _sculptStrokeMode,
+    setInteractionMode,
+    setActiveColor,
+    setActiveMaterial,
   } = localsRef.current;
+
+  // Stable refs for tool state values (needed inside async callbacks).
+  const interactionModeRef = useLatestRef(_interactionMode);
+  const activeColorRef = useLatestRef(_activeColor);
+  const activeMaterialRef = useLatestRef(_activeMaterial);
+  const brushRadiusRef = useLatestRef(_brushRadius);
+  const brushShapeRef = useLatestRef(_brushShape);
+  const brushClipBottomHalfRef = useLatestRef(_brushClipBottomHalf);
+  const mirrorXRef = useLatestRef(_mirrorX);
+  const mirrorYRef = useLatestRef(_mirrorY);
+  const mirrorZRef = useLatestRef(_mirrorZ);
+  const strokeDrawStyleRef = useLatestRef(_strokeDrawStyle);
+  const drawStrokeModeRef = useLatestRef(_drawStrokeMode);
+  const planeAxisRef = useLatestRef(_planeAxis);
+  const sprayDensityRef = useLatestRef(_sprayDensity);
+  const selectedColorsRef = useLatestRef(_selectedColors);
+  const paintColorDistribRef = useLatestRef(_paintColorDistrib);
+  const matchMaterialSelectColorRef = useLatestRef(_matchMaterialSelectColor);
+  const generatorKindRef = useLatestRef(_generatorKind);
+  const sculptStrokeModeRef = useLatestRef(_sculptStrokeMode);
 
   // ---- Private helper: clientToViewportNormalized ----
   function clientToViewportNormalized(e: React.PointerEvent) {
@@ -815,6 +837,14 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       extrudeTaper: extrudeTaperRef.current,
       extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
       extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
+      // For Draw mode, lock the face normal to the initial click so dragging over
+      // different faces doesn't change the placement direction mid-stroke.
+      ...(sm === "draw" && strokeViewportStartRef.current
+        ? {
+            drawNormalNx: strokeViewportStartRef.current.nx,
+            drawNormalNy: strokeViewportStartRef.current.ny,
+          }
+        : {}),
       ...lineStart,
       ...wallPoly,
     };

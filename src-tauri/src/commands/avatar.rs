@@ -55,7 +55,7 @@ pub(crate) struct SceneObjectsPayload {
 pub(crate) fn get_scene_objects(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<SceneObjectsPayload, String> {
-    let fg = state.current_file.lock();
+    let fg = state.file.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
@@ -67,7 +67,7 @@ pub(crate) fn get_scene_objects(
 
 #[tauri::command]
 pub(crate) fn set_active_object(state: State<'_, Arc<ViewerState>>, id: u32) -> Result<(), String> {
-    let mut fg = state.current_file.lock();
+    let mut fg = state.file.current_file.lock();
     let Some(file) = fg.as_mut() else {
         return Err("no model loaded".into());
     };
@@ -86,7 +86,7 @@ pub(crate) fn set_object_visible(
     visible: bool,
 ) -> Result<(), String> {
     {
-        let mut fg = state.current_file.lock();
+        let mut fg = state.file.current_file.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -106,7 +106,7 @@ pub(crate) fn create_scene_object(
     name: String,
 ) -> Result<u32, String> {
     let next_id = {
-        let mut fg = state.current_file.lock();
+        let mut fg = state.file.current_file.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
@@ -154,7 +154,7 @@ pub(crate) fn selection_menu_sync_match_material(
     state: State<'_, Arc<ViewerState>>,
     checked: bool,
 ) -> Result<(), String> {
-    *state.selection_match_material.lock() = checked;
+    *state.selection.selection_match_material.lock() = checked;
     #[cfg(desktop)]
     {
         if let Some(menu) = app.try_state::<SelectionMenuState>() {
@@ -170,10 +170,10 @@ pub(crate) fn selection_menu_sync_match_material(
 
 #[cfg(desktop)]
 pub(crate) fn performance_report_text(state: &ViewerState) -> String {
-    let fps = state.fps.lock().last_fps;
-    let file_label = state.file_label.lock().clone();
+    let fps = state.gpu.fps.lock().last_fps;
+    let file_label = state.file.file_label.lock().clone();
     let (vw, vh, idx_count, vtx_buf_verts) = state
-        .viewer
+        .gpu.viewer
         .lock()
         .as_ref()
         .map(|viewer| {
@@ -187,7 +187,7 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
         })
         .unwrap_or((0, 0, 0, 0));
     let (voxel_n, grid_size) = state
-        .current_file
+        .file.current_file
         .lock()
         .as_ref()
         .map(|f| (f.voxels.len(), f.grid_size))
@@ -197,7 +197,7 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let edit_block = state
-        .last_edit_perf
+        .gpu.last_edit_perf
         .lock()
         .clone()
         .map(|e| {
@@ -337,7 +337,7 @@ pub(crate) fn spawn_load_avatar_mesh(state: Arc<ViewerState>, name: &str) {
             let centroid = avatar_voxel_centroid(&file.voxels);
             let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
             let extent = (bounds.max - bounds.min).max_element().max(0.001);
-            if let Some(viewer) = state.viewer.lock().as_mut() {
+            if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
                 viewer.cache_avatar_mesh(name, &mesh, centroid, 1.5 / extent);
             }
         })
@@ -358,7 +358,7 @@ pub(crate) fn spawn_load_avatar_from_bytes(state: Arc<ViewerState>, name: String
             let centroid = avatar_voxel_centroid(&file.voxels);
             let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
             let extent = (bounds.max - bounds.min).max_element().max(0.001);
-            if let Some(viewer) = state.viewer.lock().as_mut() {
+            if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
                 viewer.cache_avatar_mesh(name, &mesh, centroid, 1.5 / extent);
             }
         })
@@ -375,7 +375,7 @@ pub(crate) fn load_start_screen_logo(
 ) -> Result<(), String> {
     let state = Arc::clone(&*state);
     let app_err = app.clone();
-    let token = state.overlay_mesh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let token = state.gpu.overlay_mesh_generation.fetch_add(1, Ordering::SeqCst) + 1;
     std::thread::Builder::new()
         .name("logo-load".into())
         .spawn(move || {
@@ -392,10 +392,10 @@ pub(crate) fn load_start_screen_logo(
             let app_main = app_err.clone();
             let state_up = Arc::clone(&state);
             let _ = app_err.run_on_main_thread(move || {
-                if state_up.overlay_mesh_generation.load(Ordering::Relaxed) != token {
+                if state_up.gpu.overlay_mesh_generation.load(Ordering::Relaxed) != token {
                     return;
                 }
-                let mut v = state_up.viewer.lock();
+                let mut v = state_up.gpu.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_logo_mesh(&mesh, bounds);
                     if let Some(logo) = viewer.logo_overlay.as_mut() {
@@ -423,7 +423,7 @@ pub(crate) fn mascot_load(
 ) -> Result<(), String> {
     let state = Arc::clone(&*state);
     let app_err = app.clone();
-    let token = state.overlay_mesh_generation.load(Ordering::SeqCst);
+    let token = state.gpu.overlay_mesh_generation.load(Ordering::SeqCst);
     std::thread::Builder::new()
         .name("mascot-load".into())
         .spawn(move || {
@@ -441,20 +441,20 @@ pub(crate) fn mascot_load(
                     return;
                 }
             };
-            let mode = *state.rendering_mode.lock();
+            let mode = *state.gpu.rendering_mode.lock();
             let is_stale = {
                 let st = Arc::clone(&state);
-                move || st.overlay_mesh_generation.load(Ordering::Relaxed) != token
+                move || st.gpu.overlay_mesh_generation.load(Ordering::Relaxed) != token
             };
             let Some((mesh, bounds)) = build_mesh_for_mode(&file, mode, is_stale) else {
                 return;
             };
             let state_up = Arc::clone(&state);
             let _ = app_err.run_on_main_thread(move || {
-                if state_up.overlay_mesh_generation.load(Ordering::Relaxed) != token {
+                if state_up.gpu.overlay_mesh_generation.load(Ordering::Relaxed) != token {
                     return;
                 }
-                let mut v = state_up.viewer.lock();
+                let mut v = state_up.gpu.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_mascot_mesh(id, &mesh, bounds);
                 }
@@ -474,7 +474,7 @@ pub(crate) fn mascot_set_screen_rect(
     w: f32,
     h: f32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         viewer.set_mascot_screen_rect(id, x, y, w, h);
     }
@@ -496,7 +496,7 @@ pub(crate) fn mascot_load_embedded(
     };
     let state = Arc::clone(&*state);
     let app_err = app.clone();
-    let token = state.overlay_mesh_generation.load(Ordering::SeqCst);
+    let token = state.gpu.overlay_mesh_generation.load(Ordering::SeqCst);
     std::thread::Builder::new()
         .name("mascot-load-embedded".into())
         .spawn(move || {
@@ -507,10 +507,10 @@ pub(crate) fn mascot_load_embedded(
                     return;
                 }
             };
-            let mode = *state.rendering_mode.lock();
+            let mode = *state.gpu.rendering_mode.lock();
             let is_stale = {
                 let st = Arc::clone(&state);
-                move || st.overlay_mesh_generation.load(Ordering::Relaxed) != token
+                move || st.gpu.overlay_mesh_generation.load(Ordering::Relaxed) != token
             };
             let Some((mesh, bounds)) = build_mesh_for_mode(&file, mode, is_stale) else {
                 return;
@@ -518,10 +518,10 @@ pub(crate) fn mascot_load_embedded(
             let state_up = Arc::clone(&state);
             let app_main = app_err.clone();
             let _ = app_err.run_on_main_thread(move || {
-                if state_up.overlay_mesh_generation.load(Ordering::Relaxed) != token {
+                if state_up.gpu.overlay_mesh_generation.load(Ordering::Relaxed) != token {
                     return;
                 }
-                let mut v = state_up.viewer.lock();
+                let mut v = state_up.gpu.viewer.lock();
                 if let Some(viewer) = v.as_mut() {
                     viewer.load_mascot_mesh(id, &mesh, bounds);
                     drop(v);
@@ -544,7 +544,7 @@ pub(crate) fn mascot_set_visible(
     id: u32,
     visible: bool,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         viewer.set_mascot_visible(id, visible);
     }
@@ -567,7 +567,7 @@ pub(crate) fn logo_set_camera_angle(
     let phi = (90.0 - elevation)
         .to_radians()
         .clamp(0.01, std::f32::consts::PI - 0.01);
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         if let Some(logo) = viewer.logo_overlay.as_mut() {
             logo.theta = theta;
@@ -588,7 +588,7 @@ pub(crate) fn logo_set_camera_dist(
     app: AppHandle,
     dist: f32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         if let Some(logo) = viewer.logo_overlay.as_mut() {
             logo.cam_dist = dist;
@@ -609,7 +609,7 @@ pub(crate) fn logo_set_light_dir(
 ) -> Result<(), String> {
     use crate::render::light_dir_from_azimuth_elevation_deg;
     let dir = light_dir_from_azimuth_elevation_deg(azimuth, elevation);
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         if let Some(logo) = viewer.logo_overlay.as_mut() {
             logo.light_dir = dir.to_array();
@@ -629,7 +629,7 @@ pub(crate) fn logo_set_light_intensity(
     app: AppHandle,
     intensity: f32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         if let Some(logo) = viewer.logo_overlay.as_mut() {
             logo.light_intensity = intensity.clamp(0.0, 5.0);
@@ -757,7 +757,7 @@ pub(crate) fn avatar_load_file(
             let centroid = avatar_voxel_centroid(&file.voxels);
             let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
             let extent = (bounds.max - bounds.min).max_element().max(0.001);
-            if let Some(viewer) = state.viewer.lock().as_mut() {
+            if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
                 viewer.cache_avatar_mesh(name, &mesh, centroid, 1.5 / extent);
             }
         })
@@ -820,7 +820,7 @@ pub(crate) fn avatar_list_user(state: State<'_, Arc<ViewerState>>, app: AppHandl
         let centroid = avatar_voxel_centroid(&file.voxels);
         let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
         let extent = (bounds.max - bounds.min).max_element().max(0.001);
-        if let Some(viewer) = state.viewer.lock().as_mut() {
+        if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
             viewer.cache_avatar_mesh(stem.clone(), &mesh, centroid, 1.5 / extent);
         }
         names.push(stem);
@@ -879,7 +879,7 @@ pub(crate) fn speech_bubble_show(
     tx: f32,
     ty: f32,
 ) -> Result<f32, String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let computed_rh = if let Some(viewer) = v.as_mut() {
         viewer.show_speech_bubble(id, pages, [rx, ry, rw, rh], [tx, ty])
     } else {
@@ -899,7 +899,7 @@ pub(crate) fn speech_bubble_click(
     app: AppHandle,
     id: u32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let changed = if let Some(viewer) = v.as_mut() {
         viewer.click_speech_bubble(id)
     } else {
@@ -920,7 +920,7 @@ pub(crate) fn speech_bubble_dismiss(
     app: AppHandle,
     id: u32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         viewer.dismiss_speech_bubble(id);
     }
@@ -944,7 +944,7 @@ pub(crate) fn speech_bubble_reposition(
     tx: f32,
     ty: f32,
 ) -> Result<(), String> {
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     if let Some(viewer) = v.as_mut() {
         viewer.reposition_speech_bubble(id, [rx, ry, rw, rh], [tx, ty]);
     }

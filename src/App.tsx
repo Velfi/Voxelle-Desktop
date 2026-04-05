@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useLatestRef } from "./hooks/useLatestRef";
 import { useFlyMode } from "./hooks/useFlyMode";
 import { useViewportPointer } from "./hooks/useViewportPointer";
 import { useWalkMode } from "./hooks/useWalkMode";
@@ -22,11 +23,6 @@ import {
 } from "./hooks/useGeneratorState";
 import { MascotView } from "./MascotView";
 import { SpeechBubbleOverlay, type BubbleInfo } from "./SpeechBubbleOverlay";
-import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
-import { JoinSessionModal } from "./JoinSessionModal";
-import { PreferencesModal } from "./PreferencesModal";
-import { StampBookModal } from "./StampBookModal";
-import type { StampBookEntryTuple } from "./stampBookStorage";
 import { loadRecentJoinUrls } from "./joinRecent";
 import {
   applyAppearanceToDocument,
@@ -58,13 +54,15 @@ import { ViewportCameraHud } from "./ViewportCameraHud";
 import { useStrokePhase } from "./useStrokePhase";
 import { SelectionGizmo, type SelectionGizmoRef } from "./SelectionGizmo";
 import { ExtrudeGizmo, type ExtrudeGizmoRef } from "./ExtrudeGizmo";
-import RadialPingMenu from "./RadialPingMenu";
-import GamepadRadialMenu from "./GamepadRadialMenu";
-import VirtualCursor from "./VirtualCursor";
 import { useGamepad } from "./useGamepad";
 import { toolSliceToMode, type SubOptionChoice } from "./gamepadRadialMenuData";
-import { PingArrowIndicator } from "./PingArrowIndicator";
 import { ToolsSidebar, PaletteSwatches } from "./ToolsSidebar";
+import { AppModals } from "./AppModals";
+import { GameHUD } from "./GameHUD";
+import { InspectorSidebar } from "./InspectorSidebar";
+import { ViewportHUD } from "./ViewportHUD";
+import { ToolStateContext } from "./ToolStateContext";
+import { CollabContext } from "./CollabContext";
 import { generateIdea } from "./ideaGenerator";
 import packageJson from "../package.json";
 import type {
@@ -153,15 +151,6 @@ function App() {
   /** Pointer id currently captured by the viewport element (or null when not captured). */
   const capturedPointerIdRef = useRef<number | null>(null);
   const interactionModeRef = useRef<InteractionMode>("navigate");
-  const activeColorRef = useRef(0x8899aa);
-  const activeMaterialRef = useRef("plastic");
-  const brushRadiusRef = useRef(0);
-  const brushShapeRef = useRef<BrushShape>("sphere");
-  const brushClipBottomHalfRef = useRef(false);
-  const strokeDrawStyleRef = useRef<StrokeDrawStyle>("line");
-  const drawStrokeModeRef = useRef<DrawStrokeModeApi>("line");
-  const planeAxisRef = useRef<PlaneAxisApi>("auto");
-  const sprayDensityRef = useRef(0);
   /** Normalized viewport start of stroke (for line stroke); matches Rust `viewport_texels_from_norm`. */
   const strokeViewportStartRef = useRef<{ nx: number; ny: number } | null>(null);
   /** Previous brush sample (normalized viewport). */
@@ -172,7 +161,6 @@ function App() {
   const loadingRef = useRef(false);
   const interactionBlockedRef = useRef(false);
   const pendingJoinUrlRef = useRef<string | null>(null);
-  const collabActiveMenuRef = useRef(false);
   const startHostMenuRef = useRef<() => void>(() => {});
   const leaveSessionMenuRef = useRef<() => void>(() => {});
   /** Physical-pixel look deltas coalesced per animation frame (shared between useFlyMode, useWalkMode, and useGamepad). */
@@ -181,7 +169,7 @@ function App() {
   const [interactionMode, setInteractionMode] = useState<InteractionMode>("navigate");
   const [mood, setMood] = useState<MoodState>(() => defaultMoodState());
   const [selectionCount, setSelectionCount] = useState(0);
-  const selectionCountRef = useRef(0);
+  const selectionCountRef = useLatestRef(selectionCount);
   const [viewportCursorDebugEnabled, setViewportCursorDebugEnabled] = useState(() => {
     try {
       return localStorage.getItem(LS_VIEWPORT_CURSOR_DEBUG) === "1";
@@ -202,81 +190,89 @@ function App() {
   const viewportCursorDebugRafRef = useRef<number | null>(null);
   const [hideUI, setHideUI] = useState(false);
   const [matchMaterialSelectColor, setMatchMaterialSelectColor] = useState(false);
-  const matchMaterialSelectColorRef = useRef(false);
+  const matchMaterialSelectColorRef = useLatestRef(matchMaterialSelectColor);
   const [activeColor, setActiveColor] = useState(0x8899aa);
+  const activeColorRef = useLatestRef(activeColor);
   /** Multi-color palette selection (empty = single-color mode). */
   const [selectedColors, setSelectedColors] = useState<number[]>([]);
-  const selectedColorsRef = useRef<number[]>([]);
+  const selectedColorsRef = useLatestRef(selectedColors);
   const [paintColorDistrib, setPaintColorDistrib] =
     useState<PaintColorDistrib>(loadPaintColorDistrib);
-  const paintColorDistribRef = useRef<PaintColorDistrib>(paintColorDistrib);
+  const paintColorDistribRef = useLatestRef(paintColorDistrib);
   /** Deterministic seed for the current stroke (randomSingle / preview consistency). */
   const currentStrokeSeedRef = useRef<number>(0);
   const [activeMaterial, setActiveMaterial] = useState("plastic");
+  const activeMaterialRef = useLatestRef(activeMaterial);
   const [brushRadius, setBrushRadius] = useState(0);
+  const brushRadiusRef = useLatestRef(brushRadius);
   const [brushShape, setBrushShape] = useState<BrushShape>("sphere");
+  const brushShapeRef = useLatestRef(brushShape);
   /** Brush: clip to half-space along the face outward normal from the pick (see Rust `brush_clip_half_normal_from_screen`). */
   const [brushClipBottomHalf, setBrushClipBottomHalf] = useState(false);
+  const brushClipBottomHalfRef = useLatestRef(brushClipBottomHalf);
   /** Mirror / symmetry axes for draw tools (bit 0 = X, bit 1 = Y, bit 2 = Z). */
   const [mirrorX, setMirrorX] = useState(false);
   const [mirrorY, setMirrorY] = useState(false);
   const [mirrorZ, setMirrorZ] = useState(false);
-  const mirrorXRef = useRef(false);
-  const mirrorYRef = useRef(false);
-  const mirrorZRef = useRef(false);
+  const mirrorXRef = useLatestRef(mirrorX);
+  const mirrorYRef = useLatestRef(mirrorY);
+  const mirrorZRef = useLatestRef(mirrorZ);
   const [strokeDrawStyle, setStrokeDrawStyle] = useState<StrokeDrawStyle>("line");
   const [strokeFamilyVariant, setStrokeFamilyVariant] = useState<StrokeFamilyVariant>("stroke");
-  const strokeFamilyVariantRef = useRef<StrokeFamilyVariant>("stroke");
+  const strokeFamilyVariantRef = useLatestRef(strokeFamilyVariant);
   const [drawStrokeMode, setDrawStrokeMode] = useState<DrawStrokeModeApi>("line");
+  const drawStrokeModeRef = useLatestRef(drawStrokeMode);
   const [planeAxis, setPlaneAxis] = useState<PlaneAxisApi>("auto");
+  const planeAxisRef = useLatestRef(planeAxis);
   const [sprayDensity, setSprayDensity] = useState(0);
+  const sprayDensityRef = useLatestRef(sprayDensity);
   /** Selection fill (web `fillSelectDiagonals` / `fillRespectsColor`). */
   const [fillSelectDiagonals, setFillSelectDiagonals] = useState(false);
   const [fillRespectsColor, setFillRespectsColor] = useState(true);
   const [selectionCombineMode, setSelectionCombineMode] =
     useState<SelectionCombineModeApi>("replace");
-  const fillSelectDiagonalsRef = useRef(false);
-  const fillRespectsColorRef = useRef(true);
+  const fillSelectDiagonalsRef = useLatestRef(fillSelectDiagonals);
+  const fillRespectsColorRef = useLatestRef(fillRespectsColor);
   const selectionStrokeBegunRef = useRef(false);
   const [toolsPane, setToolsPane] = useState<ToolsPane>("draw");
   const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
   const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("rocks");
   const [squishyMode, setSquishyMode] = useState<"add" | "edit" | "delete">("add");
-  const squishyModeRef = useRef<"add" | "edit" | "delete">("add");
+  const squishyModeRef = useLatestRef(squishyMode);
   const [squishyHollow, setSquishyHollow] = useState(false);
   const [squishyWallThickness, setSquishyWallThickness] = useState(1);
   const [squishySnapToSurface, setSquishySnapToSurface] = useState(true);
   const [selectionStrokeSnapToSurface, setSelectionStrokeSnapToSurface] = useState(true);
   const [selectionStrokeAxisAlign, setSelectionStrokeAxisAlign] = useState(true);
-  const selectionStrokeSnapToSurfaceRef = useRef(true);
-  const selectionStrokeAxisAlignRef = useRef(true);
+  const selectionStrokeSnapToSurfaceRef = useLatestRef(selectionStrokeSnapToSurface);
+  const selectionStrokeAxisAlignRef = useLatestRef(selectionStrokeAxisAlign);
   const [surfacePlaneHollow, setSurfacePlaneHollow] = useState(false);
-  const surfacePlaneHollowRef = useRef(false);
+  const surfacePlaneHollowRef = useLatestRef(surfacePlaneHollow);
   const [sprayConstrainToPlane, setSprayConstrainToPlane] = useState(false);
-  const sprayConstrainToPlaneRef = useRef(false);
+  const sprayConstrainToPlaneRef = useLatestRef(sprayConstrainToPlane);
   const [spraySizeRange, setSpraySizeRange] = useState(false);
-  const spraySizeRangeRef = useRef(false);
+  const spraySizeRangeRef = useLatestRef(spraySizeRange);
   /** Scatter: random stamp offset in voxels (web `sprayScatter`; 0 = no scatter). */
   const [sprayScatter, setSprayScatter] = useState(0);
-  const sprayScatterRef = useRef(0);
+  const sprayScatterRef = useLatestRef(sprayScatter);
   const [sprayRadiusMin, setSprayRadiusMin] = useState(0);
-  const sprayRadiusMinRef = useRef(0);
+  const sprayRadiusMinRef = useLatestRef(sprayRadiusMin);
   const [sprayRadiusMax, setSprayRadiusMax] = useState(4);
-  const sprayRadiusMaxRef = useRef(4);
+  const sprayRadiusMaxRef = useLatestRef(sprayRadiusMax);
   /** Separate brush shape for spray mode (web `sprayBrushShape`). */
   const [sprayBrushShape, setSprayBrushShape] = useState<BrushShape>("sphere");
-  const sprayBrushShapeRef = useRef<BrushShape>("sphere");
+  const sprayBrushShapeRef = useLatestRef(sprayBrushShape);
   /** Plane reference for constrain-to-plane: auto | camera | x | y | z. */
   type ConstrainToPlaneRef = "auto" | "camera" | "x" | "y" | "z";
   const [sprayConstrainToPlaneRef_, setSprayConstrainToPlaneRef_] =
     useState<ConstrainToPlaneRef>("auto");
-  const sprayConstrainToPlaneRefRef = useRef<ConstrainToPlaneRef>("auto");
+  const sprayConstrainToPlaneRefRef = useLatestRef(sprayConstrainToPlaneRef_);
   const [fillConstrainToPlane, setFillConstrainToPlane] = useState(false);
-  const fillConstrainToPlaneRef = useRef(false);
+  const fillConstrainToPlaneRef = useLatestRef(fillConstrainToPlane);
   const [squishyBallCount, setSquishyBallCount] = useState(0);
   const [strokePolygonVerts, setStrokePolygonVerts] = useState<[number, number, number][]>([]);
   /** Kept in sync with `strokePolygonVerts` for `sync_preview_input` / `mergedStrokeAux` (no stale closure). */
-  const strokePolygonVertsRef = useRef<[number, number, number][]>([]);
+  const strokePolygonVertsRef = useLatestRef(strokePolygonVerts);
   const strokeClickRef = useRef<{
     circleCenter: [number, number, number] | null;
   }>({
@@ -293,7 +289,7 @@ function App() {
     onCommit: () => void commitCuboidSolidAtScreen(),
   });
   const [cuboidDepthUi, setCuboidDepthUi] = useState(1);
-  const cuboidDepthRef = useRef(1);
+  const cuboidDepthRef = useLatestRef(cuboidDepthUi);
   /** Solid cylinder: disk drag done; adjust depth then Done (same flow as cuboid). */
   const cylinderPhase = useStrokePhase<DepthPhaseData>({
     phases: ["depth"],
@@ -305,7 +301,7 @@ function App() {
     onCommit: () => void commitCylinderSolidAtScreen(),
   });
   const [cylinderDepthUi, setCylinderDepthUi] = useState(1);
-  const cylinderDepthRef = useRef(1);
+  const cylinderDepthRef = useLatestRef(cylinderDepthUi);
   /** Solid polygon: vertices placed; adjust depth then Done (same flow as cuboid/cylinder). */
   const polygonPhase = useStrokePhase<{ endNorm: { nx: number; ny: number } }>({
     phases: ["depth"],
@@ -317,7 +313,7 @@ function App() {
     onCommit: () => void commitPolygonSolid(),
   });
   const [polygonDepthUi, setPolygonDepthUi] = useState(1);
-  const polygonDepthRef = useRef(1);
+  const polygonDepthRef = useLatestRef(polygonDepthUi);
   /** Extrude phased tool: drag creates preview, adjust settings, then commit. */
   const extrudePhase = useStrokePhase<Record<string, never>>({
     phases: ["settings"],
@@ -381,7 +377,6 @@ function App() {
   const [sculptStrokeMode, setSculptStrokeMode] = useState<SculptStrokeModeApi>("draw");
   const [terrainSculptOp, setTerrainSculptOp] = useState<TerrainSculptOpApi>("raise");
   const [terrainBaseY, setTerrainBaseY] = useState(0);
-  const [terrainStrength] = useState(4);
   const [terrainSmoothRadius, setTerrainSmoothRadius] = useState(2);
   const [terrainFlattenUseBaseY, setTerrainFlattenUseBaseY] = useState(false);
   const [terrainSubVoxel, setTerrainSubVoxel] = useState(false);
@@ -396,8 +391,7 @@ function App() {
   const [extrudeDirectionRef, setExtrudeDirectionRef] = useState<
     "camera" | "auto" | "x" | "y" | "z"
   >("camera");
-  const extrudeDirectionRefRef = useRef<"camera" | "auto" | "x" | "y" | "z">("camera");
-  extrudeDirectionRefRef.current = extrudeDirectionRef;
+  const extrudeDirectionRefRef = useLatestRef(extrudeDirectionRef);
   const [extrudeProfile, setExtrudeProfile] = useState<"cube" | "cylinder">("cube");
   const [extrudeEndCap, setExtrudeEndCap] = useState<"flat" | "rounded" | "pointed">("flat");
   const [extrudeTaper, setExtrudeTaper] = useState(false);
@@ -438,7 +432,7 @@ function App() {
 
   /** Cold-start title mesh from `Logo.voxelle`; enables bottom menu layout and viewport orbit. */
   const [startScreenLogoLoaded, setStartScreenLogoLoaded] = useState(false);
-  const startScreenLogoLoadedRef = useRef(false);
+  const startScreenLogoLoadedRef = useLatestRef(startScreenLogoLoaded);
   const [logoLightControlsVisible, setLogoLightControlsVisible] = useState(false);
   const [logoLightAzimuth, setLogoLightAzimuth] = useState(0);
   const [logoLightElevation, setLogoLightElevation] = useState(30);
@@ -460,8 +454,7 @@ function App() {
   const [workBusy, setWorkBusy] = useState(false);
   const [workProgress, setWorkProgress] = useState(0);
   const [workPhase, setWorkPhase] = useState("");
-  const workPhaseRef = useRef("");
-  workPhaseRef.current = workPhase;
+  const workPhaseRef = useLatestRef(workPhase);
   /** True from flood-fill invoke start until it settles; mesh phases say "Applying edit…" not "Fill", so HUD can't rely on phase text alone. */
   const [fillOperationPending, setFillOperationPending] = useState(false);
   const fillOperationPendingRef = useRef(false);
@@ -539,8 +532,7 @@ function App() {
     origX: number;
     origY: number;
   } | null>(null);
-  const toolPanePosRef = useRef(toolPanePos);
-  toolPanePosRef.current = toolPanePos;
+  const toolPanePosRef = useLatestRef(toolPanePos);
 
   const [colorPaletteSize, setColorPaletteSize] = useState(() => {
     if (typeof localStorage === "undefined") return { w: 200, h: 260 };
@@ -557,10 +549,7 @@ function App() {
     }
     return { w: 200, h: 260 };
   });
-  const colorPalettePosRef = useRef(colorPalettePos);
-  colorPalettePosRef.current = colorPalettePos;
-  const colorPaletteSizeRef = useRef(colorPaletteSize);
-  colorPaletteSizeRef.current = colorPaletteSize;
+  const colorPaletteSizeRef = useLatestRef(colorPaletteSize);
 
   function clampPalettePos(x: number, y: number): { x: number; y: number } {
     const { w, h } = colorPaletteSizeRef.current;
@@ -575,20 +564,15 @@ function App() {
   const [stampRotX, setStampRotX] = useState(0);
   const [stampRotY, setStampRotY] = useState(0);
   const [stampRotZ, setStampRotZ] = useState(0);
-  const stampRotXRef = useRef(0);
-  const stampRotYRef = useRef(0);
-  const stampRotZRef = useRef(0);
-  stampRotXRef.current = stampRotX;
-  stampRotYRef.current = stampRotY;
-  stampRotZRef.current = stampRotZ;
+  const stampRotXRef = useLatestRef(stampRotX);
+  const stampRotYRef = useLatestRef(stampRotY);
+  const stampRotZRef = useLatestRef(stampRotZ);
   /** Stamp placement origin X: 0 = min edge, 1 = center, 2 = max edge. */
   const [stampOriginX, setStampOriginX] = useState(0);
   /** Stamp placement origin Z: 0 = min edge, 1 = center, 2 = max edge. */
   const [stampOriginZ, setStampOriginZ] = useState(0);
-  const stampOriginXRef = useRef(0);
-  const stampOriginZRef = useRef(0);
-  stampOriginXRef.current = stampOriginX;
-  stampOriginZRef.current = stampOriginZ;
+  const stampOriginXRef = useLatestRef(stampOriginX);
+  const stampOriginZRef = useLatestRef(stampOriginZ);
 
   const [joinModalOpen, setJoinModalOpen] = useState(false);
   const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
@@ -643,6 +627,7 @@ function App() {
     () => loadPreferences().reopenLastProject,
   );
   const [collabActive, setCollabActive] = useState(false);
+  const collabActiveMenuRef = useLatestRef(collabActive);
   /** Set when hosting or after welcome; 0 when solo. */
   const [localPeerId, setLocalPeerId] = useState(0);
   const [hostingCopied, setHostingCopied] = useState(false);
@@ -749,10 +734,6 @@ function App() {
     collabActiveRef.current = collabActive;
     localPeerIdRef.current = localPeerId;
   }, [chatPanelOpen, collabActive, localPeerId]);
-
-  useEffect(() => {
-    startScreenLogoLoadedRef.current = startScreenLogoLoaded;
-  }, [startScreenLogoLoaded]);
 
   useEffect(() => {
     if (chatPanelOpen) setChatToasts([]);
@@ -1122,10 +1103,6 @@ function App() {
   );
 
   useEffect(() => {
-    selectionCountRef.current = selectionCount;
-  }, [selectionCount]);
-  useEffect(() => {
-    activeColorRef.current = activeColor;
     if (selectionCountRef.current > 0) {
       void invoke("paint_selection", {
         args: {
@@ -1137,7 +1114,6 @@ function App() {
     }
   }, [activeColor]);
   useEffect(() => {
-    selectedColorsRef.current = selectedColors;
     if (selectionCountRef.current > 0 && selectedColors.length >= 1) {
       void invoke("paint_selection", {
         args: {
@@ -1151,13 +1127,11 @@ function App() {
     }
   }, [selectedColors]);
   useEffect(() => {
-    paintColorDistribRef.current = paintColorDistrib;
     try {
       localStorage.setItem(LS_PAINT_COLOR_DISTRIB, JSON.stringify(paintColorDistrib));
     } catch {}
   }, [paintColorDistrib]);
   useEffect(() => {
-    activeMaterialRef.current = activeMaterial;
     if (selectionCountRef.current > 0) {
       const palette = selectedColorsRef.current;
       const multiColor = palette.length > 1;
@@ -1171,63 +1145,36 @@ function App() {
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
   }, [activeMaterial]);
-  useEffect(() => {
-    brushRadiusRef.current = brushRadius;
-  }, [brushRadius]);
-  useEffect(() => {
-    brushShapeRef.current = brushShape;
-  }, [brushShape]);
-  useEffect(() => {
-    mirrorXRef.current = mirrorX;
-  }, [mirrorX]);
-  useEffect(() => {
-    mirrorYRef.current = mirrorY;
-  }, [mirrorY]);
-  useEffect(() => {
-    mirrorZRef.current = mirrorZ;
-  }, [mirrorZ]);
-  useEffect(() => {
-    brushClipBottomHalfRef.current = brushClipBottomHalf;
-  }, [brushClipBottomHalf]);
-  const generatorSphereRadiusRef = useRef(4);
-  const generatorKindRef = useRef<GeneratorKindId>("rocks");
-  const sculptStrokeModeRef = useRef<SculptStrokeModeApi>("draw");
-  const terrainSculptOpRef = useRef<TerrainSculptOpApi>("raise");
-  const terrainBaseYRef = useRef(0);
-  const terrainStrengthRef = useRef(4);
-  const terrainSmoothRadiusRef = useRef(2);
-  const terrainFlattenUseBaseYRef = useRef(false);
-  const terrainSubVoxelRef = useRef(false);
+  const generatorSphereRadiusRef = useLatestRef(generatorSphereRadius);
+  const generatorKindRef = useLatestRef(generatorKind);
+  const terrainSculptOpRef = useLatestRef(terrainSculptOp);
+  const terrainBaseYRef = useLatestRef(terrainBaseY);
+  const terrainSmoothRadiusRef = useLatestRef(terrainSmoothRadius);
+  const terrainFlattenUseBaseYRef = useLatestRef(terrainFlattenUseBaseY);
+  const terrainSubVoxelRef = useLatestRef(terrainSubVoxel);
   const lastTerrainHoverMsRef = useRef(0);
-  const sculptSmoothPassesRef = useRef(1);
-  const sculptBrushRadiusRef = useRef(2);
-  const sculptBrushStrengthRef = useRef(100);
-  const sculptBrushFalloffRef = useRef(0);
-  const sculptBrushShapeUiRef = useRef<SculptBrushShapeUi>("circle");
-  const extrudeProfileRef = useRef<"cube" | "cylinder">("cube");
-  const extrudeEndCapRef = useRef<"flat" | "rounded" | "pointed">("flat");
-  const extrudeTaperRef = useRef(false);
-  const extrudeTaperStartRef = useRef(3);
-  const extrudeTaperEndRef = useRef(0);
-  const wallAreaShapeRef = useRef<WallAreaShapeApi>("brush");
-  const sprayDirectionRef = useRef<SprayDirectionApi>("auto");
-  const wallWidthIndexRef = useRef(0);
-  const wallHeightVoxRef = useRef(2);
-  const wallLockStartHeightRef = useRef(false);
-  const wallAxisAlignRef = useRef(false);
-  const sculptSmoothVariantRef = useRef<SculptSmoothVariantApi>("majority");
-  const smoothNeighborRadiusRef = useRef(0);
-  const smoothAggressivenessRef = useRef(100);
-  const smoothLaplacianIterationsRef = useRef(4);
-  const smoothLaplacianRelaxPctRef = useRef(50);
-  const wallSculptPolygonVertsRef = useRef<[number, number, number][]>([]);
-  useEffect(() => {
-    generatorSphereRadiusRef.current = generatorSphereRadius;
-  }, [generatorSphereRadius]);
-  useEffect(() => {
-    generatorKindRef.current = generatorKind;
-  }, [generatorKind]);
-
+  const sculptSmoothPassesRef = useLatestRef(sculptSmoothPasses);
+  const sculptBrushRadiusRef = useLatestRef(sculptBrushRadius);
+  const sculptBrushStrengthRef = useLatestRef(sculptBrushStrength);
+  const sculptBrushFalloffRef = useLatestRef(sculptBrushFalloff);
+  const sculptBrushShapeUiRef = useLatestRef(sculptBrushShapeUi);
+  const extrudeProfileRef = useLatestRef(extrudeProfile);
+  const extrudeEndCapRef = useLatestRef(extrudeEndCap);
+  const extrudeTaperRef = useLatestRef(extrudeTaper);
+  const extrudeTaperStartRef = useLatestRef(extrudeTaperStart);
+  const extrudeTaperEndRef = useLatestRef(extrudeTaperEnd);
+  const wallAreaShapeRef = useLatestRef(wallAreaShape);
+  const sprayDirectionRef = useLatestRef(sprayDirection);
+  const wallWidthIndexRef = useLatestRef(wallWidthIndex);
+  const wallHeightVoxRef = useLatestRef(wallHeightVox);
+  const wallLockStartHeightRef = useLatestRef(wallLockStartHeight);
+  const wallAxisAlignRef = useLatestRef(wallAxisAlign);
+  const sculptSmoothVariantRef = useLatestRef(sculptSmoothVariant);
+  const smoothNeighborRadiusRef = useLatestRef(smoothNeighborRadius);
+  const smoothAggressivenessRef = useLatestRef(smoothAggressiveness);
+  const smoothLaplacianIterationsRef = useLatestRef(smoothLaplacianIterations);
+  const smoothLaplacianRelaxPctRef = useLatestRef(smoothLaplacianRelaxPct);
+  const wallSculptPolygonVertsRef = useLatestRef(wallSculptPolygonVerts);
   // -- Generator hooks --------------------------------------------------------
   const _genCtx = { activeColorRef, activeMaterialRef, generatorSphereRadiusRef };
   const rocks = useRocksGenerator(_genCtx);
@@ -1393,111 +1340,11 @@ function App() {
   } = shape;
 
   useEffect(() => {
-    sculptStrokeModeRef.current = sculptStrokeMode;
-  }, [sculptStrokeMode]);
-  useEffect(() => {
-    terrainSculptOpRef.current = terrainSculptOp;
-  }, [terrainSculptOp]);
-  useEffect(() => {
-    terrainBaseYRef.current = terrainBaseY;
-  }, [terrainBaseY]);
-  useEffect(() => {
-    terrainStrengthRef.current = terrainStrength;
-  }, [terrainStrength]);
-  useEffect(() => {
-    terrainSmoothRadiusRef.current = terrainSmoothRadius;
-  }, [terrainSmoothRadius]);
-  useEffect(() => {
-    terrainFlattenUseBaseYRef.current = terrainFlattenUseBaseY;
-  }, [terrainFlattenUseBaseY]);
-  useEffect(() => {
-    terrainSubVoxelRef.current = terrainSubVoxel;
-  }, [terrainSubVoxel]);
-  useEffect(() => {
-    sculptSmoothPassesRef.current = sculptSmoothPasses;
-  }, [sculptSmoothPasses]);
-  useEffect(() => {
-    sculptBrushRadiusRef.current = sculptBrushRadius;
-  }, [sculptBrushRadius]);
-  useEffect(() => {
-    sculptBrushStrengthRef.current = sculptBrushStrength;
-  }, [sculptBrushStrength]);
-  useEffect(() => {
-    sculptBrushFalloffRef.current = sculptBrushFalloff;
-  }, [sculptBrushFalloff]);
-  useEffect(() => {
-    sculptBrushShapeUiRef.current = sculptBrushShapeUi;
-  }, [sculptBrushShapeUi]);
-  useEffect(() => {
-    extrudeProfileRef.current = extrudeProfile;
-  }, [extrudeProfile]);
-  useEffect(() => {
-    extrudeEndCapRef.current = extrudeEndCap;
-  }, [extrudeEndCap]);
-  useEffect(() => {
-    extrudeTaperRef.current = extrudeTaper;
-  }, [extrudeTaper]);
-  useEffect(() => {
-    extrudeTaperStartRef.current = extrudeTaperStart;
-  }, [extrudeTaperStart]);
-  useEffect(() => {
-    extrudeTaperEndRef.current = extrudeTaperEnd;
-  }, [extrudeTaperEnd]);
-  useEffect(() => {
-    wallAreaShapeRef.current = wallAreaShape;
-  }, [wallAreaShape]);
-  useEffect(() => {
-    sprayDirectionRef.current = sprayDirection;
-  }, [sprayDirection]);
-  useEffect(() => {
-    wallWidthIndexRef.current = wallWidthIndex;
-  }, [wallWidthIndex]);
-  useEffect(() => {
-    wallHeightVoxRef.current = wallHeightVox;
-  }, [wallHeightVox]);
-  useEffect(() => {
-    wallLockStartHeightRef.current = wallLockStartHeight;
-  }, [wallLockStartHeight]);
-  useEffect(() => {
-    wallAxisAlignRef.current = wallAxisAlign;
-  }, [wallAxisAlign]);
-  useEffect(() => {
-    sculptSmoothVariantRef.current = sculptSmoothVariant;
-  }, [sculptSmoothVariant]);
-  useEffect(() => {
-    smoothNeighborRadiusRef.current = smoothNeighborRadius;
-  }, [smoothNeighborRadius]);
-  useEffect(() => {
-    smoothAggressivenessRef.current = smoothAggressiveness;
-  }, [smoothAggressiveness]);
-  useEffect(() => {
-    smoothLaplacianIterationsRef.current = smoothLaplacianIterations;
-  }, [smoothLaplacianIterations]);
-  useEffect(() => {
-    smoothLaplacianRelaxPctRef.current = smoothLaplacianRelaxPct;
-  }, [smoothLaplacianRelaxPct]);
-  useEffect(() => {
-    wallSculptPolygonVertsRef.current = wallSculptPolygonVerts;
-  }, [wallSculptPolygonVerts]);
-  useEffect(() => {
     if (wallAreaShape !== "polygon" || sculptStrokeMode !== "wall") {
       setWallSculptPolygonVerts([]);
     }
   }, [wallAreaShape, sculptStrokeMode]);
   useEffect(() => {
-    selectionStrokeSnapToSurfaceRef.current = selectionStrokeSnapToSurface;
-  }, [selectionStrokeSnapToSurface]);
-  useEffect(() => {
-    selectionStrokeAxisAlignRef.current = selectionStrokeAxisAlign;
-  }, [selectionStrokeAxisAlign]);
-  useEffect(() => {
-    strokeDrawStyleRef.current = strokeDrawStyle;
-  }, [strokeDrawStyle]);
-  useEffect(() => {
-    strokeFamilyVariantRef.current = strokeFamilyVariant;
-  }, [strokeFamilyVariant]);
-  useEffect(() => {
-    drawStrokeModeRef.current = drawStrokeMode;
     if (drawStrokeMode !== "cuboid" && cuboidPhase.active) {
       cuboidPhase.cancel();
     }
@@ -1506,9 +1353,6 @@ function App() {
     }
   }, [drawStrokeMode]);
   useEffect(() => {
-    planeAxisRef.current = planeAxis;
-  }, [planeAxis]);
-  useEffect(() => {
     strokeClickRef.current = {
       circleCenter: null,
     };
@@ -1516,13 +1360,7 @@ function App() {
     strokePolygonVertsRef.current = [];
     strokePolygonLastScreenRef.current = null;
   }, [drawStrokeMode]);
-  useEffect(() => {
-    strokePolygonVertsRef.current = strokePolygonVerts;
-  }, [strokePolygonVerts]);
   // Generator refs + useEffect syncs now live in per-generator hooks.
-  useEffect(() => {
-    squishyModeRef.current = squishyMode;
-  }, [squishyMode]);
   useEffect(() => {
     void invoke("squishy_session_set_flags", {
       args: {
@@ -1592,14 +1430,6 @@ function App() {
     }
     return out;
   }
-
-  useEffect(() => {
-    cuboidDepthRef.current = cuboidDepthUi;
-  }, [cuboidDepthUi]);
-
-  useEffect(() => {
-    cylinderDepthRef.current = cylinderDepthUi;
-  }, [cylinderDepthUi]);
 
   function runDepthPhasePreview(
     endNorm: { nx: number; ny: number },
@@ -2018,42 +1848,6 @@ function App() {
     });
   }
 
-  useEffect(() => {
-    sprayDensityRef.current = sprayDensity;
-  }, [sprayDensity]);
-  useEffect(() => {
-    fillSelectDiagonalsRef.current = fillSelectDiagonals;
-  }, [fillSelectDiagonals]);
-  useEffect(() => {
-    fillRespectsColorRef.current = fillRespectsColor;
-  }, [fillRespectsColor]);
-  useEffect(() => {
-    surfacePlaneHollowRef.current = surfacePlaneHollow;
-  }, [surfacePlaneHollow]);
-  useEffect(() => {
-    sprayConstrainToPlaneRef.current = sprayConstrainToPlane;
-  }, [sprayConstrainToPlane]);
-  useEffect(() => {
-    spraySizeRangeRef.current = spraySizeRange;
-  }, [spraySizeRange]);
-  useEffect(() => {
-    sprayScatterRef.current = sprayScatter;
-  }, [sprayScatter]);
-  useEffect(() => {
-    sprayRadiusMinRef.current = sprayRadiusMin;
-  }, [sprayRadiusMin]);
-  useEffect(() => {
-    sprayRadiusMaxRef.current = sprayRadiusMax;
-  }, [sprayRadiusMax]);
-  useEffect(() => {
-    sprayBrushShapeRef.current = sprayBrushShape;
-  }, [sprayBrushShape]);
-  useEffect(() => {
-    sprayConstrainToPlaneRefRef.current = sprayConstrainToPlaneRef_;
-  }, [sprayConstrainToPlaneRef_]);
-  useEffect(() => {
-    fillConstrainToPlaneRef.current = fillConstrainToPlane;
-  }, [fillConstrainToPlane]);
   useEffect(() => {
     if (interactionMode === "fly") {
       setToolsPane("fly");
@@ -2526,10 +2320,6 @@ function App() {
   }, [interactionMode, squishyMode]);
 
   useEffect(() => {
-    matchMaterialSelectColorRef.current = matchMaterialSelectColor;
-  }, [matchMaterialSelectColor]);
-
-  useEffect(() => {
     void invoke("selection_menu_sync_match_material", {
       checked: matchMaterialSelectColor,
     }).catch(() => {});
@@ -2638,17 +2428,11 @@ function App() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const _vpLocalsRef = useRef<any>(null);
   _vpLocalsRef.current = {
-    activeColorRef,
-    activeMaterialRef,
     activePointerIdRef,
     ashlarPreviewSeedRef,
-    brushClipBottomHalfRef,
-    brushRadiusRef,
-    brushShapeRef,
     capturedPointerIdRef,
     currentStrokeSeedRef,
     dragDidEditRef,
-    drawStrokeModeRef,
     extrudeDirectionRefRef,
     extrudeEndCapRef,
     extrudeGizmoRef,
@@ -2661,14 +2445,12 @@ function App() {
     eyedropperReturnModeRef,
     floraPreviewSeedRef,
     flyMouseLookActiveRef,
-    generatorKindRef,
     generatorSphereRadiusRef,
     gestureRef,
     gizmoHoverRef,
     gizmoRef,
     grassPreviewSeedRef,
     interactionBlockedRef,
-    interactionModeRef,
     lastCursorScreenRef,
     lastRef,
     lastStrokeEditMsRef,
@@ -2676,15 +2458,9 @@ function App() {
     lastTerrainHoverMsRef,
     lastViewportPickNormRef,
     lastWallHoverMsRef,
-    matchMaterialSelectColorRef,
     maxPointerMoveRef,
-    mirrorXRef,
-    mirrorYRef,
-    mirrorZRef,
     onPointerUpRef,
-    paintColorDistribRef,
     pendingPointerUpRef,
-    planeAxisRef,
     pointerStartRef,
     probingRef,
     rockPreviewSeedRef,
@@ -2697,15 +2473,12 @@ function App() {
     sculptBrushStrengthRef,
     sculptSmoothPassesRef,
     sculptSmoothVariantRef,
-    sculptStrokeModeRef,
-    selectedColorsRef,
     selectionStrokeBegunRef,
     selectionStrokeSnapToSurfaceRef,
     smoothAggressivenessRef,
     smoothLaplacianIterationsRef,
     smoothLaplacianRelaxPctRef,
     smoothNeighborRadiusRef,
-    sprayDensityRef,
     sprayDirectionRef,
     squishyModeRef,
     stampOriginXRef,
@@ -2715,7 +2488,6 @@ function App() {
     stampRotZRef,
     startScreenLogoLoadedRef,
     strokeClickRef,
-    strokeDrawStyleRef,
     strokePolygonLastScreenRef,
     strokePolygonVertsRef,
     strokeShiftKeyRef,
@@ -2738,11 +2510,8 @@ function App() {
     wallWidthIndexRef,
     cuboidDepthRef,
     cylinderDepthRef,
-    setActiveColor,
-    setActiveMaterial,
     setCuboidDepthUi,
     setCylinderDepthUi,
-    setInteractionMode,
     setRoofFirstClick,
     setRoofPins,
     setRopeFirstScreen,
@@ -2793,6 +2562,28 @@ function App() {
     askFillConfirmation,
     activateFlyMouseLook,
     releaseFlyMouseLook,
+    // Tool state values needed by useViewportPointer
+    interactionMode,
+    activeColor,
+    activeMaterial,
+    brushRadius,
+    brushShape,
+    brushClipBottomHalf,
+    mirrorX,
+    mirrorY,
+    mirrorZ,
+    strokeDrawStyle,
+    drawStrokeMode,
+    planeAxis,
+    sprayDensity,
+    selectedColors,
+    paintColorDistrib,
+    matchMaterialSelectColor,
+    generatorKind,
+    sculptStrokeMode,
+    setInteractionMode,
+    setActiveColor,
+    setActiveMaterial,
   };
   const {
     onPointerDown,
@@ -2928,7 +2719,6 @@ function App() {
     void invoke("collab_leave").catch(() => {});
   };
 
-  collabActiveMenuRef.current = collabActive;
   startHostMenuRef.current = startHost;
   leaveSessionMenuRef.current = leaveSession;
 
@@ -3146,6 +2936,107 @@ function App() {
           isSelectionInteractionMode)));
 
   return (
+    <ToolStateContext.Provider
+      value={{
+        brushRadius,
+        setBrushRadius,
+        brushShape,
+        setBrushShape,
+        brushClipBottomHalf,
+        setBrushClipBottomHalf,
+        mirrorX,
+        setMirrorX,
+        mirrorY,
+        setMirrorY,
+        mirrorZ,
+        setMirrorZ,
+        strokeDrawStyle,
+        setStrokeDrawStyle,
+        strokeFamilyVariant,
+        setStrokeFamilyVariant,
+        drawStrokeMode,
+        setDrawStrokeMode,
+        planeAxis,
+        setPlaneAxis,
+        sprayDensity,
+        setSprayDensity,
+        interactionMode,
+        setInteractionMode,
+        toolsPane,
+        setToolsPane,
+        activeColor,
+        setActiveColor,
+        activeMaterial,
+        setActiveMaterial,
+        selectedColors,
+        setSelectedColors,
+        paintColorDistrib,
+        setPaintColorDistrib,
+        matchMaterialSelectColor,
+        setMatchMaterialSelectColor,
+        fillSelectDiagonals,
+        setFillSelectDiagonals,
+        fillRespectsColor,
+        setFillRespectsColor,
+        selectionCombineMode,
+        setSelectionCombineMode,
+        selectionMethod,
+        sculptStrokeMode,
+        setSculptStrokeMode,
+        generatorKind,
+        setGeneratorKind,
+        flySpeed,
+        setFlySpeed,
+      }}
+    >
+    <CollabContext.Provider
+      value={{
+        collabActive,
+        setCollabActive,
+        localPeerId,
+        setLocalPeerId,
+        roster,
+        setRoster,
+        chatLines,
+        setChatLines,
+        chatInput,
+        setChatInput,
+        chatPanelOpen,
+        setChatPanelOpen,
+        chatToasts,
+        setChatToasts,
+        displayName,
+        setDisplayName,
+        accentColor,
+        setAccentColor,
+        hostWsUrl,
+        setHostWsUrl,
+        hostWanUrl,
+        setHostWanUrl,
+        hostPort,
+        setHostPort,
+        hostingCopied,
+        setHostingCopied,
+        natPending,
+        setNatPending,
+        natError,
+        setNatError,
+        joinUrl,
+        setJoinUrl,
+        joinModalOpen,
+        setJoinModalOpen,
+        leaveConfirmOpen,
+        setLeaveConfirmOpen,
+        collabJoinPending,
+        setCollabJoinPending,
+        collabBanner,
+        setCollabBanner,
+        prefsEnableUpnp,
+        setPrefsEnableUpnp,
+        startHost,
+        leaveSession,
+      }}
+    >
     <div
       className={`app${loading && !loadError ? " app-loading-cursor" : ""}${hideUI ? " app--ui-hidden" : ""}`}
     >
@@ -3160,37 +3051,8 @@ function App() {
           setSidebarExpanded={setSidebarExpanded}
           toolPanePos={toolPanePos}
           onToolPaneDragDown={onToolPaneDragDown}
-          toolsPane={toolsPane}
-          setToolsPane={setToolsPane}
-          interactionMode={interactionMode}
-          setInteractionMode={setInteractionMode}
-          flySpeed={flySpeed}
-          setFlySpeed={setFlySpeed}
-          selectionMethod={selectionMethod}
-          setDrawStrokeMode={setDrawStrokeMode}
-          setStrokeDrawStyle={setStrokeDrawStyle}
-          setSprayDensity={setSprayDensity}
-          setStrokeFamilyVariant={setStrokeFamilyVariant}
           selectionCount={selectionCount}
           stampBookPatternActive={stampBookPatternActive}
-          activeColor={activeColor}
-          setActiveColor={setActiveColor}
-          selectedColors={selectedColors}
-          setSelectedColors={setSelectedColors}
-          paintColorDistrib={paintColorDistrib}
-          setPaintColorDistrib={setPaintColorDistrib}
-          mirrorX={mirrorX}
-          setMirrorX={setMirrorX}
-          mirrorY={mirrorY}
-          setMirrorY={setMirrorY}
-          mirrorZ={mirrorZ}
-          setMirrorZ={setMirrorZ}
-          activeMaterial={activeMaterial}
-          setActiveMaterial={setActiveMaterial}
-          sculptStrokeMode={sculptStrokeMode}
-          setSculptStrokeMode={setSculptStrokeMode}
-          generatorKind={generatorKind}
-          setGeneratorKind={setGeneratorKind}
           ropePhase={ropePhase}
           clothPhase={clothPhase}
           rocksPhase={rocksPhase}
@@ -3548,662 +3410,72 @@ function App() {
               </div>
             ) : null}
             {showViewportTopCenterStack ? (
-              <div
-                className="viewport-top-center-hud"
-                onPointerDown={(e) => e.stopPropagation()}
-                onPointerMove={(e) => e.stopPropagation()}
-              >
-                {viewportTopCenterHud ? (
-                  <div className="viewport-work-phase-chip" role="status" aria-live="polite">
-                    <span className="viewport-work-phase-text">{viewportTopCenterHud.label}</span>
-                    <span className="viewport-work-phase-pct">{viewportTopCenterHud.pct}%</span>
-                    {viewportTopCenterHud.showFillCancel ? (
-                      <button
-                        type="button"
-                        className="viewport-work-phase-cancel"
-                        onClick={() => void invoke("voxel_fill_cancel").catch(() => {})}
-                      >
-                        Cancel
-                      </button>
-                    ) : null}
-                  </div>
-                ) : null}
-                {cuboidPhase.active || cylinderPhase.active || polygonPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label={
-                      cuboidPhase.active
-                        ? "Cuboid extrusion depth"
-                        : polygonPhase.active
-                          ? "Polygon extrusion depth"
-                          : "Cylinder extrusion depth"
-                    }
-                  >
-                    <span>Depth</span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => {
-                        if (cuboidPhase.active) {
-                          const n = Math.max(-256, cuboidDepthUi - 1);
-                          cuboidDepthRef.current = n;
-                          setCuboidDepthUi(n);
-                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                        } else if (polygonPhase.active) {
-                          const n = Math.max(-256, polygonDepthUi - 1);
-                          polygonDepthRef.current = n;
-                          setPolygonDepthUi(n);
-                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                        } else {
-                          const n = Math.max(-256, cylinderDepthUi - 1);
-                          cylinderDepthRef.current = n;
-                          setCylinderDepthUi(n);
-                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                        }
-                      }}
-                    >
-                      −
-                    </button>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      className="viewport-cuboid-depth-input"
-                      aria-label="Extrusion depth"
-                      autoComplete="off"
-                      value={
-                        extrusionDepthEditing
-                          ? extrusionDepthDraft
-                          : String(
-                              cuboidPhase.active
-                                ? cuboidDepthUi
-                                : polygonPhase.active
-                                  ? polygonDepthUi
-                                  : cylinderDepthUi,
-                            )
-                      }
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        if (v === "" || /^-?\d*$/.test(v)) {
-                          setExtrusionDepthDraft(v);
-                        }
-                      }}
-                      onFocus={(e) => {
-                        const cur = cuboidPhase.active
-                          ? cuboidDepthUi
-                          : polygonPhase.active
-                            ? polygonDepthUi
-                            : cylinderDepthUi;
-                        setExtrusionDepthEditing(true);
-                        setExtrusionDepthDraft(String(cur));
-                        e.target.select();
-                      }}
-                      onBlur={() => {
-                        const current = cuboidPhase.active
-                          ? cuboidDepthUi
-                          : polygonPhase.active
-                            ? polygonDepthUi
-                            : cylinderDepthUi;
-                        let n = parseInt(extrusionDepthDraft, 10);
-                        if (Number.isNaN(n)) n = current;
-                        n = Math.max(-256, Math.min(256, n));
-                        if (cuboidPhase.active) {
-                          setCuboidDepthUi(n);
-                          cuboidDepthRef.current = n;
-                        } else if (polygonPhase.active) {
-                          setPolygonDepthUi(n);
-                          polygonDepthRef.current = n;
-                        } else {
-                          setCylinderDepthUi(n);
-                          cylinderDepthRef.current = n;
-                        }
-                        setExtrusionDepthEditing(false);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          (e.target as HTMLInputElement).blur();
-                        }
-                      }}
-                    />
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => {
-                        if (cuboidPhase.active) {
-                          const n = Math.min(256, cuboidDepthUi + 1);
-                          cuboidDepthRef.current = n;
-                          setCuboidDepthUi(n);
-                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                        } else if (polygonPhase.active) {
-                          const n = Math.min(256, polygonDepthUi + 1);
-                          polygonDepthRef.current = n;
-                          setPolygonDepthUi(n);
-                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                        } else {
-                          const n = Math.min(256, cylinderDepthUi + 1);
-                          cylinderDepthRef.current = n;
-                          setCylinderDepthUi(n);
-                          if (extrusionDepthEditing) setExtrusionDepthDraft(String(n));
-                        }
-                      }}
-                    >
-                      +
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => {
-                        if (cuboidPhase.active) void commitCuboidSolidAtScreen();
-                        else if (polygonPhase.active) void commitPolygonSolid();
-                        else void commitCylinderSolidAtScreen();
-                      }}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {extrudePhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Extrude settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Extrude</span>
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        color: "var(--app-text-muted)",
-                      }}
-                    >
-                      {extrudeProfile === "cylinder" ? "Cylinder" : "Cube"}
-                      {extrudeTaper ? " tapered" : ""}
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => extrudePhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => extrudePhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {/* Roof placing phase: pin/anchor count + Cancel */}
-                {generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null) ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Roof placement"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Roof</span>
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        color: "var(--app-text-muted)",
-                      }}
-                    >
-                      {roofFirstClick !== null
-                        ? roofAreaShape === "circle"
-                          ? "click edge"
-                          : "click opposite corner"
-                        : `${roofPins.length} pin${roofPins.length !== 1 ? "s" : ""}`}
-                    </span>
-                    <div className="viewport-polygon-phase-actions">
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy || roofPins.length < 3}
-                        onClick={() => {
-                          void invoke("generator_roof_from_pins_cmd", {
-                            args: {
-                              pins: roofPins,
-                              style: roofStyle,
-                              height: roofHeight,
-                              thickness: 1,
-                              shedEdgeIndex: 0,
-                              gableOrientation: 0,
-                              breakRatio: 0.5,
-                              wallHeight: 3,
-                              parapetHeight: 2,
-                              saltSkew: 0,
-                              hollow: roofHollow,
-                              color: activeColor,
-                              material: activeMaterialRef.current,
-                            },
-                          })
-                            .then(() => {
-                              setRoofPins([]);
-                              roofPinsRef.current = [];
-                              void invoke("voxel_stroke_preview_reset").catch(() => {});
-                            })
-                            .catch(() => {});
-                        }}
-                      >
-                        Done
-                      </button>
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        onClick={() => {
-                          setRoofPins([]);
-                          roofPinsRef.current = [];
-                          roofFirstClickRef.current = null;
-                          setRoofFirstClick(null);
-                          void invoke("voxel_stroke_preview_reset").catch(() => {});
-                        }}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-                {/* Cloth placing phase: pin count + Done/Cancel */}
-                {generatorKind === "cloth" && !clothPhase.active && clothPins.length > 0 ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Cloth pin placement"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Cloth</span>
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        color: "var(--app-text-muted)",
-                      }}
-                    >
-                      {clothPins.length} pin{clothPins.length !== 1 ? "s" : ""}
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => {
-                        setClothPins([]);
-                        clothPinsRef.current = [];
-                        void invoke("voxel_stroke_preview_reset").catch(() => {});
-                      }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={clothPins.length < 3}
-                      onClick={() => clothPhase.enter("settings", {})}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {/* Cloth settings phase: tension slider + Done/Cancel */}
-                {clothPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Cloth settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Cloth</span>
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        color: "var(--app-text-muted)",
-                      }}
-                    >
-                      Tension
-                    </span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={clothTension}
-                      onChange={(ev) => setClothTension(Number(ev.target.value))}
-                      style={{ width: 80 }}
-                      title="0 = loose drape, 1 = stiff"
-                    />
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        minWidth: "2.2em",
-                        textAlign: "right",
-                      }}
-                    >
-                      {clothTension.toFixed(2)}
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => clothPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => clothPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {/* Rope settings phase: tension + sag sliders + Done/Cancel */}
-                {ropePhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Rope settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Rope</span>
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        color: "var(--app-text-muted)",
-                      }}
-                    >
-                      Tension
-                    </span>
-                    <input
-                      type="range"
-                      min={-1}
-                      max={1}
-                      step={0.02}
-                      value={ropeTension}
-                      onChange={(ev) => setRopeTension(Number(ev.target.value))}
-                      style={{ width: 60 }}
-                      title="-1 = very loose, 0 = loose, 1 = taut"
-                    />
-                    <span
-                      style={{
-                        fontSize: "0.78rem",
-                        minWidth: "2.2em",
-                        textAlign: "right",
-                      }}
-                    >
-                      {ropeTension.toFixed(2)}
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => ropePhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => ropePhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {rocksPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Rocks settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Rocks</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => rocksPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => rocksPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {grassPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Grass settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Grass</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => grassPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => grassPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {ashlarPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Ashlar settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Ashlar</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => ashlarPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => ashlarPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {floraPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Flora settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Flora</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => floraPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => floraPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {shapePhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Shape settings"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Shape</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to place
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => shapePhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => shapePhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {squishyPhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Squishy session"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Squishy</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      Adjust in sidebar — Enter to commit, Esc to cancel
-                    </span>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => squishyPhase.cancel()}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      onClick={() => squishyPhase.commit()}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : null}
-                {bonePhase.active ? (
-                  <div
-                    className="viewport-cuboid-depth-bar"
-                    role="dialog"
-                    aria-label="Bone session"
-                  >
-                    <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Bone</span>
-                    <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
-                      {bonePhase.snapshot?.phase === "build"
-                        ? "Place joints — click Next to pose"
-                        : "Pose joints — Enter to commit, Esc to cancel"}
-                    </span>
-                    {bonePhase.snapshot?.phase === "build" ? (
-                      <>
-                        <button onClick={() => bonePhase.cancel()}>Cancel</button>
-                        <button
-                          onClick={() => {
-                            setBoneMode("edit");
-                            bonePhase.advance();
-                          }}
-                        >
-                          Next
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          onClick={() => {
-                            setBoneMode("add");
-                            bonePhase.retreat();
-                          }}
-                        >
-                          Back
-                        </button>
-                        <button onClick={() => bonePhase.commit()}>Done</button>
-                      </>
-                    )}
-                  </div>
-                ) : null}
-                {showWallSculptPolygonHud ? (
-                  <div
-                    className="viewport-polygon-phase-bar"
-                    role="dialog"
-                    aria-label="Wall polygon outline"
-                  >
-                    <p className="viewport-polygon-phase-hint">
-                      Wall outline: {wallSculptPolygonVerts.length} corners. Click the surface to
-                      add; Done applies (min 2 corners).
-                    </p>
-                    <div className="viewport-polygon-phase-actions">
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy}
-                        onClick={() => setWallSculptPolygonVerts([])}
-                      >
-                        Clear
-                      </button>
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy || wallSculptPolygonVerts.length < 2}
-                        onClick={() => commitWallSculptPolygonStroke()}
-                      >
-                        Done
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-                {showPolygonPhaseHud && !polygonPhase.active ? (
-                  <div
-                    className="viewport-polygon-phase-bar"
-                    role="dialog"
-                    aria-label="Polygon area"
-                  >
-                    <p className="viewport-polygon-phase-hint">
-                      Vertices: {strokePolygonVerts.length}. Click to add corners; Apply with three
-                      or more.
-                    </p>
-                    <div className="viewport-polygon-phase-actions">
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy}
-                        onClick={() => {
-                          setStrokePolygonVerts([]);
-                          strokePolygonLastScreenRef.current = null;
-                        }}
-                      >
-                        Clear
-                      </button>
-                      <button
-                        type="button"
-                        className="tool-options-shape-btn"
-                        disabled={loading || workBusy || strokePolygonVerts.length < 3}
-                        onClick={() => {
-                          if (isDrawVoxelEditMode) applyPolygonStrokeFill();
-                          else applyPolygonStrokeFill();
-                        }}
-                      >
-                        Apply
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
-              </div>
+              <ViewportHUD
+                viewportTopCenterHud={viewportTopCenterHud}
+                cuboidPhase={cuboidPhase}
+                cylinderPhase={cylinderPhase}
+                polygonPhase={polygonPhase}
+                cuboidDepthUi={cuboidDepthUi}
+                setCuboidDepthUi={setCuboidDepthUi}
+                cuboidDepthRef={cuboidDepthRef}
+                cylinderDepthUi={cylinderDepthUi}
+                setCylinderDepthUi={setCylinderDepthUi}
+                cylinderDepthRef={cylinderDepthRef}
+                polygonDepthUi={polygonDepthUi}
+                setPolygonDepthUi={setPolygonDepthUi}
+                polygonDepthRef={polygonDepthRef}
+                extrusionDepthEditing={extrusionDepthEditing}
+                setExtrusionDepthEditing={setExtrusionDepthEditing}
+                extrusionDepthDraft={extrusionDepthDraft}
+                setExtrusionDepthDraft={setExtrusionDepthDraft}
+                commitCuboidSolidAtScreen={commitCuboidSolidAtScreen}
+                commitCylinderSolidAtScreen={commitCylinderSolidAtScreen}
+                commitPolygonSolid={commitPolygonSolid}
+                extrudePhase={extrudePhase}
+                extrudeProfile={extrudeProfile}
+                extrudeTaper={extrudeTaper}
+                generatorKind={generatorKind}
+                roofPins={roofPins}
+                setRoofPins={setRoofPins}
+                roofPinsRef={roofPinsRef}
+                roofFirstClick={roofFirstClick}
+                setRoofFirstClick={setRoofFirstClick}
+                roofFirstClickRef={roofFirstClickRef}
+                roofAreaShape={roofAreaShape}
+                roofStyle={roofStyle}
+                roofHeight={roofHeight}
+                roofHollow={roofHollow}
+                activeColor={activeColor}
+                activeMaterialRef={activeMaterialRef}
+                loading={loading}
+                workBusy={workBusy}
+                clothPins={clothPins}
+                setClothPins={setClothPins}
+                clothPinsRef={clothPinsRef}
+                clothPhase={clothPhase}
+                clothTension={clothTension}
+                setClothTension={setClothTension}
+                ropePhase={ropePhase}
+                ropeTension={ropeTension}
+                setRopeTension={setRopeTension}
+                rocksPhase={rocksPhase}
+                grassPhase={grassPhase}
+                ashlarPhase={ashlarPhase}
+                floraPhase={floraPhase}
+                shapePhase={shapePhase}
+                squishyPhase={squishyPhase}
+                bonePhase={bonePhase}
+                setBoneMode={setBoneMode}
+                showWallSculptPolygonHud={showWallSculptPolygonHud}
+                wallSculptPolygonVerts={wallSculptPolygonVerts}
+                setWallSculptPolygonVerts={setWallSculptPolygonVerts}
+                commitWallSculptPolygonStroke={commitWallSculptPolygonStroke}
+                showPolygonPhaseHud={showPolygonPhaseHud}
+                strokePolygonVerts={strokePolygonVerts}
+                setStrokePolygonVerts={setStrokePolygonVerts}
+                strokePolygonLastScreenRef={strokePolygonLastScreenRef}
+                applyPolygonStrokeFill={applyPolygonStrokeFill}
+              />
             ) : null}
             <SelectionGizmo
               ref={gizmoRef}
@@ -6504,191 +5776,29 @@ function App() {
           ) : null}
         </div>
         {showEditorChrome ? (
-          <aside
-            className={
-              rightSidebarExpanded
-                ? "app-sidebar app-sidebar-right is-expanded"
-                : "app-sidebar app-sidebar-right is-collapsed"
-            }
-            aria-label="Inspector"
-          >
-            <div className="sidebar-header sidebar-header-right">
-              <button
-                type="button"
-                className="sidebar-expand-toggle sidebar-expand-toggle-right"
-                onClick={() => setRightSidebarExpanded((v) => !v)}
-                aria-expanded={rightSidebarExpanded}
-                title={rightSidebarExpanded ? "Collapse inspector" : "Expand inspector"}
-              >
-                {rightSidebarExpanded ? (
-                  <>
-                    <span className="sidebar-expand-toggle-label">Inspector</span>
-                    <span className="sidebar-expand-toggle-icon" aria-hidden>
-                      »
-                    </span>
-                  </>
-                ) : (
-                  <span className="sidebar-expand-toggle-icon" aria-hidden>
-                    «
-                  </span>
-                )}
-              </button>
-            </div>
-            {rightSidebarExpanded ? (
-              <div className="sidebar-scroll">
-                <div
-                  className="sidebar-expanded-slot sidebar-expanded-slot-right"
-                  aria-label="Inspector content"
-                >
-                  <div className="inspector-objects">
-                    <h4 className="inspector-heading">Objects</h4>
-                    {sceneObjectsErr ? <p className="inspector-hint">{sceneObjectsErr}</p> : null}
-                    <ul className="inspector-object-list">
-                      {sceneObjects
-                        .slice()
-                        .sort((a, b) => a.sortOrder - b.sortOrder || a.id - b.id)
-                        .map((o) => (
-                          <li key={o.id} className="inspector-object-row">
-                            <label className="inspector-active">
-                              <input
-                                type="radio"
-                                name="activeObject"
-                                checked={activeObjectId === o.id}
-                                onChange={() => {
-                                  void invoke("set_active_object", {
-                                    id: o.id,
-                                  }).then(() => {
-                                    setActiveObjectId(o.id);
-                                    refreshSceneObjects();
-                                  });
-                                }}
-                              />
-                              <span className="inspector-object-name">{o.name}</span>
-                            </label>
-                            <label className="inspector-visible">
-                              <input
-                                type="checkbox"
-                                checked={o.visible}
-                                onChange={(e) => {
-                                  void invoke("set_object_visible", {
-                                    id: o.id,
-                                    visible: e.target.checked,
-                                  }).then(() => refreshSceneObjects());
-                                }}
-                              />
-                              Visible
-                            </label>
-                          </li>
-                        ))}
-                    </ul>
-                    <button
-                      type="button"
-                      className="inspector-new-object"
-                      onClick={() => {
-                        void invoke<number>("create_scene_object", {
-                          name: "",
-                        }).then(() => refreshSceneObjects());
-                      }}
-                    >
-                      New object
-                    </button>
-                  </div>
-                  {collabActive ? (
-                    <div className="inspector-collaboration">
-                      <h4 className="inspector-heading">Session</h4>
-                      {hostWsUrl ? (
-                        <>
-                          <button
-                            type="button"
-                            className="inspector-copy-invite-btn"
-                            onClick={copyHostingJoinAddress}
-                            title={hostingCopied ? "Copied" : "Copy invite link"}
-                          >
-                            <span className="inspector-copy-invite-label">
-                              {hostingCopied ? "Copied!" : "Copy invite link"}
-                            </span>
-                            <code className="inspector-copy-invite-url">
-                              {hostWanUrl ?? hostWsUrl}
-                            </code>
-                          </button>
-                          {hostWanUrl ? (
-                            <p className="collab-hint inspector-collab-hint">
-                              Nearby: <code>{hostWsUrl}</code>
-                            </p>
-                          ) : null}
-                          {prefsEnableUpnp && natPending ? (
-                            <p
-                              className="collab-hint collab-hint-muted inspector-collab-hint"
-                              role="status"
-                            >
-                              Checking your router…
-                            </p>
-                          ) : null}
-                          {natError ? (
-                            <p
-                              className="collab-hint collab-hint-warn inspector-collab-hint"
-                              role="alert"
-                            >
-                              {natError} You can forward port {hostPort} in your router settings.
-                              Some networks won&apos;t allow guests over the internet.
-                            </p>
-                          ) : null}
-                        </>
-                      ) : null}
-                      <h4 className="inspector-heading inspector-roster-heading">Roster</h4>
-                      <ul className="collab-roster inspector-collab-roster">
-                        {roster.map((r) => (
-                          <li key={r.peerId}>
-                            <button
-                              type="button"
-                              className="collab-roster-name"
-                              onClick={() => onRosterSnapCamera(r.peerId)}
-                              title="Jump to their view"
-                            >
-                              <span
-                                className="collab-swatch"
-                                style={{
-                                  background: `#${(r.colorRgb & 0xffffff)
-                                    .toString(16)
-                                    .padStart(6, "0")}`,
-                                }}
-                              />
-                              {r.displayName}
-                              {r.isLeader ? " (leader)" : ""}
-                            </button>
-                            {!r.isLeader && amLeader ? (
-                              <>
-                                <label className="collab-can-edit">
-                                  <input
-                                    type="checkbox"
-                                    checked={r.canEdit}
-                                    onChange={(e) => setCanEdit(r.peerId, e.target.checked)}
-                                  />
-                                  Edit
-                                </label>
-                                <button
-                                  type="button"
-                                  className="collab-kick"
-                                  title="Remove guest"
-                                  onClick={() =>
-                                    void invoke("collab_kick_peer", {
-                                      targetPeer: r.peerId,
-                                    })
-                                  }
-                                >
-                                  Kick
-                                </button>
-                              </>
-                            ) : null}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-          </aside>
+          <InspectorSidebar
+            rightSidebarExpanded={rightSidebarExpanded}
+            setRightSidebarExpanded={setRightSidebarExpanded}
+            sceneObjects={sceneObjects}
+            sceneObjectsErr={sceneObjectsErr}
+            activeObjectId={activeObjectId}
+            setActiveObjectId={setActiveObjectId}
+            refreshSceneObjects={refreshSceneObjects}
+            collabActive={collabActive}
+            hostWsUrl={hostWsUrl}
+            hostWanUrl={hostWanUrl}
+            hostingCopied={hostingCopied}
+            copyHostingJoinAddress={copyHostingJoinAddress}
+            prefsEnableUpnp={prefsEnableUpnp}
+            natPending={natPending}
+            natError={natError}
+            hostPort={hostPort}
+            roster={roster}
+            localPeerId={localPeerId}
+            amLeader={amLeader}
+            onRosterSnapCamera={onRosterSnapCamera}
+            setCanEdit={setCanEdit}
+          />
         ) : null}
       </div>
       <StatusBar
@@ -6708,251 +5818,55 @@ function App() {
         showPingLatency={showPingLatency}
         pingMs={pingMs}
       />
-      {leaveConfirmOpen && (
-        <div className="modal-overlay" onClick={() => setLeaveConfirmOpen(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()}>
-            <h3>{hostWsUrl ? "End session?" : "Leave session?"}</h3>
-            <p style={{ margin: "0 0 0.75rem", fontSize: "0.875rem" }}>
-              {hostWsUrl
-                ? "This will end the session for everyone."
-                : "You will leave the current session."}
-            </p>
-            <div className="modal-buttons">
-              <button type="button" onClick={() => setLeaveConfirmOpen(false)}>
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setLeaveConfirmOpen(false);
-                  leaveSession();
-                }}
-              >
-                {hostWsUrl ? "End session" : "Leave"}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      <JoinSessionModal
-        open={joinModalOpen}
-        onClose={() => setJoinModalOpen(false)}
+      <AppModals
+        leaveConfirmOpen={leaveConfirmOpen}
+        setLeaveConfirmOpen={setLeaveConfirmOpen}
+        hostWsUrl={hostWsUrl}
+        leaveSession={leaveSession}
+        joinModalOpen={joinModalOpen}
+        setJoinModalOpen={setJoinModalOpen}
         joinUrl={joinUrl}
-        onJoinUrlChange={setJoinUrl}
-        onJoin={joinSession}
+        setJoinUrl={setJoinUrl}
+        joinSession={joinSession}
         collabActive={collabActive}
-        connecting={collabJoinPending}
-      />
-      <CollabJoinProgressModal
-        open={collabJoinPending}
+        collabJoinPending={collabJoinPending}
         loading={loading}
         loadProgress={loadProgress}
         loadPhase={loadPhase}
         pathLabel={pathLabel}
-        onCancel={cancelJoin}
-      />
-      <StampBookModal
-        open={stampBookOpen}
-        onClose={() => setStampBookOpen(false)}
+        cancelJoin={cancelJoin}
+        stampBookOpen={stampBookOpen}
+        setStampBookOpen={setStampBookOpen}
         selectionCount={selectionCount}
-        onUseStamp={(entries: StampBookEntryTuple[]) => {
-          void invoke("stamp_book_load_entries", {
-            entries: entries.map(([dx, dy, dz, color, mat]) => ({
-              dx,
-              dy,
-              dz,
-              color,
-              material: mat ?? "plastic",
-            })),
-          })
-            .then(() => {
-              void invoke("selection_clear").catch(() => {});
-              setStampBookPatternActive(true);
-              setInteractionMode("stamp");
-            })
-            .catch(() => {});
-        }}
+        setStampBookPatternActive={setStampBookPatternActive}
+        setInteractionMode={setInteractionMode}
+        pendingFillConfirm={pendingFillConfirm}
+        preferencesOpen={preferencesOpen}
+        setPreferencesOpen={setPreferencesOpen}
+        setShowFpsCounter={setShowFpsCounter}
+        setShowPingLatency={setShowPingLatency}
+        setPrefsEnableUpnp={setPrefsEnableUpnp}
+        setDisplayName={setDisplayName}
+        setAccentColor={setAccentColor}
+        setHostPort={setHostPort}
+        rotateDialogOpen={rotateDialogOpen}
+        setRotateDialogOpen={setRotateDialogOpen}
+        rotateDialogAxis={rotateDialogAxis}
+        setRotateDialogAxis={setRotateDialogAxis}
+        rotateDialogDegrees={rotateDialogDegrees}
+        setRotateDialogDegrees={setRotateDialogDegrees}
+        scaleDialogOpen={scaleDialogOpen}
+        setScaleDialogOpen={setScaleDialogOpen}
+        scaleDialogFactor={scaleDialogFactor}
+        setScaleDialogFactor={setScaleDialogFactor}
+        newProjectOpen={newProjectOpen}
+        setNewProjectOpen={setNewProjectOpen}
+        newGridSize={newGridSize}
+        setNewGridSize={setNewGridSize}
+        newGridShape={newGridShape}
+        setNewGridShape={setNewGridShape}
+        createNewProject={createNewProject}
       />
-      {pendingFillConfirm && (
-        <div
-          className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          tabIndex={-1}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") pendingFillConfirm.resolve(false);
-          }}
-        >
-          <div className="modal">
-            <h3>Large fill</h3>
-            <p style={{ fontSize: "0.85rem", margin: "0 0 0.75rem" }}>
-              This fill covers a large area and may take a while. Continue?
-            </p>
-            <div className="modal-buttons">
-              <button onClick={() => pendingFillConfirm.resolve(true)} autoFocus>
-                Fill
-              </button>
-              <button onClick={() => pendingFillConfirm.resolve(false)}>Cancel</button>
-            </div>
-          </div>
-        </div>
-      )}
-      <PreferencesModal
-        open={preferencesOpen}
-        onClose={() => setPreferencesOpen(false)}
-        onFpsCounterChange={setShowFpsCounter}
-        onPingLatencyChange={setShowPingLatency}
-        onEnableUpnpChange={setPrefsEnableUpnp}
-        onCollabDisplayNameChange={setDisplayName}
-        onCollabAccentColorChange={setAccentColor}
-        onCollabHostPortChange={setHostPort}
-        collabHosting={hostWsUrl != null}
-      />
-      {rotateDialogOpen ? (
-        <div
-          className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setRotateDialogOpen(false)}
-          onKeyDown={(e) => e.key === "Escape" && setRotateDialogOpen(false)}
-        >
-          <div className="modal">
-            <h3>Rotate selection</h3>
-            <label className="modal-field">
-              Axis
-              <select
-                value={rotateDialogAxis}
-                onChange={(e) => setRotateDialogAxis(Number(e.target.value) as 0 | 1 | 2)}
-              >
-                <option value={0}>X</option>
-                <option value={1}>Y</option>
-                <option value={2}>Z</option>
-              </select>
-            </label>
-            <label className="modal-field">
-              Degrees
-              <select
-                value={rotateDialogDegrees}
-                onChange={(e) => setRotateDialogDegrees(Number(e.target.value))}
-              >
-                <option value={90}>90°</option>
-                <option value={180}>180°</option>
-                <option value={270}>270°</option>
-              </select>
-            </label>
-            <div className="modal-buttons">
-              <button
-                type="button"
-                onClick={() => {
-                  const quarters = rotateDialogDegrees / 90;
-                  void invoke("selection_rotate", {
-                    axis: rotateDialogAxis,
-                    quarters,
-                  }).catch(() => {});
-                  setRotateDialogOpen(false);
-                }}
-              >
-                Rotate
-              </button>
-              <button type="button" onClick={() => setRotateDialogOpen(false)}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {scaleDialogOpen ? (
-        <div
-          className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setScaleDialogOpen(false)}
-          onKeyDown={(e) => e.key === "Escape" && setScaleDialogOpen(false)}
-        >
-          <div className="modal">
-            <h3>Scale selection</h3>
-            <label className="modal-field">
-              Factor
-              <input
-                type="number"
-                min={0.1}
-                max={8}
-                step={0.25}
-                value={scaleDialogFactor}
-                onChange={(e) =>
-                  setScaleDialogFactor(Math.max(0.1, Math.min(8, Number(e.target.value))))
-                }
-              />
-            </label>
-            <div className="modal-buttons">
-              <button
-                type="button"
-                onClick={() => {
-                  void invoke("selection_scale", {
-                    factor: scaleDialogFactor,
-                  }).catch(() => {});
-                  setScaleDialogOpen(false);
-                }}
-              >
-                Scale
-              </button>
-              <button type="button" onClick={() => setScaleDialogOpen(false)}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-      {newProjectOpen ? (
-        <div
-          className="modal-overlay"
-          role="dialog"
-          aria-modal="true"
-          tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setNewProjectOpen(false)}
-          onKeyDown={(e) => e.key === "Escape" && setNewProjectOpen(false)}
-        >
-          <div className="modal">
-            <h3>New project</h3>
-            <label className="modal-field">
-              Grid size (1–{MAX_GRID_SIZE.toLocaleString()})
-              <input
-                type="number"
-                min={1}
-                max={MAX_GRID_SIZE}
-                step={1}
-                value={newGridSize}
-                onChange={(e) => setNewGridSize(Number(e.target.value))}
-              />
-            </label>
-            <label className="modal-field">
-              Starting shape
-              <select
-                value={newGridShape}
-                onChange={(e) => setNewGridShape(e.target.value as StartShape)}
-              >
-                <option value="cube">Cube</option>
-                <option value="orb">Orb</option>
-                <option value="cylinder">Cylinder</option>
-                <option value="hollowCube">Hollow cube</option>
-                <option value="plane">Plane</option>
-                <option value="circle">Circle</option>
-                <option value="empty">Empty</option>
-              </select>
-            </label>
-            <div className="modal-buttons">
-              <button type="button" onClick={createNewProject}>
-                Create
-              </button>
-              <button type="button" onClick={() => setNewProjectOpen(false)}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
 
       {/* ── Start-screen mascot overlays ─────────────────────────────────────
            Invisible click-detection div positioned over the GPU-rendered seagull. */}
@@ -6969,71 +5883,17 @@ function App() {
            GPU renders the actual bubble shapes; these divs only capture clicks. */}
       <SpeechBubbleOverlay bubbles={speechBubbles} />
 
-      {/* ── Radial emoji-ping menu (hold Z) ──────────────────────────────── */}
-      <RadialPingMenu
-        x={radialMenu.x}
-        y={radialMenu.y}
-        visible={radialMenu.visible}
-        onSelect={onRadialSelect}
+      <GameHUD
+        radialMenu={radialMenu}
+        onRadialSelect={onRadialSelect}
+        gamepad={gamepad}
+        virtualCursorElRef={virtualCursorElRef}
+        pingHudRef={pingHudRef}
+        pingHudTick={pingHudTick}
       />
-
-      {/* ── Gamepad radial menus (LT / RT triggers) ───────────────────── */}
-      <GamepadRadialMenu
-        visible={gamepad.radialMenu != null}
-        slices={gamepad.radialSlices}
-        selectedIndex={gamepad.selectedSliceIndex}
-        title={
-          gamepad.radialMenu === "tools"
-            ? "Tool"
-            : gamepad.radialMenu === "subOptions"
-              ? "Options"
-              : undefined
-        }
-      />
-
-      {/* ── Gamepad speed HUD ─────────────────────────────────────────── */}
-      {gamepad.connected && gamepad.speedMultiplier > 1 && (
-        <div
-          style={{
-            position: "fixed",
-            bottom: 48,
-            left: "50%",
-            transform: "translateX(-50%)",
-            background: "rgba(0,0,0,0.5)",
-            color: "rgba(255,255,255,0.8)",
-            padding: "4px 12px",
-            borderRadius: 6,
-            fontSize: 13,
-            fontWeight: 600,
-            pointerEvents: "none",
-            zIndex: 99990,
-            userSelect: "none",
-          }}
-        >
-          {gamepad.speedMultiplier}x
-        </div>
-      )}
-
-      {/* ── Gamepad virtual cursor (X to toggle) ─────────────────────── */}
-      <VirtualCursor ref={virtualCursorElRef} visible={gamepad.cursorMode} />
-
-      {/* ── Off-screen ping arrow indicator ────────────────────────────── */}
-      {(() => {
-        const p = pingHudRef.current;
-        // pingHudTick is read to subscribe to re-renders
-        void pingHudTick;
-        const isActive = !!p && Date.now() < p.until;
-        return (
-          <PingArrowIndicator
-            wx={p?.wx ?? 0}
-            wy={p?.wy ?? 0}
-            wz={p?.wz ?? 0}
-            active={isActive}
-            emoji={p?.emoji}
-          />
-        );
-      })()}
     </div>
+    </CollabContext.Provider>
+    </ToolStateContext.Provider>
   );
 }
 

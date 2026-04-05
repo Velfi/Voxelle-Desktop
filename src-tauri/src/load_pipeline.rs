@@ -375,8 +375,8 @@ pub(crate) fn prepare_load_scene_cpu_streaming<R: Runtime>(
     }
 }
 
-/// Build chunk meshes from a [`SpatialMeshCache`] and push each to `state.chunk_mesh_inbox`.
-/// When done, deposits the cache into `state.deferred_spatial_cache`.
+/// Build chunk meshes from a [`SpatialMeshCache`] and push each to `state.gpu.chunk_mesh_inbox`.
+/// When done, deposits the cache into `state.gpu.deferred_spatial_cache`.
 /// Respects `load_gen` — bails if a newer load has started.
 pub(crate) fn stream_chunk_meshes_to_inbox(
     cache: greedy_mesh::SpatialMeshCache,
@@ -402,7 +402,7 @@ pub(crate) fn stream_chunk_meshes_to_inbox(
         if mesh.indices.is_empty() {
             return;
         }
-        state.chunk_mesh_inbox.lock().push_back((key, mesh));
+        state.gpu.chunk_mesh_inbox.lock().push_back((key, mesh));
     });
 
     if is_load_stale(state, load_gen) {
@@ -411,7 +411,7 @@ pub(crate) fn stream_chunk_meshes_to_inbox(
     }
 
     // Hand the cache to the viewer (main thread will pick it up).
-    *state.deferred_spatial_cache.lock() = Some(cache);
+    *state.gpu.deferred_spatial_cache.lock() = Some(cache);
     log::info!(
         target: "voxelle_load",
         "stream_chunk_meshes_to_inbox: done {total} chunks {:?}",
@@ -424,18 +424,18 @@ pub(crate) fn unload_current_project<R: Runtime>(
     state: &Arc<ViewerState>,
     app: &AppHandle<R>,
 ) -> Result<(), String> {
-    let mode = *state.rendering_mode.lock();
+    let mode = *state.gpu.rendering_mode.lock();
     let objects = voxelle::default_scene_objects();
     let prepared =
         prepare_load_scene_cpu::<R>(crate::MAX_GRID_SIZE as i32, &[], &objects, mode, None)?;
     {
-        let mut cf = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut cf = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         *cf = None;
         *vm = None;
     }
-    state.active_project.store(false, Ordering::Release);
-    let mut v = state.viewer.lock();
+    state.cam.active_project.store(false, Ordering::Release);
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
@@ -443,9 +443,9 @@ pub(crate) fn unload_current_project<R: Runtime>(
     viewer.upload_prepared_opaque(prepared.opaque);
     clear_preview_mesh_sync_cache(viewer, state.as_ref());
     viewer.clear_selection_overlay();
-    *state.selection_overlay_cache_key.lock() = None;
+    *state.gpu.selection_overlay_cache_key.lock() = None;
     viewer.clear_grid_border_lines();
-    *state.grid_overlay_cache_key.lock() = None;
+    *state.gpu.grid_overlay_cache_key.lock() = None;
     viewer.clear_collab_peer_lines();
     viewer.clear_ping_mesh();
     viewer.set_mood_params(&MoodParams::default());
@@ -457,43 +457,43 @@ pub(crate) fn unload_current_project<R: Runtime>(
     }
     drop(v);
     state
-        .start_screen_logo_transparent
+        .gpu.start_screen_logo_transparent
         .store(true, Ordering::Release);
 
-    *state.last_scene_bounds.lock() = Some(prepared.bounds);
-    *state.voxel_edit_stats_cache.lock() = None;
-    *state.last_edit_perf.lock() = None;
+    *state.gpu.last_scene_bounds.lock() = Some(prepared.bounds);
+    *state.gpu.voxel_edit_stats_cache.lock() = None;
+    *state.gpu.last_edit_perf.lock() = None;
     state
-        .mesh_refresh_generation
+        .gpu.mesh_refresh_generation
         .fetch_add(1, Ordering::Release);
 
-    state.solo_undo.lock().clear();
-    state.solo_redo.lock().clear();
+    state.file.solo_undo.lock().clear();
+    state.file.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::clear_all(app);
 
-    *state.selection_cells.lock() = AHashSet::default();
-    *state.selection_stroke_before.lock() = None;
-    *state.selection_stroke_accum.lock() = None;
-    *state.selection_combine_mode.lock() = SelectionCombineMode::default();
-    *state.stamp_clipboard.lock() = None;
-    *state.stroke_buffer.lock() = Vec::new();
-    *state.stroke_preview_union.lock() = AHashSet::default();
-    *state.stroke_preview_last_args.lock() = None;
+    *state.selection.selection_cells.lock() = AHashSet::default();
+    *state.selection.selection_stroke_before.lock() = None;
+    *state.selection.selection_stroke_accum.lock() = None;
+    *state.selection.selection_combine_mode.lock() = SelectionCombineMode::default();
+    *state.selection.stamp_clipboard.lock() = None;
+    *state.file.stroke_buffer.lock() = Vec::new();
+    *state.file.stroke_preview_union.lock() = AHashSet::default();
+    *state.file.stroke_preview_last_args.lock() = None;
     state
-        .stroke_preview_suppresses_hover
+        .file.stroke_preview_suppresses_hover
         .store(false, Ordering::Release);
-    *state.sculpt_stroke_replay.lock() = Vec::new();
-    *state.stroke_active.lock() = false;
+    *state.file.sculpt_stroke_replay.lock() = Vec::new();
+    *state.file.stroke_active.lock() = false;
     *state.ping_flash.lock() = None;
-    *state.preview_cursor.lock() = None;
+    *state.preview.preview_cursor.lock() = None;
 
-    state.squishy_session.lock().clear();
-    state.bone_session.lock().clear();
+    state.gizmos.squishy_session.lock().clear();
+    state.gizmos.bone_session.lock().clear();
 
     log::info!(target: "voxelle_load", "unload_current_project: done");
     #[cfg(desktop)]
-    selection_menu_sync_enabled_for_scene(app, false, false);
+    selection_menu_sync_enabled_for_scene(app, false, false, false);
     Ok(())
 }
 
@@ -558,7 +558,7 @@ pub(crate) fn spawn_new_project(
                 return;
             }
             state
-                .start_screen_logo_transparent
+                .gpu.start_screen_logo_transparent
                 .store(false, Ordering::Release);
             emit_load_progress(&app, 0.05, "Starting…");
 
@@ -579,7 +579,7 @@ pub(crate) fn spawn_new_project(
                             active_object_id: 0,
                         };
 
-                        let mode = *state.rendering_mode.lock();
+                        let mode = *state.gpu.rendering_mode.lock();
                         let prepared = prepare_load_scene_cpu(
                             file.grid_size,
                             &file.voxels,
@@ -718,12 +718,12 @@ pub(crate) fn run_v3_mesh_on_main(
 /// Bump the load generation counter and return the new value.
 /// Every load entry point should call this so that older in-flight loads can detect they are stale.
 pub(crate) fn next_load_generation(state: &ViewerState) -> u64 {
-    state.load_generation.fetch_add(1, Ordering::SeqCst) + 1
+    state.gpu.load_generation.fetch_add(1, Ordering::SeqCst) + 1
 }
 
 /// Returns true when a newer load has started since `gen` was issued.
 pub(crate) fn is_load_stale(state: &ViewerState, gen: u64) -> bool {
-    state.load_generation.load(Ordering::SeqCst) != gen
+    state.gpu.load_generation.load(Ordering::SeqCst) != gen
 }
 
 pub(crate) fn spawn_decode_and_mesh(state: Arc<ViewerState>, app: AppHandle, path: PathBuf) {
@@ -821,7 +821,7 @@ pub(crate) fn spawn_decode_and_mesh_inner(
                             return Err("load cancelled".into());
                         }
                         emit_load_progress(&app, 0.18, "Preparing scene…");
-                        let mode = *state.rendering_mode.lock();
+                        let mode = *state.gpu.rendering_mode.lock();
                         let (prepared, streaming_cache) = prepare_load_scene_cpu_streaming(
                             file.grid_size,
                             &file.voxels,
@@ -973,12 +973,12 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
     let mood = file.mood.clone();
     let lighting = file.lighting.clone().unwrap_or_default();
     {
-        let mut cf = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut cf = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         *cf = Some(file);
         *vm = Some(voxel_map);
     }
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
@@ -990,7 +990,7 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
     }
     viewer.apply_lighting_settings(&lighting);
 
-    let mut cam = state.camera.lock();
+    let mut cam = state.cam.camera.lock();
     cam.fov_y = focal_length_to_fov_y_radians(fl);
     cam.perspective = !orthographic;
     if orthographic {
@@ -1007,20 +1007,20 @@ pub(crate) fn apply_mesh_and_camera<R: Runtime>(
         logo.visible = false;
     }
     drop(v);
-    *state.last_scene_bounds.lock() = Some(bounds);
-    *state.voxel_edit_stats_cache.lock() = voxel_edit_stats_cache;
-    state.solo_undo.lock().clear();
-    state.solo_redo.lock().clear();
+    *state.gpu.last_scene_bounds.lock() = Some(bounds);
+    *state.gpu.voxel_edit_stats_cache.lock() = voxel_edit_stats_cache;
+    state.file.solo_undo.lock().clear();
+    state.file.solo_redo.lock().clear();
     #[cfg(target_os = "macos")]
     macos_undo::clear_all(app);
     collab::broadcast_snapshot_to_guests(state);
-    state.active_project.store(true, Ordering::Release);
+    state.cam.active_project.store(true, Ordering::Release);
     emit_load_progress(app, 0.97, "Finishing…");
     emit_load_progress(app, 1.0, "");
     #[cfg(desktop)]
     {
-        let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
-        selection_menu_sync_enabled_for_scene(app, has_voxels, has_selection);
+        let (has_project, has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+        selection_menu_sync_enabled_for_scene(app, has_project, has_voxels, has_selection);
     }
     Ok(())
 }
@@ -1041,9 +1041,9 @@ pub(crate) fn emit_voxelle_loaded<R: Runtime>(
     state: &ViewerState,
 ) {
     state
-        .start_screen_logo_transparent
+        .gpu.start_screen_logo_transparent
         .store(false, Ordering::Release);
-    let (mood, lighting) = match state.current_file.lock().as_ref() {
+    let (mood, lighting) = match state.file.current_file.lock().as_ref() {
         Some(f) => (f.mood.clone(), f.lighting.clone()),
         None => (None, None),
     };

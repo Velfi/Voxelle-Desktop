@@ -106,6 +106,12 @@ pub(crate) struct SculptStrokeAtScreenArgs {
     pub(crate) extrude_taper_start: f32,
     #[serde(default)]
     pub(crate) extrude_taper_end: f32,
+    /// Screen-space position used to sample the face normal for Draw mode.
+    /// When set, the normal is locked to the initial click rather than the current cursor.
+    #[serde(default)]
+    pub(crate) draw_normal_nx: Option<f32>,
+    #[serde(default)]
+    pub(crate) draw_normal_ny: Option<f32>,
 }
 
 // ── Sculpt raise ─────────────────────────────────────────────────────────────
@@ -128,22 +134,22 @@ pub(crate) fn voxel_sculpt_raise_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
             let (w, h) = viewer.viewport_size();
             (w as f32, h as f32)
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         voxel_edit::sculpt_raise_at_screen(file, vmap, &cam, w, h, sx, sy, args.color, material)?
     };
@@ -163,7 +169,7 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let deltas = {
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Err("viewer not ready".into());
             };
@@ -178,15 +184,19 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
             (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
             _ => None,
         };
-        let mut fg = state.current_file.lock();
-        let mut vm = state.voxel_map.lock();
+        let draw_normal_pos = match (args.draw_normal_nx, args.draw_normal_ny) {
+            (Some(dnx), Some(dny)) => Some(viewport_texels_from_norm(dnx, dny, w, h)),
+            _ => None,
+        };
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_mut() else {
             return Err("no model loaded".into());
         };
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         let wall_poly = args.wall_polygon_vertices.as_ref().map(|v| {
             v.iter()
@@ -216,7 +226,7 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
             args.terrain_smooth_radius,
             args.terrain_flatten_use_base_y,
             args.terrain_sub_voxel,
-            &mut state.terrain_accum.lock(),
+            &mut state.file.terrain_accum.lock(),
             args.smooth_neighbor_passes,
             args.brush_strength,
             args.brush_falloff,
@@ -238,6 +248,7 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
             args.extrude_taper,
             args.extrude_taper_start,
             args.extrude_taper_end,
+            draw_normal_pos,
         )?
     };
     let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
@@ -252,9 +263,9 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
         &app,
         VoxelGpuRefreshReason::SoloEdit,
     )?;
-    let stroke_on = *state.stroke_active.lock();
+    let stroke_on = *state.file.stroke_active.lock();
     if stroke_on {
-        state.stroke_buffer.lock().extend(deltas.iter().copied());
+        state.file.stroke_buffer.lock().extend(deltas.iter().copied());
         return Ok(true);
     }
     let cm = Arc::clone(&state.collab);
@@ -299,7 +310,7 @@ pub(crate) fn commit_sculpt_stroke_replay(
         let material = voxelle::MaterialId::from_str_id(&args.material);
         let deltas = {
             let (w, h) = {
-                let v = state.viewer.lock();
+                let v = state.gpu.viewer.lock();
                 let Some(viewer) = v.as_ref() else {
                     return Err("viewer not ready".into());
                 };
@@ -315,15 +326,19 @@ pub(crate) fn commit_sculpt_stroke_replay(
                 (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
                 _ => None,
             };
-            let mut fg = state.current_file.lock();
-            let mut vm = state.voxel_map.lock();
+            let draw_normal_pos = match (args.draw_normal_nx, args.draw_normal_ny) {
+                (Some(dnx), Some(dny)) => Some(viewport_texels_from_norm(dnx, dny, w, h)),
+                _ => None,
+            };
+            let mut fg = state.file.current_file.lock();
+            let mut vm = state.file.voxel_map.lock();
             let Some(file) = fg.as_mut() else {
                 return Ok(());
             };
             let Some(vmap) = vm.as_mut() else {
                 return Ok(());
             };
-            let cam = state.camera.lock();
+            let cam = state.cam.camera.lock();
             let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
             let wall_poly = args.wall_polygon_vertices.as_ref().map(|v| {
                 v.iter()
@@ -375,6 +390,7 @@ pub(crate) fn commit_sculpt_stroke_replay(
                 args.extrude_taper,
                 args.extrude_taper_start,
                 args.extrude_taper_end,
+                draw_normal_pos,
             )?
         };
         all_deltas.extend(deltas);
@@ -405,20 +421,20 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
         _ => None,
     };
 
-    state.sculpt_stroke_replay.lock().push(args.clone());
+    state.file.sculpt_stroke_replay.lock().push(args.clone());
 
     let footprint = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Ok(());
             };
@@ -435,6 +451,10 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
             (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
             _ => None,
         };
+        let draw_normal_pos = match (args.draw_normal_nx, args.draw_normal_ny) {
+            (Some(dnx), Some(dny)) => Some(viewport_texels_from_norm(dnx, dny, w, h)),
+            _ => None,
+        };
         if args.sculpt_mode == voxel_edit::SculptStrokeMode::Wall {
             let wall_poly_vec: Option<Vec<greedy_mesh::VoxelCoord>> = args
                 .wall_polygon_vertices
@@ -443,9 +463,9 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
             // Lock the face normal on the first drag frame so the wall orientation stays
             // constant for the entire stroke. During hover (stroke_active = false) always
             // recompute so the preview tracks the surface under the cursor.
-            let stroke_on = *state.stroke_active.lock();
+            let stroke_on = *state.file.stroke_active.lock();
             let locked_face = if stroke_on {
-                let mut lock = state.wall_stroke_face_snapped.lock();
+                let mut lock = state.file.wall_stroke_face_snapped.lock();
                 if lock.is_none() {
                     let face_out = voxel_edit::outward_face_normal_from_screen_ray(
                         file, vmap, &cam, w, h, sx, sy,
@@ -503,12 +523,13 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
                 args.extrude_taper,
                 args.extrude_taper_start,
                 args.extrude_taper_end,
+                draw_normal_pos,
             )
         }
     };
 
     {
-        let mut union = state.stroke_preview_union.lock();
+        let mut union = state.file.stroke_preview_union.lock();
         // Sculpt Draw/Gouge/Extrude: always accumulate so the full stroke footprint is
         // available at pointer-up for single-batch commit (avoids frame-by-frame stacking).
         let sculpt_accumulate = matches!(
@@ -536,9 +557,9 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
 
     // Palette-colored preview for every sculpt mode (gouge/smooth used to use Remove red).
     let instanced = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
-        let union = state.stroke_preview_union.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
+        let union = state.file.stroke_preview_union.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
@@ -557,21 +578,21 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
     };
 
     {
-        let mut v = state.viewer.lock();
+        let mut v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
         if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
-                .stroke_preview_suppresses_hover
+                .file.stroke_preview_suppresses_hover
                 .store(false, Ordering::Relaxed);
         } else {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
-            *state.preview_overlay_cache_key.lock() = None;
+            *state.gpu.preview_overlay_cache_key.lock() = None;
             state
-                .stroke_preview_suppresses_hover
+                .file.stroke_preview_suppresses_hover
                 .store(true, Ordering::Relaxed);
         }
     }
@@ -631,7 +652,7 @@ pub(crate) fn extrude_ray_preview(
     }
 
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(());
         };
@@ -643,15 +664,15 @@ pub(crate) fn extrude_ray_preview(
     // Raycast from start position to find add-position + face normal.
     let (start_sx, start_sy) = viewport_texels_from_norm(args.start_nx, args.start_ny, w, h);
     let (start_coord, face_normal) = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         match voxel_edit::pick_extrude_start(file, vmap, &cam, w, h, start_sx, start_sy) {
             Some(v) => v,
             None => return Ok(()),
@@ -659,7 +680,7 @@ pub(crate) fn extrude_ray_preview(
     };
 
     // Resolve extrusion direction from screen drag + camera.
-    let cam = state.camera.lock();
+    let cam = state.cam.camera.lock();
     let direction = voxel_edit::resolve_extrude_direction(
         args.direction_ref,
         &cam,
@@ -692,12 +713,12 @@ pub(crate) fn extrude_ray_preview(
     );
 
     // Store spine for recompute.
-    *state.extrude_ray_spine.lock() = Some(spine);
+    *state.gizmos.extrude_ray_spine.lock() = Some(spine);
 
     // Store a synthetic sculpt replay entry so voxel_stroke_end recognizes this as an extrude
     // and commits from the preview union.
     {
-        let mut replay = state.sculpt_stroke_replay.lock();
+        let mut replay = state.file.sculpt_stroke_replay.lock();
         if replay.is_empty() {
             replay.push(SculptStrokeAtScreenArgs {
                 nx: args.start_nx,
@@ -740,6 +761,8 @@ pub(crate) fn extrude_ray_preview(
                 extrude_taper: args.extrude_taper,
                 extrude_taper_start: args.extrude_taper_start,
                 extrude_taper_end: args.extrude_taper_end,
+                draw_normal_nx: None,
+                draw_normal_ny: None,
             });
         } else {
             // Update the existing replay entry with latest extrude params.
@@ -754,7 +777,7 @@ pub(crate) fn extrude_ray_preview(
 
     // Replace preview union entirely (not accumulate — full recompute each move).
     {
-        let mut union = state.stroke_preview_union.lock();
+        let mut union = state.file.stroke_preview_union.lock();
         union.clear();
         for c in &footprint {
             union.insert(*c);
@@ -762,20 +785,20 @@ pub(crate) fn extrude_ray_preview(
     }
 
     state
-        .stroke_preview_suppresses_hover
+        .file.stroke_preview_suppresses_hover
         .store(true, Ordering::Relaxed);
 
     // Generate and upload preview mesh.
     let instanced = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        let union = state.stroke_preview_union.lock();
+        let union = state.file.stroke_preview_union.lock();
         stroke_preview_meshes_for_union(
             voxel_edit::EditTool::Add,
             &union,
@@ -788,7 +811,7 @@ pub(crate) fn extrude_ray_preview(
     };
 
     {
-        let mut v = state.viewer.lock();
+        let mut v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
@@ -797,7 +820,7 @@ pub(crate) fn extrude_ray_preview(
         } else {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
-            *state.preview_overlay_cache_key.lock() = None;
+            *state.gpu.preview_overlay_cache_key.lock() = None;
         }
     }
 
@@ -830,13 +853,13 @@ pub(crate) fn selection_extrude_preview(
         }
     }
 
-    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> = state.selection_cells.lock().clone();
+    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> = state.selection.selection_cells.lock().clone();
     if selection.is_empty() {
         return Ok(());
     }
 
     let (w, h) = {
-        let v = state.viewer.lock();
+        let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
             return Ok(());
         };
@@ -847,7 +870,7 @@ pub(crate) fn selection_extrude_preview(
     let _ = (w, h); // viewport size not needed for direction resolution
 
     let direction = {
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         voxel_edit::resolve_extrude_direction(
             args.direction_ref,
             &cam,
@@ -864,7 +887,7 @@ pub(crate) fn selection_extrude_preview(
 
     // Replace preview union.
     {
-        let mut union = state.stroke_preview_union.lock();
+        let mut union = state.file.stroke_preview_union.lock();
         union.clear();
         for c in &footprint {
             union.insert(*c);
@@ -873,7 +896,7 @@ pub(crate) fn selection_extrude_preview(
 
     // Store a synthetic sculpt replay entry so voxel_stroke_end knows to commit from the union.
     {
-        let mut replay = state.sculpt_stroke_replay.lock();
+        let mut replay = state.file.sculpt_stroke_replay.lock();
         if replay.is_empty() {
             replay.push(SculptStrokeAtScreenArgs {
                 nx: 0.5,
@@ -916,6 +939,8 @@ pub(crate) fn selection_extrude_preview(
                 extrude_taper: false,
                 extrude_taper_start: 0.0,
                 extrude_taper_end: 0.0,
+                draw_normal_nx: None,
+                draw_normal_ny: None,
             });
         } else {
             let entry = &mut replay[0];
@@ -925,20 +950,20 @@ pub(crate) fn selection_extrude_preview(
     }
 
     state
-        .stroke_preview_suppresses_hover
+        .file.stroke_preview_suppresses_hover
         .store(true, Ordering::Relaxed);
 
     // Generate and upload preview mesh.
     let instanced = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        let union = state.stroke_preview_union.lock();
+        let union = state.file.stroke_preview_union.lock();
         stroke_preview_meshes_for_union(
             voxel_edit::EditTool::Add,
             &union,
@@ -951,7 +976,7 @@ pub(crate) fn selection_extrude_preview(
     };
 
     {
-        let mut v = state.viewer.lock();
+        let mut v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
@@ -960,7 +985,7 @@ pub(crate) fn selection_extrude_preview(
         } else {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
-            *state.preview_overlay_cache_key.lock() = None;
+            *state.gpu.preview_overlay_cache_key.lock() = None;
         }
     }
 
@@ -989,8 +1014,8 @@ pub(crate) fn extrude_recompute_preview(
     args: ExtrudeRecomputeArgs,
 ) -> Result<(), String> {
     // Use stored ray spine if available (new ray-based extrude path).
-    let spine_opt = state.extrude_ray_spine.lock().clone();
-    let replay = state.sculpt_stroke_replay.lock().clone();
+    let spine_opt = state.gizmos.extrude_ray_spine.lock().clone();
+    let replay = state.file.sculpt_stroke_replay.lock().clone();
     if replay.is_empty() {
         return Ok(());
     }
@@ -1016,8 +1041,8 @@ pub(crate) fn extrude_recompute_preview(
     } else {
         // Legacy freeform fallback: replay frame-by-frame.
         let mut union: ahash::AHashSet<greedy_mesh::VoxelCoord> = ahash::AHashSet::new();
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
@@ -1027,13 +1052,13 @@ pub(crate) fn extrude_recompute_preview(
         // Acquire viewer before camera to match the render loop's lock order
         // (viewer → camera). Inverting this order deadlocks with the render tick.
         let (w, h) = {
-            let v = state.viewer.lock();
+            let v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_ref() else {
                 return Ok(());
             };
             viewer.viewport_size()
         };
-        let cam = state.camera.lock();
+        let cam = state.cam.camera.lock();
         let w = w as f32;
         let h = h as f32;
         for sample in &replay {
@@ -1044,6 +1069,10 @@ pub(crate) fn extrude_recompute_preview(
             };
             let seg = match (sample.stroke_segment_prev_nx, sample.stroke_segment_prev_ny) {
                 (Some(pnx), Some(pny)) => Some(viewport_texels_from_norm(pnx, pny, w, h)),
+                _ => None,
+            };
+            let draw_normal_pos = match (sample.draw_normal_nx, sample.draw_normal_ny) {
+                (Some(dnx), Some(dny)) => Some(viewport_texels_from_norm(dnx, dny, w, h)),
                 _ => None,
             };
             let footprint = voxel_edit::sculpt_stroke_effective_footprint(
@@ -1069,6 +1098,7 @@ pub(crate) fn extrude_recompute_preview(
                 args.extrude_taper,
                 args.extrude_taper_start,
                 args.extrude_taper_end,
+                draw_normal_pos,
             );
             for c in footprint {
                 union.insert(c);
@@ -1079,7 +1109,7 @@ pub(crate) fn extrude_recompute_preview(
 
     // Update stored replay args with new extrude settings so commit uses them.
     {
-        let mut replay_mut = state.sculpt_stroke_replay.lock();
+        let mut replay_mut = state.file.sculpt_stroke_replay.lock();
         for sample in replay_mut.iter_mut() {
             sample.extrude_profile = args.extrude_profile;
             sample.extrude_end_cap = args.extrude_end_cap;
@@ -1091,7 +1121,7 @@ pub(crate) fn extrude_recompute_preview(
 
     // Replace the preview union and re-render.
     {
-        let mut preview_union = state.stroke_preview_union.lock();
+        let mut preview_union = state.file.stroke_preview_union.lock();
         preview_union.clear();
         for c in &union {
             preview_union.insert(*c);
@@ -1099,8 +1129,8 @@ pub(crate) fn extrude_recompute_preview(
     }
 
     let instanced = {
-        let fg = state.current_file.lock();
-        let vm = state.voxel_map.lock();
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
         let Some(file) = fg.as_ref() else {
             return Ok(());
         };
@@ -1119,7 +1149,7 @@ pub(crate) fn extrude_recompute_preview(
     };
 
     {
-        let mut v = state.viewer.lock();
+        let mut v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
@@ -1128,7 +1158,7 @@ pub(crate) fn extrude_recompute_preview(
         } else {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
-            *state.preview_overlay_cache_key.lock() = None;
+            *state.gpu.preview_overlay_cache_key.lock() = None;
         }
     }
 

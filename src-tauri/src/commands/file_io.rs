@@ -17,7 +17,7 @@ pub(crate) fn write_voxelle_file_to_path(
         None => None,
     };
     let file = {
-        let g = state.current_file.lock();
+        let g = state.file.current_file.lock();
         g.as_ref()
             .ok_or_else(|| "no model loaded".to_string())?
             .clone()
@@ -155,7 +155,7 @@ fn collect_autosave_paths_for_document(
     state: &ViewerState,
     document_path: &Path,
 ) -> Result<Vec<PathBuf>, String> {
-    let keep = *state.autosave_keep_count.lock();
+    let keep = *state.autosave.autosave_keep_count.lock();
     let keep = keep.max(1);
     let mut out = Vec::new();
     let leg = legacy_autosave_path(app, document_path)?;
@@ -191,10 +191,10 @@ pub(crate) fn next_rotating_autosave_path(
     document_path: &Path,
 ) -> Result<PathBuf, String> {
     let h = stable_path_key(document_path);
-    let keep = *state.autosave_keep_count.lock();
+    let keep = *state.autosave.autosave_keep_count.lock();
     let k = (keep.max(1)) as u64;
     let idx = {
-        let mut map = state.autosave_slot.lock();
+        let mut map = state.autosave.autosave_slot.lock();
         let n = map.entry(h.clone()).or_insert(0);
         let slot = (*n % k) as u32;
         *n = n.wrapping_add(1);
@@ -233,8 +233,8 @@ pub(crate) fn try_initial_autosave_after_new_project(
     state: &Arc<ViewerState>,
     label: &str,
 ) {
-    let enabled = *state.autosave_enabled.lock();
-    let interval = *state.autosave_interval_secs.lock();
+    let enabled = *state.autosave.autosave_enabled.lock();
+    let interval = *state.autosave.autosave_interval_secs.lock();
     if !enabled || interval == 0 {
         return;
     }
@@ -245,7 +245,7 @@ pub(crate) fn try_initial_autosave_after_new_project(
     if collab_on && !is_host {
         return;
     }
-    if !state.active_project.load(Ordering::Relaxed) {
+    if !state.cam.active_project.load(Ordering::Relaxed) {
         return;
     }
     let Ok(doc) = autosave_document_path_for_label(app, label) else {
@@ -255,7 +255,7 @@ pub(crate) fn try_initial_autosave_after_new_project(
         return;
     };
     if write_voxelle_file_to_path(None, Arc::as_ref(state), &dest).is_ok() {
-        *state.last_autosave.lock() = Some(Instant::now());
+        *state.autosave.last_autosave.lock() = Some(Instant::now());
     }
 }
 
@@ -381,13 +381,13 @@ pub(crate) fn load_voxelle_recovery(
     args: LoadVoxelleRecoveryArgs,
 ) -> Result<(), String> {
     state
-        .start_screen_logo_transparent
+        .gpu.start_screen_logo_transparent
         .store(false, Ordering::Release);
     let read_from = PathBuf::from(&args.autosave_path);
     if !read_from.is_file() {
         return Err("Autosave file not found.".into());
     }
-    *state.file_label.lock() = args.document_path.clone();
+    *state.file.file_label.lock() = args.document_path.clone();
     let _ = app.emit("voxelle-load-start", args.document_path.clone());
     spawn_decode_and_mesh_with_label(Arc::clone(&*state), app, read_from, args.document_path);
     Ok(())
@@ -400,10 +400,10 @@ pub(crate) fn load_voxelle_path(
     path: String,
 ) -> Result<(), String> {
     state
-        .start_screen_logo_transparent
+        .gpu.start_screen_logo_transparent
         .store(false, Ordering::Release);
     let p = std::path::PathBuf::from(&path);
-    *state.file_label.lock() = path.clone();
+    *state.file.file_label.lock() = path.clone();
     let _ = app.emit("voxelle-load-start", path.clone());
     spawn_decode_and_mesh(Arc::clone(&*state), app, p);
     Ok(())
@@ -416,7 +416,7 @@ pub(crate) fn save_voxelle(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<(), String> {
-    let label = state.file_label.lock();
+    let label = state.file.file_label.lock();
     if label.starts_with("New project") || !label.ends_with(".voxelle") {
         return Err("Use \u{201c}Save As\u{2026}\u{201d} for new or unsaved projects.".into());
     }
@@ -460,7 +460,7 @@ pub(crate) fn save_voxelle_as(
             return;
         }
         let s = path.to_string_lossy().to_string();
-        *state_c.file_label.lock() = s.clone();
+        *state_c.file.file_label.lock() = s.clone();
         persist_last_document_path(&app_c, &s);
         persist_recent_file(&app_c, &s);
         #[cfg(desktop)]
@@ -475,11 +475,11 @@ pub(crate) fn save_voxelle_as(
 // ── Tauri commands: export ──────────────────────────────────────────────────
 
 fn mesh_for_export(state: &Arc<ViewerState>) -> Result<greedy_mesh::MeshBuffers, String> {
-    let fg = state.current_file.lock();
+    let fg = state.file.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
-    let rm = *state.rendering_mode.lock();
+    let rm = *state.gpu.rendering_mode.lock();
     let mesh = match rm {
         RenderingMode::Greedy | RenderingMode::Ray => {
             greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects).0
@@ -597,7 +597,7 @@ fn show_file_picker(app: AppHandle, state: Arc<ViewerState>) {
             return;
         };
         let label = path.to_string_lossy().to_string();
-        *state.file_label.lock() = label.clone();
+        *state.file.file_label.lock() = label.clone();
         let _ = app_cb.emit("voxelle-load-start", label);
         spawn_decode_and_mesh(state, app_cb, path);
     });
@@ -616,7 +616,7 @@ pub(crate) fn open_voxelle_dialog(
 
 /// Performs the unload + emit so the frontend returns to the start screen.
 fn finish_close_project(state: &Arc<ViewerState>, app: &AppHandle) {
-    *state.file_label.lock() = String::new();
+    *state.file.file_label.lock() = String::new();
     if let Err(e) = run_unload_on_main_thread(state, app) {
         log::error!(target: "voxelle_load", "close_project unload failed: {e}");
     }
@@ -630,13 +630,13 @@ pub(crate) fn close_project_dialog(app: AppHandle, state: Arc<ViewerState>) {
 
     // Nothing to close — already on the start screen.
     if !state
-        .active_project
+        .cam.active_project
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         return;
     }
 
-    let label = state.file_label.lock().clone();
+    let label = state.file.file_label.lock().clone();
     let is_named = !label.starts_with("New project") && label.ends_with(".voxelle");
 
     let app_d = app.clone();
@@ -727,7 +727,7 @@ pub(crate) fn create_new_project(
     let grid_size = args.grid_size.clamp(1, MAX_GRID_SIZE);
     let shape_l = start_shape_label(args.shape);
     let label = format!("New project ({grid_size}³, {shape_l})");
-    *state.file_label.lock() = label.clone();
+    *state.file.file_label.lock() = label.clone();
     let _ = app.emit("voxelle-load-start", label);
     spawn_new_project(Arc::clone(&*state), app, grid_size, args.shape);
     Ok(())
@@ -748,9 +748,9 @@ pub(crate) fn get_autosave_settings(
     state: State<'_, Arc<ViewerState>>,
 ) -> Result<AutosaveSettings, String> {
     Ok(AutosaveSettings {
-        enabled: *state.autosave_enabled.lock(),
-        interval_secs: *state.autosave_interval_secs.lock(),
-        keep_count: *state.autosave_keep_count.lock(),
+        enabled: *state.autosave.autosave_enabled.lock(),
+        interval_secs: *state.autosave.autosave_interval_secs.lock(),
+        keep_count: *state.autosave.autosave_keep_count.lock(),
     })
 }
 
@@ -767,10 +767,10 @@ pub(crate) fn set_autosave_settings(
     state: State<'_, Arc<ViewerState>>,
     args: AutosaveSettingsArgs,
 ) -> Result<(), String> {
-    *state.autosave_enabled.lock() = args.enabled;
-    *state.autosave_interval_secs.lock() = args.interval_secs;
+    *state.autosave.autosave_enabled.lock() = args.enabled;
+    *state.autosave.autosave_interval_secs.lock() = args.interval_secs;
     let k = args.keep_count.clamp(1, 64);
-    *state.autosave_keep_count.lock() = k;
+    *state.autosave.autosave_keep_count.lock() = k;
     Ok(())
 }
 

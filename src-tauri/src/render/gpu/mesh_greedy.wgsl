@@ -102,6 +102,15 @@ fn unpack_mat(packed: u32) -> u32 {
     return (packed >> 24u) & 0xFu;
 }
 
+/// Matches [`greedy_mesh::srgb_to_linear`] / CPU `color_rgb` so GPU greedy chunks match CPU mesh shading.
+fn srgb_channel_to_linear(c: f32) -> f32 {
+    if c <= 0.04045 {
+        return c / 12.92;
+    }
+    let t = (c + 0.055) / 1.055;
+    return pow(t, 2.4);
+}
+
 /// Non-transmissive solid occludes AO. CPU also requires same `object_id`; the brick buffer has no per-voxel object id, so GPU only excludes glass/water (parity for materials, not object seams).
 fn ao_cell_occludes_brick(ix: vec3<i32>) -> bool {
     let cell = brick_cell_at(ix);
@@ -288,10 +297,13 @@ fn greedy_slice(@builtin(global_invocation_id) gid: vec3<u32>) {
         bits[i] = slice_bits[bs + i];
     }
 
+    let cr = f32((h.color >> 16u) & 0xffu) / 255.0;
+    let cg = f32((h.color >> 8u) & 0xffu) / 255.0;
+    let cb = f32(h.color & 0xffu) / 255.0;
     let col = vec3<f32>(
-        f32((h.color >> 16u) & 0xffu) / 255.0,
-        f32((h.color >> 8u) & 0xffu) / 255.0,
-        f32(h.color & 0xffu) / 255.0,
+        srgb_channel_to_linear(cr),
+        srgb_channel_to_linear(cg),
+        srgb_channel_to_linear(cb),
     );
     let n = face_normal(h.axis, h.sign_i);
     let ccw = select(

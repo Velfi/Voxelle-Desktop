@@ -95,7 +95,7 @@ pub(crate) fn scene_bounds_for_edit(
         &file.objects
     };
     if voxelle::scene::scene_objects_identity_for_bounds_fast_path(objs) {
-        let guard = state.last_scene_bounds.lock();
+        let guard = state.gpu.last_scene_bounds.lock();
         if let Some(prev) = guard.as_ref() {
             match delta {
                 voxel_edit::VoxelEditDelta::Added(v) => {
@@ -148,7 +148,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     // Compute bounds with a short `current_file` lock only. Overlay prep locks `current_file`
     // only while the viewer mutex is free (see main-loop `prepare_*_overlay`).
     let bounds = {
-        let fg = state.current_file.lock();
+        let fg = state.file.current_file.lock();
         let Some(file) = fg.as_ref() else {
             return Err("no model loaded".into());
         };
@@ -158,15 +158,15 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     let prepare_ms = t_prep_start.elapsed().as_secs_f64() * 1000.0;
 
     let t_lock_start = Instant::now();
-    let mut v = state.viewer.lock();
+    let mut v = state.gpu.viewer.lock();
     let viewer_lock_wait_ms = t_lock_start.elapsed().as_secs_f64() * 1000.0;
 
-    let mut fg = state.current_file.lock();
+    let mut fg = state.file.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
 
-    let rm = *state.rendering_mode.lock();
+    let rm = *state.gpu.rendering_mode.lock();
     let show_work = {
         let Some(viewer) = v.as_mut() else {
             return Err("viewer not ready".into());
@@ -220,8 +220,8 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
     drop(fg);
     drop(v);
     std::thread::yield_now();
-    v = state.viewer.lock();
-    fg = state.current_file.lock();
+    v = state.gpu.viewer.lock();
+    fg = state.file.current_file.lock();
     let Some(file) = fg.as_ref() else {
         return Err("no model loaded".into());
     };
@@ -248,13 +248,13 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
             viewer.upload_mesh(&mut greedy_mesh::MeshBuffers::default());
             viewer.last_mesh_route = "clear".to_string();
         }
-        *state.voxel_edit_stats_cache.lock() = None;
+        *state.gpu.voxel_edit_stats_cache.lock() = None;
     } else if rm.uses_smooth_surface() {
         let nv = file.voxels.len();
         if nv >= OFF_THREAD_SMOOTH_MESH_MIN_VOXELS {
             let voxels = file.voxels.clone();
             let rm_copy = rm;
-            let token = state.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let token = state.gpu.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
             let app_thread = app.clone();
             let show_work_thread = show_work;
             drop(fg);
@@ -295,15 +295,15 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 .map_err(|e| e.to_string())?
                 .join()
                 .map_err(|_| "smooth mesh thread panicked".to_string())?;
-            v = state.viewer.lock();
+            v = state.gpu.viewer.lock();
             let Some(viewer) = v.as_mut() else {
                 return Err("viewer not ready".into());
             };
-            fg = state.current_file.lock();
+            fg = state.file.current_file.lock();
             let Some(file) = fg.as_ref() else {
                 return Err("no model loaded".into());
             };
-            let mut mesh = if state.mesh_refresh_generation.load(Ordering::SeqCst) == token {
+            let mut mesh = if state.gpu.mesh_refresh_generation.load(Ordering::SeqCst) == token {
                 mesh_from_thread
             } else {
                 match rm {
@@ -322,7 +322,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 RenderingMode::DualContour => "dual_contour".to_string(),
                 _ => unreachable!(),
             };
-            *state.voxel_edit_stats_cache.lock() =
+            *state.gpu.voxel_edit_stats_cache.lock() =
                 Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
         } else {
             let Some(viewer) = v.as_mut() else {
@@ -354,11 +354,11 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 RenderingMode::DualContour => "dual_contour".to_string(),
                 _ => unreachable!(),
             };
-            *state.voxel_edit_stats_cache.lock() =
+            *state.gpu.voxel_edit_stats_cache.lock() =
                 Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
         }
     } else {
-        let cached_stats = *state.voxel_edit_stats_cache.lock();
+        let cached_stats = *state.gpu.voxel_edit_stats_cache.lock();
         let voxel_stats = resolve_voxel_edit_stats_batch(&file.voxels, deltas, cached_stats);
         let origin_new = voxel_stats.aabb_min;
         let single_object = voxel_stats.common_object_id.is_some();
@@ -416,7 +416,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                     if bi > 0 {
                         std::thread::yield_now();
                     }
-                    let mut v2 = state.viewer.lock();
+                    let mut v2 = state.gpu.viewer.lock();
                     let Some(viewer2) = v2.as_mut() else {
                         return Err("viewer not ready".into());
                     };
@@ -438,7 +438,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 mesh_greedy_cpu_ms = rperf_acc.greedy_cpu_ms;
                 mesh_chunk_buffers_ms = rperf_acc.chunk_buffers_ms;
                 mesh_full_chunked_rebuild_ms = rperf_acc.full_chunked_rebuild_ms;
-                v = state.viewer.lock();
+                v = state.gpu.viewer.lock();
                 let Some(viewer) = v.as_mut() else {
                     return Err("viewer not ready".into());
                 };
@@ -454,23 +454,23 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 let grid_size = file.grid_size;
                 let voxels = file.voxels.clone();
                 let objects = file.objects.clone();
-                let token = state.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                let token = state.gpu.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
                 drop(fg);
                 drop(v);
                 let prepared_result =
                     off_thread_prepare_greedy_rebuild(app, grid_size, voxels, objects);
-                v = state.viewer.lock();
+                v = state.gpu.viewer.lock();
                 let Some(viewer) = v.as_mut() else {
                     return Err("viewer not ready".into());
                 };
-                fg = state.current_file.lock();
+                fg = state.file.current_file.lock();
                 let Some(file) = fg.as_ref() else {
                     return Err("no model loaded".into());
                 };
                 let t_pipe = Instant::now();
                 match prepared_result {
                     Ok(prepared) => {
-                        if state.mesh_refresh_generation.load(Ordering::SeqCst) != token {
+                        if state.gpu.mesh_refresh_generation.load(Ordering::SeqCst) != token {
                             let _ = viewer.rebuild_mesh_gpu_greedy(
                                 &file.voxels,
                                 &file.objects,
@@ -499,7 +499,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 mesh_pipeline_ms = t_pipe.elapsed().as_secs_f64() * 1000.0;
             }
         }
-        *state.voxel_edit_stats_cache.lock() = Some(voxel_stats);
+        *state.gpu.voxel_edit_stats_cache.lock() = Some(voxel_stats);
     }
     // Release `current_file` before other helpers that lock it. Release `viewer` before any
     // follow-up that might contend with the render/preview paths (menu sync is lock-free; keeping
@@ -517,7 +517,7 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
         (preview_clear_ms, viewer.last_mesh_route.clone())
     };
     let total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
-    *state.last_edit_perf.lock() = Some(EditPerfBreakdown {
+    *state.gpu.last_edit_perf.lock() = Some(EditPerfBreakdown {
         apply_edit_ms,
         prepare_ms,
         viewer_lock_wait_ms,
@@ -536,14 +536,14 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
         preview_clear_ms,
     });
 
-    *state.last_scene_bounds.lock() = Some(bounds);
+    *state.gpu.last_scene_bounds.lock() = Some(bounds);
 
     drop(v);
 
     #[cfg(desktop)]
     {
-        let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
-        selection_menu_sync_enabled_for_scene(app, has_voxels, has_selection);
+        let (has_project, has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+        selection_menu_sync_enabled_for_scene(app, has_project, has_voxels, has_selection);
     }
     Ok(())
 }
@@ -553,19 +553,19 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
     state: &Arc<ViewerState>,
     app: Option<&AppHandle<R>>,
 ) -> Result<(), String> {
-    let rm = *state.rendering_mode.lock();
-    let mut v = state.viewer.lock();
+    let rm = *state.gpu.rendering_mode.lock();
+    let mut v = state.gpu.viewer.lock();
     let Some(viewer) = v.as_mut() else {
         return Err("viewer not ready".into());
     };
-    let fg = state.current_file.lock();
+    let fg = state.file.current_file.lock();
     let Some(file) = fg.as_ref() else {
         drop(fg);
         drop(v);
         #[cfg(desktop)]
         if let Some(a) = app {
-            let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
-            selection_menu_sync_enabled_for_scene(a, has_voxels, has_selection);
+            let (has_project, has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+            selection_menu_sync_enabled_for_scene(a, has_project, has_voxels, has_selection);
         }
         return Ok(());
     };
@@ -581,14 +581,14 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
     if file.voxels.is_empty() {
         viewer.upload_mesh(&mut greedy_mesh::MeshBuffers::default());
         viewer.last_mesh_route = "clear".to_string();
-        *state.voxel_edit_stats_cache.lock() = None;
+        *state.gpu.voxel_edit_stats_cache.lock() = None;
         drop(wp);
         drop(fg);
         drop(v);
         #[cfg(desktop)]
         if let Some(a) = app {
-            let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
-            selection_menu_sync_enabled_for_scene(a, has_voxels, has_selection);
+            let (has_project, has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+            selection_menu_sync_enabled_for_scene(a, has_project, has_voxels, has_selection);
         }
         return Ok(());
     }
@@ -608,7 +608,7 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
         match viewer.rebuild_mesh_gpu_greedy(&file.voxels, &file.objects, file.grid_size) {
             Ok(b) => {
                 viewer.set_scene_bounds(b);
-                *state.last_scene_bounds.lock() = Some(b);
+                *state.gpu.last_scene_bounds.lock() = Some(b);
             }
             Err(_) => {
                 let work = voxelle::scene::visible_voxels_for_meshing(&file.voxels, &file.objects);
@@ -620,19 +620,19 @@ pub(crate) fn refresh_opaque_mesh<R: Runtime>(
                         .unwrap_or_else(|| greedy_mesh::mesh_bounds_for_cube_side(file.grid_size))
                 };
                 viewer.set_scene_bounds(b);
-                *state.last_scene_bounds.lock() = Some(b);
+                *state.gpu.last_scene_bounds.lock() = Some(b);
             }
         }
     }
-    *state.voxel_edit_stats_cache.lock() =
+    *state.gpu.voxel_edit_stats_cache.lock() =
         Some(voxel_aabb_min_and_single_object_one_pass(&file.voxels));
     drop(wp);
     drop(fg);
     drop(v);
     #[cfg(desktop)]
     if let Some(a) = app {
-        let (has_voxels, has_selection) = scene_menu_flags(state.as_ref());
-        selection_menu_sync_enabled_for_scene(a, has_voxels, has_selection);
+        let (has_project, has_voxels, has_selection) = scene_menu_flags(state.as_ref());
+        selection_menu_sync_enabled_for_scene(a, has_project, has_voxels, has_selection);
     }
     Ok(())
 }
@@ -648,14 +648,14 @@ enum OpaqueRefreshWork {
 
 /// Heavy CPU mesh work runs on a side thread; GPU upload runs on the main thread via [`AppHandle::run_on_main_thread`].
 pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHandle) {
-    let token = state.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let token = state.gpu.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let state_c = Arc::clone(state);
     let app = app.clone();
-    let file = (*state.current_file.lock()).clone();
+    let file = (*state.file.current_file.lock()).clone();
     let Some(file) = file else {
         return;
     };
-    let rm = *state.rendering_mode.lock();
+    let rm = *state.gpu.rendering_mode.lock();
     if std::thread::Builder::new()
         .name("voxelle-opaque-refresh".into())
         .spawn(move || {
@@ -681,7 +681,7 @@ pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHa
                 };
                 let is_stale = {
                     let state_check = Arc::clone(&state_c);
-                    move || state_check.mesh_refresh_generation.load(Ordering::Relaxed) != token
+                    move || state_check.gpu.mesh_refresh_generation.load(Ordering::Relaxed) != token
                 };
                 let mesh = match rm {
                     RenderingMode::MarchingCubes => {
@@ -751,10 +751,10 @@ pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHa
             let file_snapshot = file.clone();
             let app_emit = app.clone();
             if let Err(e) = app.run_on_main_thread(move || {
-                if state_c.mesh_refresh_generation.load(Ordering::SeqCst) != token {
+                if state_c.gpu.mesh_refresh_generation.load(Ordering::SeqCst) != token {
                     return;
                 }
-                let mut vl = Some(state_c.viewer.lock());
+                let mut vl = Some(state_c.gpu.viewer.lock());
                 let Some(viewer) = vl.as_mut().and_then(|v| v.as_mut()) else {
                     return;
                 };
@@ -767,13 +767,13 @@ pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHa
                         viewer.upload_mesh(&mut mesh);
                         viewer.set_scene_bounds(bounds);
                         viewer.last_mesh_route = route;
-                        *state_c.last_scene_bounds.lock() = Some(bounds);
+                        *state_c.gpu.last_scene_bounds.lock() = Some(bounds);
                     }
                     OpaqueRefreshWork::Greedy(prepared) => {
                         match viewer.apply_prepared_greedy_rebuild(prepared) {
                             Ok(b) => {
                                 viewer.set_scene_bounds(b);
-                                *state_c.last_scene_bounds.lock() = Some(b);
+                                *state_c.gpu.last_scene_bounds.lock() = Some(b);
                             }
                             Err(_) => {
                                 let w = voxelle::scene::visible_voxels_for_meshing(
@@ -795,15 +795,15 @@ pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHa
                                     })
                                 };
                                 viewer.set_scene_bounds(b);
-                                *state_c.last_scene_bounds.lock() = Some(b);
+                                *state_c.gpu.last_scene_bounds.lock() = Some(b);
                             }
                         }
                     }
                 }
                 if file_snapshot.voxels.is_empty() {
-                    *state_c.voxel_edit_stats_cache.lock() = None;
+                    *state_c.gpu.voxel_edit_stats_cache.lock() = None;
                 } else {
-                    *state_c.voxel_edit_stats_cache.lock() = Some(
+                    *state_c.gpu.voxel_edit_stats_cache.lock() = Some(
                         voxel_aabb_min_and_single_object_one_pass(&file_snapshot.voxels),
                     );
                 }

@@ -686,6 +686,184 @@ pub(crate) fn create_scene_pipelines(
     }
 }
 
+// ── GPU compute preview pipelines ───────────────────────────────────────────
+
+pub(crate) struct PreviewComputePipelines {
+    pub pipeline_preview_fill_occ: wgpu::ComputePipeline,
+    pub pipeline_preview_shell_emit: wgpu::ComputePipeline,
+    pub preview_compute_fill_layout: wgpu::BindGroupLayout,
+    pub preview_compute_emit_layout: wgpu::BindGroupLayout,
+}
+
+pub(crate) fn create_preview_compute_pipelines(device: &wgpu::Device) -> PreviewComputePipelines {
+    // ── Pass 1: fill occupancy ──────────────────────────────────────────��─────
+    let fill_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("preview_fill_occ_bgl"),
+        entries: &[
+            // binding 0: PreviewUniforms (uniform)
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 1: raw_voxels (storage, read)
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 2: occupancy (storage, read_write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let shader_fill = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("preview_fill_occ"),
+        source: wgpu::ShaderSource::Wgsl(gpu::preview_fill_occ::WGSL.into()),
+    });
+    let pl_fill = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("preview_fill_occ_pl"),
+        bind_group_layouts: &[&fill_layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline_preview_fill_occ = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("preview_fill_occ"),
+        layout: Some(&pl_fill),
+        module: &shader_fill,
+        entry_point: Some("fill_occ"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    // ── Pass 2: shell emit ────────────────────────────────────────────────────
+    let emit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("preview_shell_emit_bgl"),
+        entries: &[
+            // binding 0: PreviewUniforms (uniform)
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 1: raw_voxels (storage, read)
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 2: occupancy (storage, read)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 3: obj_matrices (storage, read)
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 4: solid_instances (storage, read_write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 5: wire_instances (storage, read_write)
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 6: indirect (storage, read_write — atomicAdd on instance counts)
+            wgpu::BindGroupLayoutEntry {
+                binding: 6,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+
+    let shader_emit = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("preview_shell_emit"),
+        source: wgpu::ShaderSource::Wgsl(gpu::preview_shell_emit::WGSL.into()),
+    });
+    let pl_emit = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("preview_shell_emit_pl"),
+        bind_group_layouts: &[&emit_layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline_preview_shell_emit = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("preview_shell_emit"),
+        layout: Some(&pl_emit),
+        module: &shader_emit,
+        entry_point: Some("shell_emit"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+
+    PreviewComputePipelines {
+        pipeline_preview_fill_occ,
+        pipeline_preview_shell_emit,
+        preview_compute_fill_layout: fill_layout,
+        preview_compute_emit_layout: emit_layout,
+    }
+}
+
 // ── Overlay pipelines (collab lines, grid borders, gizmos) ──────────────────
 
 pub(crate) struct OverlayPipelines {

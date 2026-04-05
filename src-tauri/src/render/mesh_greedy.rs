@@ -80,7 +80,9 @@ impl WgpuViewer {
 
     /// Rebuild GPU buffers for `keys` only. Returns `true` if only those chunks were updated; `false` if a full chunked upload ran (origin drift).
     ///
-    /// Incremental greedy: [`greedy_mesh::pack_gpu_greedy_slices`] plus GPU greedy compute (same pipeline as [`Self::run_mesh_greedy_compute_with_brick`]) per dirty chunk unless `VOXELLE_CPU_CHUNK_REMESH` is set (any value forces CPU [`greedy_mesh::mesh_buffers_for_chunk_key`] only).
+    /// Incremental greedy: [`greedy_mesh::pack_gpu_greedy_slices`] plus GPU greedy compute per dirty
+    /// chunk (same AO + merge order as CPU greedy after [`greedy_mesh::mesh_buffers_for_chunk_key`]
+    /// parity fixes). Set `VOXELLE_CPU_CHUNK_REMESH` to force CPU meshing only (debug / regression).
     pub fn remesh_opaque_chunks<R: Runtime>(
         &mut self,
         keys: &[ChunkKey],
@@ -172,7 +174,13 @@ impl WgpuViewer {
             let core: &[Voxel] = &core_vec;
 
             let mut used_gpu = false;
-            if use_gpu_chunk && !core.is_empty() {
+            let has_transmissive = core.iter().any(|v| {
+                matches!(
+                    v.material,
+                    crate::voxelle::MaterialId::Glass | crate::voxelle::MaterialId::Water
+                )
+            });
+            if use_gpu_chunk && !core.is_empty() && !has_transmissive {
                 let (mo, md, brick_ref): (IVec3, (u32, u32, u32), &wgpu::Buffer) = match &halo_pack
                 {
                     Some((o, d, buf)) => (*o, *d, buf),

@@ -84,7 +84,97 @@ impl WgpuViewer {
         }
     }
 
+    /// Dispatch the two GPU compute preview passes (fill_occ → shell_emit) if new raw voxel data
+    /// has been uploaded since the last dispatch.  Must be called from the frame encoder *before*
+    /// the render pass that calls `draw_indexed_preview`.
+    pub(crate) fn dispatch_preview_compute_if_needed(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if !self.preview_needs_compute {
+            return;
+        }
+        let (bgs, occ_buf, n) = match (
+            &self.preview_compute_bgs,
+            &self.preview_compute_occupancy_buf,
+            self.preview_compute_voxel_count,
+        ) {
+            (Some(bgs), Some(occ), n) if n > 0 => (bgs, occ, n),
+            _ => return,
+        };
+
+        let workgroups = (n + 63) / 64;
+
+        // Clear the occupancy bitfield before filling it.
+        encoder.clear_buffer(occ_buf, 0, None);
+
+        // Pass 1: fill occupancy.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("preview_fill_occ"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.pipeline_preview_fill_occ);
+            cpass.set_bind_group(0, &bgs[0], &[]);
+            cpass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        // Pass 2: shell emit.
+        {
+            let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("preview_shell_emit"),
+                timestamp_writes: None,
+            });
+            cpass.set_pipeline(&self.pipeline_preview_shell_emit);
+            cpass.set_bind_group(0, &bgs[1], &[]);
+            cpass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        self.preview_needs_compute = false;
+    }
+
+    /// Draw the GPU compute preview (solid + wire) using `draw_indexed_indirect`.
+    /// The instance counts are stored in the indirect buffer by the compute shader.
+    pub(crate) fn draw_indexed_preview_compute(&self, pass: &mut wgpu::RenderPass<'_>) {
+        let (solid_pvb, solid_pib, solid_ibuf, wire_pvb, wire_pib, wire_ibuf, ind) = match (
+            &self.preview_compute_solid_proto_vb,
+            &self.preview_compute_solid_proto_ib,
+            &self.preview_compute_solid_instance_buf,
+            &self.preview_compute_wire_proto_vb,
+            &self.preview_compute_wire_proto_ib,
+            &self.preview_compute_wire_instance_buf,
+            &self.preview_compute_indirect_buf,
+        ) {
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => (a, b, c, d, e, f, g),
+            _ => return,
+        };
+        if self.preview_compute_voxel_count == 0 {
+            return;
+        }
+
+        // Solid: occluded pass then front pass.
+        pass.set_vertex_buffer(0, solid_pvb.slice(..));
+        pass.set_vertex_buffer(1, solid_ibuf.slice(..));
+        pass.set_index_buffer(solid_pib.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.set_pipeline(&self.pipeline_preview_inst_occluded);
+        pass.draw_indexed_indirect(ind, 0);
+        pass.set_pipeline(&self.pipeline_preview_inst_front);
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.draw_indexed_indirect(ind, 0);
+
+        // Wire.
+        pass.set_vertex_buffer(0, wire_pvb.slice(..));
+        pass.set_vertex_buffer(1, wire_ibuf.slice(..));
+        pass.set_index_buffer(wire_pib.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_bind_group(0, &self.bind_scene_opaque, &[]);
+        pass.set_pipeline(&self.pipeline_preview_inst_front_wire);
+        pass.draw_indexed_indirect(ind, 20);
+    }
+
     pub(crate) fn draw_indexed_preview(&self, pass: &mut wgpu::RenderPass<'_>) {
+        // GPU compute path (large strokes — draw_indexed_indirect from shell_emit output).
+        self.draw_indexed_preview_compute(pass);
         // GPU-instanced solid cubes
         if let (Some(pvb), Some(pib), Some(ibuf)) = (
             &self.preview_solid_proto_vb,
