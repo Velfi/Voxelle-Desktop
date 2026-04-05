@@ -1,3 +1,17 @@
+## 0.2.7 — 2026-04-05
+
+### Added
+- Bone generator: place joints on the model surface and connect them into an armature, then commit to voxelize the skeleton into a creature or character shape. Supports add, edit, and delete modes with IK drag for posing.
+- Generators now respect active symmetry axes. Any generator edit (rocks, grass, rope, cloth, shapes, bones, etc.) is automatically mirrored across the selected X/Y/Z axes, matching the behaviour of manual voxel painting.
+- Shape generator: place geometric primitives (cube, orb, cylinder, hollow cube, plane, circle) onto the model surface with configurable size and X/Y/Z rotation. The placement gizmo lets you reposition and rotate the shape before committing.
+- New .voxelle V5 file format uses zstd compression instead of gzip for faster save and load times. Large files are also parsed in parallel on multi-core systems. V3 and V4 files continue to open normally.
+
+### Changed
+- Collaborative editing now sends voxel deltas as binary (bincode) frames instead of JSON text, reducing message size and improving sync performance in large edit operations.
+
+### Fixed
+- Undo history is now capped at a maximum number of entries, preventing unbounded memory growth during long editing sessions.
+
 # Changelog
 
 ## 0.2.6 — 2026-04-04
