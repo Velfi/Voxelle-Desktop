@@ -2617,6 +2617,10 @@ pub(crate) fn prepare_preview_mesh(
         }
     }
 
+    if matches!(mode, PreviewMode::SelectExtrude) {
+        return PreviewMeshPrepared::Clear;
+    }
+
     if matches!(mode, PreviewMode::Select) {
         let poly_placing = matches!(
             ctx.stroke_mode,
