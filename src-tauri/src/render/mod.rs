@@ -359,6 +359,10 @@ pub struct WgpuViewer {
     pub(crate) meter_view: wgpu::TextureView,
     pub(crate) meter_staging: wgpu::Buffer,
     pub(crate) bind_meter: wgpu::BindGroup,
+    /// Pending async luminance readback from the *previous* frame's meter pass.
+    /// `Some` while the GPU copy is in-flight; `None` after it has been consumed.
+    pub(crate) meter_pending_rx:
+        Option<std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>>,
     /// User EV slider (−5…5); with auto exposure, added as bias on metered EV.
     pub(crate) exposure_user_ev: f32,
     pub(crate) auto_exposure_enabled: bool,
@@ -1553,6 +1557,7 @@ impl WgpuViewer {
             exposure_user_ev: default_lit.exposure_ev.clamp(-5.0, 5.0),
             auto_exposure_enabled: default_lit.auto_exposure,
             auto_exposure_smoothed: 0.0,
+            meter_pending_rx: None,
             // Match default `ViewerState::start_screen_logo_transparent`: gradient until a real scene load turns it off.
             start_screen_transparent: true,
             start_screen_appearance: 0.0,
@@ -2029,32 +2034,60 @@ impl WgpuViewer {
         };
     }
 
-    /// Read 1×1 meter from the previous submit; updates smoothed EV for the next frame.
-    fn read_meter_luminance_and_update_auto_exposure(&mut self) {
+    /// Initiate an async readback of the 1×1 meter texture that was just copied to
+    /// `meter_staging` in this frame's command encoder.  The result will be consumed
+    /// on the *next* frame by `try_collect_meter_luminance` — no blocking poll here.
+    pub(crate) fn begin_meter_readback(&mut self) {
+        // If a previous mapping is still in flight, abandon it (don't start a second one).
+        if self.meter_pending_rx.is_some() {
+            return;
+        }
         let slice = self.meter_staging.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        self.device.poll(wgpu::Maintain::Wait);
-        let Ok(map_ok) = rx.recv() else {
-            return;
+        self.meter_pending_rx = Some(rx);
+    }
+
+    /// Non-blockingly collect the luminance value started by `begin_meter_readback` on the
+    /// previous frame.  If the GPU hasn't finished yet, the value is silently skipped this
+    /// frame (exposure adapts on the next available result — imperceptible at 60 fps).
+    pub(crate) fn try_collect_meter_luminance(&mut self) {
+        let rx = match self.meter_pending_rx.take() {
+            Some(r) => r,
+            None => return,
         };
-        if map_ok.is_err() {
-            return;
+        // Poll the device once (non-blocking) to give wgpu a chance to mark the mapping done.
+        self.device.poll(wgpu::Maintain::Poll);
+        match rx.try_recv() {
+            Ok(Ok(())) => {
+                let slice = self.meter_staging.slice(..);
+                let lum = {
+                    let view = slice.get_mapped_range();
+                    let arr: [u8; 4] = view[0..4].try_into().unwrap_or([0; 4]);
+                    let v = f32::from_le_bytes(arr);
+                    drop(view);
+                    v
+                };
+                self.meter_staging.unmap();
+                let target = 0.18_f32;
+                let ev_inst = (target / lum.max(1e-5)).log2();
+                // Faster adaptation so toggling auto is visibly responsive (still stable).
+                self.auto_exposure_smoothed = self.auto_exposure_smoothed * 0.82 + ev_inst * 0.18;
+            }
+            Ok(Err(_)) => {
+                // Mapping failed — unmap and discard.
+                self.meter_staging.unmap();
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // GPU not done yet — put the receiver back so we retry next frame.
+                self.meter_pending_rx = Some(rx);
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                // Channel dropped unexpectedly — nothing to unmap.
+            }
         }
-        let lum = {
-            let view = slice.get_mapped_range();
-            let arr: [u8; 4] = view[0..4].try_into().unwrap_or([0; 4]);
-            let v = f32::from_le_bytes(arr);
-            drop(view);
-            self.meter_staging.unmap();
-            v
-        };
-        let target = 0.18_f32;
-        let ev_inst = (target / lum.max(1e-5)).log2();
-        // Faster adaptation so toggling auto is visibly responsive (still stable).
-        self.auto_exposure_smoothed = self.auto_exposure_smoothed * 0.82 + ev_inst * 0.18;
     }
 
     pub fn apply_lighting_settings(&mut self, s: &crate::voxelle::LightingSettings) {

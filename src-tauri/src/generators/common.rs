@@ -127,17 +127,26 @@ mod tests {
 
     #[test]
     fn v3_add_basic() {
-        assert!(v3_approx_eq(v3_add([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]), [5.0, 7.0, 9.0]));
+        assert!(v3_approx_eq(
+            v3_add([1.0, 2.0, 3.0], [4.0, 5.0, 6.0]),
+            [5.0, 7.0, 9.0]
+        ));
     }
 
     #[test]
     fn v3_sub_basic() {
-        assert!(v3_approx_eq(v3_sub([4.0, 5.0, 6.0], [1.0, 2.0, 3.0]), [3.0, 3.0, 3.0]));
+        assert!(v3_approx_eq(
+            v3_sub([4.0, 5.0, 6.0], [1.0, 2.0, 3.0]),
+            [3.0, 3.0, 3.0]
+        ));
     }
 
     #[test]
     fn v3_scale_basic() {
-        assert!(v3_approx_eq(v3_scale([1.0, 2.0, 3.0], 2.0), [2.0, 4.0, 6.0]));
+        assert!(v3_approx_eq(
+            v3_scale([1.0, 2.0, 3.0], 2.0),
+            [2.0, 4.0, 6.0]
+        ));
     }
 
     #[test]
@@ -153,9 +162,15 @@ mod tests {
     #[test]
     fn v3_cross_unit_axes() {
         // X × Y = Z
-        assert!(v3_approx_eq(v3_cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]), [0.0, 0.0, 1.0]));
+        assert!(v3_approx_eq(
+            v3_cross([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+            [0.0, 0.0, 1.0]
+        ));
         // Y × Z = X
-        assert!(v3_approx_eq(v3_cross([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]), [1.0, 0.0, 0.0]));
+        assert!(v3_approx_eq(
+            v3_cross([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+            [1.0, 0.0, 0.0]
+        ));
     }
 
     #[test]

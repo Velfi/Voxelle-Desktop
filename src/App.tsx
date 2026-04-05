@@ -138,7 +138,13 @@ function App() {
   /** After pick probe: camera orbit/pan/dolly vs voxel click-to-edit (matches web: no hit → camera). */
   const gestureRef = useRef<{
     pointerId: number;
-    mode: "camera" | "voxel" | "squishyGizmo" | "selectionGizmo" | "extrudeGizmo";
+    mode:
+      | "camera"
+      | "voxel"
+      | "squishyGizmo"
+      | "squishyAddDrag"
+      | "selectionGizmo"
+      | "extrudeGizmo";
   } | null>(null);
   const probingRef = useRef(false);
   /** Pointer-up event that arrived while a pick probe was in-flight; replayed after the probe resolves. */
@@ -477,6 +483,7 @@ function App() {
   const [rotateDialogDegrees, setRotateDialogDegrees] = useState(90);
   const [scaleDialogOpen, setScaleDialogOpen] = useState(false);
   const [scaleDialogFactor, setScaleDialogFactor] = useState(2);
+  const [pointerTestOpen, setPointerTestOpen] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(() => {
     if (typeof localStorage === "undefined") return true;
     const stored = localStorage.getItem(LS_SIDEBAR_EXPANDED);
@@ -727,6 +734,7 @@ function App() {
       enabled: p.enableEmissionLighting,
     }).catch(() => {});
     void invoke("set_gizmo_on_top", { enabled: p.gizmoOnTop }).catch(() => {});
+    void invoke("set_mouselook_sensitivity", { value: p.mouselookSensitivity }).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -843,6 +851,7 @@ function App() {
     setSelectionCombineMode,
     setRotateDialogOpen,
     setScaleDialogOpen,
+    setPointerTestOpen,
   });
 
   /** Sidebars change flex width; sync native viewer after layout so `.viewport` matches `viewer_resize`. */
@@ -2900,6 +2909,7 @@ function App() {
       ashlarPhase.active ||
       floraPhase.active ||
       shapePhase.active ||
+      squishyPhase.active ||
       (generatorKind === "cloth" && clothPins.length > 0) ||
       (generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null)) ||
       showPolygonPhaseHud ||
@@ -2989,930 +2999,833 @@ function App() {
         setFlySpeed,
       }}
     >
-    <CollabContext.Provider
-      value={{
-        collabActive,
-        setCollabActive,
-        localPeerId,
-        setLocalPeerId,
-        roster,
-        setRoster,
-        chatLines,
-        setChatLines,
-        chatInput,
-        setChatInput,
-        chatPanelOpen,
-        setChatPanelOpen,
-        chatToasts,
-        setChatToasts,
-        displayName,
-        setDisplayName,
-        accentColor,
-        setAccentColor,
-        hostWsUrl,
-        setHostWsUrl,
-        hostWanUrl,
-        setHostWanUrl,
-        hostPort,
-        setHostPort,
-        hostingCopied,
-        setHostingCopied,
-        natPending,
-        setNatPending,
-        natError,
-        setNatError,
-        joinUrl,
-        setJoinUrl,
-        joinModalOpen,
-        setJoinModalOpen,
-        leaveConfirmOpen,
-        setLeaveConfirmOpen,
-        collabJoinPending,
-        setCollabJoinPending,
-        collabBanner,
-        setCollabBanner,
-        prefsEnableUpnp,
-        setPrefsEnableUpnp,
-        startHost,
-        leaveSession,
-      }}
-    >
-    <div
-      className={`app${loading && !loadError ? " app-loading-cursor" : ""}${hideUI ? " app--ui-hidden" : ""}`}
-    >
-      <div className="app-main">
-        <ToolsSidebar
-          showEditorChrome={showEditorChrome}
-          loading={loading}
-          workBusy={workBusy}
-          toolsPaneFloating={toolsPaneFloating}
-          setToolsPaneFloating={setToolsPaneFloating}
-          sidebarExpanded={sidebarExpanded}
-          setSidebarExpanded={setSidebarExpanded}
-          toolPanePos={toolPanePos}
-          onToolPaneDragDown={onToolPaneDragDown}
-          selectionCount={selectionCount}
-          stampBookPatternActive={stampBookPatternActive}
-          ropePhase={ropePhase}
-          clothPhase={clothPhase}
-          rocksPhase={rocksPhase}
-          grassPhase={grassPhase}
-          ashlarPhase={ashlarPhase}
-          floraPhase={floraPhase}
-          shapePhase={shapePhase}
-          ropeFirstScreen={ropeFirstScreen}
-          setRopeFirstScreen={setRopeFirstScreen}
-          setClothPins={setClothPins}
-          clothPinsRef={clothPinsRef}
-          colorPaletteFloating={colorPaletteFloating}
-          setColorPaletteFloating={setColorPaletteFloating}
-          bonePhase={bonePhase}
-          boneMode={boneMode}
-          setBoneMode={setBoneMode}
-          boneJointCount={boneJointCount}
-          boneBoneCount={boneBoneCount}
-          boneDefaultRadius={boneDefaultRadius}
-          setBoneDefaultRadius={setBoneDefaultRadius}
-          ikEnabled={ikEnabled}
-          setIkEnabled={setIkEnabled}
-        />
-        {colorPaletteFloating && showEditorChrome ? (
-          <div
-            className="floating-palette-panel"
-            style={{
-              left: colorPalettePos.x,
-              top: colorPalettePos.y,
-              width: colorPaletteSize.w,
-              height: colorPaletteSize.h,
-            }}
-            role="region"
-            aria-label="Floating color palette"
-          >
-            <div className="floating-palette-header">
-              <div
-                className="floating-palette-drag-handle"
-                onPointerDown={(e) => {
-                  const pid = e.pointerId;
-                  const startX = e.clientX;
-                  const startY = e.clientY;
-                  const origX = colorPalettePos.x;
-                  const origY = colorPalettePos.y;
-
-                  const handleMove = (moveE: PointerEvent) => {
-                    if (moveE.pointerId !== pid) return;
-                    const dx = moveE.clientX - startX;
-                    const dy = moveE.clientY - startY;
-                    setColorPalettePos(clampPalettePos(origX + dx, origY + dy));
-                  };
-
-                  const handleUp = (upE: PointerEvent) => {
-                    if (upE.pointerId !== pid) return;
-                    document.removeEventListener("pointermove", handleMove as EventListener);
-                    document.removeEventListener("pointerup", handleUp as EventListener);
-                  };
-
-                  document.addEventListener("pointermove", handleMove as EventListener);
-                  document.addEventListener("pointerup", handleUp as EventListener);
-                }}
-                aria-label="Drag to move palette"
-              >
-                <span className="floating-palette-grip" aria-hidden>
-                  ⋮⋮
-                </span>
-              </div>
-              <div className="floating-palette-header-actions">
-                <button
-                  type="button"
-                  className="floating-palette-dock-btn"
-                  onClick={() => setColorPaletteFloating(false)}
-                  title="Dock palette"
-                >
-                  Dock
-                </button>
-              </div>
-            </div>
-            <div className="floating-palette-content">
-              <div className="sidebar-color-row">
-                <label className="sidebar-palette-row sidebar-color-swatch">
-                  <input
-                    type="color"
-                    value={`#${activeColor.toString(16).padStart(6, "0")}`}
-                    onChange={(ev) => {
-                      const h = ev.target.value.slice(1);
-                      const n = Number.parseInt(h, 16);
-                      if (!Number.isNaN(n)) setActiveColor(n);
-                    }}
-                    disabled={loading || workBusy}
-                    aria-label="Brush color"
-                  />
-                </label>
-                <button
-                  type="button"
-                  className={
-                    interactionMode === "eyedropper"
-                      ? "sidebar-mode-btn is-active"
-                      : "sidebar-mode-btn"
-                  }
-                  disabled={loading || workBusy}
-                  onClick={() => setInteractionMode("eyedropper")}
-                >
-                  <span className="sidebar-mode-label">Eyedropper</span>
-                </button>
-              </div>
-              <PaletteSwatches
-                activeColor={activeColor}
-                selectedColors={selectedColors}
-                setActiveColor={setActiveColor}
-                setSelectedColors={setSelectedColors}
-                disabled={loading || workBusy}
-                palette={MATERIAL_BUILTIN_PALETTE_HEX}
-              />
-            </div>
-            <div
-              className="floating-palette-resize-handle"
-              onPointerDown={(e) => {
-                const pid = e.pointerId;
-                const startX = e.clientX;
-                const startY = e.clientY;
-                const origW = colorPaletteSize.w;
-                const origH = colorPaletteSize.h;
-
-                const handleMove = (moveE: PointerEvent) => {
-                  if (moveE.pointerId !== pid) return;
-                  const dx = moveE.clientX - startX;
-                  const dy = moveE.clientY - startY;
-                  setColorPaletteSize({
-                    w: Math.max(140, origW + dx),
-                    h: Math.max(120, origH + dy),
-                  });
-                };
-
-                const handleUp = (upE: PointerEvent) => {
-                  if (upE.pointerId !== pid) return;
-                  document.removeEventListener("pointermove", handleMove as EventListener);
-                  document.removeEventListener("pointerup", handleUp as EventListener);
-                };
-
-                document.addEventListener("pointermove", handleMove as EventListener);
-                document.addEventListener("pointerup", handleUp as EventListener);
-              }}
-              aria-label="Resize palette"
-            />
-          </div>
-        ) : null}
+      <CollabContext.Provider
+        value={{
+          collabActive,
+          setCollabActive,
+          localPeerId,
+          setLocalPeerId,
+          roster,
+          setRoster,
+          chatLines,
+          setChatLines,
+          chatInput,
+          setChatInput,
+          chatPanelOpen,
+          setChatPanelOpen,
+          chatToasts,
+          setChatToasts,
+          displayName,
+          setDisplayName,
+          accentColor,
+          setAccentColor,
+          hostWsUrl,
+          setHostWsUrl,
+          hostWanUrl,
+          setHostWanUrl,
+          hostPort,
+          setHostPort,
+          hostingCopied,
+          setHostingCopied,
+          natPending,
+          setNatPending,
+          natError,
+          setNatError,
+          joinUrl,
+          setJoinUrl,
+          joinModalOpen,
+          setJoinModalOpen,
+          leaveConfirmOpen,
+          setLeaveConfirmOpen,
+          collabJoinPending,
+          setCollabJoinPending,
+          collabBanner,
+          setCollabBanner,
+          prefsEnableUpnp,
+          setPrefsEnableUpnp,
+          startHost,
+          leaveSession,
+        }}
+      >
         <div
-          className={`viewport-wrap${showStartScreen ? " is-start-screen" : ""}${
-            showEditorChrome && !rightSidebarExpanded ? " is-right-sidebar-collapsed" : ""
-          }`}
+          className={`app${loading && !loadError ? " app-loading-cursor" : ""}${hideUI ? " app--ui-hidden" : ""}`}
         >
-          {loading || workBusy ? (
-            <div className="load-bar" aria-hidden>
-              <div
-                className="load-bar-fill"
-                style={{
-                  width: `${Math.round(
-                    Math.min(1, Math.max(0, loading ? loadProgress : workProgress)) * 100,
-                  )}%`,
-                }}
-              />
-            </div>
-          ) : null}
-          {showStartScreenLogoSpinner ? (
-            <div
-              className="viewport-start-screen-spinner"
-              role="status"
-              aria-live="polite"
-              aria-label="Loading scene"
-            >
-              <div className="viewport-start-screen-spinner-ring" aria-hidden />
-            </div>
-          ) : null}
-          <div
-            ref={viewportRef}
-            className={
-              interactionMode === "navigate"
-                ? "viewport viewport-mode-navigate"
-                : interactionMode === "fly" || interactionMode === "walk"
-                  ? "viewport viewport-mode-fly"
-                  : "viewport viewport-mode-edit"
-            }
-            onPointerDown={onPointerDown}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
-            onPointerLeave={onPointerLeave}
-            onGotPointerCapture={onGotPointerCapture}
-            onLostPointerCapture={onLostPointerCapture}
-            onContextMenu={(ev) => {
-              ev.preventDefault();
-              const m = interactionModeRef.current;
-              if ((m === "stamp" || m === "punch") && !loading && !workBusy) {
-                const el = viewportRef.current;
-                const rect = el?.getBoundingClientRect();
-                if (rect && rect.width > 0 && rect.height > 0) {
-                  const nx = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
-                  const ny = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
-                  void invoke<[number, number, number] | null>("stamp_face_normal_at_screen", {
-                    args: { nx, ny },
-                  })
-                    .then((normal) => {
-                      if (!normal) return;
-                      const [fnx, fny, fnz] = normal;
-                      if (fnx !== 0) setStampRotX((v) => v + 90);
-                      else if (fny !== 0) setStampRotY((v) => v + 90);
-                      else if (fnz !== 0) setStampRotZ((v) => v + 90);
-                    })
-                    .catch(() => {});
-                }
-              }
-            }}
-            onWheel={onWheel}
-            role="application"
-            aria-label="3D viewport"
-          >
-            {showEditorChrome && viewportCursorDebugEnabled ? (
-              <div className="viewport-cursor-debug-overlay" aria-hidden>
-                {(() => {
-                  const jsPct = viewportCursorDebugJs
-                    ? viewportCursorOverlayPercent(
-                        viewportCursorDebugJs.nx,
-                        viewportCursorDebugJs.ny,
-                      )
-                    : null;
-                  const rustPct =
-                    viewportCursorDebugRust?.previewNx != null &&
-                    viewportCursorDebugRust.previewNy != null
-                      ? viewportCursorOverlayPercent(
-                          viewportCursorDebugRust.previewNx,
-                          viewportCursorDebugRust.previewNy,
-                        )
-                      : null;
-                  return (
-                    <>
-                      {jsPct ? (
-                        <div
-                          className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
-                          style={{
-                            left: `${jsPct.leftPct}%`,
-                            top: `${jsPct.topPct}%`,
-                          }}
-                        />
-                      ) : null}
-                      {rustPct ? (
-                        <div
-                          className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
-                          style={{
-                            left: `${rustPct.leftPct}%`,
-                            top: `${rustPct.topPct}%`,
-                          }}
-                        />
-                      ) : null}
-                    </>
-                  );
-                })()}
-                <div className="viewport-cursor-debug-legend">
-                  <div>
-                    JS{" "}
-                    {viewportCursorDebugJs
-                      ? `${viewportCursorDebugJs.nx.toFixed(5)}, ${viewportCursorDebugJs.ny.toFixed(5)}`
-                      : "—"}
-                  </div>
-                  <div>
-                    Rust preview{" "}
-                    {viewportCursorDebugRust?.previewNx != null &&
-                    viewportCursorDebugRust.previewNy != null
-                      ? `${viewportCursorDebugRust.previewNx.toFixed(5)}, ${viewportCursorDebugRust.previewNy.toFixed(5)}`
-                      : "—"}
-                  </div>
-                  <div>
-                    Δn{" "}
-                    {viewportCursorDebugJs &&
-                    viewportCursorDebugRust?.previewNx != null &&
-                    viewportCursorDebugRust.previewNy != null
-                      ? `${(viewportCursorDebugJs.nx - viewportCursorDebugRust.previewNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.previewNy).toFixed(5)}`
-                      : "—"}
-                  </div>
-                  <div>
-                    proj cube (face hit){" "}
-                    {viewportCursorDebugRust?.projCubeNx != null &&
-                    viewportCursorDebugRust.projCubeNy != null
-                      ? `${viewportCursorDebugRust.projCubeNx.toFixed(5)}, ${viewportCursorDebugRust.projCubeNy.toFixed(5)}`
-                      : "—"}
-                    {viewportCursorDebugJs &&
-                    viewportCursorDebugRust?.projCubeNx != null &&
-                    viewportCursorDebugRust.projCubeNy != null
-                      ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCubeNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCubeNy).toFixed(5)}`
-                      : ""}
-                  </div>
-                  <div>
-                    proj center (voxel ctr, debug){" "}
-                    {viewportCursorDebugRust?.projCenterNx != null &&
-                    viewportCursorDebugRust.projCenterNy != null
-                      ? `${viewportCursorDebugRust.projCenterNx.toFixed(5)}, ${viewportCursorDebugRust.projCenterNy.toFixed(5)}`
-                      : "—"}
-                    {viewportCursorDebugJs &&
-                    viewportCursorDebugRust?.projCenterNx != null &&
-                    viewportCursorDebugRust.projCenterNy != null
-                      ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCenterNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCenterNy).toFixed(5)}`
-                      : ""}
-                  </div>
-                  <div>
-                    viewport{" "}
-                    {viewportCursorDebugRust
-                      ? `${viewportCursorDebugRust.viewportWidth}×${viewportCursorDebugRust.viewportHeight}`
-                      : "—"}
-                    {viewportCursorDebugRust?.texelSx != null &&
-                    viewportCursorDebugRust.texelSy != null
-                      ? ` · texel ${viewportCursorDebugRust.texelSx.toFixed(2)}, ${viewportCursorDebugRust.texelSy.toFixed(2)}`
-                      : ""}
-                  </div>
-                  <div>
-                    screen client{" "}
-                    {viewportCursorDebugScreen
-                      ? `${viewportCursorDebugScreen.clientX.toFixed(1)}, ${viewportCursorDebugScreen.clientY.toFixed(1)}`
-                      : "—"}
-                    {" · rel "}
-                    {viewportCursorDebugScreen
-                      ? `${viewportCursorDebugScreen.relX.toFixed(2)}, ${viewportCursorDebugScreen.relY.toFixed(2)}`
-                      : "—"}
-                  </div>
-                  <div>
-                    layout→surface origin{" "}
-                    {viewportCursorDebugRust &&
-                    viewportCursorDebugScreen &&
-                    viewportCursorDebugScreen.layoutWidth > 0 &&
-                    viewportCursorDebugScreen.layoutHeight > 0
-                      ? (() => {
-                          const s = viewportCursorDebugScreen;
-                          const r = viewportCursorDebugRust;
-                          const expX = Math.round((s.rectLeft / s.layoutWidth) * r.surfaceWidth);
-                          const expY = Math.round((s.rectTop / s.layoutHeight) * r.surfaceHeight);
-                          const dx = expX - r.viewportOriginX;
-                          const dy = expY - r.viewportOriginY;
-                          return `expect (${expX}, ${expY}) · Rust (${r.viewportOriginX}, ${r.viewportOriginY}) · Δ (${dx}, ${dy}) · surface ${r.surfaceWidth}×${r.surfaceHeight} · layout ${s.layoutWidth}×${s.layoutHeight} · inner ${s.innerWidth}×${s.innerHeight} · rect @ ${s.rectLeft.toFixed(0)},${s.rectTop.toFixed(0)}`;
-                        })()
-                      : "—"}
-                  </div>
-                  <div>
-                    world ray (Rust, preview texels) o{" "}
-                    {viewportCursorDebugRust?.rayOriginX != null &&
-                    viewportCursorDebugRust.rayOriginY != null &&
-                    viewportCursorDebugRust.rayOriginZ != null
-                      ? `${viewportCursorDebugRust.rayOriginX.toFixed(4)}, ${viewportCursorDebugRust.rayOriginY.toFixed(4)}, ${viewportCursorDebugRust.rayOriginZ.toFixed(4)}`
-                      : "—"}
-                    {" d "}
-                    {viewportCursorDebugRust?.rayDirX != null &&
-                    viewportCursorDebugRust.rayDirY != null &&
-                    viewportCursorDebugRust.rayDirZ != null
-                      ? `${viewportCursorDebugRust.rayDirX.toFixed(4)}, ${viewportCursorDebugRust.rayDirY.toFixed(4)}, ${viewportCursorDebugRust.rayDirZ.toFixed(4)}`
-                      : "—"}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-            {showViewportTopCenterStack ? (
-              <ViewportHUD
-                viewportTopCenterHud={viewportTopCenterHud}
-                cuboidPhase={cuboidPhase}
-                cylinderPhase={cylinderPhase}
-                polygonPhase={polygonPhase}
-                cuboidDepthUi={cuboidDepthUi}
-                setCuboidDepthUi={setCuboidDepthUi}
-                cuboidDepthRef={cuboidDepthRef}
-                cylinderDepthUi={cylinderDepthUi}
-                setCylinderDepthUi={setCylinderDepthUi}
-                cylinderDepthRef={cylinderDepthRef}
-                polygonDepthUi={polygonDepthUi}
-                setPolygonDepthUi={setPolygonDepthUi}
-                polygonDepthRef={polygonDepthRef}
-                extrusionDepthEditing={extrusionDepthEditing}
-                setExtrusionDepthEditing={setExtrusionDepthEditing}
-                extrusionDepthDraft={extrusionDepthDraft}
-                setExtrusionDepthDraft={setExtrusionDepthDraft}
-                commitCuboidSolidAtScreen={commitCuboidSolidAtScreen}
-                commitCylinderSolidAtScreen={commitCylinderSolidAtScreen}
-                commitPolygonSolid={commitPolygonSolid}
-                extrudePhase={extrudePhase}
-                extrudeProfile={extrudeProfile}
-                extrudeTaper={extrudeTaper}
-                generatorKind={generatorKind}
-                roofPins={roofPins}
-                setRoofPins={setRoofPins}
-                roofPinsRef={roofPinsRef}
-                roofFirstClick={roofFirstClick}
-                setRoofFirstClick={setRoofFirstClick}
-                roofFirstClickRef={roofFirstClickRef}
-                roofAreaShape={roofAreaShape}
-                roofStyle={roofStyle}
-                roofHeight={roofHeight}
-                roofHollow={roofHollow}
-                activeColor={activeColor}
-                activeMaterialRef={activeMaterialRef}
-                loading={loading}
-                workBusy={workBusy}
-                clothPins={clothPins}
-                setClothPins={setClothPins}
-                clothPinsRef={clothPinsRef}
-                clothPhase={clothPhase}
-                clothTension={clothTension}
-                setClothTension={setClothTension}
-                ropePhase={ropePhase}
-                ropeTension={ropeTension}
-                setRopeTension={setRopeTension}
-                rocksPhase={rocksPhase}
-                grassPhase={grassPhase}
-                ashlarPhase={ashlarPhase}
-                floraPhase={floraPhase}
-                shapePhase={shapePhase}
-                squishyPhase={squishyPhase}
-                bonePhase={bonePhase}
-                setBoneMode={setBoneMode}
-                showWallSculptPolygonHud={showWallSculptPolygonHud}
-                wallSculptPolygonVerts={wallSculptPolygonVerts}
-                setWallSculptPolygonVerts={setWallSculptPolygonVerts}
-                commitWallSculptPolygonStroke={commitWallSculptPolygonStroke}
-                showPolygonPhaseHud={showPolygonPhaseHud}
-                strokePolygonVerts={strokePolygonVerts}
-                setStrokePolygonVerts={setStrokePolygonVerts}
-                strokePolygonLastScreenRef={strokePolygonLastScreenRef}
-                applyPolygonStrokeFill={applyPolygonStrokeFill}
-              />
-            ) : null}
-            <SelectionGizmo
-              ref={gizmoRef}
+          <div className="app-main">
+            <ToolsSidebar
+              showEditorChrome={showEditorChrome}
+              loading={loading}
+              workBusy={workBusy}
+              toolsPaneFloating={toolsPaneFloating}
+              setToolsPaneFloating={setToolsPaneFloating}
+              sidebarExpanded={sidebarExpanded}
+              setSidebarExpanded={setSidebarExpanded}
+              toolPanePos={toolPanePos}
+              onToolPaneDragDown={onToolPaneDragDown}
               selectionCount={selectionCount}
-              flyMode={interactionMode === "fly" || interactionMode === "walk"}
-              loadingOrBusy={loading || workBusy}
-              stampOrPunch={interactionMode === "stamp" || interactionMode === "punch"}
-              viewportEl={viewportRef.current}
+              stampBookPatternActive={stampBookPatternActive}
+              ropePhase={ropePhase}
+              clothPhase={clothPhase}
+              rocksPhase={rocksPhase}
+              grassPhase={grassPhase}
+              ashlarPhase={ashlarPhase}
+              floraPhase={floraPhase}
+              shapePhase={shapePhase}
+              ropeFirstScreen={ropeFirstScreen}
+              setRopeFirstScreen={setRopeFirstScreen}
+              setClothPins={setClothPins}
+              clothPinsRef={clothPinsRef}
+              colorPaletteFloating={colorPaletteFloating}
+              setColorPaletteFloating={setColorPaletteFloating}
+              squishyMode={squishyMode}
+              setSquishyMode={setSquishyMode}
+              squishyBallCount={squishyBallCount}
+              bonePhase={bonePhase}
+              boneMode={boneMode}
+              setBoneMode={setBoneMode}
+              boneJointCount={boneJointCount}
+              boneBoneCount={boneBoneCount}
+              boneDefaultRadius={boneDefaultRadius}
+              setBoneDefaultRadius={setBoneDefaultRadius}
+              ikEnabled={ikEnabled}
+              setIkEnabled={setIkEnabled}
             />
-            <ExtrudeGizmo ref={extrudeGizmoRef} viewportEl={viewportRef.current} />
-          </div>
-          {showEditorChrome ? (
-            <ViewportCameraHud
-              flyMode={interactionMode === "fly" || interactionMode === "walk"}
-              loadingOrBusy={loading || workBusy}
-            />
-          ) : null}
-          {showToolOptionsPanel ? (
-            <div
-              className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""}${
-                !toolsPaneFloating && sidebarExpanded ? " is-sidebar-expanded" : ""
-              }${!toolsPaneFloating && !sidebarExpanded ? " is-sidebar-collapsed" : ""}${
-                toolsPane === "generators" && generatorKind === "flora" ? " is-generator-wide" : ""
-              }`}
-              role="dialog"
-              aria-label="Tool options"
-              onPointerDown={(e) => e.stopPropagation()}
-              onPointerUp={(e) => e.stopPropagation()}
-            >
-              {selectionCount > 0 ? (
-                <div className="tool-options-section tool-panel-selection-toolbar">
+            {colorPaletteFloating && showEditorChrome ? (
+              <div
+                className="floating-palette-panel"
+                style={{
+                  left: colorPalettePos.x,
+                  top: colorPalettePos.y,
+                  width: colorPaletteSize.w,
+                  height: colorPaletteSize.h,
+                }}
+                role="region"
+                aria-label="Floating color palette"
+              >
+                <div className="floating-palette-header">
                   <div
-                    className="tool-options-shape-row"
-                    style={{
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      flexWrap: "wrap",
-                      gap: "0.5rem",
+                    className="floating-palette-drag-handle"
+                    onPointerDown={(e) => {
+                      const pid = e.pointerId;
+                      const startX = e.clientX;
+                      const startY = e.clientY;
+                      const origX = colorPalettePos.x;
+                      const origY = colorPalettePos.y;
+
+                      const handleMove = (moveE: PointerEvent) => {
+                        if (moveE.pointerId !== pid) return;
+                        const dx = moveE.clientX - startX;
+                        const dy = moveE.clientY - startY;
+                        setColorPalettePos(clampPalettePos(origX + dx, origY + dy));
+                      };
+
+                      const handleUp = (upE: PointerEvent) => {
+                        if (upE.pointerId !== pid) return;
+                        document.removeEventListener("pointermove", handleMove as EventListener);
+                        document.removeEventListener("pointerup", handleUp as EventListener);
+                      };
+
+                      document.addEventListener("pointermove", handleMove as EventListener);
+                      document.addEventListener("pointerup", handleUp as EventListener);
                     }}
+                    aria-label="Drag to move palette"
                   >
-                    <span className="tool-panel-selection-count" role="status" aria-live="polite">
-                      {selectionCount} selected
+                    <span className="floating-palette-grip" aria-hidden>
+                      ⋮⋮
                     </span>
+                  </div>
+                  <div className="floating-palette-header-actions">
                     <button
                       type="button"
-                      className="tool-options-shape-btn"
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        void invoke("selection_clear").catch(() => {});
-                      }}
+                      className="floating-palette-dock-btn"
+                      onClick={() => setColorPaletteFloating(false)}
+                      title="Dock palette"
                     >
-                      Deselect
+                      Dock
                     </button>
                   </div>
                 </div>
-              ) : null}
-              {(toolsPane === "draw" || toolsPane === "select") &&
-              drawStrokeMode === "fill" &&
-              (interactionMode === "add" ||
-                interactionMode === "remove" ||
-                interactionMode === "paint" ||
-                isSelectionInteractionMode) ? (
-                <div className="tool-options-section">
-                  <div className="tool-options-heading">Fill</div>
-                  <p className="tool-options-hint">
-                    Click a solid voxel. The connected region is filled, recolored, or added to the
-                    selection per your current tool and the options below.
-                  </p>
-                </div>
-              ) : null}
-              {(toolsPane === "draw" || toolsPane === "select") && isSelectionInteractionMode ? (
-                <div className="tool-options-section">
-                  <div className="tool-options-heading">Combine</div>
-                  <div
-                    className="tool-options-shape-row tool-options-shape-row-two"
-                    role="group"
-                    aria-label="Selection combine mode"
-                  >
-                    {(
-                      [
-                        ["replace", "Replace"],
-                        ["intersect", "Intersect"],
-                        ["add", "Add"],
-                        ["subtract", "Subtract"],
-                      ] as const
-                    ).map(([id, label]) => (
-                      <button
-                        key={id}
-                        type="button"
-                        className={
-                          selectionCombineMode === id
-                            ? "tool-options-shape-btn is-active"
-                            : "tool-options-shape-btn"
-                        }
-                        disabled={loading || workBusy}
-                        onClick={() => {
-                          setSelectionCombineMode(id);
-                          void invoke("selection_set_combine_mode", {
-                            mode: id,
-                          }).catch(() => {});
+                <div className="floating-palette-content">
+                  <div className="sidebar-color-row">
+                    <label className="sidebar-palette-row sidebar-color-swatch">
+                      <input
+                        type="color"
+                        value={`#${activeColor.toString(16).padStart(6, "0")}`}
+                        onChange={(ev) => {
+                          const h = ev.target.value.slice(1);
+                          const n = Number.parseInt(h, 16);
+                          if (!Number.isNaN(n)) setActiveColor(n);
                         }}
-                      >
-                        {label}
-                      </button>
-                    ))}
+                        disabled={loading || workBusy}
+                        aria-label="Brush color"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className={
+                        interactionMode === "eyedropper"
+                          ? "sidebar-mode-btn is-active"
+                          : "sidebar-mode-btn"
+                      }
+                      disabled={loading || workBusy}
+                      onClick={() => setInteractionMode("eyedropper")}
+                    >
+                      <span className="sidebar-mode-label">Eyedropper</span>
+                    </button>
                   </div>
+                  <PaletteSwatches
+                    activeColor={activeColor}
+                    selectedColors={selectedColors}
+                    setActiveColor={setActiveColor}
+                    setSelectedColors={setSelectedColors}
+                    disabled={loading || workBusy}
+                    palette={MATERIAL_BUILTIN_PALETTE_HEX}
+                  />
+                </div>
+                <div
+                  className="floating-palette-resize-handle"
+                  onPointerDown={(e) => {
+                    const pid = e.pointerId;
+                    const startX = e.clientX;
+                    const startY = e.clientY;
+                    const origW = colorPaletteSize.w;
+                    const origH = colorPaletteSize.h;
+
+                    const handleMove = (moveE: PointerEvent) => {
+                      if (moveE.pointerId !== pid) return;
+                      const dx = moveE.clientX - startX;
+                      const dy = moveE.clientY - startY;
+                      setColorPaletteSize({
+                        w: Math.max(140, origW + dx),
+                        h: Math.max(120, origH + dy),
+                      });
+                    };
+
+                    const handleUp = (upE: PointerEvent) => {
+                      if (upE.pointerId !== pid) return;
+                      document.removeEventListener("pointermove", handleMove as EventListener);
+                      document.removeEventListener("pointerup", handleUp as EventListener);
+                    };
+
+                    document.addEventListener("pointermove", handleMove as EventListener);
+                    document.addEventListener("pointerup", handleUp as EventListener);
+                  }}
+                  aria-label="Resize palette"
+                />
+              </div>
+            ) : null}
+            <div
+              className={`viewport-wrap${showStartScreen ? " is-start-screen" : ""}${
+                showEditorChrome && !rightSidebarExpanded ? " is-right-sidebar-collapsed" : ""
+              }`}
+            >
+              {loading || workBusy ? (
+                <div className="load-bar" aria-hidden>
+                  <div
+                    className="load-bar-fill"
+                    style={{
+                      width: `${Math.round(
+                        Math.min(1, Math.max(0, loading ? loadProgress : workProgress)) * 100,
+                      )}%`,
+                    }}
+                  />
                 </div>
               ) : null}
-              {showDrawPaneToolMatrix ? (
-                <>
-                  <DrawPaneSelectionToolOptions
+              {showStartScreenLogoSpinner ? (
+                <div
+                  className="viewport-start-screen-spinner"
+                  role="status"
+                  aria-live="polite"
+                  aria-label="Loading scene"
+                >
+                  <div className="viewport-start-screen-spinner-ring" aria-hidden />
+                </div>
+              ) : null}
+              <div
+                ref={viewportRef}
+                className={
+                  interactionMode === "navigate"
+                    ? "viewport viewport-mode-navigate"
+                    : interactionMode === "fly" || interactionMode === "walk"
+                      ? "viewport viewport-mode-fly"
+                      : "viewport viewport-mode-edit"
+                }
+                onPointerDown={onPointerDown}
+                onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp}
+                onPointerLeave={onPointerLeave}
+                onGotPointerCapture={onGotPointerCapture}
+                onLostPointerCapture={onLostPointerCapture}
+                onContextMenu={(ev) => {
+                  ev.preventDefault();
+                  const m = interactionModeRef.current;
+                  if ((m === "stamp" || m === "punch") && !loading && !workBusy) {
+                    const el = viewportRef.current;
+                    const rect = el?.getBoundingClientRect();
+                    if (rect && rect.width > 0 && rect.height > 0) {
+                      const nx = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+                      const ny = Math.min(1, Math.max(0, (ev.clientY - rect.top) / rect.height));
+                      void invoke<[number, number, number] | null>("stamp_face_normal_at_screen", {
+                        args: { nx, ny },
+                      })
+                        .then((normal) => {
+                          if (!normal) return;
+                          const [fnx, fny, fnz] = normal;
+                          if (fnx !== 0) setStampRotX((v) => v + 90);
+                          else if (fny !== 0) setStampRotY((v) => v + 90);
+                          else if (fnz !== 0) setStampRotZ((v) => v + 90);
+                        })
+                        .catch(() => {});
+                    }
+                  }
+                }}
+                onWheel={onWheel}
+                role="application"
+                aria-label="3D viewport"
+              >
+                {showEditorChrome && viewportCursorDebugEnabled ? (
+                  <div className="viewport-cursor-debug-overlay" aria-hidden>
+                    {(() => {
+                      const jsPct = viewportCursorDebugJs
+                        ? viewportCursorOverlayPercent(
+                            viewportCursorDebugJs.nx,
+                            viewportCursorDebugJs.ny,
+                          )
+                        : null;
+                      const rustPct =
+                        viewportCursorDebugRust?.previewNx != null &&
+                        viewportCursorDebugRust.previewNy != null
+                          ? viewportCursorOverlayPercent(
+                              viewportCursorDebugRust.previewNx,
+                              viewportCursorDebugRust.previewNy,
+                            )
+                          : null;
+                      return (
+                        <>
+                          {jsPct ? (
+                            <div
+                              className="viewport-cursor-debug-mark viewport-cursor-debug-mark-js"
+                              style={{
+                                left: `${jsPct.leftPct}%`,
+                                top: `${jsPct.topPct}%`,
+                              }}
+                            />
+                          ) : null}
+                          {rustPct ? (
+                            <div
+                              className="viewport-cursor-debug-mark viewport-cursor-debug-mark-rust"
+                              style={{
+                                left: `${rustPct.leftPct}%`,
+                                top: `${rustPct.topPct}%`,
+                              }}
+                            />
+                          ) : null}
+                        </>
+                      );
+                    })()}
+                    <div className="viewport-cursor-debug-legend">
+                      <div>
+                        JS{" "}
+                        {viewportCursorDebugJs
+                          ? `${viewportCursorDebugJs.nx.toFixed(5)}, ${viewportCursorDebugJs.ny.toFixed(5)}`
+                          : "—"}
+                      </div>
+                      <div>
+                        Rust preview{" "}
+                        {viewportCursorDebugRust?.previewNx != null &&
+                        viewportCursorDebugRust.previewNy != null
+                          ? `${viewportCursorDebugRust.previewNx.toFixed(5)}, ${viewportCursorDebugRust.previewNy.toFixed(5)}`
+                          : "—"}
+                      </div>
+                      <div>
+                        Δn{" "}
+                        {viewportCursorDebugJs &&
+                        viewportCursorDebugRust?.previewNx != null &&
+                        viewportCursorDebugRust.previewNy != null
+                          ? `${(viewportCursorDebugJs.nx - viewportCursorDebugRust.previewNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.previewNy).toFixed(5)}`
+                          : "—"}
+                      </div>
+                      <div>
+                        proj cube (face hit){" "}
+                        {viewportCursorDebugRust?.projCubeNx != null &&
+                        viewportCursorDebugRust.projCubeNy != null
+                          ? `${viewportCursorDebugRust.projCubeNx.toFixed(5)}, ${viewportCursorDebugRust.projCubeNy.toFixed(5)}`
+                          : "—"}
+                        {viewportCursorDebugJs &&
+                        viewportCursorDebugRust?.projCubeNx != null &&
+                        viewportCursorDebugRust.projCubeNy != null
+                          ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCubeNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCubeNy).toFixed(5)}`
+                          : ""}
+                      </div>
+                      <div>
+                        proj center (voxel ctr, debug){" "}
+                        {viewportCursorDebugRust?.projCenterNx != null &&
+                        viewportCursorDebugRust.projCenterNy != null
+                          ? `${viewportCursorDebugRust.projCenterNx.toFixed(5)}, ${viewportCursorDebugRust.projCenterNy.toFixed(5)}`
+                          : "—"}
+                        {viewportCursorDebugJs &&
+                        viewportCursorDebugRust?.projCenterNx != null &&
+                        viewportCursorDebugRust.projCenterNy != null
+                          ? ` · Δ ${(viewportCursorDebugJs.nx - viewportCursorDebugRust.projCenterNx).toFixed(5)}, ${(viewportCursorDebugJs.ny - viewportCursorDebugRust.projCenterNy).toFixed(5)}`
+                          : ""}
+                      </div>
+                      <div>
+                        viewport{" "}
+                        {viewportCursorDebugRust
+                          ? `${viewportCursorDebugRust.viewportWidth}×${viewportCursorDebugRust.viewportHeight}`
+                          : "—"}
+                        {viewportCursorDebugRust?.texelSx != null &&
+                        viewportCursorDebugRust.texelSy != null
+                          ? ` · texel ${viewportCursorDebugRust.texelSx.toFixed(2)}, ${viewportCursorDebugRust.texelSy.toFixed(2)}`
+                          : ""}
+                      </div>
+                      <div>
+                        screen client{" "}
+                        {viewportCursorDebugScreen
+                          ? `${viewportCursorDebugScreen.clientX.toFixed(1)}, ${viewportCursorDebugScreen.clientY.toFixed(1)}`
+                          : "—"}
+                        {" · rel "}
+                        {viewportCursorDebugScreen
+                          ? `${viewportCursorDebugScreen.relX.toFixed(2)}, ${viewportCursorDebugScreen.relY.toFixed(2)}`
+                          : "—"}
+                      </div>
+                      <div>
+                        layout→surface origin{" "}
+                        {viewportCursorDebugRust &&
+                        viewportCursorDebugScreen &&
+                        viewportCursorDebugScreen.layoutWidth > 0 &&
+                        viewportCursorDebugScreen.layoutHeight > 0
+                          ? (() => {
+                              const s = viewportCursorDebugScreen;
+                              const r = viewportCursorDebugRust;
+                              const expX = Math.round(
+                                (s.rectLeft / s.layoutWidth) * r.surfaceWidth,
+                              );
+                              const expY = Math.round(
+                                (s.rectTop / s.layoutHeight) * r.surfaceHeight,
+                              );
+                              const dx = expX - r.viewportOriginX;
+                              const dy = expY - r.viewportOriginY;
+                              return `expect (${expX}, ${expY}) · Rust (${r.viewportOriginX}, ${r.viewportOriginY}) · Δ (${dx}, ${dy}) · surface ${r.surfaceWidth}×${r.surfaceHeight} · layout ${s.layoutWidth}×${s.layoutHeight} · inner ${s.innerWidth}×${s.innerHeight} · rect @ ${s.rectLeft.toFixed(0)},${s.rectTop.toFixed(0)}`;
+                            })()
+                          : "—"}
+                      </div>
+                      <div>
+                        world ray (Rust, preview texels) o{" "}
+                        {viewportCursorDebugRust?.rayOriginX != null &&
+                        viewportCursorDebugRust.rayOriginY != null &&
+                        viewportCursorDebugRust.rayOriginZ != null
+                          ? `${viewportCursorDebugRust.rayOriginX.toFixed(4)}, ${viewportCursorDebugRust.rayOriginY.toFixed(4)}, ${viewportCursorDebugRust.rayOriginZ.toFixed(4)}`
+                          : "—"}
+                        {" d "}
+                        {viewportCursorDebugRust?.rayDirX != null &&
+                        viewportCursorDebugRust.rayDirY != null &&
+                        viewportCursorDebugRust.rayDirZ != null
+                          ? `${viewportCursorDebugRust.rayDirX.toFixed(4)}, ${viewportCursorDebugRust.rayDirY.toFixed(4)}, ${viewportCursorDebugRust.rayDirZ.toFixed(4)}`
+                          : "—"}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                {showViewportTopCenterStack ? (
+                  <ViewportHUD
+                    viewportTopCenterHud={viewportTopCenterHud}
+                    cuboidPhase={cuboidPhase}
+                    cylinderPhase={cylinderPhase}
+                    polygonPhase={polygonPhase}
+                    cuboidDepthUi={cuboidDepthUi}
+                    setCuboidDepthUi={setCuboidDepthUi}
+                    cuboidDepthRef={cuboidDepthRef}
+                    cylinderDepthUi={cylinderDepthUi}
+                    setCylinderDepthUi={setCylinderDepthUi}
+                    cylinderDepthRef={cylinderDepthRef}
+                    polygonDepthUi={polygonDepthUi}
+                    setPolygonDepthUi={setPolygonDepthUi}
+                    polygonDepthRef={polygonDepthRef}
+                    extrusionDepthEditing={extrusionDepthEditing}
+                    setExtrusionDepthEditing={setExtrusionDepthEditing}
+                    extrusionDepthDraft={extrusionDepthDraft}
+                    setExtrusionDepthDraft={setExtrusionDepthDraft}
+                    commitCuboidSolidAtScreen={commitCuboidSolidAtScreen}
+                    commitCylinderSolidAtScreen={commitCylinderSolidAtScreen}
+                    commitPolygonSolid={commitPolygonSolid}
+                    extrudePhase={extrudePhase}
+                    extrudeProfile={extrudeProfile}
+                    extrudeTaper={extrudeTaper}
+                    generatorKind={generatorKind}
+                    roofPins={roofPins}
+                    setRoofPins={setRoofPins}
+                    roofPinsRef={roofPinsRef}
+                    roofFirstClick={roofFirstClick}
+                    setRoofFirstClick={setRoofFirstClick}
+                    roofFirstClickRef={roofFirstClickRef}
+                    roofAreaShape={roofAreaShape}
+                    roofStyle={roofStyle}
+                    roofHeight={roofHeight}
+                    roofHollow={roofHollow}
+                    activeColor={activeColor}
+                    activeMaterialRef={activeMaterialRef}
                     loading={loading}
                     workBusy={workBusy}
-                    selectionMethod={selectionMethod}
-                    drawStrokeMode={drawStrokeMode}
-                    setDrawStrokeMode={setDrawStrokeMode}
-                    strokeDrawStyle={strokeDrawStyle}
-                    setStrokeDrawStyle={setStrokeDrawStyle}
-                    strokeFamilyVariant={strokeFamilyVariant}
-                    setStrokeFamilyVariant={setStrokeFamilyVariant}
-                    planeAxis={planeAxis}
-                    setPlaneAxis={setPlaneAxis}
-                    fillSelectDiagonals={fillSelectDiagonals}
-                    setFillSelectDiagonals={setFillSelectDiagonals}
-                    fillRespectsColor={fillRespectsColor}
-                    setFillRespectsColor={setFillRespectsColor}
-                    sprayDensity={sprayDensity}
-                    setSprayDensity={setSprayDensity}
-                    brushShape={brushShape}
-                    setBrushShape={setBrushShape}
-                    brushClipBottomHalf={brushClipBottomHalf}
-                    setBrushClipBottomHalf={setBrushClipBottomHalf}
-                    brushRadius={brushRadius}
-                    setBrushRadius={setBrushRadius}
-                    selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
-                    setSelectionStrokeSnapToSurface={setSelectionStrokeSnapToSurface}
-                    selectionStrokeAxisAlign={selectionStrokeAxisAlign}
-                    setSelectionStrokeAxisAlign={setSelectionStrokeAxisAlign}
-                    surfacePlaneHollow={surfacePlaneHollow}
-                    setSurfacePlaneHollow={setSurfacePlaneHollow}
-                    sprayConstrainToPlane={sprayConstrainToPlane}
-                    setSprayConstrainToPlane={setSprayConstrainToPlane}
-                    spraySizeRange={spraySizeRange}
-                    setSpraySizeRange={setSpraySizeRange}
-                    sprayScatter={sprayScatter}
-                    setSprayScatter={setSprayScatter}
-                    sprayRadiusMin={sprayRadiusMin}
-                    setSprayRadiusMin={setSprayRadiusMin}
-                    sprayRadiusMax={sprayRadiusMax}
-                    setSprayRadiusMax={setSprayRadiusMax}
-                    sprayBrushShape={sprayBrushShape}
-                    setSprayBrushShape={setSprayBrushShape}
-                    sprayConstrainToPlaneRef={sprayConstrainToPlaneRef_}
-                    setSprayConstrainToPlaneRef={setSprayConstrainToPlaneRef_}
-                    fillConstrainToPlane={fillConstrainToPlane}
-                    setFillConstrainToPlane={setFillConstrainToPlane}
+                    clothPins={clothPins}
+                    setClothPins={setClothPins}
+                    clothPinsRef={clothPinsRef}
+                    clothPhase={clothPhase}
+                    clothTension={clothTension}
+                    setClothTension={setClothTension}
+                    ropePhase={ropePhase}
+                    ropeTension={ropeTension}
+                    setRopeTension={setRopeTension}
+                    rocksPhase={rocksPhase}
+                    grassPhase={grassPhase}
+                    ashlarPhase={ashlarPhase}
+                    floraPhase={floraPhase}
+                    shapePhase={shapePhase}
+                    squishyPhase={squishyPhase}
+                    bonePhase={bonePhase}
+                    setBoneMode={setBoneMode}
+                    showWallSculptPolygonHud={showWallSculptPolygonHud}
+                    wallSculptPolygonVerts={wallSculptPolygonVerts}
+                    setWallSculptPolygonVerts={setWallSculptPolygonVerts}
+                    commitWallSculptPolygonStroke={commitWallSculptPolygonStroke}
+                    showPolygonPhaseHud={showPolygonPhaseHud}
+                    strokePolygonVerts={strokePolygonVerts}
+                    setStrokePolygonVerts={setStrokePolygonVerts}
+                    strokePolygonLastScreenRef={strokePolygonLastScreenRef}
+                    applyPolygonStrokeFill={applyPolygonStrokeFill}
                   />
-                </>
+                ) : null}
+                <SelectionGizmo
+                  ref={gizmoRef}
+                  selectionCount={selectionCount}
+                  flyMode={interactionMode === "fly" || interactionMode === "walk"}
+                  loadingOrBusy={loading || workBusy}
+                  stampOrPunch={interactionMode === "stamp" || interactionMode === "punch"}
+                  viewportEl={viewportRef.current}
+                />
+                <ExtrudeGizmo ref={extrudeGizmoRef} viewportEl={viewportRef.current} />
+              </div>
+              {showEditorChrome ? (
+                <ViewportCameraHud
+                  flyMode={interactionMode === "fly" || interactionMode === "walk"}
+                  loadingOrBusy={loading || workBusy}
+                />
               ) : null}
-              {(toolsPane === "draw" || toolsPane === "select") && isSelectionInteractionMode ? (
-                <>
-                  {interactionMode === "selectByColor" ? (
-                    <div className="tool-options-section">
-                      <div className="tool-options-heading">By color</div>
-                      <p className="tool-options-hint">
-                        Click a voxel to select all connected voxels of the same color.
-                      </p>
-                      <label
-                        className="tool-options-range-label"
+              {showToolOptionsPanel ? (
+                <div
+                  className={`tool-options-panel${toolsPaneFloating ? " is-tools-floating" : ""}${
+                    !toolsPaneFloating && sidebarExpanded ? " is-sidebar-expanded" : ""
+                  }${!toolsPaneFloating && !sidebarExpanded ? " is-sidebar-collapsed" : ""}${
+                    toolsPane === "generators" && generatorKind === "flora"
+                      ? " is-generator-wide"
+                      : ""
+                  }`}
+                  role="dialog"
+                  aria-label="Tool options"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onPointerUp={(e) => e.stopPropagation()}
+                >
+                  {selectionCount > 0 ? (
+                    <div className="tool-options-section tool-panel-selection-toolbar">
+                      <div
+                        className="tool-options-shape-row"
                         style={{
-                          display: "flex",
+                          justifyContent: "space-between",
                           alignItems: "center",
-                          gap: "0.35rem",
+                          flexWrap: "wrap",
+                          gap: "0.5rem",
                         }}
                       >
-                        <input
-                          type="checkbox"
-                          checked={matchMaterialSelectColor}
-                          onChange={(ev) => setMatchMaterialSelectColor(ev.target.checked)}
-                          disabled={loading || workBusy}
-                        />
-                        <span>Match material when matching color</span>
-                      </label>
-                    </div>
-                  ) : null}
-                  {interactionMode === "selectCoplanar" ? (
-                    <div className="tool-options-section">
-                      <div className="tool-options-heading">Coplanar</div>
-                      <p className="tool-options-hint">
-                        Click a solid voxel to extend the selection along the same face plane.
-                      </p>
-                    </div>
-                  ) : null}
-                  {interactionMode === "selectCoplanarEmpty" ? (
-                    <div className="tool-options-section">
-                      <div className="tool-options-heading">Coplanar void</div>
-                      <p className="tool-options-hint">
-                        Click empty space on a plane to select the coplanar empty region.
-                      </p>
-                    </div>
-                  ) : null}
-                </>
-              ) : null}
-              {toolsPane === "sculpt" && interactionMode === "sculpt" ? (
-                <>
-                  {sculptStrokeMode === "draw" ||
-                  sculptStrokeMode === "smooth" ||
-                  sculptStrokeMode === "gouge" ||
-                  sculptStrokeMode === "extrude" ||
-                  sculptStrokeMode === "terrain" ? (
-                    <div className="tool-options-section" aria-label="Sculpt">
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Brush</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={SCULPT_BRUSH_MAX_INDEX}
-                          value={sculptBrushRadius}
-                          onChange={(ev) => setSculptBrushRadius(Number(ev.target.value))}
-                          disabled={loading || workBusy}
-                          title="Brush size (1–64 voxels)"
-                        />
-                        <span className="tool-options-range-value">{sculptBrushRadius + 1}</span>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Strength</span>
-                        <input
-                          type="range"
-                          min={1}
-                          max={100}
-                          value={sculptBrushStrength}
-                          onChange={(ev) => setSculptBrushStrength(Number(ev.target.value))}
-                          disabled={loading || workBusy}
-                          title="How strongly the brush applies (with falloff)"
-                        />
-                        <span className="tool-options-range-value">{sculptBrushStrength}</span>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Falloff</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={100}
-                          value={sculptBrushFalloff}
-                          onChange={(ev) => setSculptBrushFalloff(Number(ev.target.value))}
-                          disabled={loading || workBusy}
-                          title="0 = hard edge; higher = softer falloff toward brush radius"
-                        />
-                        <span className="tool-options-range-value">{sculptBrushFalloff}</span>
-                      </label>
-                      {sculptStrokeMode === "draw" || sculptStrokeMode === "smooth" ? (
-                        <label
-                          className="tool-options-checkbox-row"
-                          style={{ marginTop: "0.35rem" }}
+                        <span
+                          className="tool-panel-selection-count"
+                          role="status"
+                          aria-live="polite"
                         >
-                          <input
-                            type="checkbox"
-                            checked={brushClipBottomHalf}
-                            onChange={(ev) => setBrushClipBottomHalf(ev.target.checked)}
+                          {selectionCount} selected
+                        </span>
+                        <button
+                          type="button"
+                          className="tool-options-shape-btn"
+                          disabled={loading || workBusy}
+                          onClick={() => {
+                            void invoke("selection_clear").catch(() => {});
+                          }}
+                        >
+                          Deselect
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  {(toolsPane === "draw" || toolsPane === "select") &&
+                  drawStrokeMode === "fill" &&
+                  (interactionMode === "add" ||
+                    interactionMode === "remove" ||
+                    interactionMode === "paint" ||
+                    isSelectionInteractionMode) ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Fill</div>
+                      <p className="tool-options-hint">
+                        Click a solid voxel. The connected region is filled, recolored, or added to
+                        the selection per your current tool and the options below.
+                      </p>
+                    </div>
+                  ) : null}
+                  {(toolsPane === "draw" || toolsPane === "select") &&
+                  isSelectionInteractionMode ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Combine</div>
+                      <div
+                        className="tool-options-shape-row tool-options-shape-row-two"
+                        role="group"
+                        aria-label="Selection combine mode"
+                      >
+                        {(
+                          [
+                            ["replace", "Replace"],
+                            ["intersect", "Intersect"],
+                            ["add", "Add"],
+                            ["subtract", "Subtract"],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            className={
+                              selectionCombineMode === id
+                                ? "tool-options-shape-btn is-active"
+                                : "tool-options-shape-btn"
+                            }
                             disabled={loading || workBusy}
-                          />
-                          <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
-                            Outer half (face)
-                          </span>
-                        </label>
-                      ) : null}
-                      {sculptStrokeMode === "draw" ||
-                      sculptStrokeMode === "smooth" ||
-                      sculptStrokeMode === "gouge" ? (
-                        <>
-                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
-                            Brush shape
-                          </div>
-                          <div
-                            className="tool-options-shape-row tool-options-shape-row-two"
-                            role="group"
-                            aria-label="Sculpt brush shape"
-                          >
-                            {(
-                              [
-                                ["circle", "Circle"],
-                                ["square", "Square"],
-                              ] as const
-                            ).map(([id, label]) => (
-                              <button
-                                key={id}
-                                type="button"
-                                className={
-                                  sculptBrushShapeUi === id
-                                    ? "tool-options-shape-btn is-active"
-                                    : "tool-options-shape-btn"
-                                }
-                                disabled={loading || workBusy}
-                                onClick={() => setSculptBrushShapeUi(id)}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                          <div
-                            className="tool-options-shape-row tool-options-shape-row-two"
-                            role="group"
-                            aria-label="Sculpt brush shape 3D"
-                          >
-                            {(
-                              [
-                                ["sphere", "Sphere"],
-                                ["cube", "Cube"],
-                              ] as const
-                            ).map(([id, label]) => (
-                              <button
-                                key={id}
-                                type="button"
-                                className={
-                                  sculptBrushShapeUi === id
-                                    ? "tool-options-shape-btn is-active"
-                                    : "tool-options-shape-btn"
-                                }
-                                disabled={loading || workBusy}
-                                onClick={() => setSculptBrushShapeUi(id)}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </>
-                      ) : null}
-                      {sculptStrokeMode === "extrude" ? (
-                        <>
-                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
-                            Direction
-                          </div>
-                          <div
-                            className="tool-options-shape-row"
-                            role="group"
-                            aria-label="Extrude direction reference"
-                            style={{
-                              display: "grid",
-                              gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
-                              gap: "0.25rem",
+                            onClick={() => {
+                              setSelectionCombineMode(id);
+                              void invoke("selection_set_combine_mode", {
+                                mode: id,
+                              }).catch(() => {});
                             }}
                           >
-                            {(
-                              [
-                                ["auto", "Auto"],
-                                ["camera", "Cam"],
-                                ["x", "X"],
-                                ["y", "Y"],
-                                ["z", "Z"],
-                              ] as const
-                            ).map(([id, label]) => (
-                              <button
-                                key={id}
-                                type="button"
-                                className={
-                                  extrudeDirectionRef === id
-                                    ? "tool-options-shape-btn is-active"
-                                    : "tool-options-shape-btn"
-                                }
-                                disabled={loading || workBusy}
-                                onClick={() => setExtrudeDirectionRef(id)}
-                                title={
-                                  id === "auto"
-                                    ? "Along dominant axis of start face"
-                                    : id === "camera"
-                                      ? "View plane: drag maps through camera right/up"
-                                      : `World ±${id.toUpperCase()} (sign from drag)`
-                                }
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
-                            Profile
-                          </div>
-                          <div
-                            className="tool-options-shape-row tool-options-shape-row-two"
-                            role="group"
-                            aria-label="Extrude profile"
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {showDrawPaneToolMatrix ? (
+                    <>
+                      <DrawPaneSelectionToolOptions
+                        loading={loading}
+                        workBusy={workBusy}
+                        selectionMethod={selectionMethod}
+                        drawStrokeMode={drawStrokeMode}
+                        setDrawStrokeMode={setDrawStrokeMode}
+                        strokeDrawStyle={strokeDrawStyle}
+                        setStrokeDrawStyle={setStrokeDrawStyle}
+                        strokeFamilyVariant={strokeFamilyVariant}
+                        setStrokeFamilyVariant={setStrokeFamilyVariant}
+                        planeAxis={planeAxis}
+                        setPlaneAxis={setPlaneAxis}
+                        fillSelectDiagonals={fillSelectDiagonals}
+                        setFillSelectDiagonals={setFillSelectDiagonals}
+                        fillRespectsColor={fillRespectsColor}
+                        setFillRespectsColor={setFillRespectsColor}
+                        sprayDensity={sprayDensity}
+                        setSprayDensity={setSprayDensity}
+                        brushShape={brushShape}
+                        setBrushShape={setBrushShape}
+                        brushClipBottomHalf={brushClipBottomHalf}
+                        setBrushClipBottomHalf={setBrushClipBottomHalf}
+                        brushRadius={brushRadius}
+                        setBrushRadius={setBrushRadius}
+                        selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
+                        setSelectionStrokeSnapToSurface={setSelectionStrokeSnapToSurface}
+                        selectionStrokeAxisAlign={selectionStrokeAxisAlign}
+                        setSelectionStrokeAxisAlign={setSelectionStrokeAxisAlign}
+                        surfacePlaneHollow={surfacePlaneHollow}
+                        setSurfacePlaneHollow={setSurfacePlaneHollow}
+                        sprayConstrainToPlane={sprayConstrainToPlane}
+                        setSprayConstrainToPlane={setSprayConstrainToPlane}
+                        spraySizeRange={spraySizeRange}
+                        setSpraySizeRange={setSpraySizeRange}
+                        sprayScatter={sprayScatter}
+                        setSprayScatter={setSprayScatter}
+                        sprayRadiusMin={sprayRadiusMin}
+                        setSprayRadiusMin={setSprayRadiusMin}
+                        sprayRadiusMax={sprayRadiusMax}
+                        setSprayRadiusMax={setSprayRadiusMax}
+                        sprayBrushShape={sprayBrushShape}
+                        setSprayBrushShape={setSprayBrushShape}
+                        sprayConstrainToPlaneRef={sprayConstrainToPlaneRef_}
+                        setSprayConstrainToPlaneRef={setSprayConstrainToPlaneRef_}
+                        fillConstrainToPlane={fillConstrainToPlane}
+                        setFillConstrainToPlane={setFillConstrainToPlane}
+                      />
+                    </>
+                  ) : null}
+                  {(toolsPane === "draw" || toolsPane === "select") &&
+                  isSelectionInteractionMode ? (
+                    <>
+                      {interactionMode === "selectByColor" ? (
+                        <div className="tool-options-section">
+                          <div className="tool-options-heading">By color</div>
+                          <p className="tool-options-hint">
+                            Click a voxel to select all connected voxels of the same color.
+                          </p>
+                          <label
+                            className="tool-options-range-label"
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.35rem",
+                            }}
                           >
-                            {(
-                              [
-                                ["cube", "Cube"],
-                                ["cylinder", "Cylinder"],
-                              ] as const
-                            ).map(([id, label]) => (
-                              <button
-                                key={id}
-                                type="button"
-                                className={
-                                  extrudeProfile === id
-                                    ? "tool-options-shape-btn is-active"
-                                    : "tool-options-shape-btn"
-                                }
+                            <input
+                              type="checkbox"
+                              checked={matchMaterialSelectColor}
+                              onChange={(ev) => setMatchMaterialSelectColor(ev.target.checked)}
+                              disabled={loading || workBusy}
+                            />
+                            <span>Match material when matching color</span>
+                          </label>
+                        </div>
+                      ) : null}
+                      {interactionMode === "selectCoplanar" ? (
+                        <div className="tool-options-section">
+                          <div className="tool-options-heading">Coplanar</div>
+                          <p className="tool-options-hint">
+                            Click a solid voxel to extend the selection along the same face plane.
+                          </p>
+                        </div>
+                      ) : null}
+                      {interactionMode === "selectCoplanarEmpty" ? (
+                        <div className="tool-options-section">
+                          <div className="tool-options-heading">Coplanar void</div>
+                          <p className="tool-options-hint">
+                            Click empty space on a plane to select the coplanar empty region.
+                          </p>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+                  {toolsPane === "sculpt" && interactionMode === "sculpt" ? (
+                    <>
+                      {sculptStrokeMode === "draw" ||
+                      sculptStrokeMode === "smooth" ||
+                      sculptStrokeMode === "gouge" ||
+                      sculptStrokeMode === "extrude" ||
+                      sculptStrokeMode === "terrain" ? (
+                        <div className="tool-options-section" aria-label="Sculpt">
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Brush</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={SCULPT_BRUSH_MAX_INDEX}
+                              value={sculptBrushRadius}
+                              onChange={(ev) => setSculptBrushRadius(Number(ev.target.value))}
+                              disabled={loading || workBusy}
+                              title="Brush size (1–64 voxels)"
+                            />
+                            <span className="tool-options-range-value">
+                              {sculptBrushRadius + 1}
+                            </span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Strength</span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={100}
+                              value={sculptBrushStrength}
+                              onChange={(ev) => setSculptBrushStrength(Number(ev.target.value))}
+                              disabled={loading || workBusy}
+                              title="How strongly the brush applies (with falloff)"
+                            />
+                            <span className="tool-options-range-value">{sculptBrushStrength}</span>
+                          </label>
+                          <label className="tool-options-range-label tool-options-range-with-value">
+                            <span>Falloff</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={100}
+                              value={sculptBrushFalloff}
+                              onChange={(ev) => setSculptBrushFalloff(Number(ev.target.value))}
+                              disabled={loading || workBusy}
+                              title="0 = hard edge; higher = softer falloff toward brush radius"
+                            />
+                            <span className="tool-options-range-value">{sculptBrushFalloff}</span>
+                          </label>
+                          {sculptStrokeMode === "draw" || sculptStrokeMode === "smooth" ? (
+                            <label
+                              className="tool-options-checkbox-row"
+                              style={{ marginTop: "0.35rem" }}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={brushClipBottomHalf}
+                                onChange={(ev) => setBrushClipBottomHalf(ev.target.checked)}
                                 disabled={loading || workBusy}
-                                onClick={() => setExtrudeProfile(id)}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                          {extrudeProfile === "cylinder" ? (
+                              />
+                              <span title="Uses the clicked face outward normal (world +Y if no solid hit)">
+                                Outer half (face)
+                              </span>
+                            </label>
+                          ) : null}
+                          {sculptStrokeMode === "draw" ||
+                          sculptStrokeMode === "smooth" ||
+                          sculptStrokeMode === "gouge" ? (
                             <>
                               <div
                                 className="tool-options-heading"
                                 style={{ marginTop: "0.35rem" }}
                               >
-                                End caps
+                                Brush shape
                               </div>
                               <div
-                                className="tool-options-shape-row"
+                                className="tool-options-shape-row tool-options-shape-row-two"
                                 role="group"
-                                aria-label="Extrude end cap"
-                                style={{
-                                  display: "grid",
-                                  gridTemplateColumns: "1fr 1fr 1fr",
-                                  gap: "0.25rem",
-                                }}
+                                aria-label="Sculpt brush shape"
                               >
                                 {(
                                   [
-                                    ["flat", "Flat"],
-                                    ["rounded", "Rounded"],
-                                    ["pointed", "Pointed"],
+                                    ["circle", "Circle"],
+                                    ["square", "Square"],
                                   ] as const
                                 ).map(([id, label]) => (
                                   <button
                                     key={id}
                                     type="button"
                                     className={
-                                      extrudeEndCap === id
+                                      sculptBrushShapeUi === id
                                         ? "tool-options-shape-btn is-active"
                                         : "tool-options-shape-btn"
                                     }
                                     disabled={loading || workBusy}
-                                    onClick={() => setExtrudeEndCap(id)}
+                                    onClick={() => setSculptBrushShapeUi(id)}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                              <div
+                                className="tool-options-shape-row tool-options-shape-row-two"
+                                role="group"
+                                aria-label="Sculpt brush shape 3D"
+                              >
+                                {(
+                                  [
+                                    ["sphere", "Sphere"],
+                                    ["cube", "Cube"],
+                                  ] as const
+                                ).map(([id, label]) => (
+                                  <button
+                                    key={id}
+                                    type="button"
+                                    className={
+                                      sculptBrushShapeUi === id
+                                        ? "tool-options-shape-btn is-active"
+                                        : "tool-options-shape-btn"
+                                    }
+                                    disabled={loading || workBusy}
+                                    onClick={() => setSculptBrushShapeUi(id)}
                                   >
                                     {label}
                                   </button>
@@ -3920,92 +3833,500 @@ function App() {
                               </div>
                             </>
                           ) : null}
-                          <label
-                            className="tool-options-checkbox-row"
-                            style={{ marginTop: "0.35rem" }}
+                          {sculptStrokeMode === "extrude" ? (
+                            <>
+                              <div
+                                className="tool-options-heading"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                Direction
+                              </div>
+                              <div
+                                className="tool-options-shape-row"
+                                role="group"
+                                aria-label="Extrude direction reference"
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr",
+                                  gap: "0.25rem",
+                                }}
+                              >
+                                {(
+                                  [
+                                    ["auto", "Auto"],
+                                    ["camera", "Cam"],
+                                    ["x", "X"],
+                                    ["y", "Y"],
+                                    ["z", "Z"],
+                                  ] as const
+                                ).map(([id, label]) => (
+                                  <button
+                                    key={id}
+                                    type="button"
+                                    className={
+                                      extrudeDirectionRef === id
+                                        ? "tool-options-shape-btn is-active"
+                                        : "tool-options-shape-btn"
+                                    }
+                                    disabled={loading || workBusy}
+                                    onClick={() => setExtrudeDirectionRef(id)}
+                                    title={
+                                      id === "auto"
+                                        ? "Along dominant axis of start face"
+                                        : id === "camera"
+                                          ? "View plane: drag maps through camera right/up"
+                                          : `World ±${id.toUpperCase()} (sign from drag)`
+                                    }
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                              <div
+                                className="tool-options-heading"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                Profile
+                              </div>
+                              <div
+                                className="tool-options-shape-row tool-options-shape-row-two"
+                                role="group"
+                                aria-label="Extrude profile"
+                              >
+                                {(
+                                  [
+                                    ["cube", "Cube"],
+                                    ["cylinder", "Cylinder"],
+                                  ] as const
+                                ).map(([id, label]) => (
+                                  <button
+                                    key={id}
+                                    type="button"
+                                    className={
+                                      extrudeProfile === id
+                                        ? "tool-options-shape-btn is-active"
+                                        : "tool-options-shape-btn"
+                                    }
+                                    disabled={loading || workBusy}
+                                    onClick={() => setExtrudeProfile(id)}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                              {extrudeProfile === "cylinder" ? (
+                                <>
+                                  <div
+                                    className="tool-options-heading"
+                                    style={{ marginTop: "0.35rem" }}
+                                  >
+                                    End caps
+                                  </div>
+                                  <div
+                                    className="tool-options-shape-row"
+                                    role="group"
+                                    aria-label="Extrude end cap"
+                                    style={{
+                                      display: "grid",
+                                      gridTemplateColumns: "1fr 1fr 1fr",
+                                      gap: "0.25rem",
+                                    }}
+                                  >
+                                    {(
+                                      [
+                                        ["flat", "Flat"],
+                                        ["rounded", "Rounded"],
+                                        ["pointed", "Pointed"],
+                                      ] as const
+                                    ).map(([id, label]) => (
+                                      <button
+                                        key={id}
+                                        type="button"
+                                        className={
+                                          extrudeEndCap === id
+                                            ? "tool-options-shape-btn is-active"
+                                            : "tool-options-shape-btn"
+                                        }
+                                        disabled={loading || workBusy}
+                                        onClick={() => setExtrudeEndCap(id)}
+                                      >
+                                        {label}
+                                      </button>
+                                    ))}
+                                  </div>
+                                </>
+                              ) : null}
+                              <label
+                                className="tool-options-checkbox-row"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={extrudeTaper}
+                                  onChange={(ev) => setExtrudeTaper(ev.target.checked)}
+                                  disabled={loading || workBusy}
+                                />
+                                <span>Taper</span>
+                              </label>
+                              {extrudeTaper ? (
+                                <>
+                                  <label className="tool-options-range-label tool-options-range-with-value">
+                                    <span>Start</span>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={24}
+                                      value={extrudeTaperStart}
+                                      onChange={(ev) =>
+                                        setExtrudeTaperStart(Number(ev.target.value))
+                                      }
+                                      disabled={loading || workBusy}
+                                    />
+                                    <span className="tool-options-range-value">
+                                      {extrudeTaperStart + 1}
+                                    </span>
+                                  </label>
+                                  <label className="tool-options-range-label tool-options-range-with-value">
+                                    <span>End</span>
+                                    <input
+                                      type="range"
+                                      min={0}
+                                      max={24}
+                                      value={extrudeTaperEnd}
+                                      onChange={(ev) => setExtrudeTaperEnd(Number(ev.target.value))}
+                                      disabled={loading || workBusy}
+                                    />
+                                    <span className="tool-options-range-value">
+                                      {extrudeTaperEnd + 1}
+                                    </span>
+                                  </label>
+                                </>
+                              ) : null}
+                            </>
+                          ) : null}
+                          {sculptStrokeMode === "terrain" ? (
+                            <>
+                              <div
+                                className="tool-options-heading"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                Brush shape
+                              </div>
+                              <div
+                                className="tool-options-shape-row tool-options-shape-row-two"
+                                role="group"
+                                aria-label="Terrain brush shape (horizontal XZ)"
+                              >
+                                <button
+                                  type="button"
+                                  className={
+                                    sculptBrushShapeUi === "circle" ||
+                                    sculptBrushShapeUi === "sphere"
+                                      ? "tool-options-shape-btn is-active"
+                                      : "tool-options-shape-btn"
+                                  }
+                                  disabled={loading || workBusy}
+                                  onClick={() => setSculptBrushShapeUi("circle")}
+                                  title="Circular footprint in XZ"
+                                >
+                                  Circle
+                                </button>
+                                <button
+                                  type="button"
+                                  className={
+                                    sculptBrushShapeUi === "square" || sculptBrushShapeUi === "cube"
+                                      ? "tool-options-shape-btn is-active"
+                                      : "tool-options-shape-btn"
+                                  }
+                                  disabled={loading || workBusy}
+                                  onClick={() => setSculptBrushShapeUi("square")}
+                                  title="Square footprint in XZ"
+                                >
+                                  Square
+                                </button>
+                              </div>
+                              <div
+                                className="tool-options-heading"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                Terrain
+                              </div>
+                              <div
+                                className="tool-options-shape-row"
+                                style={{
+                                  display: "grid",
+                                  gridTemplateColumns: "1fr 1fr 1fr",
+                                  gap: "0.25rem",
+                                }}
+                                role="group"
+                                aria-label="Terrain operation"
+                              >
+                                {(
+                                  [
+                                    ["raise", "Raise"],
+                                    ["lower", "Lower"],
+                                    ["smooth", "Smooth"],
+                                    ["flatten", "Flatten"],
+                                    ["erode", "Erode"],
+                                  ] as const
+                                ).map(([id, label]) => (
+                                  <button
+                                    key={id}
+                                    type="button"
+                                    className={
+                                      terrainSculptOp === id
+                                        ? "tool-options-shape-btn is-active"
+                                        : "tool-options-shape-btn"
+                                    }
+                                    disabled={loading || workBusy}
+                                    onClick={() => setTerrainSculptOp(id)}
+                                  >
+                                    {label}
+                                  </button>
+                                ))}
+                              </div>
+                              {terrainHoverY !== null ? (
+                                <div
+                                  className="tool-options-hint"
+                                  style={{ marginTop: "0.25rem", opacity: 0.7 }}
+                                >
+                                  Surface Y: <strong>{terrainHoverY}</strong>
+                                </div>
+                              ) : null}
+                              {terrainSculptOp !== "erode" ? (
+                                <label
+                                  className="tool-options-range-label"
+                                  style={{ marginTop: "0.35rem" }}
+                                >
+                                  <span>Base Y</span>
+                                  <input
+                                    type="number"
+                                    value={terrainBaseY}
+                                    min={-512}
+                                    max={512}
+                                    step={1}
+                                    onChange={(ev) => {
+                                      const n = Number(ev.target.value);
+                                      if (Number.isNaN(n)) return;
+                                      setTerrainBaseY(Math.max(-512, Math.min(512, n)));
+                                    }}
+                                    disabled={loading || workBusy}
+                                  />
+                                </label>
+                              ) : null}
+                              {terrainSculptOp === "raise" || terrainSculptOp === "lower" ? (
+                                <label
+                                  className="tool-options-checkbox-row"
+                                  style={{ marginTop: "0.2rem" }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={terrainSubVoxel}
+                                    onChange={(ev) => setTerrainSubVoxel(ev.target.checked)}
+                                    disabled={loading || workBusy}
+                                  />
+                                  <span title="Accumulate fractional changes for gentle sub-voxel sculpting">
+                                    Sub-voxel precision
+                                  </span>
+                                </label>
+                              ) : null}
+                              {terrainSculptOp === "smooth" ? (
+                                <label className="tool-options-range-label tool-options-range-with-value">
+                                  <span>Smooth reach</span>
+                                  <input
+                                    type="range"
+                                    min={0}
+                                    max={8}
+                                    value={terrainSmoothRadius}
+                                    onChange={(ev) =>
+                                      setTerrainSmoothRadius(Number(ev.target.value))
+                                    }
+                                    disabled={loading || workBusy}
+                                  />
+                                  <span className="tool-options-range-value">
+                                    {terrainSmoothRadius}
+                                  </span>
+                                </label>
+                              ) : null}
+                              {terrainSculptOp === "flatten" ? (
+                                <label
+                                  className="tool-options-checkbox-row"
+                                  style={{ marginTop: "0.35rem" }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={terrainFlattenUseBaseY}
+                                    onChange={(ev) => setTerrainFlattenUseBaseY(ev.target.checked)}
+                                    disabled={loading || workBusy}
+                                  />
+                                  <span title="Flatten to the Base Y value instead of the average surface height">
+                                    Use explicit Base Y
+                                  </span>
+                                </label>
+                              ) : null}
+                            </>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {sculptStrokeMode === "smooth" ? (
+                        <div className="tool-options-section">
+                          <div className="tool-options-heading">Smooth</div>
+                          <div
+                            className="tool-options-shape-row"
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "1fr 1fr",
+                              gap: "0.25rem",
+                              marginBottom: "0.35rem",
+                            }}
+                            role="group"
+                            aria-label="Smooth algorithm"
                           >
-                            <input
-                              type="checkbox"
-                              checked={extrudeTaper}
-                              onChange={(ev) => setExtrudeTaper(ev.target.checked)}
-                              disabled={loading || workBusy}
-                            />
-                            <span>Taper</span>
-                          </label>
-                          {extrudeTaper ? (
+                            {(
+                              [
+                                ["majority", "Majority"],
+                                ["meshLaplacian", "Mesh Laplacian"],
+                              ] as const
+                            ).map(([id, label]) => (
+                              <button
+                                key={id}
+                                type="button"
+                                className={
+                                  sculptSmoothVariant === id
+                                    ? "tool-options-shape-btn is-active"
+                                    : "tool-options-shape-btn"
+                                }
+                                disabled={loading || workBusy}
+                                onClick={() => setSculptSmoothVariant(id)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                          {sculptSmoothVariant === "majority" ? (
                             <>
                               <label className="tool-options-range-label tool-options-range-with-value">
-                                <span>Start</span>
+                                <span>Passes</span>
                                 <input
                                   type="range"
-                                  min={0}
-                                  max={24}
-                                  value={extrudeTaperStart}
-                                  onChange={(ev) => setExtrudeTaperStart(Number(ev.target.value))}
+                                  min={1}
+                                  max={8}
+                                  value={sculptSmoothPasses}
+                                  onChange={(ev) => setSculptSmoothPasses(Number(ev.target.value))}
                                   disabled={loading || workBusy}
                                 />
                                 <span className="tool-options-range-value">
-                                  {extrudeTaperStart + 1}
+                                  {sculptSmoothPasses}
                                 </span>
                               </label>
                               <label className="tool-options-range-label tool-options-range-with-value">
-                                <span>End</span>
+                                <span>Neighbor radius</span>
                                 <input
                                   type="range"
                                   min={0}
-                                  max={24}
-                                  value={extrudeTaperEnd}
-                                  onChange={(ev) => setExtrudeTaperEnd(Number(ev.target.value))}
+                                  max={6}
+                                  value={smoothNeighborRadius}
+                                  onChange={(ev) =>
+                                    setSmoothNeighborRadius(Number(ev.target.value))
+                                  }
+                                  disabled={loading || workBusy}
+                                  title="0 = six face neighbors only"
+                                />
+                                <span className="tool-options-range-value">
+                                  {smoothNeighborRadius}
+                                </span>
+                              </label>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>Aggressiveness</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={100}
+                                  value={smoothAggressiveness}
+                                  onChange={(ev) =>
+                                    setSmoothAggressiveness(Number(ev.target.value))
+                                  }
                                   disabled={loading || workBusy}
                                 />
                                 <span className="tool-options-range-value">
-                                  {extrudeTaperEnd + 1}
+                                  {smoothAggressiveness}
                                 </span>
                               </label>
                             </>
-                          ) : null}
-                        </>
+                          ) : (
+                            <>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>Iterations</span>
+                                <input
+                                  type="range"
+                                  min={1}
+                                  max={20}
+                                  value={smoothLaplacianIterations}
+                                  onChange={(ev) =>
+                                    setSmoothLaplacianIterations(Number(ev.target.value))
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span className="tool-options-range-value">
+                                  {smoothLaplacianIterations}
+                                </span>
+                              </label>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>Relax</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={100}
+                                  value={smoothLaplacianRelaxPct}
+                                  onChange={(ev) =>
+                                    setSmoothLaplacianRelaxPct(Number(ev.target.value))
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span className="tool-options-range-value">
+                                  {smoothLaplacianRelaxPct}
+                                </span>
+                              </label>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>Majority fallback radius</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={6}
+                                  value={smoothNeighborRadius}
+                                  onChange={(ev) =>
+                                    setSmoothNeighborRadius(Number(ev.target.value))
+                                  }
+                                  disabled={loading || workBusy}
+                                  title="Neighborhood margin + mesh fallback"
+                                />
+                                <span className="tool-options-range-value">
+                                  {smoothNeighborRadius}
+                                </span>
+                              </label>
+                              <label className="tool-options-range-label tool-options-range-with-value">
+                                <span>Fallback aggressiveness</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={100}
+                                  value={smoothAggressiveness}
+                                  onChange={(ev) =>
+                                    setSmoothAggressiveness(Number(ev.target.value))
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span className="tool-options-range-value">
+                                  {smoothAggressiveness}
+                                </span>
+                              </label>
+                            </>
+                          )}
+                        </div>
                       ) : null}
-                      {sculptStrokeMode === "terrain" ? (
-                        <>
-                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
-                            Brush shape
-                          </div>
-                          <div
-                            className="tool-options-shape-row tool-options-shape-row-two"
-                            role="group"
-                            aria-label="Terrain brush shape (horizontal XZ)"
-                          >
-                            <button
-                              type="button"
-                              className={
-                                sculptBrushShapeUi === "circle" || sculptBrushShapeUi === "sphere"
-                                  ? "tool-options-shape-btn is-active"
-                                  : "tool-options-shape-btn"
-                              }
-                              disabled={loading || workBusy}
-                              onClick={() => setSculptBrushShapeUi("circle")}
-                              title="Circular footprint in XZ"
-                            >
-                              Circle
-                            </button>
-                            <button
-                              type="button"
-                              className={
-                                sculptBrushShapeUi === "square" || sculptBrushShapeUi === "cube"
-                                  ? "tool-options-shape-btn is-active"
-                                  : "tool-options-shape-btn"
-                              }
-                              disabled={loading || workBusy}
-                              onClick={() => setSculptBrushShapeUi("square")}
-                              title="Square footprint in XZ"
-                            >
-                              Square
-                            </button>
-                          </div>
-                          <div className="tool-options-heading" style={{ marginTop: "0.35rem" }}>
-                            Terrain
-                          </div>
+                      {sculptStrokeMode === "wall" ? (
+                        <div className="tool-options-section" aria-label="Sculpt wall">
+                          <div className="tool-options-heading">Area shape</div>
                           <div
                             className="tool-options-shape-row"
                             style={{
@@ -4014,998 +4335,568 @@ function App() {
                               gap: "0.25rem",
                             }}
                             role="group"
-                            aria-label="Terrain operation"
+                            aria-label="Wall area shape"
                           >
                             {(
                               [
-                                ["raise", "Raise"],
-                                ["lower", "Lower"],
-                                ["smooth", "Smooth"],
-                                ["flatten", "Flatten"],
-                                ["erode", "Erode"],
+                                ["brush", "Brush"],
+                                ["circle", "Circle"],
+                                ["polygon", "Polygon"],
                               ] as const
                             ).map(([id, label]) => (
                               <button
                                 key={id}
                                 type="button"
                                 className={
-                                  terrainSculptOp === id
+                                  wallAreaShape === id
                                     ? "tool-options-shape-btn is-active"
                                     : "tool-options-shape-btn"
                                 }
                                 disabled={loading || workBusy}
-                                onClick={() => setTerrainSculptOp(id)}
+                                title={
+                                  id === "brush"
+                                    ? "Drag a freehand stroke on the surface"
+                                    : id === "circle"
+                                      ? "Drag from center to edge on the face"
+                                      : "Click corners for a closed outline, then Done (web)"
+                                }
+                                onClick={() => setWallAreaShape(id)}
                               >
                                 {label}
                               </button>
                             ))}
                           </div>
-                          {terrainHoverY !== null ? (
-                            <div
-                              className="tool-options-hint"
-                              style={{ marginTop: "0.25rem", opacity: 0.7 }}
-                            >
-                              Surface Y: <strong>{terrainHoverY}</strong>
-                            </div>
-                          ) : null}
-                          {terrainSculptOp !== "erode" ? (
-                            <label
-                              className="tool-options-range-label"
-                              style={{ marginTop: "0.35rem" }}
-                            >
-                              <span>Base Y</span>
-                              <input
-                                type="number"
-                                value={terrainBaseY}
-                                min={-512}
-                                max={512}
-                                step={1}
-                                onChange={(ev) => {
-                                  const n = Number(ev.target.value);
-                                  if (Number.isNaN(n)) return;
-                                  setTerrainBaseY(Math.max(-512, Math.min(512, n)));
-                                }}
-                                disabled={loading || workBusy}
-                              />
-                            </label>
-                          ) : null}
-                          {terrainSculptOp === "raise" || terrainSculptOp === "lower" ? (
-                            <label
-                              className="tool-options-checkbox-row"
-                              style={{ marginTop: "0.2rem" }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={terrainSubVoxel}
-                                onChange={(ev) => setTerrainSubVoxel(ev.target.checked)}
-                                disabled={loading || workBusy}
-                              />
-                              <span title="Accumulate fractional changes for gentle sub-voxel sculpting">
-                                Sub-voxel precision
-                              </span>
-                            </label>
-                          ) : null}
-                          {terrainSculptOp === "smooth" ? (
-                            <label className="tool-options-range-label tool-options-range-with-value">
-                              <span>Smooth reach</span>
-                              <input
-                                type="range"
-                                min={0}
-                                max={8}
-                                value={terrainSmoothRadius}
-                                onChange={(ev) => setTerrainSmoothRadius(Number(ev.target.value))}
-                                disabled={loading || workBusy}
-                              />
-                              <span className="tool-options-range-value">
-                                {terrainSmoothRadius}
-                              </span>
-                            </label>
-                          ) : null}
-                          {terrainSculptOp === "flatten" ? (
-                            <label
-                              className="tool-options-checkbox-row"
-                              style={{ marginTop: "0.35rem" }}
-                            >
-                              <input
-                                type="checkbox"
-                                checked={terrainFlattenUseBaseY}
-                                onChange={(ev) => setTerrainFlattenUseBaseY(ev.target.checked)}
-                                disabled={loading || workBusy}
-                              />
-                              <span title="Flatten to the Base Y value instead of the average surface height">
-                                Use explicit Base Y
-                              </span>
-                            </label>
-                          ) : null}
-                        </>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {sculptStrokeMode === "smooth" ? (
-                    <div className="tool-options-section">
-                      <div className="tool-options-heading">Smooth</div>
-                      <div
-                        className="tool-options-shape-row"
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "1fr 1fr",
-                          gap: "0.25rem",
-                          marginBottom: "0.35rem",
-                        }}
-                        role="group"
-                        aria-label="Smooth algorithm"
-                      >
-                        {(
-                          [
-                            ["majority", "Majority"],
-                            ["meshLaplacian", "Mesh Laplacian"],
-                          ] as const
-                        ).map(([id, label]) => (
-                          <button
-                            key={id}
-                            type="button"
-                            className={
-                              sculptSmoothVariant === id
-                                ? "tool-options-shape-btn is-active"
-                                : "tool-options-shape-btn"
-                            }
-                            disabled={loading || workBusy}
-                            onClick={() => setSculptSmoothVariant(id)}
+                          <label
+                            className="tool-options-range-label"
+                            style={{
+                              marginTop: "0.45rem",
+                              flexDirection: "row",
+                              alignItems: "center",
+                              gap: "0.5rem",
+                            }}
                           >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
-                      {sculptSmoothVariant === "majority" ? (
-                        <>
-                          <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Passes</span>
-                            <input
-                              type="range"
-                              min={1}
-                              max={8}
-                              value={sculptSmoothPasses}
-                              onChange={(ev) => setSculptSmoothPasses(Number(ev.target.value))}
-                              disabled={loading || workBusy}
-                            />
-                            <span className="tool-options-range-value">{sculptSmoothPasses}</span>
-                          </label>
-                          <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Neighbor radius</span>
-                            <input
-                              type="range"
-                              min={0}
-                              max={6}
-                              value={smoothNeighborRadius}
-                              onChange={(ev) => setSmoothNeighborRadius(Number(ev.target.value))}
-                              disabled={loading || workBusy}
-                              title="0 = six face neighbors only"
-                            />
-                            <span className="tool-options-range-value">{smoothNeighborRadius}</span>
-                          </label>
-                          <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Aggressiveness</span>
-                            <input
-                              type="range"
-                              min={0}
-                              max={100}
-                              value={smoothAggressiveness}
-                              onChange={(ev) => setSmoothAggressiveness(Number(ev.target.value))}
-                              disabled={loading || workBusy}
-                            />
-                            <span className="tool-options-range-value">{smoothAggressiveness}</span>
-                          </label>
-                        </>
-                      ) : (
-                        <>
-                          <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Iterations</span>
-                            <input
-                              type="range"
-                              min={1}
-                              max={20}
-                              value={smoothLaplacianIterations}
+                            <span style={{ minWidth: "4.5rem" }}>Direction</span>
+                            <select
+                              className="sidebar-material-select"
+                              style={{ flex: 1, maxWidth: "12rem" }}
+                              value={sprayDirection}
                               onChange={(ev) =>
-                                setSmoothLaplacianIterations(Number(ev.target.value))
+                                setSprayDirection(ev.target.value as SprayDirectionApi)
                               }
                               disabled={loading || workBusy}
-                            />
-                            <span className="tool-options-range-value">
-                              {smoothLaplacianIterations}
-                            </span>
+                              title="Auto = face normal; or pick a world axis"
+                              aria-label="Wall extrusion direction"
+                            >
+                              <option value="auto">Auto</option>
+                              <option value="none">None</option>
+                              <option value="right">X+</option>
+                              <option value="left">X−</option>
+                              <option value="up">Y+</option>
+                              <option value="down">Y−</option>
+                              <option value="back">Z+</option>
+                              <option value="forward">Z−</option>
+                            </select>
                           </label>
                           <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Relax</span>
+                            <span>Width</span>
                             <input
                               type="range"
                               min={0}
-                              max={100}
-                              value={smoothLaplacianRelaxPct}
-                              onChange={(ev) => setSmoothLaplacianRelaxPct(Number(ev.target.value))}
+                              max={SCULPT_BRUSH_MAX_INDEX}
+                              value={wallWidthIndex}
+                              onChange={(ev) => setWallWidthIndex(Number(ev.target.value))}
                               disabled={loading || workBusy}
+                              title="Path thickness (1–64 voxels)"
                             />
-                            <span className="tool-options-range-value">
-                              {smoothLaplacianRelaxPct}
-                            </span>
+                            <span className="tool-options-range-value">{wallWidthIndex + 1}</span>
                           </label>
                           <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Majority fallback radius</span>
+                            <span>Height</span>
                             <input
                               type="range"
-                              min={0}
-                              max={6}
-                              value={smoothNeighborRadius}
-                              onChange={(ev) => setSmoothNeighborRadius(Number(ev.target.value))}
+                              min={2}
+                              max={20}
+                              value={wallHeightVox}
+                              onChange={(ev) => setWallHeightVox(Number(ev.target.value))}
                               disabled={loading || workBusy}
-                              title="Neighborhood margin + mesh fallback"
+                              title="Voxels to extend along direction (min 2)"
                             />
-                            <span className="tool-options-range-value">{smoothNeighborRadius}</span>
+                            <span className="tool-options-range-value">{wallHeightVox}</span>
                           </label>
-                          <label className="tool-options-range-label tool-options-range-with-value">
-                            <span>Fallback aggressiveness</span>
+                          <label
+                            className="tool-options-checkbox-row"
+                            style={{ marginTop: "0.35rem" }}
+                          >
                             <input
-                              type="range"
-                              min={0}
-                              max={100}
-                              value={smoothAggressiveness}
-                              onChange={(ev) => setSmoothAggressiveness(Number(ev.target.value))}
+                              type="checkbox"
+                              checked={wallLockStartHeight}
+                              onChange={(ev) => setWallLockStartHeight(ev.target.checked)}
                               disabled={loading || workBusy}
                             />
-                            <span className="tool-options-range-value">{smoothAggressiveness}</span>
+                            <span>Lock start height</span>
                           </label>
-                        </>
-                      )}
+                          <label className="tool-options-checkbox-row">
+                            <input
+                              type="checkbox"
+                              checked={wallAxisAlign}
+                              onChange={(ev) => setWallAxisAlign(ev.target.checked)}
+                              disabled={loading || workBusy}
+                            />
+                            <span>Axis-align</span>
+                          </label>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : toolsPane === "sculpt" ? (
+                    <div className="tool-options-section">
+                      <p className="tool-options-hint">Select Sculpt mode in the sidebar.</p>
                     </div>
                   ) : null}
-                  {sculptStrokeMode === "wall" ? (
-                    <div className="tool-options-section" aria-label="Sculpt wall">
-                      <div className="tool-options-heading">Area shape</div>
-                      <div
-                        className="tool-options-shape-row"
-                        style={{
-                          display: "grid",
-                          gridTemplateColumns: "1fr 1fr 1fr",
-                          gap: "0.25rem",
-                        }}
-                        role="group"
-                        aria-label="Wall area shape"
-                      >
-                        {(
-                          [
-                            ["brush", "Brush"],
-                            ["circle", "Circle"],
-                            ["polygon", "Polygon"],
-                          ] as const
-                        ).map(([id, label]) => (
-                          <button
-                            key={id}
-                            type="button"
-                            className={
-                              wallAreaShape === id
-                                ? "tool-options-shape-btn is-active"
-                                : "tool-options-shape-btn"
-                            }
-                            disabled={loading || workBusy}
-                            title={
-                              id === "brush"
-                                ? "Drag a freehand stroke on the surface"
-                                : id === "circle"
-                                  ? "Drag from center to edge on the face"
-                                  : "Click corners for a closed outline, then Done (web)"
-                            }
-                            onClick={() => setWallAreaShape(id)}
-                          >
-                            {label}
-                          </button>
-                        ))}
-                      </div>
+                  {toolsPane === "generators" ? (
+                    <GeneratorToolOptions
+                      loading={loading}
+                      workBusy={workBusy}
+                      generatorKind={generatorKind}
+                      generatorSphereRadius={generatorSphereRadius}
+                      setGeneratorSphereRadius={setGeneratorSphereRadius}
+                      rockRoughness={rockRoughness}
+                      setRockRoughness={setRockRoughness}
+                      rockCount={rockCount}
+                      setRockCount={setRockCount}
+                      rockClusterRadius={rockClusterRadius}
+                      setRockClusterRadius={setRockClusterRadius}
+                      rockSinkDirection={rockSinkDirection}
+                      setRockSinkDirection={setRockSinkDirection}
+                      rockSinkAmount={rockSinkAmount}
+                      setRockSinkAmount={setRockSinkAmount}
+                      grassDensity={grassDensity}
+                      setGrassDensity={setGrassDensity}
+                      grassMaxHeight={grassMaxHeight}
+                      setGrassMaxHeight={setGrassMaxHeight}
+                      clothGravityDirection={clothGravityDirection}
+                      setClothGravityDirection={setClothGravityDirection}
+                      ropeBrushShapeUi={ropeBrushShapeUi}
+                      setRopeBrushShapeUi={setRopeBrushShapeUi}
+                      ropeBrushRadiusIndex={ropeBrushRadiusIndex}
+                      setRopeBrushRadiusIndex={setRopeBrushRadiusIndex}
+                      clothSimGravityPct={clothSimGravityPct}
+                      setClothSimGravityPct={setClothSimGravityPct}
+                      clothSimStiffnessPct={clothSimStiffnessPct}
+                      setClothSimStiffnessPct={setClothSimStiffnessPct}
+                      clothSimIterations={clothSimIterations}
+                      setClothSimIterations={setClothSimIterations}
+                      clothSimConstraintPasses={clothSimConstraintPasses}
+                      setClothSimConstraintPasses={setClothSimConstraintPasses}
+                      ashlarThickness={ashlarThickness}
+                      setAshlarThickness={setAshlarThickness}
+                      floraPreset={floraPreset}
+                      setFloraPreset={setFloraPreset}
+                      floraHeight={floraHeight}
+                      setFloraHeight={setFloraHeight}
+                      floraGirth={floraGirth}
+                      setFloraGirth={setFloraGirth}
+                      floraWobble={floraWobble}
+                      setFloraWobble={setFloraWobble}
+                      floraTaper={floraTaper}
+                      setFloraTaper={setFloraTaper}
+                      floraStemCount={floraStemCount}
+                      setFloraStemCount={setFloraStemCount}
+                      floraClusterRadius={floraClusterRadius}
+                      setFloraClusterRadius={setFloraClusterRadius}
+                      floraBranchCount={floraBranchCount}
+                      setFloraBranchCount={setFloraBranchCount}
+                      floraBranchDepth={floraBranchDepth}
+                      setFloraBranchDepth={setFloraBranchDepth}
+                      floraBranchStart={floraBranchStart}
+                      setFloraBranchStart={setFloraBranchStart}
+                      floraBranchSpread={floraBranchSpread}
+                      setFloraBranchSpread={setFloraBranchSpread}
+                      floraBraidStrands={floraBraidStrands}
+                      setFloraBraidStrands={setFloraBraidStrands}
+                      floraBraidTwist={floraBraidTwist}
+                      setFloraBraidTwist={setFloraBraidTwist}
+                      floraCanopy={floraCanopy}
+                      setFloraCanopy={setFloraCanopy}
+                      roofAreaShape={roofAreaShape}
+                      setRoofAreaShape={setRoofAreaShape}
+                      roofPins={roofPins}
+                      setRoofPins={setRoofPins}
+                      roofPinsRef={roofPinsRef}
+                      roofFirstClickRef={roofFirstClickRef}
+                      setRoofFirstClick={setRoofFirstClick}
+                      roofStyle={roofStyle}
+                      setRoofStyle={setRoofStyle}
+                      roofHeight={roofHeight}
+                      setRoofHeight={setRoofHeight}
+                      roofHollow={roofHollow}
+                      setRoofHollow={setRoofHollow}
+                      shapeKind={shapeKind}
+                      setShapeKind={setShapeKind}
+                      shapeSize={shapeSize}
+                      setShapeSize={setShapeSize}
+                      shapeOverwrite={shapeOverwrite}
+                      setShapeOverwrite={setShapeOverwrite}
+                    />
+                  ) : null}
+                  {toolsPane === "squishy" && interactionMode === "squishy" ? (
+                    <div className="tool-options-section">
+                      <div className="tool-options-heading">Squishy options</div>
                       <label
                         className="tool-options-range-label"
                         style={{
-                          marginTop: "0.45rem",
                           flexDirection: "row",
                           alignItems: "center",
                           gap: "0.5rem",
                         }}
                       >
-                        <span style={{ minWidth: "4.5rem" }}>Direction</span>
-                        <select
-                          className="sidebar-material-select"
-                          style={{ flex: 1, maxWidth: "12rem" }}
-                          value={sprayDirection}
-                          onChange={(ev) => setSprayDirection(ev.target.value as SprayDirectionApi)}
-                          disabled={loading || workBusy}
-                          title="Auto = face normal; or pick a world axis"
-                          aria-label="Wall extrusion direction"
-                        >
-                          <option value="auto">Auto</option>
-                          <option value="none">None</option>
-                          <option value="right">X+</option>
-                          <option value="left">X−</option>
-                          <option value="up">Y+</option>
-                          <option value="down">Y−</option>
-                          <option value="back">Z+</option>
-                          <option value="forward">Z−</option>
-                        </select>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Width</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={SCULPT_BRUSH_MAX_INDEX}
-                          value={wallWidthIndex}
-                          onChange={(ev) => setWallWidthIndex(Number(ev.target.value))}
-                          disabled={loading || workBusy}
-                          title="Path thickness (1–64 voxels)"
-                        />
-                        <span className="tool-options-range-value">{wallWidthIndex + 1}</span>
-                      </label>
-                      <label className="tool-options-range-label tool-options-range-with-value">
-                        <span>Height</span>
-                        <input
-                          type="range"
-                          min={2}
-                          max={20}
-                          value={wallHeightVox}
-                          onChange={(ev) => setWallHeightVox(Number(ev.target.value))}
-                          disabled={loading || workBusy}
-                          title="Voxels to extend along direction (min 2)"
-                        />
-                        <span className="tool-options-range-value">{wallHeightVox}</span>
-                      </label>
-                      <label className="tool-options-checkbox-row" style={{ marginTop: "0.35rem" }}>
                         <input
                           type="checkbox"
-                          checked={wallLockStartHeight}
-                          onChange={(ev) => setWallLockStartHeight(ev.target.checked)}
+                          checked={squishyHollow}
+                          onChange={(ev) => setSquishyHollow(ev.target.checked)}
                           disabled={loading || workBusy}
                         />
-                        <span>Lock start height</span>
+                        <span>Hollow shell</span>
                       </label>
-                      <label className="tool-options-checkbox-row">
+                      {squishyHollow ? (
+                        <label className="tool-options-range-label">
+                          <span>Shell thickness (voxels)</span>
+                          <input
+                            type="range"
+                            min={1}
+                            max={8}
+                            step={1}
+                            value={Math.min(8, Math.max(1, squishyWallThickness))}
+                            onChange={(ev) => setSquishyWallThickness(Number(ev.target.value))}
+                            disabled={loading || workBusy}
+                          />
+                        </label>
+                      ) : null}
+                      <label
+                        className="tool-options-range-label"
+                        style={{
+                          flexDirection: "row",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
                         <input
                           type="checkbox"
-                          checked={wallAxisAlign}
-                          onChange={(ev) => setWallAxisAlign(ev.target.checked)}
+                          checked={squishySnapToSurface}
+                          onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
                           disabled={loading || workBusy}
                         />
-                        <span>Axis-align</span>
+                        <span>Snap add to surface</span>
                       </label>
                     </div>
                   ) : null}
-                </>
-              ) : toolsPane === "sculpt" ? (
-                <div className="tool-options-section">
-                  <p className="tool-options-hint">Select Sculpt mode in the sidebar.</p>
-                </div>
-              ) : null}
-              {toolsPane === "generators" ? (
-                <GeneratorToolOptions
-                  loading={loading}
-                  workBusy={workBusy}
-                  generatorKind={generatorKind}
-                  generatorSphereRadius={generatorSphereRadius}
-                  setGeneratorSphereRadius={setGeneratorSphereRadius}
-                  rockRoughness={rockRoughness}
-                  setRockRoughness={setRockRoughness}
-                  rockCount={rockCount}
-                  setRockCount={setRockCount}
-                  rockClusterRadius={rockClusterRadius}
-                  setRockClusterRadius={setRockClusterRadius}
-                  rockSinkDirection={rockSinkDirection}
-                  setRockSinkDirection={setRockSinkDirection}
-                  rockSinkAmount={rockSinkAmount}
-                  setRockSinkAmount={setRockSinkAmount}
-                  grassDensity={grassDensity}
-                  setGrassDensity={setGrassDensity}
-                  grassMaxHeight={grassMaxHeight}
-                  setGrassMaxHeight={setGrassMaxHeight}
-                  clothGravityDirection={clothGravityDirection}
-                  setClothGravityDirection={setClothGravityDirection}
-                  ropeBrushShapeUi={ropeBrushShapeUi}
-                  setRopeBrushShapeUi={setRopeBrushShapeUi}
-                  ropeBrushRadiusIndex={ropeBrushRadiusIndex}
-                  setRopeBrushRadiusIndex={setRopeBrushRadiusIndex}
-                  clothSimGravityPct={clothSimGravityPct}
-                  setClothSimGravityPct={setClothSimGravityPct}
-                  clothSimStiffnessPct={clothSimStiffnessPct}
-                  setClothSimStiffnessPct={setClothSimStiffnessPct}
-                  clothSimIterations={clothSimIterations}
-                  setClothSimIterations={setClothSimIterations}
-                  clothSimConstraintPasses={clothSimConstraintPasses}
-                  setClothSimConstraintPasses={setClothSimConstraintPasses}
-                  ashlarThickness={ashlarThickness}
-                  setAshlarThickness={setAshlarThickness}
-                  floraPreset={floraPreset}
-                  setFloraPreset={setFloraPreset}
-                  floraHeight={floraHeight}
-                  setFloraHeight={setFloraHeight}
-                  floraGirth={floraGirth}
-                  setFloraGirth={setFloraGirth}
-                  floraWobble={floraWobble}
-                  setFloraWobble={setFloraWobble}
-                  floraTaper={floraTaper}
-                  setFloraTaper={setFloraTaper}
-                  floraStemCount={floraStemCount}
-                  setFloraStemCount={setFloraStemCount}
-                  floraClusterRadius={floraClusterRadius}
-                  setFloraClusterRadius={setFloraClusterRadius}
-                  floraBranchCount={floraBranchCount}
-                  setFloraBranchCount={setFloraBranchCount}
-                  floraBranchDepth={floraBranchDepth}
-                  setFloraBranchDepth={setFloraBranchDepth}
-                  floraBranchStart={floraBranchStart}
-                  setFloraBranchStart={setFloraBranchStart}
-                  floraBranchSpread={floraBranchSpread}
-                  setFloraBranchSpread={setFloraBranchSpread}
-                  floraBraidStrands={floraBraidStrands}
-                  setFloraBraidStrands={setFloraBraidStrands}
-                  floraBraidTwist={floraBraidTwist}
-                  setFloraBraidTwist={setFloraBraidTwist}
-                  floraCanopy={floraCanopy}
-                  setFloraCanopy={setFloraCanopy}
-                  roofAreaShape={roofAreaShape}
-                  setRoofAreaShape={setRoofAreaShape}
-                  roofPins={roofPins}
-                  setRoofPins={setRoofPins}
-                  roofPinsRef={roofPinsRef}
-                  roofFirstClickRef={roofFirstClickRef}
-                  setRoofFirstClick={setRoofFirstClick}
-                  roofStyle={roofStyle}
-                  setRoofStyle={setRoofStyle}
-                  roofHeight={roofHeight}
-                  setRoofHeight={setRoofHeight}
-                  roofHollow={roofHollow}
-                  setRoofHollow={setRoofHollow}
-                  shapeKind={shapeKind}
-                  setShapeKind={setShapeKind}
-                  shapeSize={shapeSize}
-                  setShapeSize={setShapeSize}
-                  shapeOverwrite={shapeOverwrite}
-                  setShapeOverwrite={setShapeOverwrite}
-                />
-              ) : null}
-              {toolsPane === "squishy" && interactionMode === "squishy" ? (
-                <div className="tool-options-section">
-                  <div className="tool-options-heading">Squishy session</div>
-                  <div className="tool-options-shape-row" role="group" aria-label="Squishy mode">
-                    <button
-                      type="button"
-                      className={
-                        squishyMode === "add"
-                          ? "tool-options-shape-btn is-active"
-                          : "tool-options-shape-btn"
-                      }
-                      disabled={loading || workBusy}
-                      onClick={() => setSquishyMode("add")}
-                    >
-                      Add
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        squishyMode === "edit"
-                          ? "tool-options-shape-btn is-active"
-                          : "tool-options-shape-btn"
-                      }
-                      disabled={loading || workBusy}
-                      onClick={() => setSquishyMode("edit")}
-                    >
-                      Pick
-                    </button>
-                    <button
-                      type="button"
-                      className={
-                        squishyMode === "delete"
-                          ? "tool-options-shape-btn is-active"
-                          : "tool-options-shape-btn"
-                      }
-                      disabled={loading || workBusy}
-                      onClick={() => setSquishyMode("delete")}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                  <p
-                    style={{
-                      fontSize: "0.85rem",
-                      opacity: 0.85,
-                      margin: "0.25rem 0",
-                    }}
-                  >
-                    Metaballs: {squishyBallCount}. Click viewport to add/pick/delete; Commit
-                    voxelizes the combined field.
-                  </p>
-                  <label className="tool-options-range-label">
-                    <span>Blob radius (add)</span>
-                    <input
-                      type="range"
-                      min={2}
-                      max={10}
-                      value={Math.min(10, Math.max(2, generatorSphereRadius))}
-                      onChange={(ev) => setGeneratorSphereRadius(Number(ev.target.value))}
-                      disabled={loading || workBusy}
-                    />
-                  </label>
-                  <label
-                    className="tool-options-range-label"
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={squishyHollow}
-                      onChange={(ev) => setSquishyHollow(ev.target.checked)}
-                      disabled={loading || workBusy}
-                    />
-                    <span>Hollow shell</span>
-                  </label>
-                  {squishyHollow ? (
-                    <label className="tool-options-range-label">
-                      <span>Shell thickness (voxels)</span>
-                      <input
-                        type="range"
-                        min={1}
-                        max={8}
-                        step={1}
-                        value={Math.min(8, Math.max(1, squishyWallThickness))}
-                        onChange={(ev) => setSquishyWallThickness(Number(ev.target.value))}
-                        disabled={loading || workBusy}
-                      />
-                    </label>
-                  ) : null}
-                  <label
-                    className="tool-options-range-label"
-                    style={{
-                      flexDirection: "row",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={squishySnapToSurface}
-                      onChange={(ev) => setSquishySnapToSurface(ev.target.checked)}
-                      disabled={loading || workBusy}
-                    />
-                    <span>Snap add to surface</span>
-                  </label>
-                  <div className="tool-options-shape-row" style={{ marginTop: "0.35rem" }}>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        if (squishyPhase.active) {
-                          squishyPhase.commit();
-                        } else {
-                          void invoke("squishy_session_commit", {
-                            args: {
-                              color: activeColorRef.current,
-                              material: activeMaterialRef.current,
-                            },
-                          })
-                            .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
-                            .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-                            .catch(() => {});
-                        }
-                      }}
-                    >
-                      Commit to voxels
-                    </button>
-                    <button
-                      type="button"
-                      className="tool-options-shape-btn"
-                      disabled={loading || workBusy}
-                      onClick={() => {
-                        if (squishyPhase.active) {
-                          squishyPhase.cancel();
-                        } else {
-                          void invoke("squishy_session_clear")
-                            .then(() => setSquishyBallCount(0))
-                            .catch(() => {});
-                        }
-                      }}
-                    >
-                      Clear session
-                    </button>
-                  </div>
-                </div>
-              ) : toolsPane === "squishy" ? (
-                <div className="tool-options-section">
-                  <p className="tool-options-hint">Select Squishy mode in the sidebar.</p>
-                </div>
-              ) : null}
-              {toolsPane === "mood" ? (
-                <div className="tool-options-section">
-                  {/* ── Grain ────────────────────────────── */}
-                  <div className="tool-options-heading">Grain</div>
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={mood.grainEnabled}
-                      onChange={(ev) =>
-                        setMood((p) => moodWith(p, { grainEnabled: ev.target.checked }))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                    <span>Enable grain</span>
-                  </label>
-                  {mood.grainEnabled && (
-                    <>
+                  {toolsPane === "mood" ? (
+                    <div className="tool-options-section">
+                      {/* ── Grain ────────────────────────────── */}
+                      <div className="tool-options-heading">Grain</div>
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mood.grainEnabled}
+                          onChange={(ev) =>
+                            setMood((p) => moodWith(p, { grainEnabled: ev.target.checked }))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Enable grain</span>
+                      </label>
+                      {mood.grainEnabled && (
+                        <>
+                          <label className="tool-options-range-label">
+                            <span>Strength</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={0.5}
+                              step={0.01}
+                              value={mood.grainStrength}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    grainStrength: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={mood.grainAnimated}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { grainAnimated: ev.target.checked }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span>Animated</span>
+                          </label>
+                          {mood.grainAnimated && (
+                            <label className="tool-options-range-label">
+                              <span>Speed</span>
+                              <input
+                                type="range"
+                                min={0}
+                                max={4}
+                                step={0.1}
+                                value={mood.grainSpeed}
+                                onChange={(ev) =>
+                                  setMood((p) =>
+                                    moodWith(p, {
+                                      grainSpeed: Number(ev.target.value),
+                                    }),
+                                  )
+                                }
+                                disabled={loading || workBusy}
+                              />
+                            </label>
+                          )}
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={mood.grainColorful}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { grainColorful: ev.target.checked }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span>Colorful</span>
+                          </label>
+                        </>
+                      )}
+
+                      {/* ── Bloom ────────────────────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Bloom
+                      </div>
                       <label className="tool-options-range-label">
                         <span>Strength</span>
                         <input
                           type="range"
                           min={0}
-                          max={0.5}
-                          step={0.01}
-                          value={mood.grainStrength}
+                          max={2}
+                          step={0.02}
+                          value={mood.bloomStrength}
                           onChange={(ev) =>
                             setMood((p) =>
                               moodWith(p, {
-                                grainStrength: Number(ev.target.value),
+                                bloomStrength: Number(ev.target.value),
                               }),
                             )
                           }
                           disabled={loading || workBusy}
                         />
                       </label>
-                      <label
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={mood.grainAnimated}
-                          onChange={(ev) =>
-                            setMood((p) => moodWith(p, { grainAnimated: ev.target.checked }))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                        <span>Animated</span>
-                      </label>
-                      {mood.grainAnimated && (
-                        <label className="tool-options-range-label">
-                          <span>Speed</span>
-                          <input
-                            type="range"
-                            min={0}
-                            max={4}
-                            step={0.1}
-                            value={mood.grainSpeed}
-                            onChange={(ev) =>
-                              setMood((p) =>
-                                moodWith(p, {
-                                  grainSpeed: Number(ev.target.value),
-                                }),
-                              )
-                            }
-                            disabled={loading || workBusy}
-                          />
-                        </label>
-                      )}
-                      <label
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "0.5rem",
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={mood.grainColorful}
-                          onChange={(ev) =>
-                            setMood((p) => moodWith(p, { grainColorful: ev.target.checked }))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                        <span>Colorful</span>
-                      </label>
-                    </>
-                  )}
 
-                  {/* ── Bloom ────────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
-                    Bloom
-                  </div>
-                  <label className="tool-options-range-label">
-                    <span>Strength</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={2}
-                      step={0.02}
-                      value={mood.bloomStrength}
-                      onChange={(ev) =>
-                        setMood((p) =>
-                          moodWith(p, {
-                            bloomStrength: Number(ev.target.value),
-                          }),
-                        )
-                      }
-                      disabled={loading || workBusy}
-                    />
-                  </label>
-
-                  {/* ── Vignette ─────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
-                    Vignette
-                  </div>
-                  <label className="tool-options-range-label">
-                    <span>Strength</span>
-                    <input
-                      type="range"
-                      min={0}
-                      max={1}
-                      step={0.02}
-                      value={mood.vignette}
-                      onChange={(ev) =>
-                        setMood((p) => moodWith(p, { vignette: Number(ev.target.value) }))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                  </label>
-
-                  {/* ── Atmosphere ────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
-                    Atmosphere
-                  </div>
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={mood.atmEnabled}
-                      onChange={(ev) =>
-                        setMood((p) => moodWith(p, { atmEnabled: ev.target.checked }))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                    <span>Enable atmosphere</span>
-                  </label>
-                  {mood.atmEnabled && (
-                    <>
+                      {/* ── Vignette ─────────────────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Vignette
+                      </div>
                       <label className="tool-options-range-label">
-                        <span>Color</span>
-                        <input
-                          type="color"
-                          value={mood.atmColor}
-                          onChange={(ev) =>
-                            setMood((p) => moodWith(p, { atmColor: ev.target.value }))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Thickness</span>
-                        <input
-                          type="range"
-                          min={1}
-                          max={200}
-                          step={1}
-                          value={mood.atmThickness}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                atmThickness: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Density</span>
+                        <span>Strength</span>
                         <input
                           type="range"
                           min={0}
                           max={1}
                           step={0.02}
-                          value={mood.atmDensity}
+                          value={mood.vignette}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                atmDensity: Number(ev.target.value),
-                              }),
-                            )
+                            setMood((p) => moodWith(p, { vignette: Number(ev.target.value) }))
                           }
                           disabled={loading || workBusy}
                         />
                       </label>
-                      <div
-                        style={{
-                          display: "flex",
-                          gap: "0.75rem",
-                          marginTop: "0.25rem",
-                        }}
-                      >
-                        <label
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.3rem",
-                          }}
-                        >
-                          <input
-                            type="radio"
-                            name="atm-spatial"
-                            checked={mood.atmAerial}
-                            onChange={() => setMood((p) => moodWith(p, { atmAerial: true }))}
-                            disabled={loading || workBusy}
-                          />
-                          <span>Aerial</span>
-                        </label>
-                        <label
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: "0.3rem",
-                          }}
-                        >
-                          <input
-                            type="radio"
-                            name="atm-spatial"
-                            checked={!mood.atmAerial}
-                            onChange={() => setMood((p) => moodWith(p, { atmAerial: false }))}
-                            disabled={loading || workBusy}
-                          />
-                          <span>Plane</span>
-                        </label>
+
+                      {/* ── Atmosphere ────────────────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Atmosphere
                       </div>
-                      {!mood.atmAerial && (
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "0.75rem",
-                            marginTop: "0.25rem",
-                          }}
-                        >
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "0.3rem",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name="atm-mode"
-                              checked={!mood.atmPositiveSide}
-                              onChange={() =>
-                                setMood((p) => moodWith(p, { atmPositiveSide: false }))
-                              }
-                              disabled={loading || workBusy}
-                            />
-                            <span>Layer (slab)</span>
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              alignItems: "center",
-                              gap: "0.3rem",
-                            }}
-                          >
-                            <input
-                              type="radio"
-                              name="atm-mode"
-                              checked={mood.atmPositiveSide}
-                              onChange={() =>
-                                setMood((p) => moodWith(p, { atmPositiveSide: true }))
-                              }
-                              disabled={loading || workBusy}
-                            />
-                            <span>Above face</span>
-                          </label>
-                        </div>
-                      )}
-                      <label className="tool-options-range-label">
-                        <span>Height bias</span>
-                        <input
-                          type="range"
-                          min={-200}
-                          max={200}
-                          step={1}
-                          value={mood.atmHeightBias}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                atmHeightBias: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Height falloff</span>
-                        <input
-                          type="range"
-                          min={10}
-                          max={400}
-                          step={1}
-                          value={mood.atmHeightFalloff}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                atmHeightFalloff: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
                       <label
                         style={{
                           display: "flex",
                           alignItems: "center",
                           gap: "0.5rem",
-                          marginTop: "0.25rem",
                         }}
                       >
                         <input
                           type="checkbox"
-                          checked={mood.atmDriftEnabled}
+                          checked={mood.atmEnabled}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                atmDriftEnabled: ev.target.checked,
-                              }),
-                            )
+                            setMood((p) => moodWith(p, { atmEnabled: ev.target.checked }))
                           }
                           disabled={loading || workBusy}
                         />
-                        <span>Drift</span>
+                        <span>Enable atmosphere</span>
                       </label>
-                      {mood.atmDriftEnabled && (
+                      {mood.atmEnabled && (
                         <>
                           <label className="tool-options-range-label">
-                            <span>Amount</span>
+                            <span>Color</span>
+                            <input
+                              type="color"
+                              value={mood.atmColor}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { atmColor: ev.target.value }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Thickness</span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={200}
+                              step={1}
+                              value={mood.atmThickness}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    atmThickness: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Density</span>
                             <input
                               type="range"
                               min={0}
                               max={1}
                               step={0.02}
-                              value={mood.atmDriftAmount}
+                              value={mood.atmDensity}
                               onChange={(ev) =>
                                 setMood((p) =>
                                   moodWith(p, {
-                                    atmDriftAmount: Number(ev.target.value),
+                                    atmDensity: Number(ev.target.value),
                                   }),
                                 )
                               }
                               disabled={loading || workBusy}
                             />
                           </label>
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "0.75rem",
+                              marginTop: "0.25rem",
+                            }}
+                          >
+                            <label
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.3rem",
+                              }}
+                            >
+                              <input
+                                type="radio"
+                                name="atm-spatial"
+                                checked={mood.atmAerial}
+                                onChange={() => setMood((p) => moodWith(p, { atmAerial: true }))}
+                                disabled={loading || workBusy}
+                              />
+                              <span>Aerial</span>
+                            </label>
+                            <label
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: "0.3rem",
+                              }}
+                            >
+                              <input
+                                type="radio"
+                                name="atm-spatial"
+                                checked={!mood.atmAerial}
+                                onChange={() => setMood((p) => moodWith(p, { atmAerial: false }))}
+                                disabled={loading || workBusy}
+                              />
+                              <span>Plane</span>
+                            </label>
+                          </div>
+                          {!mood.atmAerial && (
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: "0.75rem",
+                                marginTop: "0.25rem",
+                              }}
+                            >
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "0.3rem",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="atm-mode"
+                                  checked={!mood.atmPositiveSide}
+                                  onChange={() =>
+                                    setMood((p) => moodWith(p, { atmPositiveSide: false }))
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span>Layer (slab)</span>
+                              </label>
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: "0.3rem",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="atm-mode"
+                                  checked={mood.atmPositiveSide}
+                                  onChange={() =>
+                                    setMood((p) => moodWith(p, { atmPositiveSide: true }))
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span>Above face</span>
+                              </label>
+                            </div>
+                          )}
                           <label className="tool-options-range-label">
-                            <span>Scale</span>
+                            <span>Height bias</span>
                             <input
                               type="range"
-                              min={0.001}
-                              max={0.1}
-                              step={0.001}
-                              value={mood.atmDriftScale}
+                              min={-200}
+                              max={200}
+                              step={1}
+                              value={mood.atmHeightBias}
                               onChange={(ev) =>
                                 setMood((p) =>
                                   moodWith(p, {
-                                    atmDriftScale: Number(ev.target.value),
+                                    atmHeightBias: Number(ev.target.value),
                                   }),
                                 )
                               }
@@ -5013,17 +4904,210 @@ function App() {
                             />
                           </label>
                           <label className="tool-options-range-label">
-                            <span>Speed</span>
+                            <span>Height falloff</span>
+                            <input
+                              type="range"
+                              min={10}
+                              max={400}
+                              step={1}
+                              value={mood.atmHeightFalloff}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    atmHeightFalloff: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "0.5rem",
+                              marginTop: "0.25rem",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={mood.atmDriftEnabled}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    atmDriftEnabled: ev.target.checked,
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                            <span>Drift</span>
+                          </label>
+                          {mood.atmDriftEnabled && (
+                            <>
+                              <label className="tool-options-range-label">
+                                <span>Amount</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={1}
+                                  step={0.02}
+                                  value={mood.atmDriftAmount}
+                                  onChange={(ev) =>
+                                    setMood((p) =>
+                                      moodWith(p, {
+                                        atmDriftAmount: Number(ev.target.value),
+                                      }),
+                                    )
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                              </label>
+                              <label className="tool-options-range-label">
+                                <span>Scale</span>
+                                <input
+                                  type="range"
+                                  min={0.001}
+                                  max={0.1}
+                                  step={0.001}
+                                  value={mood.atmDriftScale}
+                                  onChange={(ev) =>
+                                    setMood((p) =>
+                                      moodWith(p, {
+                                        atmDriftScale: Number(ev.target.value),
+                                      }),
+                                    )
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                              </label>
+                              <label className="tool-options-range-label">
+                                <span>Speed</span>
+                                <input
+                                  type="range"
+                                  min={0}
+                                  max={2}
+                                  step={0.02}
+                                  value={mood.atmDriftSpeed}
+                                  onChange={(ev) =>
+                                    setMood((p) =>
+                                      moodWith(p, {
+                                        atmDriftSpeed: Number(ev.target.value),
+                                      }),
+                                    )
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                              </label>
+                            </>
+                          )}
+                        </>
+                      )}
+
+                      {/* ── Distance tint ────────────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Distance tint
+                      </div>
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mood.dtEnabled}
+                          onChange={(ev) =>
+                            setMood((p) => moodWith(p, { dtEnabled: ev.target.checked }))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Enable distance tint</span>
+                      </label>
+                      {mood.dtEnabled && (
+                        <>
+                          <label className="tool-options-range-label">
+                            <span>Near color</span>
+                            <input
+                              type="color"
+                              value={mood.dtNearColor}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { dtNearColor: ev.target.value }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Mid color</span>
+                            <input
+                              type="color"
+                              value={mood.dtMidColor}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { dtMidColor: ev.target.value }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Far color</span>
+                            <input
+                              type="color"
+                              value={mood.dtFarColor}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { dtFarColor: ev.target.value }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Near distance</span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={200}
+                              step={1}
+                              value={mood.dtNearDist}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    dtNearDist: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Far distance</span>
+                            <input
+                              type="range"
+                              min={1}
+                              max={400}
+                              step={1}
+                              value={mood.dtFarDist}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    dtFarDist: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Strength</span>
                             <input
                               type="range"
                               min={0}
-                              max={2}
+                              max={1}
                               step={0.02}
-                              value={mood.atmDriftSpeed}
+                              value={mood.dtStrength}
                               onChange={(ev) =>
                                 setMood((p) =>
                                   moodWith(p, {
-                                    atmDriftSpeed: Number(ev.target.value),
+                                    dtStrength: Number(ev.target.value),
                                   }),
                                 )
                               }
@@ -5032,867 +5116,762 @@ function App() {
                           </label>
                         </>
                       )}
-                    </>
-                  )}
 
-                  {/* ── Distance tint ────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
-                    Distance tint
-                  </div>
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={mood.dtEnabled}
-                      onChange={(ev) =>
-                        setMood((p) => moodWith(p, { dtEnabled: ev.target.checked }))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                    <span>Enable distance tint</span>
-                  </label>
-                  {mood.dtEnabled && (
-                    <>
-                      <label className="tool-options-range-label">
-                        <span>Near color</span>
+                      {/* ── Sun shafts ────────────────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Sun shafts
+                      </div>
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
                         <input
-                          type="color"
-                          value={mood.dtNearColor}
+                          type="checkbox"
+                          checked={mood.ssEnabled}
                           onChange={(ev) =>
-                            setMood((p) => moodWith(p, { dtNearColor: ev.target.value }))
+                            setMood((p) => moodWith(p, { ssEnabled: ev.target.checked }))
                           }
                           disabled={loading || workBusy}
                         />
+                        <span>Enable sun shafts</span>
                       </label>
-                      <label className="tool-options-range-label">
-                        <span>Mid color</span>
-                        <input
-                          type="color"
-                          value={mood.dtMidColor}
-                          onChange={(ev) =>
-                            setMood((p) => moodWith(p, { dtMidColor: ev.target.value }))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Far color</span>
-                        <input
-                          type="color"
-                          value={mood.dtFarColor}
-                          onChange={(ev) =>
-                            setMood((p) => moodWith(p, { dtFarColor: ev.target.value }))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Near distance</span>
-                        <input
-                          type="range"
-                          min={1}
-                          max={200}
-                          step={1}
-                          value={mood.dtNearDist}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                dtNearDist: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Far distance</span>
-                        <input
-                          type="range"
-                          min={1}
-                          max={400}
-                          step={1}
-                          value={mood.dtFarDist}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                dtFarDist: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Strength</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={1}
-                          step={0.02}
-                          value={mood.dtStrength}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                dtStrength: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                    </>
-                  )}
+                      {mood.ssEnabled && (
+                        <>
+                          <label className="tool-options-range-label">
+                            <span>Strength</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={10}
+                              step={0.1}
+                              value={mood.ssStrength}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    ssStrength: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Decay</span>
+                            <input
+                              type="range"
+                              min={0.5}
+                              max={0.99}
+                              step={0.01}
+                              value={mood.ssDecay}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { ssDecay: Number(ev.target.value) }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Density</span>
+                            <input
+                              type="range"
+                              min={0.1}
+                              max={1.5}
+                              step={0.02}
+                              value={mood.ssDensity}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    ssDensity: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Weight</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1.5}
+                              step={0.02}
+                              value={mood.ssWeight}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    ssWeight: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Samples</span>
+                            <input
+                              type="range"
+                              min={20}
+                              max={56}
+                              step={1}
+                              value={mood.ssSamples}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    ssSamples: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                        </>
+                      )}
 
-                  {/* ── Sun shafts ────────────────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
-                    Sun shafts
-                  </div>
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={mood.ssEnabled}
-                      onChange={(ev) =>
-                        setMood((p) => moodWith(p, { ssEnabled: ev.target.checked }))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                    <span>Enable sun shafts</span>
-                  </label>
-                  {mood.ssEnabled && (
-                    <>
-                      <label className="tool-options-range-label">
-                        <span>Strength</span>
+                      {/* ── Screen-space reflections ──────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Reflections
+                      </div>
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                        }}
+                      >
                         <input
-                          type="range"
-                          min={0}
-                          max={10}
-                          step={0.1}
-                          value={mood.ssStrength}
+                          type="checkbox"
+                          checked={mood.ssrEnabled}
                           onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                ssStrength: Number(ev.target.value),
-                              }),
-                            )
+                            setMood((p) => moodWith(p, { ssrEnabled: ev.target.checked }))
                           }
                           disabled={loading || workBusy}
                         />
+                        <span>Screen-space reflections</span>
                       </label>
-                      <label className="tool-options-range-label">
-                        <span>Decay</span>
-                        <input
-                          type="range"
-                          min={0.5}
-                          max={0.99}
-                          step={0.01}
-                          value={mood.ssDecay}
-                          onChange={(ev) =>
-                            setMood((p) => moodWith(p, { ssDecay: Number(ev.target.value) }))
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Density</span>
-                        <input
-                          type="range"
-                          min={0.1}
-                          max={1.5}
-                          step={0.02}
-                          value={mood.ssDensity}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                ssDensity: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Weight</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={1.5}
-                          step={0.02}
-                          value={mood.ssWeight}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                ssWeight: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                      <label className="tool-options-range-label">
-                        <span>Samples</span>
-                        <input
-                          type="range"
-                          min={20}
-                          max={56}
-                          step={1}
-                          value={mood.ssSamples}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                ssSamples: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                    </>
-                  )}
-
-                  {/* ── Screen-space reflections ──────────────── */}
-                  <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
-                    Reflections
-                  </div>
-                  <label
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={mood.ssrEnabled}
-                      onChange={(ev) =>
-                        setMood((p) => moodWith(p, { ssrEnabled: ev.target.checked }))
-                      }
-                      disabled={loading || workBusy}
-                    />
-                    <span>Screen-space reflections</span>
-                  </label>
-                  {mood.ssrEnabled && (
-                    <>
-                      <label className="tool-options-range-label">
-                        <span>Strength</span>
-                        <input
-                          type="range"
-                          min={0}
-                          max={1}
-                          step={0.02}
-                          value={mood.ssrStrength}
-                          onChange={(ev) =>
-                            setMood((p) =>
-                              moodWith(p, {
-                                ssrStrength: Number(ev.target.value),
-                              }),
-                            )
-                          }
-                          disabled={loading || workBusy}
-                        />
-                      </label>
-                    </>
-                  )}
-                </div>
-              ) : null}
-              {(interactionMode === "stamp" || interactionMode === "punch") &&
-              (toolsPane === "draw" || toolsPane === "select") ? (
-                <div className="tool-options-section" aria-label="Stamp orientation">
-                  <div className="tool-options-heading">Orientation</div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "auto 1fr 1fr 1fr",
-                      gap: "0.25rem",
-                      alignItems: "center",
-                    }}
-                  >
-                    <span style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}>Rot</span>
-                    {(
-                      [
-                        ["X", stampRotX, setStampRotX],
-                        ["Y", stampRotY, setStampRotY],
-                        ["Z", stampRotZ, setStampRotZ],
-                      ] as const
-                    ).map(([axis, val, set]) => (
-                      <input
-                        key={axis}
-                        type="number"
-                        step={1}
-                        value={val}
-                        title={`${axis} rotation (degrees)`}
-                        style={{ width: "100%", minWidth: 0 }}
-                        onInput={(e) => set(Number((e.target as HTMLInputElement).value))}
-                      />
-                    ))}
-                  </div>
-                  <div
-                    style={{
-                      display: "grid",
-                      gridTemplateColumns: "auto 1fr 1fr",
-                      gap: "0.2rem",
-                      alignItems: "center",
-                    }}
-                  >
-                    {(
-                      [
-                        ["X", setStampRotX],
-                        ["Y", setStampRotY],
-                        ["Z", setStampRotZ],
-                      ] as const
-                    ).map(([axis, set]) => (
-                      <>
-                        <span
-                          key={`${axis}-label`}
-                          style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}
-                        >
-                          {axis}
-                        </span>
-                        <button
-                          key={`${axis}-ccw`}
-                          type="button"
-                          className="tool-options-shape-btn"
-                          title={`CCW ${axis} (−15°)`}
-                          onClick={() => set((v) => v - 15)}
-                        >
-                          CCW
-                        </button>
-                        <button
-                          key={`${axis}-cw`}
-                          type="button"
-                          className="tool-options-shape-btn"
-                          title={`CW ${axis} (+15°)`}
-                          onClick={() => set((v) => v + 15)}
-                        >
-                          CW
-                        </button>
-                      </>
-                    ))}
-                  </div>
-                  <div style={{ marginTop: "0.4rem" }}>
-                    <span style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}>
-                      Origin
-                    </span>
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(3, 1fr)",
-                        gap: "0.15rem",
-                        marginTop: "0.2rem",
-                      }}
-                    >
-                      {([0, 1, 2] as const).flatMap((oz) =>
-                        ([0, 1, 2] as const).map((ox) => {
-                          const labels = ["left", "center", "right"];
-                          const labelsZ = ["front", "center", "back"];
-                          return (
-                            <button
-                              key={`${ox}-${oz}`}
-                              type="button"
-                              className={`tool-options-shape-btn${stampOriginX === ox && stampOriginZ === oz ? " is-active" : ""}`}
-                              style={{
-                                padding: "0.3rem 0",
-                                minWidth: 0,
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                              title={`Origin: ${labels[ox]} / ${labelsZ[oz]}`}
-                              onClick={() => {
-                                setStampOriginX(ox);
-                                setStampOriginZ(oz);
-                              }}
-                            >
-                              <span
-                                style={{
-                                  width: "0.35rem",
-                                  height: "0.35rem",
-                                  borderRadius: "50%",
-                                  background: "currentColor",
-                                  display: "block",
-                                  opacity: stampOriginX === ox && stampOriginZ === oz ? 1 : 0.35,
-                                }}
-                              />
-                            </button>
-                          );
-                        }),
+                      {mood.ssrEnabled && (
+                        <>
+                          <label className="tool-options-range-label">
+                            <span>Strength</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.02}
+                              value={mood.ssrStrength}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, {
+                                    ssrStrength: Number(ev.target.value),
+                                  }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                        </>
                       )}
                     </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="tool-options-shape-btn"
-                    style={{ width: "100%" }}
-                    onClick={() => {
-                      setStampRotX(0);
-                      setStampRotY(0);
-                      setStampRotZ(0);
-                    }}
-                  >
-                    Reset
-                  </button>
+                  ) : null}
+                  {(interactionMode === "stamp" || interactionMode === "punch") &&
+                  (toolsPane === "draw" || toolsPane === "select") ? (
+                    <div className="tool-options-section" aria-label="Stamp orientation">
+                      <div className="tool-options-heading">Orientation</div>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "auto 1fr 1fr 1fr",
+                          gap: "0.25rem",
+                          alignItems: "center",
+                        }}
+                      >
+                        <span style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}>
+                          Rot
+                        </span>
+                        {(
+                          [
+                            ["X", stampRotX, setStampRotX],
+                            ["Y", stampRotY, setStampRotY],
+                            ["Z", stampRotZ, setStampRotZ],
+                          ] as const
+                        ).map(([axis, val, set]) => (
+                          <input
+                            key={axis}
+                            type="number"
+                            step={1}
+                            value={val}
+                            title={`${axis} rotation (degrees)`}
+                            style={{ width: "100%", minWidth: 0 }}
+                            onInput={(e) => set(Number((e.target as HTMLInputElement).value))}
+                          />
+                        ))}
+                      </div>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "auto 1fr 1fr",
+                          gap: "0.2rem",
+                          alignItems: "center",
+                        }}
+                      >
+                        {(
+                          [
+                            ["X", setStampRotX],
+                            ["Y", setStampRotY],
+                            ["Z", setStampRotZ],
+                          ] as const
+                        ).map(([axis, set]) => (
+                          <>
+                            <span
+                              key={`${axis}-label`}
+                              style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}
+                            >
+                              {axis}
+                            </span>
+                            <button
+                              key={`${axis}-ccw`}
+                              type="button"
+                              className="tool-options-shape-btn"
+                              title={`CCW ${axis} (−15°)`}
+                              onClick={() => set((v) => v - 15)}
+                            >
+                              CCW
+                            </button>
+                            <button
+                              key={`${axis}-cw`}
+                              type="button"
+                              className="tool-options-shape-btn"
+                              title={`CW ${axis} (+15°)`}
+                              onClick={() => set((v) => v + 15)}
+                            >
+                              CW
+                            </button>
+                          </>
+                        ))}
+                      </div>
+                      <div style={{ marginTop: "0.4rem" }}>
+                        <span style={{ fontSize: "0.72rem", color: "var(--app-text-faint)" }}>
+                          Origin
+                        </span>
+                        <div
+                          style={{
+                            display: "grid",
+                            gridTemplateColumns: "repeat(3, 1fr)",
+                            gap: "0.15rem",
+                            marginTop: "0.2rem",
+                          }}
+                        >
+                          {([0, 1, 2] as const).flatMap((oz) =>
+                            ([0, 1, 2] as const).map((ox) => {
+                              const labels = ["left", "center", "right"];
+                              const labelsZ = ["front", "center", "back"];
+                              return (
+                                <button
+                                  key={`${ox}-${oz}`}
+                                  type="button"
+                                  className={`tool-options-shape-btn${stampOriginX === ox && stampOriginZ === oz ? " is-active" : ""}`}
+                                  style={{
+                                    padding: "0.3rem 0",
+                                    minWidth: 0,
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "center",
+                                  }}
+                                  title={`Origin: ${labels[ox]} / ${labelsZ[oz]}`}
+                                  onClick={() => {
+                                    setStampOriginX(ox);
+                                    setStampOriginZ(oz);
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      width: "0.35rem",
+                                      height: "0.35rem",
+                                      borderRadius: "50%",
+                                      background: "currentColor",
+                                      display: "block",
+                                      opacity:
+                                        stampOriginX === ox && stampOriginZ === oz ? 1 : 0.35,
+                                    }}
+                                  />
+                                </button>
+                              );
+                            }),
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="tool-options-shape-btn"
+                        style={{ width: "100%" }}
+                        onClick={() => {
+                          setStampRotX(0);
+                          setStampRotY(0);
+                          setStampRotZ(0);
+                        }}
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
-            </div>
-          ) : null}
-          {showEmptyOpenFile ? (
-            <div className="viewport-empty-open" role="region" aria-label="No file open">
-              <div className="viewport-empty-open-stack">
-                {lastSessionReady &&
-                lastSessionInfo?.lastDocumentPath &&
-                (lastSessionInfo.documentExists || lastSessionInfo.autosaveExists) ? (
-                  <div
-                    className="viewport-empty-last"
-                    role="group"
-                    aria-label="Continue last project"
-                  >
-                    <div className="viewport-empty-last-title">Continue where you left off</div>
-                    {lastSessionInfo.documentBasename ? (
+              {showEmptyOpenFile ? (
+                <div className="viewport-empty-open" role="region" aria-label="No file open">
+                  <div className="viewport-empty-open-stack">
+                    {lastSessionReady &&
+                    lastSessionInfo?.lastDocumentPath &&
+                    (lastSessionInfo.documentExists || lastSessionInfo.autosaveExists) ? (
                       <div
-                        className="viewport-empty-last-filename"
-                        title={lastSessionInfo.lastDocumentPath ?? undefined}
+                        className="viewport-empty-last"
+                        role="group"
+                        aria-label="Continue last project"
                       >
-                        {lastSessionInfo.documentBasename}
+                        <div className="viewport-empty-last-title">Continue where you left off</div>
+                        {lastSessionInfo.documentBasename ? (
+                          <div
+                            className="viewport-empty-last-filename"
+                            title={lastSessionInfo.lastDocumentPath ?? undefined}
+                          >
+                            {lastSessionInfo.documentBasename}
+                          </div>
+                        ) : null}
+                        {lastProjectBlurb ? (
+                          <p id="viewport-empty-last-desc" className="viewport-empty-last-blurb">
+                            {lastProjectBlurb}
+                          </p>
+                        ) : null}
+                        <div className="viewport-empty-last-actions">
+                          <button
+                            type="button"
+                            className="viewport-empty-open-btn"
+                            onClick={() => setNewProjectOpen(true)}
+                            disabled={loading || workBusy}
+                          >
+                            Start new project
+                          </button>
+                          <button
+                            type="button"
+                            className="viewport-empty-open-btn is-secondary"
+                            onClick={reopenLastProject}
+                            disabled={loading || workBusy}
+                            aria-describedby={
+                              lastProjectBlurb ? "viewport-empty-last-desc" : undefined
+                            }
+                          >
+                            Reopen last project
+                          </button>
+                        </div>
                       </div>
-                    ) : null}
-                    {lastProjectBlurb ? (
-                      <p id="viewport-empty-last-desc" className="viewport-empty-last-blurb">
-                        {lastProjectBlurb}
-                      </p>
-                    ) : null}
-                    <div className="viewport-empty-last-actions">
+                    ) : lastSessionReady ? (
                       <button
                         type="button"
                         className="viewport-empty-open-btn"
                         onClick={() => setNewProjectOpen(true)}
                         disabled={loading || workBusy}
                       >
-                        Start new project
+                        New Project
                       </button>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="viewport-empty-open-btn is-secondary"
+                      onClick={() => void invoke("open_voxelle_dialog").catch(() => {})}
+                    >
+                      Open file…
+                    </button>
+                    <div className="viewport-empty-session-row">
                       <button
                         type="button"
                         className="viewport-empty-open-btn is-secondary"
-                        onClick={reopenLastProject}
-                        disabled={loading || workBusy}
-                        aria-describedby={lastProjectBlurb ? "viewport-empty-last-desc" : undefined}
+                        onClick={() => setJoinModalOpen(true)}
+                        disabled={collabActive}
+                        title={collabActive ? "Leave your session first" : "Paste a host link"}
                       >
-                        Reopen last project
+                        Join Session
+                      </button>
+                      <button
+                        type="button"
+                        className="viewport-empty-open-btn"
+                        onClick={collabActive ? leaveSession : startHost}
+                        title={
+                          collabActive
+                            ? hostWsUrl
+                              ? "End the session for everyone"
+                              : "Leave session"
+                            : undefined
+                        }
+                      >
+                        {hostWsUrl ? "Stop hosting" : collabGuest ? "Leave" : "Start Session"}
                       </button>
                     </div>
                   </div>
-                ) : lastSessionReady ? (
-                  <button
-                    type="button"
-                    className="viewport-empty-open-btn"
-                    onClick={() => setNewProjectOpen(true)}
-                    disabled={loading || workBusy}
-                  >
-                    New Project
-                  </button>
-                ) : null}
-                <button
-                  type="button"
-                  className="viewport-empty-open-btn is-secondary"
-                  onClick={() => void invoke("open_voxelle_dialog").catch(() => {})}
-                >
-                  Open file…
-                </button>
-                <div className="viewport-empty-session-row">
-                  <button
-                    type="button"
-                    className="viewport-empty-open-btn is-secondary"
-                    onClick={() => setJoinModalOpen(true)}
-                    disabled={collabActive}
-                    title={collabActive ? "Leave your session first" : "Paste a host link"}
-                  >
-                    Join Session
-                  </button>
-                  <button
-                    type="button"
-                    className="viewport-empty-open-btn"
-                    onClick={collabActive ? leaveSession : startHost}
-                    title={
-                      collabActive
-                        ? hostWsUrl
-                          ? "End the session for everyone"
-                          : "Leave session"
-                        : undefined
-                    }
-                  >
-                    {hostWsUrl ? "Stop hosting" : collabGuest ? "Leave" : "Start Session"}
-                  </button>
                 </div>
-              </div>
-            </div>
-          ) : null}
-          {/* Debug: Logo light controls (toggle via Debug menu) */}
-          {showStartScreen && startScreenLogoLoaded && logoLightControlsVisible ? (
-            <div
-              style={{
-                position: "absolute",
-                bottom: 12,
-                right: 12,
-                zIndex: 20,
-                background: "rgba(0,0,0,0.75)",
-                color: "#fff",
-                padding: "10px 14px",
-                borderRadius: 8,
-                fontSize: 12,
-                fontFamily: "system-ui, sans-serif",
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-                minWidth: 220,
-              }}
-            >
-              <div style={{ fontWeight: 600, marginBottom: 2 }}>Camera</div>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 60 }}>Angle</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={360}
-                  step={1}
-                  value={logoCamAzimuth}
-                  style={{ flex: 1 }}
-                  onChange={(e) => {
-                    const az = Number(e.target.value);
-                    setLogoCamAzimuth(az);
-                    void invoke("logo_set_camera_angle", {
-                      azimuth: az,
-                      elevation: logoCamElevation,
-                    });
-                  }}
-                />
-                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
-                  {Math.round(logoCamAzimuth)}°
-                </span>
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 60 }}>Elevation</span>
-                <input
-                  type="range"
-                  min={-85}
-                  max={85}
-                  step={1}
-                  value={logoCamElevation}
-                  style={{ flex: 1 }}
-                  onChange={(e) => {
-                    const el = Number(e.target.value);
-                    setLogoCamElevation(el);
-                    void invoke("logo_set_camera_angle", {
-                      azimuth: logoCamAzimuth,
-                      elevation: el,
-                    });
-                  }}
-                />
-                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
-                  {Math.round(logoCamElevation)}°
-                </span>
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 60 }}>Zoom</span>
-                <input
-                  type="range"
-                  min={1.0}
-                  max={8.0}
-                  step={0.1}
-                  value={logoCamDist}
-                  style={{ flex: 1 }}
-                  onChange={(e) => {
-                    const d = Number(e.target.value);
-                    setLogoCamDist(d);
-                    void invoke("logo_set_camera_dist", { dist: d });
-                  }}
-                />
-                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
-                  {logoCamDist.toFixed(1)}
-                </span>
-              </label>
-              <div style={{ borderTop: "1px solid rgba(255,255,255,0.15)", margin: "4px 0" }} />
-              <div style={{ fontWeight: 600, marginBottom: 2 }}>Light</div>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 60 }}>Angle</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={360}
-                  step={1}
-                  value={logoLightAzimuth}
-                  style={{ flex: 1 }}
-                  onChange={(e) => {
-                    const az = Number(e.target.value);
-                    setLogoLightAzimuth(az);
-                    void invoke("logo_set_light_dir", {
-                      azimuth: az,
-                      elevation: logoLightElevation,
-                    });
-                  }}
-                />
-                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
-                  {Math.round(logoLightAzimuth)}°
-                </span>
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 60 }}>Elevation</span>
-                <input
-                  type="range"
-                  min={5}
-                  max={90}
-                  step={1}
-                  value={logoLightElevation}
-                  style={{ flex: 1 }}
-                  onChange={(e) => {
-                    const el = Number(e.target.value);
-                    setLogoLightElevation(el);
-                    void invoke("logo_set_light_dir", { azimuth: logoLightAzimuth, elevation: el });
-                  }}
-                />
-                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
-                  {Math.round(logoLightElevation)}°
-                </span>
-              </label>
-              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span style={{ width: 60 }}>Intensity</span>
-                <input
-                  type="range"
-                  min={0}
-                  max={5}
-                  step={0.01}
-                  value={logoLightIntensity}
-                  style={{ flex: 1 }}
-                  onChange={(e) => {
-                    const val = Number(e.target.value);
-                    setLogoLightIntensity(val);
-                    void invoke("logo_set_light_intensity", { intensity: val });
-                  }}
-                />
-                <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
-                  {logoLightIntensity.toFixed(2)}
-                </span>
-              </label>
-            </div>
-          ) : null}
-          {loadError ? (
-            <div className="viewport-error" role="alert">
-              <span className="viewport-notice-text" title={loadError}>
-                {loadError}
-              </span>
-              <button
-                type="button"
-                className="viewport-notice-dismiss"
-                aria-label="Dismiss error"
-                onClick={() => setLoadError(null)}
-              >
-                Dismiss
-              </button>
-            </div>
-          ) : null}
-          {collabBanner ? (
-            <div
-              className={
-                collabBanner.tone === "alert" ? "viewport-notice is-alert" : "viewport-notice"
-              }
-              role={collabBanner.tone === "alert" ? "alert" : "status"}
-            >
-              <span className="viewport-notice-text">{collabBanner.text}</span>
-              <button
-                type="button"
-                className="viewport-notice-dismiss"
-                onClick={() => setCollabBanner(null)}
-              >
-                Dismiss
-              </button>
-            </div>
-          ) : null}
-          {collabActive && chatToasts.length > 0 ? (
-            <div className="chat-toast-stack" aria-live="polite" aria-label="New chat messages">
-              {chatToasts.map((t) => (
+              ) : null}
+              {/* Debug: Logo light controls (toggle via Debug menu) */}
+              {showStartScreen && startScreenLogoLoaded && logoLightControlsVisible ? (
                 <div
-                  key={t.id}
-                  className="chat-toast"
-                  role="status"
-                  onClick={() => setChatPanelOpen(true)}
+                  style={{
+                    position: "absolute",
+                    bottom: 12,
+                    right: 12,
+                    zIndex: 20,
+                    background: "rgba(0,0,0,0.75)",
+                    color: "#fff",
+                    padding: "10px 14px",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontFamily: "system-ui, sans-serif",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                    minWidth: 220,
+                  }}
                 >
-                  <span className="chat-toast-text">{t.text}</span>
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>Camera</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 60 }}>Angle</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={360}
+                      step={1}
+                      value={logoCamAzimuth}
+                      style={{ flex: 1 }}
+                      onChange={(e) => {
+                        const az = Number(e.target.value);
+                        setLogoCamAzimuth(az);
+                        void invoke("logo_set_camera_angle", {
+                          azimuth: az,
+                          elevation: logoCamElevation,
+                        });
+                      }}
+                    />
+                    <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                      {Math.round(logoCamAzimuth)}°
+                    </span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 60 }}>Elevation</span>
+                    <input
+                      type="range"
+                      min={-85}
+                      max={85}
+                      step={1}
+                      value={logoCamElevation}
+                      style={{ flex: 1 }}
+                      onChange={(e) => {
+                        const el = Number(e.target.value);
+                        setLogoCamElevation(el);
+                        void invoke("logo_set_camera_angle", {
+                          azimuth: logoCamAzimuth,
+                          elevation: el,
+                        });
+                      }}
+                    />
+                    <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                      {Math.round(logoCamElevation)}°
+                    </span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 60 }}>Zoom</span>
+                    <input
+                      type="range"
+                      min={1.0}
+                      max={8.0}
+                      step={0.1}
+                      value={logoCamDist}
+                      style={{ flex: 1 }}
+                      onChange={(e) => {
+                        const d = Number(e.target.value);
+                        setLogoCamDist(d);
+                        void invoke("logo_set_camera_dist", { dist: d });
+                      }}
+                    />
+                    <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                      {logoCamDist.toFixed(1)}
+                    </span>
+                  </label>
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.15)", margin: "4px 0" }} />
+                  <div style={{ fontWeight: 600, marginBottom: 2 }}>Light</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 60 }}>Angle</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={360}
+                      step={1}
+                      value={logoLightAzimuth}
+                      style={{ flex: 1 }}
+                      onChange={(e) => {
+                        const az = Number(e.target.value);
+                        setLogoLightAzimuth(az);
+                        void invoke("logo_set_light_dir", {
+                          azimuth: az,
+                          elevation: logoLightElevation,
+                        });
+                      }}
+                    />
+                    <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                      {Math.round(logoLightAzimuth)}°
+                    </span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 60 }}>Elevation</span>
+                    <input
+                      type="range"
+                      min={5}
+                      max={90}
+                      step={1}
+                      value={logoLightElevation}
+                      style={{ flex: 1 }}
+                      onChange={(e) => {
+                        const el = Number(e.target.value);
+                        setLogoLightElevation(el);
+                        void invoke("logo_set_light_dir", {
+                          azimuth: logoLightAzimuth,
+                          elevation: el,
+                        });
+                      }}
+                    />
+                    <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                      {Math.round(logoLightElevation)}°
+                    </span>
+                  </label>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ width: 60 }}>Intensity</span>
+                    <input
+                      type="range"
+                      min={0}
+                      max={5}
+                      step={0.01}
+                      value={logoLightIntensity}
+                      style={{ flex: 1 }}
+                      onChange={(e) => {
+                        const val = Number(e.target.value);
+                        setLogoLightIntensity(val);
+                        void invoke("logo_set_light_intensity", { intensity: val });
+                      }}
+                    />
+                    <span style={{ width: 36, textAlign: "right", fontFamily: "monospace" }}>
+                      {logoLightIntensity.toFixed(2)}
+                    </span>
+                  </label>
+                </div>
+              ) : null}
+              {loadError ? (
+                <div className="viewport-error" role="alert">
+                  <span className="viewport-notice-text" title={loadError}>
+                    {loadError}
+                  </span>
                   <button
                     type="button"
-                    className="chat-toast-dismiss"
-                    aria-label="Dismiss notification"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
-                    }}
+                    className="viewport-notice-dismiss"
+                    aria-label="Dismiss error"
+                    onClick={() => setLoadError(null)}
                   >
-                    ×
+                    Dismiss
                   </button>
                 </div>
-              ))}
-            </div>
-          ) : null}
-          {chatPanelOpen ? (
-            <div className="chat-float-panel" role="dialog" aria-label="Collaboration chat">
-              <div className="chat-float-header">
-                <h3 className="chat-float-title">Chat</h3>
-                <button
-                  type="button"
-                  className="chat-float-close"
-                  onClick={() => setChatPanelOpen(false)}
-                  aria-label="Close chat"
+              ) : null}
+              {collabBanner ? (
+                <div
+                  className={
+                    collabBanner.tone === "alert" ? "viewport-notice is-alert" : "viewport-notice"
+                  }
+                  role={collabBanner.tone === "alert" ? "alert" : "status"}
                 >
-                  ×
-                </button>
-              </div>
-              <div className="collab-chat-log chat-float-log" role="log">
-                {chatLines.map((line, i) => (
-                  <div key={i}>{line}</div>
-                ))}
-              </div>
-              <div className="collab-row chat-float-input-row">
-                <input
-                  className="collab-grow"
-                  type="text"
-                  value={chatInput}
-                  placeholder={collabActive ? "Message…" : "Join or host to chat"}
-                  disabled={!collabActive}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  onKeyDown={(e) => collabActive && e.key === "Enter" && sendChat()}
-                />
-                <button type="button" onClick={sendChat} disabled={!collabActive}>
-                  Send
-                </button>
-              </div>
+                  <span className="viewport-notice-text">{collabBanner.text}</span>
+                  <button
+                    type="button"
+                    className="viewport-notice-dismiss"
+                    onClick={() => setCollabBanner(null)}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              ) : null}
+              {collabActive && chatToasts.length > 0 ? (
+                <div className="chat-toast-stack" aria-live="polite" aria-label="New chat messages">
+                  {chatToasts.map((t) => (
+                    <div
+                      key={t.id}
+                      className="chat-toast"
+                      role="status"
+                      onClick={() => setChatPanelOpen(true)}
+                    >
+                      <span className="chat-toast-text">{t.text}</span>
+                      <button
+                        type="button"
+                        className="chat-toast-dismiss"
+                        aria-label="Dismiss notification"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setChatToasts((prev) => prev.filter((x) => x.id !== t.id));
+                        }}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {chatPanelOpen ? (
+                <div className="chat-float-panel" role="dialog" aria-label="Collaboration chat">
+                  <div className="chat-float-header">
+                    <h3 className="chat-float-title">Chat</h3>
+                    <button
+                      type="button"
+                      className="chat-float-close"
+                      onClick={() => setChatPanelOpen(false)}
+                      aria-label="Close chat"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="collab-chat-log chat-float-log" role="log">
+                    {chatLines.map((line, i) => (
+                      <div key={i}>{line}</div>
+                    ))}
+                  </div>
+                  <div className="collab-row chat-float-input-row">
+                    <input
+                      className="collab-grow"
+                      type="text"
+                      value={chatInput}
+                      placeholder={collabActive ? "Message…" : "Join or host to chat"}
+                      disabled={!collabActive}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      onKeyDown={(e) => collabActive && e.key === "Enter" && sendChat()}
+                    />
+                    <button type="button" onClick={sendChat} disabled={!collabActive}>
+                      Send
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
-          ) : null}
-        </div>
-        {showEditorChrome ? (
-          <InspectorSidebar
-            rightSidebarExpanded={rightSidebarExpanded}
-            setRightSidebarExpanded={setRightSidebarExpanded}
-            sceneObjects={sceneObjects}
-            sceneObjectsErr={sceneObjectsErr}
-            activeObjectId={activeObjectId}
-            setActiveObjectId={setActiveObjectId}
-            refreshSceneObjects={refreshSceneObjects}
+            {showEditorChrome ? (
+              <InspectorSidebar
+                rightSidebarExpanded={rightSidebarExpanded}
+                setRightSidebarExpanded={setRightSidebarExpanded}
+                sceneObjects={sceneObjects}
+                sceneObjectsErr={sceneObjectsErr}
+                activeObjectId={activeObjectId}
+                setActiveObjectId={setActiveObjectId}
+                refreshSceneObjects={refreshSceneObjects}
+                collabActive={collabActive}
+                hostWsUrl={hostWsUrl}
+                hostWanUrl={hostWanUrl}
+                hostingCopied={hostingCopied}
+                copyHostingJoinAddress={copyHostingJoinAddress}
+                prefsEnableUpnp={prefsEnableUpnp}
+                natPending={natPending}
+                natError={natError}
+                hostPort={hostPort}
+                roster={roster}
+                localPeerId={localPeerId}
+                amLeader={amLeader}
+                onRosterSnapCamera={onRosterSnapCamera}
+                setCanEdit={setCanEdit}
+              />
+            ) : null}
+          </div>
+          <StatusBar
+            showStartScreen={showStartScreen}
+            statusBarMessage={statusBarMessage}
+            pathLabel={pathLabel}
             collabActive={collabActive}
             hostWsUrl={hostWsUrl}
-            hostWanUrl={hostWanUrl}
             hostingCopied={hostingCopied}
             copyHostingJoinAddress={copyHostingJoinAddress}
-            prefsEnableUpnp={prefsEnableUpnp}
-            natPending={natPending}
-            natError={natError}
-            hostPort={hostPort}
             roster={roster}
-            localPeerId={localPeerId}
-            amLeader={amLeader}
-            onRosterSnapCamera={onRosterSnapCamera}
-            setCanEdit={setCanEdit}
+            setLeaveConfirmOpen={setLeaveConfirmOpen}
+            startHost={startHost}
+            showFpsCounter={showFpsCounter}
+            showEditorChrome={showEditorChrome}
+            fpsDisplayed={fpsDisplayed}
+            showPingLatency={showPingLatency}
+            pingMs={pingMs}
           />
-        ) : null}
-      </div>
-      <StatusBar
-        showStartScreen={showStartScreen}
-        statusBarMessage={statusBarMessage}
-        pathLabel={pathLabel}
-        collabActive={collabActive}
-        hostWsUrl={hostWsUrl}
-        hostingCopied={hostingCopied}
-        copyHostingJoinAddress={copyHostingJoinAddress}
-        roster={roster}
-        setLeaveConfirmOpen={setLeaveConfirmOpen}
-        startHost={startHost}
-        showFpsCounter={showFpsCounter}
-        showEditorChrome={showEditorChrome}
-        fpsDisplayed={fpsDisplayed}
-        showPingLatency={showPingLatency}
-        pingMs={pingMs}
-      />
-      <AppModals
-        leaveConfirmOpen={leaveConfirmOpen}
-        setLeaveConfirmOpen={setLeaveConfirmOpen}
-        hostWsUrl={hostWsUrl}
-        leaveSession={leaveSession}
-        joinModalOpen={joinModalOpen}
-        setJoinModalOpen={setJoinModalOpen}
-        joinUrl={joinUrl}
-        setJoinUrl={setJoinUrl}
-        joinSession={joinSession}
-        collabActive={collabActive}
-        collabJoinPending={collabJoinPending}
-        loading={loading}
-        loadProgress={loadProgress}
-        loadPhase={loadPhase}
-        pathLabel={pathLabel}
-        cancelJoin={cancelJoin}
-        stampBookOpen={stampBookOpen}
-        setStampBookOpen={setStampBookOpen}
-        selectionCount={selectionCount}
-        setStampBookPatternActive={setStampBookPatternActive}
-        setInteractionMode={setInteractionMode}
-        pendingFillConfirm={pendingFillConfirm}
-        preferencesOpen={preferencesOpen}
-        setPreferencesOpen={setPreferencesOpen}
-        setShowFpsCounter={setShowFpsCounter}
-        setShowPingLatency={setShowPingLatency}
-        setPrefsEnableUpnp={setPrefsEnableUpnp}
-        setDisplayName={setDisplayName}
-        setAccentColor={setAccentColor}
-        setHostPort={setHostPort}
-        rotateDialogOpen={rotateDialogOpen}
-        setRotateDialogOpen={setRotateDialogOpen}
-        rotateDialogAxis={rotateDialogAxis}
-        setRotateDialogAxis={setRotateDialogAxis}
-        rotateDialogDegrees={rotateDialogDegrees}
-        setRotateDialogDegrees={setRotateDialogDegrees}
-        scaleDialogOpen={scaleDialogOpen}
-        setScaleDialogOpen={setScaleDialogOpen}
-        scaleDialogFactor={scaleDialogFactor}
-        setScaleDialogFactor={setScaleDialogFactor}
-        newProjectOpen={newProjectOpen}
-        setNewProjectOpen={setNewProjectOpen}
-        newGridSize={newGridSize}
-        setNewGridSize={setNewGridSize}
-        newGridShape={newGridShape}
-        setNewGridShape={setNewGridShape}
-        createNewProject={createNewProject}
-      />
+          <AppModals
+            leaveConfirmOpen={leaveConfirmOpen}
+            setLeaveConfirmOpen={setLeaveConfirmOpen}
+            hostWsUrl={hostWsUrl}
+            leaveSession={leaveSession}
+            joinModalOpen={joinModalOpen}
+            setJoinModalOpen={setJoinModalOpen}
+            joinUrl={joinUrl}
+            setJoinUrl={setJoinUrl}
+            joinSession={joinSession}
+            collabActive={collabActive}
+            collabJoinPending={collabJoinPending}
+            loading={loading}
+            loadProgress={loadProgress}
+            loadPhase={loadPhase}
+            pathLabel={pathLabel}
+            cancelJoin={cancelJoin}
+            stampBookOpen={stampBookOpen}
+            setStampBookOpen={setStampBookOpen}
+            selectionCount={selectionCount}
+            setStampBookPatternActive={setStampBookPatternActive}
+            setInteractionMode={setInteractionMode}
+            pendingFillConfirm={pendingFillConfirm}
+            preferencesOpen={preferencesOpen}
+            setPreferencesOpen={setPreferencesOpen}
+            setShowFpsCounter={setShowFpsCounter}
+            setShowPingLatency={setShowPingLatency}
+            setPrefsEnableUpnp={setPrefsEnableUpnp}
+            setDisplayName={setDisplayName}
+            setAccentColor={setAccentColor}
+            setHostPort={setHostPort}
+            rotateDialogOpen={rotateDialogOpen}
+            setRotateDialogOpen={setRotateDialogOpen}
+            rotateDialogAxis={rotateDialogAxis}
+            setRotateDialogAxis={setRotateDialogAxis}
+            rotateDialogDegrees={rotateDialogDegrees}
+            setRotateDialogDegrees={setRotateDialogDegrees}
+            scaleDialogOpen={scaleDialogOpen}
+            setScaleDialogOpen={setScaleDialogOpen}
+            scaleDialogFactor={scaleDialogFactor}
+            setScaleDialogFactor={setScaleDialogFactor}
+            newProjectOpen={newProjectOpen}
+            setNewProjectOpen={setNewProjectOpen}
+            newGridSize={newGridSize}
+            setNewGridSize={setNewGridSize}
+            newGridShape={newGridShape}
+            setNewGridShape={setNewGridShape}
+            createNewProject={createNewProject}
+            pointerTestOpen={pointerTestOpen}
+            setPointerTestOpen={setPointerTestOpen}
+          />
 
-      {/* ── Start-screen mascot overlays ─────────────────────────────────────
+          {/* ── Start-screen mascot overlays ─────────────────────────────────────
            Invisible click-detection div positioned over the GPU-rendered seagull. */}
-      {showStartScreen && mascotsLoaded && (
-        <MascotView
-          id={0}
-          rect={mascotRect}
-          visible={showStartScreen}
-          onClick={handleMascotClick}
-        />
-      )}
+          {showStartScreen && mascotsLoaded && (
+            <MascotView
+              id={0}
+              rect={mascotRect}
+              visible={showStartScreen}
+              onClick={handleMascotClick}
+            />
+          )}
 
-      {/* ── Speech bubble click-capture overlays ─────────────────────────────
+          {/* ── Speech bubble click-capture overlays ─────────────────────────────
            GPU renders the actual bubble shapes; these divs only capture clicks. */}
-      <SpeechBubbleOverlay bubbles={speechBubbles} />
+          <SpeechBubbleOverlay bubbles={speechBubbles} />
 
-      <GameHUD
-        radialMenu={radialMenu}
-        onRadialSelect={onRadialSelect}
-        gamepad={gamepad}
-        virtualCursorElRef={virtualCursorElRef}
-        pingHudRef={pingHudRef}
-        pingHudTick={pingHudTick}
-      />
-    </div>
-    </CollabContext.Provider>
+          <GameHUD
+            radialMenu={radialMenu}
+            onRadialSelect={onRadialSelect}
+            gamepad={gamepad}
+            virtualCursorElRef={virtualCursorElRef}
+            pingHudRef={pingHudRef}
+            pingHudTick={pingHudTick}
+          />
+        </div>
+      </CollabContext.Provider>
     </ToolStateContext.Provider>
   );
 }

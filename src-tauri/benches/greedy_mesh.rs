@@ -214,6 +214,112 @@ fn bench_grid_border_lines(c: &mut Criterion) {
     group.finish();
 }
 
+/// Build a hollow box (1-voxel-thick shell) — more realistic than a solid box
+/// for typical user models in the 500–2000 voxel range.
+fn hollow_box(edge: i32, color: u32) -> Vec<Voxel> {
+    let e = edge.max(3);
+    let mut voxels = Vec::new();
+    for z in 0..e {
+        for y in 0..e {
+            for x in 0..e {
+                let on_surface =
+                    x == 0 || x == e - 1 || y == 0 || y == e - 1 || z == 0 || z == e - 1;
+                if on_surface {
+                    voxels.push(Voxel {
+                        x,
+                        y,
+                        z,
+                        color,
+                        material: MaterialId::Plastic,
+                        object_id: 0,
+                    });
+                }
+            }
+        }
+    }
+    voxels
+}
+
+/// Build a hollow box with alternating colors per face to stress per-bucket logic
+/// (every face bucket is different, defeating greedy merge across colors).
+fn hollow_box_multicolor(edge: i32) -> Vec<Voxel> {
+    let e = edge.max(3);
+    let mut voxels = Vec::new();
+    let colors = [
+        0xff4444u32,
+        0x44ff44,
+        0x4444ff,
+        0xffff44,
+        0xff44ff,
+        0x44ffff,
+    ];
+    for z in 0..e {
+        for y in 0..e {
+            for x in 0..e {
+                let on_surface =
+                    x == 0 || x == e - 1 || y == 0 || y == e - 1 || z == 0 || z == e - 1;
+                if on_surface {
+                    let face = if z == 0 {
+                        0
+                    } else if z == e - 1 {
+                        1
+                    } else if y == 0 {
+                        2
+                    } else if y == e - 1 {
+                        3
+                    } else if x == 0 {
+                        4
+                    } else {
+                        5
+                    };
+                    voxels.push(Voxel {
+                        x,
+                        y,
+                        z,
+                        color: colors[face],
+                        material: MaterialId::Plastic,
+                        object_id: 0,
+                    });
+                }
+            }
+        }
+    }
+    voxels
+}
+
+/// Benchmarks at sizes that straddle the off-thread meshing thresholds
+/// (OFF_THREAD_GREEDY_MESH_MIN_VOXELS = 2_000, proposed new value = 500).
+/// These establish the baseline for validating the threshold change.
+fn bench_threshold_sizes(c: &mut Criterion) {
+    // 10³ outer - 8³ inner = 488 voxels  (below old threshold, above proposed 500 — edge case)
+    let v_490 = hollow_box(10, 0x8899aa);
+    // 14³ outer - 12³ inner = 1016 voxels (between proposed 500 and old 2000)
+    let v_1k = hollow_box(14, 0x8899aa);
+    // 20³ outer - 18³ inner = 2168 voxels (just above old threshold)
+    let v_2k = hollow_box(20, 0x8899aa);
+    // Multicolor variants (worst-case per-bucket overhead)
+    let v_1k_mc = hollow_box_multicolor(14);
+    let v_2k_mc = hollow_box_multicolor(20);
+
+    let mut group = c.benchmark_group("greedy_mesh threshold sizes");
+    group.bench_function("~490 voxels hollow (mono)", |b| {
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v_490), black_box(NO_OBJECTS)))
+    });
+    group.bench_function("~1k voxels hollow (mono)", |b| {
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v_1k), black_box(NO_OBJECTS)))
+    });
+    group.bench_function("~2k voxels hollow (mono)", |b| {
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v_2k), black_box(NO_OBJECTS)))
+    });
+    group.bench_function("~1k voxels hollow (multicolor)", |b| {
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v_1k_mc), black_box(NO_OBJECTS)))
+    });
+    group.bench_function("~2k voxels hollow (multicolor)", |b| {
+        b.iter(|| greedy_mesh::build_greedy_mesh(black_box(&v_2k_mc), black_box(NO_OBJECTS)))
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_full_mesh,
@@ -224,5 +330,6 @@ criterion_group!(
     bench_dirty_chunk_remesh,
     bench_mesh_bounds,
     bench_grid_border_lines,
+    bench_threshold_sizes,
 );
 criterion_main!(benches);

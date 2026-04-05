@@ -156,9 +156,7 @@ export function InspectorSidebar({
                       <span className="inspector-copy-invite-label">
                         {hostingCopied ? "Copied!" : "Copy invite link"}
                       </span>
-                      <code className="inspector-copy-invite-url">
-                        {hostWanUrl ?? hostWsUrl}
-                      </code>
+                      <code className="inspector-copy-invite-url">{hostWanUrl ?? hostWsUrl}</code>
                     </button>
                     {hostWanUrl ? (
                       <p className="collab-hint inspector-collab-hint">
@@ -178,8 +176,8 @@ export function InspectorSidebar({
                         className="collab-hint collab-hint-warn inspector-collab-hint"
                         role="alert"
                       >
-                        {natError} You can forward port {hostPort} in your router settings.
-                        Some networks won&apos;t allow guests over the internet.
+                        {natError} You can forward port {hostPort} in your router settings. Some
+                        networks won&apos;t allow guests over the internet.
                       </p>
                     ) : null}
                   </>
@@ -197,9 +195,7 @@ export function InspectorSidebar({
                         <span
                           className="collab-swatch"
                           style={{
-                            background: `#${(r.colorRgb & 0xffffff)
-                              .toString(16)
-                              .padStart(6, "0")}`,
+                            background: `#${(r.colorRgb & 0xffffff).toString(16).padStart(6, "0")}`,
                           }}
                         />
                         {r.displayName}

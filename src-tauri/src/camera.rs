@@ -168,9 +168,16 @@ impl OrbitCamera {
 
     /// FPS-style mouse look: yaw around world +Y, then pitch around camera right — pivot at **eye**,
     /// so you turn where you look instead of orbiting a fixed point in space (`rotate_screen`).
-    pub fn fly_look_rotate_screen(&mut self, dx: f32, dy: f32, _viewport_height_px: f32) {
+    pub fn fly_look_rotate_screen(
+        &mut self,
+        dx: f32,
+        dy: f32,
+        _viewport_height_px: f32,
+        sensitivity_mult: f32,
+    ) {
         // Fixed FPS sensitivity: radians per pixel, resolution-independent.
-        let sensitivity = FLY_LOOK_SENSITIVITY / FLY_LOOK_PIXELS_PER_RADIAN;
+        let sensitivity =
+            FLY_LOOK_SENSITIVITY * sensitivity_mult.clamp(0.01, 100.0) / FLY_LOOK_PIXELS_PER_RADIAN;
         let yaw = -dx * sensitivity;
         let pitch = dy * sensitivity;
 

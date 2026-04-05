@@ -381,7 +381,8 @@ pub(crate) fn load_voxelle_recovery(
     args: LoadVoxelleRecoveryArgs,
 ) -> Result<(), String> {
     state
-        .gpu.start_screen_logo_transparent
+        .gpu
+        .start_screen_logo_transparent
         .store(false, Ordering::Release);
     let read_from = PathBuf::from(&args.autosave_path);
     if !read_from.is_file() {
@@ -400,7 +401,8 @@ pub(crate) fn load_voxelle_path(
     path: String,
 ) -> Result<(), String> {
     state
-        .gpu.start_screen_logo_transparent
+        .gpu
+        .start_screen_logo_transparent
         .store(false, Ordering::Release);
     let p = std::path::PathBuf::from(&path);
     *state.file.file_label.lock() = path.clone();
@@ -630,7 +632,8 @@ pub(crate) fn close_project_dialog(app: AppHandle, state: Arc<ViewerState>) {
 
     // Nothing to close — already on the start screen.
     if !state
-        .cam.active_project
+        .cam
+        .active_project
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         return;

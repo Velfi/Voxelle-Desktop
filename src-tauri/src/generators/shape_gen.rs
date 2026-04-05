@@ -257,7 +257,10 @@ mod tests {
         let r = (size - 1) as f64 * 0.5;
         for &(x, y, z) in &positions {
             let d2 = (x as f64).powi(2) + (y as f64).powi(2) + (z as f64).powi(2);
-            assert!(d2 <= r * r + 1e-6, "voxel ({x},{y},{z}) outside sphere r={r}");
+            assert!(
+                d2 <= r * r + 1e-6,
+                "voxel ({x},{y},{z}) outside sphere r={r}"
+            );
         }
     }
 }

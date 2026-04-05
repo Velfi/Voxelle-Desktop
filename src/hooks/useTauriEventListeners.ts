@@ -105,6 +105,7 @@ export interface UseTauriEventListenersParams {
   setSelectionCombineMode: React.Dispatch<React.SetStateAction<SelectionCombineModeApi>>;
   setRotateDialogOpen: React.Dispatch<React.SetStateAction<boolean>>;
   setScaleDialogOpen: React.Dispatch<React.SetStateAction<boolean>>;
+  setPointerTestOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 /**
@@ -174,6 +175,7 @@ export function useTauriEventListeners(params: UseTauriEventListenersParams): vo
     setSelectionCombineMode,
     setRotateDialogOpen,
     setScaleDialogOpen,
+    setPointerTestOpen,
   } = params;
 
   useEffect(() => {
@@ -559,6 +561,9 @@ export function useTauriEventListeners(params: UseTauriEventListenersParams): vo
       }),
       listen("voxelle-menu-scale-selection", () => {
         setScaleDialogOpen(true);
+      }),
+      listen("voxelle-debug-pointer-test", () => {
+        setPointerTestOpen(true);
       }),
     ]).then((unlisteners) => {
       if (!active) {

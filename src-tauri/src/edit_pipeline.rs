@@ -34,9 +34,9 @@ pub(crate) fn work_progress_for_voxel_refresh(
 }
 
 /// Full greedy rebuild CPU prep runs off-thread above these thresholds (viewer lock released during prep).
-const OFF_THREAD_GREEDY_MESH_MIN_VOXELS: usize = 2_000;
-const OFF_THREAD_GREEDY_MESH_MIN_DELTAS: usize = 500;
-const OFF_THREAD_SMOOTH_MESH_MIN_VOXELS: usize = 4_000;
+const OFF_THREAD_GREEDY_MESH_MIN_VOXELS: usize = 500;
+const OFF_THREAD_GREEDY_MESH_MIN_DELTAS: usize = 100;
+const OFF_THREAD_SMOOTH_MESH_MIN_VOXELS: usize = 1_500;
 /// Incremental remesh releases the viewer mutex between batches so the render loop can present.
 const INCREMENTAL_REMESH_KEY_BATCH: usize = 8;
 
@@ -254,7 +254,11 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
         if nv >= OFF_THREAD_SMOOTH_MESH_MIN_VOXELS {
             let voxels = file.voxels.clone();
             let rm_copy = rm;
-            let token = state.gpu.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            let token = state
+                .gpu
+                .mesh_refresh_generation
+                .fetch_add(1, Ordering::SeqCst)
+                + 1;
             let app_thread = app.clone();
             let show_work_thread = show_work;
             drop(fg);
@@ -454,7 +458,11 @@ pub(crate) fn finish_voxel_edit_gpu_deltas<R: Runtime>(
                 let grid_size = file.grid_size;
                 let voxels = file.voxels.clone();
                 let objects = file.objects.clone();
-                let token = state.gpu.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+                let token = state
+                    .gpu
+                    .mesh_refresh_generation
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1;
                 drop(fg);
                 drop(v);
                 let prepared_result =
@@ -648,7 +656,11 @@ enum OpaqueRefreshWork {
 
 /// Heavy CPU mesh work runs on a side thread; GPU upload runs on the main thread via [`AppHandle::run_on_main_thread`].
 pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHandle) {
-    let token = state.gpu.mesh_refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let token = state
+        .gpu
+        .mesh_refresh_generation
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
     let state_c = Arc::clone(state);
     let app = app.clone();
     let file = (*state.file.current_file.lock()).clone();
@@ -681,7 +693,13 @@ pub(crate) fn schedule_opaque_mesh_refresh(state: &Arc<ViewerState>, app: &AppHa
                 };
                 let is_stale = {
                     let state_check = Arc::clone(&state_c);
-                    move || state_check.gpu.mesh_refresh_generation.load(Ordering::Relaxed) != token
+                    move || {
+                        state_check
+                            .gpu
+                            .mesh_refresh_generation
+                            .load(Ordering::Relaxed)
+                            != token
+                    }
                 };
                 let mesh = match rm {
                     RenderingMode::MarchingCubes => {

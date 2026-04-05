@@ -646,7 +646,8 @@ fn extrude_gizmo_preview_inner(
     color: u32,
     material: &str,
 ) -> Result<(), String> {
-    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> = state.selection.selection_cells.lock().clone();
+    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
+        state.selection.selection_cells.lock().clone();
     if selection.is_empty() {
         return Ok(());
     }
@@ -727,7 +728,8 @@ fn extrude_gizmo_preview_inner(
         }
     }
     state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .store(true, Ordering::Relaxed);
     let instanced = {
         let fg = state.file.current_file.lock();
@@ -844,7 +846,10 @@ pub(crate) async fn selection_stroke_at_screen(
                     }
                 }
                 _ => {
-                    state.file.fill_operation_cancel.store(false, Ordering::Relaxed);
+                    state
+                        .file
+                        .fill_operation_cancel
+                        .store(false, Ordering::Relaxed);
                     emit_work_progress(&app, 0.08, "Selection fill…");
                     tokio::task::yield_now().await;
                     let state_cl = Arc::clone(state.inner());
@@ -1280,7 +1285,10 @@ pub(crate) fn gizmo_hit_test(
     dpr: f32,
 ) -> bool {
     let Some(proj) = compute_gizmo_proj(&state) else {
-        state.gizmos.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+        state
+            .gizmos
+            .hovered_gizmo_axis
+            .store(255, Ordering::Relaxed);
         return false;
     };
     // Check scale ring hover.
@@ -1291,27 +1299,40 @@ pub(crate) fn gizmo_hit_test(
         let cursor_dist = dx.hypot(dy);
         let ring_screen_r = radius * proj.px_per_world;
         if (cursor_dist - ring_screen_r).abs() <= ring_hit {
-            state.gizmos.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+            state
+                .gizmos
+                .hovered_gizmo_axis
+                .store(255, Ordering::Relaxed);
             return true;
         }
     }
     match gizmo_hit_test_inner(&proj, sx, sy, dpr) {
         Some(SelectionGizmoDrag::Move { world_axis, .. }) => {
             state
-                .gizmos.hovered_gizmo_axis
+                .gizmos
+                .hovered_gizmo_axis
                 .store(world_axis, Ordering::Relaxed);
             true
         }
         Some(SelectionGizmoDrag::Rotate { ring, .. }) => {
-            state.gizmos.hovered_gizmo_axis.store(ring, Ordering::Relaxed);
+            state
+                .gizmos
+                .hovered_gizmo_axis
+                .store(ring, Ordering::Relaxed);
             true
         }
         Some(SelectionGizmoDrag::Scale { .. }) => {
-            state.gizmos.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+            state
+                .gizmos
+                .hovered_gizmo_axis
+                .store(255, Ordering::Relaxed);
             true
         }
         Some(SelectionGizmoDrag::None) | None => {
-            state.gizmos.hovered_gizmo_axis.store(255, Ordering::Relaxed);
+            state
+                .gizmos
+                .hovered_gizmo_axis
+                .store(255, Ordering::Relaxed);
             false
         }
     }
@@ -1419,19 +1440,26 @@ pub(crate) fn extrude_gizmo_hit_test(
     dpr: f32,
 ) -> bool {
     let Some(proj) = compute_gizmo_proj(&state) else {
-        state.gizmos.hovered_extrude_axis.store(255, Ordering::Relaxed);
+        state
+            .gizmos
+            .hovered_extrude_axis
+            .store(255, Ordering::Relaxed);
         return false;
     };
     let move_hit_sq = (GIZMO_MOVE_HIT_CSS * dpr).powi(2);
     for (i, h) in proj.move_handles.iter().enumerate() {
         if (sx - h.sx).powi(2) + (sy - h.sy).powi(2) <= move_hit_sq {
             state
-                .gizmos.hovered_extrude_axis
+                .gizmos
+                .hovered_extrude_axis
                 .store((i / 2) as u8, Ordering::Relaxed);
             return true;
         }
     }
-    state.gizmos.hovered_extrude_axis.store(255, Ordering::Relaxed);
+    state
+        .gizmos
+        .hovered_extrude_axis
+        .store(255, Ordering::Relaxed);
     false
 }
 
@@ -1590,7 +1618,11 @@ pub(crate) fn selection_delete_selected_voxels(
     let stroke_on = *state.file.stroke_active.lock();
     let n = deltas.len() as u32;
     if stroke_on {
-        state.file.stroke_buffer.lock().extend(deltas.iter().copied());
+        state
+            .file
+            .stroke_buffer
+            .lock()
+            .extend(deltas.iter().copied());
         return Ok(n);
     }
 

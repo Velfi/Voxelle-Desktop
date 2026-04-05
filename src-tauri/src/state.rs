@@ -576,6 +576,13 @@ pub struct CameraState {
     pub(crate) walk_physics: Mutex<camera::WalkPhysicsState>,
     /// Previous [`Instant`] for walk physics dt.
     pub(crate) walk_last_physics: Mutex<Option<Instant>>,
+    /// When true, each `MainEventsCleared` polls `CGGetLastMouseDelta` (macOS) and applies the
+    /// delta to the camera. Set while Tauri cursor grab is active — grab hides the cursor but
+    /// freezes the OS position so WKWebView `pointermove` deltas are 0. On non-macOS platforms
+    /// this flag has no effect (pointer lock works there, deltas come via JS).
+    pub native_look_active: AtomicBool,
+    /// User-configurable fly/walk mouselook sensitivity multiplier (0.1–5.0, default 1.0).
+    pub mouselook_sensitivity: Mutex<f32>,
 }
 
 /// File / document state: the loaded model, voxel spatial index, undo/redo stacks,

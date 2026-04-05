@@ -265,7 +265,11 @@ pub(crate) fn voxel_sculpt_stroke_at_screen(
     )?;
     let stroke_on = *state.file.stroke_active.lock();
     if stroke_on {
-        state.file.stroke_buffer.lock().extend(deltas.iter().copied());
+        state
+            .file
+            .stroke_buffer
+            .lock()
+            .extend(deltas.iter().copied());
         return Ok(true);
     }
     let cm = Arc::clone(&state.collab);
@@ -585,14 +589,16 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
         if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
-                .file.stroke_preview_suppresses_hover
+                .file
+                .stroke_preview_suppresses_hover
                 .store(false, Ordering::Relaxed);
         } else {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
             *state.gpu.preview_overlay_cache_key.lock() = None;
             state
-                .file.stroke_preview_suppresses_hover
+                .file
+                .stroke_preview_suppresses_hover
                 .store(true, Ordering::Relaxed);
         }
     }
@@ -785,7 +791,8 @@ pub(crate) fn extrude_ray_preview(
     }
 
     state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .store(true, Ordering::Relaxed);
 
     // Generate and upload preview mesh.
@@ -853,7 +860,8 @@ pub(crate) fn selection_extrude_preview(
         }
     }
 
-    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> = state.selection.selection_cells.lock().clone();
+    let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
+        state.selection.selection_cells.lock().clone();
     if selection.is_empty() {
         return Ok(());
     }
@@ -950,7 +958,8 @@ pub(crate) fn selection_extrude_preview(
     }
 
     state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .store(true, Ordering::Relaxed);
 
     // Generate and upload preview mesh.

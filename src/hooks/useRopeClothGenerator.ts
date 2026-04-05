@@ -1,8 +1,9 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
 import type { ClothGravityDirectionId } from "../types";
 import { sculptBrushShapeToRust } from "../constants";
+import { useLatestRef } from "./useLatestRef";
 
 interface RopeClothGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
@@ -64,19 +65,9 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
   const [ropeBrushRadiusIndex, setRopeBrushRadiusIndex] = useState(2);
   const [ropeBrushShapeUi, setRopeBrushShapeUi] = useState<"sphere" | "cube">("sphere");
 
-  const clothGravityDirectionRef = useRef(clothGravityDirection);
-  const ropeBrushRadiusIndexRef = useRef(ropeBrushRadiusIndex);
-  const ropeBrushShapeUiRef = useRef<"sphere" | "cube">(ropeBrushShapeUi);
-
-  useEffect(() => {
-    clothGravityDirectionRef.current = clothGravityDirection;
-  }, [clothGravityDirection]);
-  useEffect(() => {
-    ropeBrushRadiusIndexRef.current = ropeBrushRadiusIndex;
-  }, [ropeBrushRadiusIndex]);
-  useEffect(() => {
-    ropeBrushShapeUiRef.current = ropeBrushShapeUi;
-  }, [ropeBrushShapeUi]);
+  const clothGravityDirectionRef = useLatestRef(clothGravityDirection);
+  const ropeBrushRadiusIndexRef = useLatestRef(ropeBrushRadiusIndex);
+  const ropeBrushShapeUiRef = useLatestRef(ropeBrushShapeUi);
 
   // -- Rope state -------------------------------------------------------------
   const [ropeFirstScreen, setRopeFirstScreen] = useState<{ nx: number; ny: number } | null>(null);
@@ -84,26 +75,14 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
   const [ropeSag, _setRopeSag] = useState(2.5);
   const [ropeTension, setRopeTension] = useState(0.5);
 
-  const ropeFirstScreenRef = useRef<{ nx: number; ny: number } | null>(null);
-  const ropeFirstVoxelRef = useRef<[number, number, number] | null>(null);
-  const ropeSagRef = useRef(ropeSag);
-  const ropeTensionRef = useRef(ropeTension);
-
-  useEffect(() => {
-    ropeFirstScreenRef.current = ropeFirstScreen;
-  }, [ropeFirstScreen]);
-  useEffect(() => {
-    ropeFirstVoxelRef.current = ropeFirstVoxel;
-  }, [ropeFirstVoxel]);
-  useEffect(() => {
-    ropeSagRef.current = ropeSag;
-  }, [ropeSag]);
-  useEffect(() => {
-    ropeTensionRef.current = ropeTension;
-  }, [ropeTension]);
+  const ropeFirstScreenRef = useLatestRef(ropeFirstScreen);
+  const ropeFirstVoxelRef = useLatestRef(ropeFirstVoxel);
+  const ropeSagRef = useLatestRef(ropeSag);
+  const ropeTensionRef = useLatestRef(ropeTension);
 
   // -- Cloth state ------------------------------------------------------------
   const [clothPins, setClothPins] = useState<[number, number, number][]>([]);
+  // clothPinsRef is mutated directly in handlers for immediate consistency.
   const clothPinsRef = useRef<[number, number, number][]>([]);
   const [clothTension, setClothTension] = useState(0.5);
   const [clothSimGravityPct, setClothSimGravityPct] = useState(100);
@@ -111,30 +90,11 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
   const [clothSimIterations, setClothSimIterations] = useState(0);
   const [clothSimConstraintPasses, setClothSimConstraintPasses] = useState(2);
 
-  const clothTensionRef = useRef(clothTension);
-  const clothSimGravityPctRef = useRef(clothSimGravityPct);
-  const clothSimStiffnessPctRef = useRef(clothSimStiffnessPct);
-  const clothSimIterationsRef = useRef(clothSimIterations);
-  const clothSimConstraintPassesRef = useRef(clothSimConstraintPasses);
-
-  useEffect(() => {
-    clothPinsRef.current = clothPins;
-  }, [clothPins]);
-  useEffect(() => {
-    clothTensionRef.current = clothTension;
-  }, [clothTension]);
-  useEffect(() => {
-    clothSimGravityPctRef.current = clothSimGravityPct;
-  }, [clothSimGravityPct]);
-  useEffect(() => {
-    clothSimStiffnessPctRef.current = clothSimStiffnessPct;
-  }, [clothSimStiffnessPct]);
-  useEffect(() => {
-    clothSimIterationsRef.current = clothSimIterations;
-  }, [clothSimIterations]);
-  useEffect(() => {
-    clothSimConstraintPassesRef.current = clothSimConstraintPasses;
-  }, [clothSimConstraintPasses]);
+  const clothTensionRef = useLatestRef(clothTension);
+  const clothSimGravityPctRef = useLatestRef(clothSimGravityPct);
+  const clothSimStiffnessPctRef = useLatestRef(clothSimStiffnessPct);
+  const clothSimIterationsRef = useLatestRef(clothSimIterations);
+  const clothSimConstraintPassesRef = useLatestRef(clothSimConstraintPasses);
 
   // -- Rope phase -------------------------------------------------------------
   const ropePhase = useStrokePhase<{

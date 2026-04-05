@@ -19,18 +19,18 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     edits::{
-        broadcast_roster_to_guests, check_can_edit, host_remove_peer_from_session,
-        touch_guest_activity, broadcast_edit_binary, decode_client_edit_binary,
-        decode_host_edit_binary,
+        broadcast_edit_binary, broadcast_roster_to_guests, check_can_edit,
+        decode_client_edit_binary, decode_host_edit_binary, host_remove_peer_from_session,
+        touch_guest_activity,
     },
     presence::record_ping_flash,
     ClientOutgoing, ClientToHost, CollabHostStartResponse, CollabInboxItem, CollabNatResult,
-    CollabPeerLeftKind, CollabRole, CollabRuntime, HostToClient, RosterEntry,
-    BROADCAST_CAPACITY, CAMERA_BROADCAST_MIN_INTERVAL, CLIENT_HEARTBEAT_INTERVAL,
-    CLIENT_HOST_SILENCE_TIMEOUT, CLIENT_JOIN_TIMEOUT, CLIENT_LATENCY_PROBE_INTERVAL,
-    GUEST_ACTIVITY_CHECK_INTERVAL, GUEST_ACTIVITY_TIMEOUT, GUEST_TIMEOUT_KICK_REASON,
-    HOST_KEEPALIVE_INTERVAL, HOST_PEER_ID, MAX_AVATAR_FILE_BYTES, SNAPSHOT_CHUNK_SIZE,
-    SNAPSHOT_CHUNK_THRESHOLD, UPNP_LEASE_SECS, UPNP_RENEW_INTERVAL,
+    CollabPeerLeftKind, CollabRole, CollabRuntime, HostToClient, RosterEntry, BROADCAST_CAPACITY,
+    CAMERA_BROADCAST_MIN_INTERVAL, CLIENT_HEARTBEAT_INTERVAL, CLIENT_HOST_SILENCE_TIMEOUT,
+    CLIENT_JOIN_TIMEOUT, CLIENT_LATENCY_PROBE_INTERVAL, GUEST_ACTIVITY_CHECK_INTERVAL,
+    GUEST_ACTIVITY_TIMEOUT, GUEST_TIMEOUT_KICK_REASON, HOST_KEEPALIVE_INTERVAL, HOST_PEER_ID,
+    MAX_AVATAR_FILE_BYTES, SNAPSHOT_CHUNK_SIZE, SNAPSHOT_CHUNK_THRESHOLD, UPNP_LEASE_SECS,
+    UPNP_RENEW_INTERVAL,
 };
 
 type WsTcp = WebSocketStream<TcpStream>;
@@ -861,9 +861,7 @@ pub fn start_host<R: Runtime>(
         }
         let mut next_peer: u32 = 2;
         while !sd.load(Ordering::SeqCst) {
-            let acc =
-                tokio::time::timeout(Duration::from_millis(400), listener.accept())
-                    .await;
+            let acc = tokio::time::timeout(Duration::from_millis(400), listener.accept()).await;
             let Ok(Ok((stream, _))) = acc else {
                 continue;
             };
@@ -1164,7 +1162,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                         let _ = seq;
                         let local = cm4.lock().local_peer_id;
                         if peer_id != local {
-                            st4.file.collab_edit_inbox
+                            st4.file
+                                .collab_edit_inbox
                                 .lock()
                                 .push_back(CollabInboxItem::Edit { peer_id, deltas });
                         }
@@ -1201,7 +1200,8 @@ pub async fn client_connect_blocking<R: Runtime>(
                                 if peer_id == local {
                                     continue;
                                 }
-                                st4.file.collab_edit_inbox
+                                st4.file
+                                    .collab_edit_inbox
                                     .lock()
                                     .push_back(CollabInboxItem::Edit { peer_id, deltas });
                             }

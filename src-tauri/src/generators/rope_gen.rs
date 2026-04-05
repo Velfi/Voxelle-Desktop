@@ -214,7 +214,10 @@ mod tests {
         let sag = 5.0;
         let arc = catenary_voxel_arc(a, b, sag, 16, "down");
         let min_y = arc.iter().map(|c| c.1).min().unwrap();
-        assert!(min_y < 10, "expected arc to dip below y=10, got min_y={min_y}");
+        assert!(
+            min_y < 10,
+            "expected arc to dip below y=10, got min_y={min_y}"
+        );
     }
 
     #[test]

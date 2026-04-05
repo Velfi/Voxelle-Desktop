@@ -1224,6 +1224,13 @@ pub(crate) fn squishy_session_set_mode(
         "delete" => generators::SquishyMode::Delete,
         _ => generators::SquishyMode::Add,
     };
+    // Gizmo only relevant in pick/edit mode — clear it when switching away.
+    if g.mode != generators::SquishyMode::Edit {
+        g.selected_id = None;
+        drop(g);
+        *state.gizmos.generator_gizmo_center.lock() = None;
+        *state.gizmos.generator_gizmo_ring_radius.lock() = None;
+    }
     Ok(())
 }
 
@@ -1315,7 +1322,13 @@ pub(crate) fn squishy_metaball_remove(
     args: SquishyMetaballIdArgs,
 ) -> Result<bool, String> {
     let mut g = state.gizmos.squishy_session.lock();
-    Ok(g.remove_ball(args.id))
+    let was_selected = g.selected_id == Some(args.id);
+    let removed = g.remove_ball(args.id);
+    if removed && was_selected {
+        *state.gizmos.generator_gizmo_center.lock() = None;
+        *state.gizmos.generator_gizmo_ring_radius.lock() = None;
+    }
+    Ok(removed)
 }
 
 #[derive(serde::Deserialize)]
@@ -1331,6 +1344,22 @@ pub(crate) fn squishy_metaball_select(
 ) -> Result<(), String> {
     let mut g = state.gizmos.squishy_session.lock();
     g.selected_id = args.id;
+    // Only show the gizmo in pick/edit mode.
+    if g.mode == generators::SquishyMode::Edit {
+        if let Some(id) = args.id {
+            if let Some(ball) = g.balls.iter().find(|b| b.id == id) {
+                *state.gizmos.generator_gizmo_center.lock() = Some([
+                    ball.x as f32 + 0.5,
+                    ball.y as f32 + 0.5,
+                    ball.z as f32 + 0.5,
+                ]);
+                *state.gizmos.generator_gizmo_ring_radius.lock() = Some(ball.radius);
+            }
+        } else {
+            *state.gizmos.generator_gizmo_center.lock() = None;
+            *state.gizmos.generator_gizmo_ring_radius.lock() = None;
+        }
+    }
     Ok(())
 }
 
@@ -1338,7 +1367,10 @@ pub(crate) fn squishy_metaball_select(
 pub(crate) fn squishy_session_clear(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
     let mut g = state.gizmos.squishy_session.lock();
     g.clear();
+    drop(g);
     *state.gizmos.squishy_gizmo_drag.lock() = None;
+    *state.gizmos.generator_gizmo_center.lock() = None;
+    *state.gizmos.generator_gizmo_ring_radius.lock() = None;
     Ok(())
 }
 
@@ -1374,7 +1406,10 @@ pub(crate) fn squishy_session_commit(
     commit_voxel_edits(&state, &app, deltas)?;
     let mut g = state.gizmos.squishy_session.lock();
     g.clear();
+    drop(g);
     *state.gizmos.squishy_gizmo_drag.lock() = None;
+    *state.gizmos.generator_gizmo_center.lock() = None;
+    *state.gizmos.generator_gizmo_ring_radius.lock() = None;
     Ok(true)
 }
 
@@ -1463,6 +1498,17 @@ pub(crate) fn squishy_gizmo_pointer_move(
     let mut sg = state.gizmos.squishy_session.lock();
     let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
     generators::squishy_gizmo_apply_drag(&mut sg, &cam, w, h, sx, sy, &drag);
+    // Keep shared gizmo center/ring in sync with the moved/resized ball.
+    if let Some(id) = sg.selected_id {
+        if let Some(ball) = sg.balls.iter().find(|b| b.id == id) {
+            *state.gizmos.generator_gizmo_center.lock() = Some([
+                ball.x as f32 + 0.5,
+                ball.y as f32 + 0.5,
+                ball.z as f32 + 0.5,
+            ]);
+            *state.gizmos.generator_gizmo_ring_radius.lock() = Some(ball.radius);
+        }
+    }
     wake_viewport_loop(&app);
     Ok(())
 }
@@ -1470,6 +1516,66 @@ pub(crate) fn squishy_gizmo_pointer_move(
 #[tauri::command]
 pub(crate) fn squishy_gizmo_pointer_up(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
     *state.gizmos.squishy_gizmo_drag.lock() = None;
+    Ok(())
+}
+
+/// During an add-drag, resize the ball so its radius equals the world-space
+/// distance from the ball center to the cursor projected onto the camera plane.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SquishyAddResizeArgs {
+    ball_id: u32,
+    nx: f32,
+    ny: f32,
+}
+
+#[tauri::command]
+pub(crate) fn squishy_add_drag_resize(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: SquishyAddResizeArgs,
+) -> Result<(), String> {
+    let (w, h) = {
+        let v = state.gpu.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let cam = state.cam.camera.lock();
+    let mut sg = state.gizmos.squishy_session.lock();
+    let Some(ball) = sg.balls.iter().find(|b| b.id == args.ball_id) else {
+        return Ok(());
+    };
+    let center = glam::Vec3::new(
+        ball.x as f32 + 0.5,
+        ball.y as f32 + 0.5,
+        ball.z as f32 + 0.5,
+    );
+    // Project cursor onto the camera plane passing through the ball center.
+    let eye = cam.smooth_eye();
+    let plane_n = (center - eye).normalize();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let (ro, rd) = voxel_edit::screen_to_world_ray(&cam, w, h, sx, sy);
+    let ro = glam::Vec3::new(ro.x, ro.y, ro.z);
+    let rd = glam::Vec3::new(rd.x, rd.y, rd.z).normalize();
+    let denom = rd.dot(plane_n);
+    if denom.abs() < 1e-6 {
+        return Ok(());
+    }
+    let t = (center - ro).dot(plane_n) / denom;
+    if t <= 0.0 {
+        return Ok(());
+    }
+    let world_cursor = ro + rd * t;
+    let radius = (world_cursor - center).length().clamp(0.5, 64.0);
+    let ball = sg.balls.iter().find(|b| b.id == args.ball_id).unwrap();
+    let (bx, by, bz) = (ball.x, ball.y, ball.z);
+    sg.set_ball_transform(args.ball_id, bx, by, bz, radius);
+    drop(sg);
+    drop(cam);
+    wake_viewport_loop(&app);
     Ok(())
 }
 

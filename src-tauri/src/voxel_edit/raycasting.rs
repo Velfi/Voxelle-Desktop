@@ -9,7 +9,6 @@ use crate::voxelle::VoxelleFile;
 use ahash::{AHashMap, AHashSet};
 use glam::{Mat4, Vec3, Vec4};
 
-
 pub fn screen_to_world_ray(
     camera: &OrbitCamera,
     width: f32,

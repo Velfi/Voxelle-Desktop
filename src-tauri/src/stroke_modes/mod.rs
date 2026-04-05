@@ -210,11 +210,11 @@ pub fn stroke_anchor_centers_with_mode(
 mod tests {
     use super::*;
     use anchors::{
-        axis_aligned_cuboid_from_plane, axis_aligned_cylinder_from_plane,
-        disk_in_axis_plane, fill_axis_aligned_plane_rectangle, flip_depth_anchor_if_needed,
+        axis_aligned_cuboid_from_plane, axis_aligned_cylinder_from_plane, disk_in_axis_plane,
+        fill_axis_aligned_plane_rectangle, flip_depth_anchor_if_needed,
     };
     use polygon::fill_non_coplanar_convex_hull_voxels;
-    use polygon::{fill_polygon_axis_aligned};
+    use polygon::fill_polygon_axis_aligned;
 
     #[test]
     fn disk_radius_0_single() {

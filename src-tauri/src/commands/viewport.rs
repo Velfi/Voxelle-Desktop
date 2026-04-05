@@ -149,7 +149,8 @@ pub(crate) fn viewport_pointer(
                 match ev.kind.as_str() {
                     "down" | "move" => {
                         state
-                            .cam.camera_dragging
+                            .cam
+                            .camera_dragging
                             .store(ev.buttons != 0, Ordering::Relaxed);
                         logo.update_mouse_ndc(x, y, vw, vh);
                         if ev.buttons & 1 != 0 && !ev.shift_key {
@@ -176,7 +177,8 @@ pub(crate) fn viewport_pointer(
         match ev.kind.as_str() {
             "down" | "move" => {
                 state
-                    .cam.camera_dragging
+                    .cam
+                    .camera_dragging
                     .store(ev.buttons != 0, Ordering::Relaxed);
                 // bitmask: 1=left orbit (or shift+left pan), 2=right pan, 4=middle dolly (Three.js OrbitControls defaults)
                 if ev.buttons & 1 != 0 {
@@ -240,7 +242,8 @@ pub(crate) fn scene_bounds_min_max_grid(state: &ViewerState) -> (glam::Vec3, gla
     let guard = state.gpu.last_scene_bounds.lock();
     if let Some(b) = guard.as_ref() {
         let grid = state
-            .file.current_file
+            .file
+            .current_file
             .lock()
             .as_ref()
             .map(|file| file.grid_size)
@@ -424,11 +427,13 @@ pub(crate) fn apply_rendering_mode(
     // On the start screen, bump the overlay generation so in-flight smooth-mesh
     // builds are cancelled, then tell the frontend to reload logo + mascots.
     if !state
-        .cam.active_project
+        .cam
+        .active_project
         .load(std::sync::atomic::Ordering::Relaxed)
     {
         state
-            .gpu.overlay_mesh_generation
+            .gpu
+            .overlay_mesh_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let _ = app.emit("voxelle-reload-start-screen-overlays", ());
     }
@@ -606,7 +611,8 @@ pub(crate) fn debug_menu_sync_viewport_cursor_overlay(
     enabled: bool,
 ) -> Result<(), String> {
     state
-        .gpu.viewport_cursor_debug_overlay
+        .gpu
+        .viewport_cursor_debug_overlay
         .store(enabled, Ordering::Relaxed);
     #[cfg(desktop)]
     {
@@ -667,7 +673,8 @@ pub(crate) fn set_emission_lighting(
         viewer.invalidate_spatial_mesh_cache();
     }
     state
-        .gpu.mesh_refresh_generation
+        .gpu
+        .mesh_refresh_generation
         .fetch_add(1, std::sync::atomic::Ordering::Release);
     Ok(())
 }
@@ -1004,9 +1011,15 @@ pub(crate) struct SyncFlyInputArgs {
     speed_scale: f32,
     #[serde(default)]
     jump: bool,
+    /// Optional mouse-look delta bundled with movement to halve IPC calls per frame.
+    #[serde(default)]
+    look_dx: f32,
+    #[serde(default)]
+    look_dy: f32,
 }
 
-/// WASD / shift state only. Translation integrates on the native event loop with real elapsed time.
+/// WASD / shift state + optional mouse-look delta.  Bundling look with movement
+/// halves the IPC round-trips per frame during fly/walk navigation.
 #[tauri::command]
 pub(crate) fn sync_fly_input(
     app: AppHandle,
@@ -1024,7 +1037,29 @@ pub(crate) fn sync_fly_input(
     } else {
         1.0
     };
-    let has_movement = args.forward != 0.0 || args.right != 0.0 || args.up != 0.0 || args.jump;
+    // On macOS the frame loop reads CGGetLastMouseDelta via native_look_active;
+    // look_dx/look_dy here carry non-macOS pointer-lock deltas from JS.
+    let (look_dx, look_dy) = (args.look_dx, args.look_dy);
+
+    // Apply bundled look delta (same logic as camera_fly_look).
+    if look_dx != 0.0 || look_dy != 0.0 {
+        let (vh, sens) = {
+            let v = state.gpu.viewer.lock();
+            let Some(viewer) = v.as_ref() else {
+                return Ok(());
+            };
+            let (_, h) = viewer.viewport_size();
+            (h as f32, *state.cam.mouselook_sensitivity.lock())
+        };
+        let mut cam = state.cam.camera.lock();
+        cam.fly_look_rotate_screen(look_dx, look_dy, vh.max(1.0), sens);
+    }
+    let has_movement = args.forward != 0.0
+        || args.right != 0.0
+        || args.up != 0.0
+        || args.jump
+        || look_dx != 0.0
+        || look_dy != 0.0;
     *state.cam.fly_input.lock() = FlyInputState {
         forward: args.forward,
         right: args.right,
@@ -1062,10 +1097,41 @@ pub(crate) fn camera_fly_look(
         let (_, h) = viewer.viewport_size();
         h as f32
     };
+    let sens = *state.cam.mouselook_sensitivity.lock();
     let mut cam = state.cam.camera.lock();
-    cam.fly_look_rotate_screen(args.dx, args.dy, vh.max(1.0));
+    cam.fly_look_rotate_screen(args.dx, args.dy, vh.max(1.0), sens);
     wake_viewport_loop(&app);
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn set_mouselook_sensitivity(
+    state: State<'_, Arc<ViewerState>>,
+    value: f32,
+) -> Result<(), String> {
+    *state.cam.mouselook_sensitivity.lock() = value.clamp(0.1, 5.0);
+    Ok(())
+}
+
+/// Enable or disable native mouse-look (cursor-grab path, macOS only).
+/// When active, `CGGetLastMouseDelta` is polled each frame and applied to the camera.
+/// JS should call this after successfully activating Tauri cursor grab.
+#[tauri::command]
+pub(crate) fn set_native_look(state: State<'_, Arc<ViewerState>>, active: bool) {
+    // CGDisplayHideCursor/ShowCursor use a reference count and survive mouse
+    // movement, unlike NSCursor.hide() which the OS re-shows on mouseMoved events.
+    #[cfg(target_os = "macos")]
+    unsafe {
+        if active {
+            CGDisplayHideCursor(CGMainDisplayID());
+        } else {
+            CGDisplayShowCursor(CGMainDisplayID());
+        }
+    }
+    state
+        .cam
+        .native_look_active
+        .store(active, Ordering::Relaxed);
 }
 
 // ── Input / query commands ─────────────────────────────────────────────────────

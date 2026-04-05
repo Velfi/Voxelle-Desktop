@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { useLatestRef } from "./useLatestRef";
 
 interface AshlarGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
@@ -21,12 +22,8 @@ export interface AshlarGeneratorState {
 export function useAshlarGenerator(ctx: AshlarGeneratorContext): AshlarGeneratorState {
   const [ashlarThickness, setAshlarThickness] = useState(3);
 
-  const ashlarThicknessRef = useRef(ashlarThickness);
+  const ashlarThicknessRef = useLatestRef(ashlarThickness);
   const ashlarPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-
-  useEffect(() => {
-    ashlarThicknessRef.current = ashlarThickness;
-  }, [ashlarThickness]);
 
   const ashlarPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],

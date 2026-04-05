@@ -9,10 +9,10 @@ use glam::Vec3;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use super::raycasting::{ray_first_solid_scene, screen_to_world_ray};
 /// Web parity with `MAX_GRID_SIZE` in `store/core.ts`: symmetric grid about origin, capped for safety.
 /// (Re-exported from parent; available here for fill BFS grid checks.)
 use super::{effective_ray_grid_size, in_grid};
-use super::raycasting::{screen_to_world_ray, ray_first_solid_scene};
 
 /// Web parity with `MAX_GRID_SIZE` in `store/core.ts`: symmetric grid about origin, capped for safety.
 /// Unconstrained fills that would exceed this many cells show a "large fill" path.

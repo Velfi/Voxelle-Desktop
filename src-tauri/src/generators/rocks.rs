@@ -152,7 +152,10 @@ mod tests {
 
     #[test]
     fn value_noise3_is_deterministic() {
-        assert_eq!(value_noise3(42, 1.5, 2.5, 3.5), value_noise3(42, 1.5, 2.5, 3.5));
+        assert_eq!(
+            value_noise3(42, 1.5, 2.5, 3.5),
+            value_noise3(42, 1.5, 2.5, 3.5)
+        );
     }
 
     #[test]
@@ -189,7 +192,10 @@ mod tests {
 
     #[test]
     fn generate_rock_local_is_deterministic() {
-        assert_eq!(generate_rock_local(1, 3, 0.5), generate_rock_local(1, 3, 0.5));
+        assert_eq!(
+            generate_rock_local(1, 3, 0.5),
+            generate_rock_local(1, 3, 0.5)
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
 import type { StartShapeId } from "../types";
+import { useLatestRef } from "./useLatestRef";
 
 interface ShapeGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
@@ -41,32 +42,13 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
   const [shapeRotZ, setShapeRotZ] = useState(0);
   const [shapeOverwrite, setShapeOverwrite] = useState(true);
 
-  const shapeKindRef = useRef(shapeKind);
-  const shapeSizeRef = useRef(shapeSize);
-  const shapeRotXRef = useRef(shapeRotX);
-  const shapeRotYRef = useRef(shapeRotY);
-  const shapeRotZRef = useRef(shapeRotZ);
-  const shapeOverwriteRef = useRef(shapeOverwrite);
+  const shapeKindRef = useLatestRef(shapeKind);
+  const shapeSizeRef = useLatestRef(shapeSize);
+  const shapeRotXRef = useLatestRef(shapeRotX);
+  const shapeRotYRef = useLatestRef(shapeRotY);
+  const shapeRotZRef = useLatestRef(shapeRotZ);
+  const shapeOverwriteRef = useLatestRef(shapeOverwrite);
   const shapeGizmoPosRef = useRef<[number, number, number] | null>(null);
-
-  useEffect(() => {
-    shapeKindRef.current = shapeKind;
-  }, [shapeKind]);
-  useEffect(() => {
-    shapeSizeRef.current = shapeSize;
-  }, [shapeSize]);
-  useEffect(() => {
-    shapeRotXRef.current = shapeRotX;
-  }, [shapeRotX]);
-  useEffect(() => {
-    shapeRotYRef.current = shapeRotY;
-  }, [shapeRotY]);
-  useEffect(() => {
-    shapeRotZRef.current = shapeRotZ;
-  }, [shapeRotZ]);
-  useEffect(() => {
-    shapeOverwriteRef.current = shapeOverwrite;
-  }, [shapeOverwrite]);
 
   // Listen for gizmo-moved events from Rust.
   useEffect(() => {

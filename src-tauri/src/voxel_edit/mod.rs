@@ -34,14 +34,14 @@ pub use fill::{
     FILL_ABSOLUTE_MAX_CELLS, FILL_BFS_CANCEL_CHECK_INTERVAL, FILL_BFS_PROGRESS_INTERVAL,
     FILL_THRESHOLD_PROBE_CANCEL_INTERVAL, FILL_UNCONSTRAINED_LARGE_THRESHOLD,
 };
+pub(crate) use raycasting::{
+    anchor_for_stroke_edit, ray_first_solid, ray_first_solid_scene, voxel_line_dda,
+};
 pub use raycasting::{
     anchor_on_plane, constrain_plane_normal, local_ray_entry_on_voxel_cell,
     outward_face_normal_from_screen_ray, pick_extrude_start, pick_solid_coord_at_screen,
     pick_voxel_at_screen, preview_add_cell, preview_remove_cell, probe_solid_hit,
     screen_to_world_ray, world_ray_entry_on_voxel_cell, world_to_viewport_pixels,
-};
-pub(crate) use raycasting::{
-    anchor_for_stroke_edit, ray_first_solid, ray_first_solid_scene, voxel_line_dda,
 };
 
 // ── Grid utilities (used by all sub-modules via super::) ─────────────────────
@@ -406,7 +406,8 @@ pub fn apply_edit(
                     scz = cz + oz;
                     if size_range && rmax > rmin {
                         let r = brush::spray_random_radius((*cx, *cy, *cz), rmin, rmax);
-                        cur_offsets = brush::brush_offset_cells(effective_shape, r, clip_half, None);
+                        cur_offsets =
+                            brush::brush_offset_cells(effective_shape, r, clip_half, None);
                     } else {
                         cur_offsets = Vec::new();
                     }
@@ -464,7 +465,8 @@ pub fn apply_edit(
                     scz = hz + oz;
                     if size_range && rmax > rmin {
                         let r = brush::spray_random_radius((*hx, *hy, *hz), rmin, rmax);
-                        cur_offsets = brush::brush_offset_cells(effective_shape, r, clip_half, None);
+                        cur_offsets =
+                            brush::brush_offset_cells(effective_shape, r, clip_half, None);
                     } else {
                         cur_offsets = Vec::new();
                     }
@@ -519,7 +521,8 @@ pub fn apply_edit(
                     scz = hz + oz;
                     if size_range && rmax > rmin {
                         let r = brush::spray_random_radius((*hx, *hy, *hz), rmin, rmax);
-                        cur_offsets = brush::brush_offset_cells(effective_shape, r, clip_half, None);
+                        cur_offsets =
+                            brush::brush_offset_cells(effective_shape, r, clip_half, None);
                     } else {
                         cur_offsets = Vec::new();
                     }
@@ -779,15 +782,7 @@ pub fn collect_stroke_preview_targets(
     if stroke_mode == DrawStrokeMode::Fill {
         let snap = stroke_aux.stroke_snap_to_surface;
         let Some((cx, cy, cz)) = raycasting::anchor_for_stroke_edit(
-            tool,
-            snap,
-            file,
-            voxel_map,
-            camera,
-            width,
-            height,
-            sx,
-            sy,
+            tool, snap, file, voxel_map, camera, width, height, sx, sy,
         ) else {
             return Vec::new();
         };
@@ -886,7 +881,8 @@ pub fn collect_stroke_preview_targets(
                     scz = cz + oz;
                     if size_range && rmax > rmin {
                         let r = brush::spray_random_radius((*cx, *cy, *cz), rmin, rmax);
-                        cur_offsets = brush::brush_offset_cells(effective_shape, r, clip_half, None);
+                        cur_offsets =
+                            brush::brush_offset_cells(effective_shape, r, clip_half, None);
                     } else {
                         cur_offsets = Vec::new();
                     }
@@ -933,7 +929,8 @@ pub fn collect_stroke_preview_targets(
                     scz = hz + oz;
                     if size_range && rmax > rmin {
                         let r = brush::spray_random_radius((*hx, *hy, *hz), rmin, rmax);
-                        cur_offsets = brush::brush_offset_cells(effective_shape, r, clip_half, None);
+                        cur_offsets =
+                            brush::brush_offset_cells(effective_shape, r, clip_half, None);
                     } else {
                         cur_offsets = Vec::new();
                     }
@@ -2007,8 +2004,10 @@ pub fn collect_sculpt_stroke_footprint(
     );
     // For 2D shapes (Square/Circle), determine the face-normal axis so offsets stay in the tangent plane.
     let face_axis = if matches!(brush_shape, BrushShape::Square | BrushShape::Circle) {
-        raycasting::outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, normal_sx, normal_sy)
-            .map(brush::face_normal_to_axis)
+        raycasting::outward_face_normal_from_screen_ray(
+            file, voxel_map, camera, width, height, normal_sx, normal_sy,
+        )
+        .map(brush::face_normal_to_axis)
     } else {
         None
     };
@@ -2034,10 +2033,14 @@ pub fn collect_sculpt_stroke_footprint(
     // along the outward face normal so the brush footprint layers on top of existing voxels.
     // Draw uses normal_sx/normal_sy (locked click position) so the direction stays constant.
     if matches!(mode, SculptStrokeMode::Draw | SculptStrokeMode::Extrude) {
-        let (nsx, nsy) = if mode == SculptStrokeMode::Draw { (normal_sx, normal_sy) } else { (sx, sy) };
-        if let Some(n) =
-            raycasting::outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, nsx, nsy)
-        {
+        let (nsx, nsy) = if mode == SculptStrokeMode::Draw {
+            (normal_sx, normal_sy)
+        } else {
+            (sx, sy)
+        };
+        if let Some(n) = raycasting::outward_face_normal_from_screen_ray(
+            file, voxel_map, camera, width, height, nsx, nsy,
+        ) {
             for c in spine.iter_mut() {
                 c.0 += n.0;
                 c.1 += n.1;
@@ -2424,8 +2427,9 @@ pub fn compute_wall_sculpt_footprint(
     let face_snapped = match locked_face_snapped {
         Some(v) => v,
         None => {
-            let face_out =
-                raycasting::outward_face_normal_from_screen_ray(file, voxel_map, camera, width, height, sx, sy);
+            let face_out = raycasting::outward_face_normal_from_screen_ray(
+                file, voxel_map, camera, width, height, sx, sy,
+            );
             face_out.map(brush::snap_normal_to_axis)
         }
     };

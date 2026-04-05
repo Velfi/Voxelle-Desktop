@@ -1409,11 +1409,21 @@ fn build_mesh_mapped_inner(
             let mut mergeable: Vec<(i32, i32)> = Vec::new();
             let mut individual: Vec<(i32, i32)> = Vec::new();
             if greedy {
+                // Cache AO values per vertex coordinate within this slice.
+                // Adjacent cells share corners, so each vertex is computed at
+                // most once instead of up to 4 times.
+                let mut ao_cache: AHashMap<(i32, i32), f32> =
+                    AHashMap::with_capacity((cells.len() + 1) * 4);
+                let mut cached_ao = |u: i32, v: i32| -> f32 {
+                    *ao_cache.entry((u, v)).or_insert_with(|| {
+                        canonical_vertex_ao(map, axis, sign, depth, u, v, src_oid)
+                    })
+                };
                 for &(cu, cv) in &cells {
-                    let a00 = canonical_vertex_ao(map, axis, sign, depth, cu, cv, src_oid);
-                    let a10 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv, src_oid);
-                    let a11 = canonical_vertex_ao(map, axis, sign, depth, cu + 1, cv + 1, src_oid);
-                    let a01 = canonical_vertex_ao(map, axis, sign, depth, cu, cv + 1, src_oid);
+                    let a00 = cached_ao(cu, cv);
+                    let a10 = cached_ao(cu + 1, cv);
+                    let a11 = cached_ao(cu + 1, cv + 1);
+                    let a01 = cached_ao(cu, cv + 1);
                     if a00 >= 1.0 && a10 >= 1.0 && a11 >= 1.0 && a01 >= 1.0 {
                         mergeable.push((cu, cv));
                     } else {
@@ -3150,5 +3160,175 @@ mod shell_tests {
         s.insert((0, 0, 0));
         let sh = filter_voxel_set_to_shell(&s);
         assert_eq!(sh.len(), 1);
+    }
+}
+
+/// Regression guards: verify mesh output is deterministic and within expected ranges
+/// across the sizes relevant to the off-thread threshold (500 and 2 000 voxels).
+/// These tests must continue to pass after any meshing optimization.
+#[cfg(test)]
+mod mesh_determinism_tests {
+    use super::*;
+    use crate::voxelle::MaterialId;
+
+    fn hollow_box_voxels(edge: i32) -> Vec<Voxel> {
+        let e = edge.max(3);
+        let mut out = Vec::new();
+        for z in 0..e {
+            for y in 0..e {
+                for x in 0..e {
+                    let on_surface =
+                        x == 0 || x == e - 1 || y == 0 || y == e - 1 || z == 0 || z == e - 1;
+                    if on_surface {
+                        out.push(Voxel {
+                            x,
+                            y,
+                            z,
+                            color: 0x8899aa,
+                            material: MaterialId::Plastic,
+                            object_id: 0,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A single voxel must produce 4 vertices per face × 6 faces = 24 vertices, stored
+    /// as 24 × 3 = 72 floats in the flat `positions` array, and 36 indices.
+    /// Greedy meshing cannot merge anything for a lone voxel, so these numbers are stable.
+    #[test]
+    fn single_voxel_vertex_and_index_count() {
+        let voxels = vec![Voxel {
+            x: 0,
+            y: 0,
+            z: 0,
+            color: 0xff0000,
+            material: MaterialId::Plastic,
+            object_id: 0,
+        }];
+        let (mesh, _) = build_greedy_mesh(&voxels, &[]);
+        // positions is flat Vec<f32>, 3 floats per vertex: 24 verts × 3 = 72
+        assert_eq!(
+            mesh.positions.len(),
+            72,
+            "single voxel: expected 72 position floats (24 verts × 3)"
+        );
+        assert_eq!(mesh.indices.len(), 36, "single voxel: expected 36 indices");
+    }
+
+    /// Two adjacent voxels of the same color: the shared interior face is culled, leaving
+    /// 10 visible faces instead of 12.  Greedy merges 4 of them into 2×1 quads.
+    /// The mesh must be non-empty, deterministic, and smaller than two isolated voxels.
+    #[test]
+    fn two_adjacent_voxels_deterministic() {
+        let voxels = vec![
+            Voxel {
+                x: 0,
+                y: 0,
+                z: 0,
+                color: 0xaabbcc,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+            Voxel {
+                x: 1,
+                y: 0,
+                z: 0,
+                color: 0xaabbcc,
+                material: MaterialId::Plastic,
+                object_id: 0,
+            },
+        ];
+        let (m1, _) = build_greedy_mesh(&voxels, &[]);
+        let (m2, _) = build_greedy_mesh(&voxels, &[]);
+        assert!(!m1.positions.is_empty());
+        assert_eq!(
+            m1.positions.len(),
+            m2.positions.len(),
+            "non-deterministic vertex count"
+        );
+        assert_eq!(
+            m1.indices.len(),
+            m2.indices.len(),
+            "non-deterministic index count"
+        );
+        // Two isolated voxels would produce 144 position floats (72 × 2); the shared-face
+        // culling alone brings it to 120 (10 faces × 12 floats).  Greedy merging reduces further.
+        assert!(
+            m1.positions.len() < 144,
+            "expected fewer positions than two isolated voxels (144), got {}",
+            m1.positions.len()
+        );
+    }
+
+    /// ~490-voxel hollow box: mesh must be stable across two consecutive calls
+    /// and yield a plausible vertex range (capped at < 20 000).
+    #[test]
+    fn hollow_490_voxels_stable() {
+        let voxels = hollow_box_voxels(10); // 10³ - 8³ = 488 surface voxels
+        let (m1, _) = build_greedy_mesh(&voxels, &[]);
+        let (m2, _) = build_greedy_mesh(&voxels, &[]);
+        assert!(!m1.positions.is_empty(), "hollow box produced empty mesh");
+        assert_eq!(
+            m1.positions.len(),
+            m2.positions.len(),
+            "non-deterministic at ~490 voxels"
+        );
+        assert_eq!(
+            m1.indices.len(),
+            m2.indices.len(),
+            "non-deterministic indices at ~490 voxels"
+        );
+        // A hollow 10³ box has ~488 surface voxels; even without any merging that is
+        // 488 × 72 = 35 136 floats. With greedy merging the actual count is well below 20 000.
+        assert!(
+            m1.positions.len() < 20_000,
+            "suspiciously large position float count for ~490 voxels: {}",
+            m1.positions.len()
+        );
+    }
+
+    /// ~2k-voxel hollow box: same stability check at the old off-thread threshold.
+    #[test]
+    fn hollow_2k_voxels_stable() {
+        let voxels = hollow_box_voxels(20); // 20³ - 18³ = 2168 surface voxels
+        let (m1, _) = build_greedy_mesh(&voxels, &[]);
+        let (m2, _) = build_greedy_mesh(&voxels, &[]);
+        assert_eq!(
+            m1.positions.len(),
+            m2.positions.len(),
+            "non-deterministic at ~2k voxels"
+        );
+        assert_eq!(
+            m1.indices.len(),
+            m2.indices.len(),
+            "non-deterministic indices at ~2k voxels"
+        );
+        assert!(
+            m1.positions.len() < 100_000,
+            "suspiciously large position float count for ~2k voxels: {}",
+            m1.positions.len()
+        );
+    }
+
+    /// Chunked meshing must produce the same total vertex count as the non-chunked path
+    /// for a scene that fits in a single chunk.
+    #[test]
+    fn chunked_matches_non_chunked_for_small_scene() {
+        let voxels = hollow_box_voxels(10);
+        let (flat, _) = build_greedy_mesh(&voxels, &[]);
+        let chunked = build_greedy_mesh_chunked(&voxels, SPATIAL_CHUNK_SIZE, &[]);
+        assert_eq!(
+            flat.positions.len(),
+            chunked.0.positions.len(),
+            "chunked/non-chunked vertex count mismatch for small scene"
+        );
+        assert_eq!(
+            flat.indices.len(),
+            chunked.0.indices.len(),
+            "chunked/non-chunked index count mismatch for small scene"
+        );
     }
 }

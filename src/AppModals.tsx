@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { CollabJoinProgressModal } from "./CollabJoinProgressModal";
 import { JoinSessionModal } from "./JoinSessionModal";
+import { PointerTestModal } from "./PointerTestModal";
 import { PreferencesModal } from "./PreferencesModal";
 import { StampBookModal } from "./StampBookModal";
 import type { StampBookEntryTuple } from "./stampBookStorage";
@@ -73,6 +74,10 @@ interface Props {
   newGridShape: StartShape;
   setNewGridShape: (shape: StartShape) => void;
   createNewProject: () => void;
+
+  // Pointer test modal
+  pointerTestOpen: boolean;
+  setPointerTestOpen: (open: boolean) => void;
 }
 
 export function AppModals({
@@ -123,6 +128,8 @@ export function AppModals({
   newGridShape,
   setNewGridShape,
   createNewProject,
+  pointerTestOpen,
+  setPointerTestOpen,
 }: Props) {
   return (
     <>
@@ -371,6 +378,7 @@ export function AppModals({
           </div>
         </div>
       ) : null}
+      <PointerTestModal open={pointerTestOpen} onClose={() => setPointerTestOpen(false)} />
     </>
   );
 }

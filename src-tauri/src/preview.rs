@@ -76,7 +76,6 @@ pub(crate) fn hash_squishy_preview(
     sx: f32,
     sy: f32,
     add_anchor: Option<(i32, i32, i32)>,
-    preview_radius_i: u32,
     gizmo_drag: bool,
     delete_hover_id: Option<u32>,
     debug_overlay: bool,
@@ -88,7 +87,6 @@ pub(crate) fn hash_squishy_preview(
     palette_color.hash(&mut h);
     sx.to_bits().hash(&mut h);
     sy.to_bits().hash(&mut h);
-    preview_radius_i.hash(&mut h);
     gizmo_drag.hash(&mut h);
     delete_hover_id.hash(&mut h);
     (session.mode as u8).hash(&mut h);
@@ -1317,12 +1315,16 @@ pub(crate) fn prepare_preview_mesh(
     viewport_h: u32,
 ) -> PreviewMeshPrepared {
     if state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .load(Ordering::Relaxed)
     {
         return PreviewMeshPrepared::Noop;
     }
-    let dbg = state.gpu.viewport_cursor_debug_overlay.load(Ordering::Relaxed);
+    let dbg = state
+        .gpu
+        .viewport_cursor_debug_overlay
+        .load(Ordering::Relaxed);
     let (cursor, mode) = {
         let c = state.preview.preview_cursor.lock();
         let m = state.preview.preview_mode.lock();
@@ -1616,7 +1618,6 @@ pub(crate) fn prepare_preview_mesh(
 
     if matches!(mode, PreviewMode::Squishy) {
         let hover = state.preview.preview_hover.lock();
-        let preview_radius_i = hover.brush_radius.clamp(2, 64);
         let gizmo_drag = state.gizmos.squishy_gizmo_drag.lock().is_some();
 
         let session_snap = state.gizmos.squishy_session.lock().clone();
@@ -1642,7 +1643,6 @@ pub(crate) fn prepare_preview_mesh(
             sx,
             sy,
             add_anchor,
-            preview_radius_i,
             gizmo_drag,
             delete_hover_id,
             dbg,
@@ -1654,31 +1654,24 @@ pub(crate) fn prepare_preview_mesh(
 
         let mut temp_session = session_snap.clone();
         temp_session.hollow = false;
-        if let Some((ax, ay, az)) = add_anchor {
-            if session_snap.mode == generators::SquishyMode::Add {
-                temp_session.balls.push(generators::Metaball {
-                    id: 0,
-                    x: ax,
-                    y: ay,
-                    z: az,
-                    radius: preview_radius_i as f32,
-                });
-            }
-        }
 
-        let coords = generators::voxel_coords_for_session_with_limit(
+        let mut coords = generators::voxel_coords_for_session_with_limit(
             &temp_session,
             file.grid_size.max(1),
             usize::MAX,
         );
 
-        let show_gizmo = session_snap.mode == generators::SquishyMode::Edit
-            && session_snap.selected_id.is_some();
+        // In add mode show a single cursor voxel instead of a full metaball blob.
+        if session_snap.mode == generators::SquishyMode::Add {
+            if let Some((ax, ay, az)) = add_anchor {
+                coords.push((ax, ay, az));
+            }
+        }
 
         let has_pick_chrome = !session_snap.balls.is_empty()
             || (session_snap.mode == generators::SquishyMode::Add && add_anchor.is_some());
 
-        if coords.is_empty() && !show_gizmo && !has_pick_chrome {
+        if coords.is_empty() && !has_pick_chrome {
             return PreviewMeshPrepared::Clear;
         }
 
@@ -1693,16 +1686,10 @@ pub(crate) fn prepare_preview_mesh(
             None,
         );
 
-        if show_gizmo {
-            generators::append_squishy_gizmo_wire(&session_snap, cam, &mut instanced.extra_wire);
-        }
-
         if has_pick_chrome {
             generators::append_squishy_metaball_pick_rings(
                 &mut instanced.extra_wire,
                 &session_snap,
-                add_anchor,
-                preview_radius_i as i32,
                 delete_hover_id,
             );
         }
@@ -2903,9 +2890,7 @@ pub(crate) fn prepare_preview_mesh(
     // For large uniform-colour strokes with no polygon-corner extras, use the
     // GPU compute shell-filter path.  Falls back to CPU instanced otherwise.
     if !targets.is_empty() && !poly_corners && hover_resolver_ref.is_none() {
-        if let Some(raw) =
-            build_raw_voxel_upload(tool, &set, vmap, file, dbg, ctx.color, None)
-        {
+        if let Some(raw) = build_raw_voxel_upload(tool, &set, vmap, file, dbg, ctx.color, None) {
             return PreviewMeshPrepared::RawVoxelUpload {
                 cache_key: key,
                 raw,

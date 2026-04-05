@@ -337,11 +337,7 @@ export function ViewportHUD({
       ) : null}
 
       {extrudePhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Extrude settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Extrude settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Extrude</span>
           <span
             style={{
@@ -371,11 +367,7 @@ export function ViewportHUD({
 
       {/* Roof placing phase: pin/anchor count + Cancel */}
       {generatorKind === "roof" && (roofPins.length > 0 || roofFirstClick !== null) ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Roof placement"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Roof placement">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Roof</span>
           <span
             style={{
@@ -441,11 +433,7 @@ export function ViewportHUD({
 
       {/* Cloth placing phase: pin count + Done/Cancel */}
       {generatorKind === "cloth" && !clothPhase.active && clothPins.length > 0 ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Cloth pin placement"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Cloth pin placement">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Cloth</span>
           <span
             style={{
@@ -479,11 +467,7 @@ export function ViewportHUD({
 
       {/* Cloth settings phase: tension slider + Done/Cancel */}
       {clothPhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Cloth settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Cloth settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Cloth</span>
           <span
             style={{
@@ -531,11 +515,7 @@ export function ViewportHUD({
 
       {/* Rope settings phase: tension + sag sliders + Done/Cancel */}
       {ropePhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Rope settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Rope settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Rope</span>
           <span
             style={{
@@ -582,11 +562,7 @@ export function ViewportHUD({
       ) : null}
 
       {rocksPhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Rocks settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Rocks settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Rocks</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             Adjust in sidebar — Enter to place
@@ -609,11 +585,7 @@ export function ViewportHUD({
       ) : null}
 
       {grassPhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Grass settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Grass settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Grass</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             Adjust in sidebar — Enter to place
@@ -636,11 +608,7 @@ export function ViewportHUD({
       ) : null}
 
       {ashlarPhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Ashlar settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Ashlar settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Ashlar</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             Adjust in sidebar — Enter to place
@@ -663,11 +631,7 @@ export function ViewportHUD({
       ) : null}
 
       {floraPhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Flora settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Flora settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Flora</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             Adjust in sidebar — Enter to place
@@ -690,11 +654,7 @@ export function ViewportHUD({
       ) : null}
 
       {shapePhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Shape settings"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Shape settings">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Shape</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             Adjust in sidebar — Enter to place
@@ -717,11 +677,7 @@ export function ViewportHUD({
       ) : null}
 
       {squishyPhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Squishy session"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Squishy session">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Squishy</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             Adjust in sidebar — Enter to commit, Esc to cancel
@@ -744,11 +700,7 @@ export function ViewportHUD({
       ) : null}
 
       {bonePhase.active ? (
-        <div
-          className="viewport-cuboid-depth-bar"
-          role="dialog"
-          aria-label="Bone session"
-        >
+        <div className="viewport-cuboid-depth-bar" role="dialog" aria-label="Bone session">
           <span style={{ fontSize: "0.82rem", fontWeight: 600 }}>Bone</span>
           <span style={{ fontSize: "0.78rem", color: "var(--app-text-muted)" }}>
             {bonePhase.snapshot?.phase === "build"
@@ -784,14 +736,10 @@ export function ViewportHUD({
       ) : null}
 
       {showWallSculptPolygonHud ? (
-        <div
-          className="viewport-polygon-phase-bar"
-          role="dialog"
-          aria-label="Wall polygon outline"
-        >
+        <div className="viewport-polygon-phase-bar" role="dialog" aria-label="Wall polygon outline">
           <p className="viewport-polygon-phase-hint">
-            Wall outline: {wallSculptPolygonVerts.length} corners. Click the surface to
-            add; Done applies (min 2 corners).
+            Wall outline: {wallSculptPolygonVerts.length} corners. Click the surface to add; Done
+            applies (min 2 corners).
           </p>
           <div className="viewport-polygon-phase-actions">
             <button
@@ -815,14 +763,9 @@ export function ViewportHUD({
       ) : null}
 
       {showPolygonPhaseHud && !polygonPhase.active ? (
-        <div
-          className="viewport-polygon-phase-bar"
-          role="dialog"
-          aria-label="Polygon area"
-        >
+        <div className="viewport-polygon-phase-bar" role="dialog" aria-label="Polygon area">
           <p className="viewport-polygon-phase-hint">
-            Vertices: {strokePolygonVerts.length}. Click to add corners; Apply with three
-            or more.
+            Vertices: {strokePolygonVerts.length}. Click to add corners; Apply with three or more.
           </p>
           <div className="viewport-polygon-phase-actions">
             <button

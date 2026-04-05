@@ -1,6 +1,5 @@
 import { useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
 import type { InteractionMode } from "../types";
 import type { GamepadFrameOutput } from "../useGamepad";
 
@@ -43,14 +42,7 @@ export function useWalkMode({
       void releaseFlyMouseLook();
       return;
     }
-    console.log("[walk-debug] walk useEffect SETUP — activating walk mode");
-    void invoke("set_walk_mode", { enabled: true })
-      .then(() => {
-        console.log("[walk-debug] set_walk_mode(true) resolved OK");
-      })
-      .catch((err) => {
-        console.error("[walk-debug] set_walk_mode(true) FAILED:", err);
-      });
+    void invoke("set_walk_mode", { enabled: true }).catch(() => {});
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.code === "Escape" && flyMouseLookActiveRef.current) {
@@ -98,39 +90,10 @@ export function useWalkMode({
         flyPendingLookDyRef.current += dyCss * s;
         return;
       }
-      // Fallback: manual recentering when pointer lock is unavailable
-      if (flySkipNextFlyMoveRef.current) {
-        flySkipNextFlyMoveRef.current = false;
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-        return;
-      }
-      let dxCss = e.movementX;
-      let dyCss = e.movementY;
-      if (dxCss === 0 && dyCss === 0) {
-        const last = flyLastClientRef.current;
-        if (last == null) {
-          flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-          return;
-        }
-        dxCss = e.clientX - last.x;
-        dyCss = e.clientY - last.y;
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-        if (dxCss === 0 && dyCss === 0) return;
-      } else {
-        flyLastClientRef.current = { x: e.clientX, y: e.clientY };
-      }
-      flyPendingLookDxRef.current += dxCss * s;
-      flyPendingLookDyRef.current += dyCss * s;
-      const r = vp.getBoundingClientRect();
-      const cx = r.left + r.width / 2;
-      const cy = r.top + r.height / 2;
-      void getCurrentWindow()
-        .setCursorPosition(new LogicalPosition(cx, cy))
-        .then(() => {
-          flySkipNextFlyMoveRef.current = true;
-          flyLastClientRef.current = { x: cx, y: cy };
-        })
-        .catch(() => {});
+      // On macOS, setCursorGrab(true) dissociates cursor from mouse via
+      // CGAssociateMouseAndMouseCursorPosition — cursor is frozen, no pointermove
+      // events reach WKWebView.  The frame loop reads CGGetLastMouseDelta directly.
+      // Nothing to do here for the fallback path.
     };
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
@@ -142,11 +105,6 @@ export function useWalkMode({
       const pdy = flyPendingLookDyRef.current;
       flyPendingLookDxRef.current = 0;
       flyPendingLookDyRef.current = 0;
-      if (pdx !== 0 || pdy !== 0) {
-        void invoke("camera_fly_look", {
-          args: { dx: pdx, dy: pdy },
-        }).catch(() => {});
-      }
       const k = keysDownRef.current;
       let forward = gp.forward;
       let right = gp.right;
@@ -157,25 +115,12 @@ export function useWalkMode({
       const jump = k.has("Space");
       const slow = k.has("ShiftLeft") || k.has("ShiftRight");
       const speedScale = (slow ? 1 / 3 : 1) * gp.speedScale;
+      // Bundle look delta with movement args — halves IPC calls per frame.
+      // On macOS the frame loop handles camera rotation via CGGetLastMouseDelta;
+      // look deltas here are only non-zero on other platforms (pointer lock path).
       void invoke("sync_fly_input", {
-        args: { forward, right, up: 0, speedScale, jump },
+        args: { forward, right, up: 0, speedScale, jump, lookDx: pdx, lookDy: pdy },
       }).catch(() => {});
-      // Recenter cursor each frame when using Tauri fallback (not pointer lock)
-      if (flyMouseLookActiveRef.current && !document.pointerLockElement) {
-        const vp = viewportRef.current;
-        if (vp) {
-          const r = vp.getBoundingClientRect();
-          const cx = r.left + r.width / 2;
-          const cy = r.top + r.height / 2;
-          void getCurrentWindow()
-            .setCursorPosition(new LogicalPosition(cx, cy))
-            .then(() => {
-              flySkipNextFlyMoveRef.current = true;
-              flyLastClientRef.current = { x: cx, y: cy };
-            })
-            .catch(() => {});
-        }
-      }
       flyRafRef.current = requestAnimationFrame(tick);
     };
     flyRafRef.current = requestAnimationFrame(tick);

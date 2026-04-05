@@ -745,14 +745,15 @@ pub(crate) fn create_preview_compute_pipelines(device: &wgpu::Device) -> Preview
         bind_group_layouts: &[&fill_layout],
         push_constant_ranges: &[],
     });
-    let pipeline_preview_fill_occ = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("preview_fill_occ"),
-        layout: Some(&pl_fill),
-        module: &shader_fill,
-        entry_point: Some("fill_occ"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+    let pipeline_preview_fill_occ =
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("preview_fill_occ"),
+            layout: Some(&pl_fill),
+            module: &shader_fill,
+            entry_point: Some("fill_occ"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
     // ── Pass 2: shell emit ────────────────────────────────────────────────────
     let emit_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -847,14 +848,15 @@ pub(crate) fn create_preview_compute_pipelines(device: &wgpu::Device) -> Preview
         bind_group_layouts: &[&emit_layout],
         push_constant_ranges: &[],
     });
-    let pipeline_preview_shell_emit = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some("preview_shell_emit"),
-        layout: Some(&pl_emit),
-        module: &shader_emit,
-        entry_point: Some("shell_emit"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+    let pipeline_preview_shell_emit =
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("preview_shell_emit"),
+            layout: Some(&pl_emit),
+            module: &shader_emit,
+            entry_point: Some("shell_emit"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
     PreviewComputePipelines {
         pipeline_preview_fill_occ,

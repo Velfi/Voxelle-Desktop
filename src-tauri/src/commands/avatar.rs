@@ -173,7 +173,8 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
     let fps = state.gpu.fps.lock().last_fps;
     let file_label = state.file.file_label.lock().clone();
     let (vw, vh, idx_count, vtx_buf_verts) = state
-        .gpu.viewer
+        .gpu
+        .viewer
         .lock()
         .as_ref()
         .map(|viewer| {
@@ -187,7 +188,8 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
         })
         .unwrap_or((0, 0, 0, 0));
     let (voxel_n, grid_size) = state
-        .file.current_file
+        .file
+        .current_file
         .lock()
         .as_ref()
         .map(|f| (f.voxels.len(), f.grid_size))
@@ -197,7 +199,8 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let edit_block = state
-        .gpu.last_edit_perf
+        .gpu
+        .last_edit_perf
         .lock()
         .clone()
         .map(|e| {
@@ -375,7 +378,11 @@ pub(crate) fn load_start_screen_logo(
 ) -> Result<(), String> {
     let state = Arc::clone(&*state);
     let app_err = app.clone();
-    let token = state.gpu.overlay_mesh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let token = state
+        .gpu
+        .overlay_mesh_generation
+        .fetch_add(1, Ordering::SeqCst)
+        + 1;
     std::thread::Builder::new()
         .name("logo-load".into())
         .spawn(move || {

@@ -1,7 +1,7 @@
 //! Polygon vertex placement, hull ordering, and polygon fill helpers.
 
-use crate::greedy_mesh::VoxelCoord;
 use super::{PlaneAxis, StrokeAux};
+use crate::greedy_mesh::VoxelCoord;
 
 /// Web `COPLANAR_FILL_TOL` — plane distance threshold for integer voxel corners.
 const COPLANAR_FILL_TOL: f64 = 0.08;
@@ -412,7 +412,9 @@ fn point_in_closed_halfspaces(q: [f64; 3], faces: &[([f64; 3], [f64; 3])]) -> bo
 }
 
 /// Integer voxel centers inside the convex hull of `vertices` (web non-coplanar branch).
-pub(super) fn fill_non_coplanar_convex_hull_voxels(vertices: &[[i32; 3]]) -> Option<Vec<VoxelCoord>> {
+pub(super) fn fill_non_coplanar_convex_hull_voxels(
+    vertices: &[[i32; 3]],
+) -> Option<Vec<VoxelCoord>> {
     if vertices.len() < 4 {
         return None;
     }
@@ -580,7 +582,10 @@ pub(super) fn stroke_aux_is_solid_family(aux: &StrokeAux) -> bool {
 }
 
 /// Web `getSolidPolygonBasePositions`: corners projected onto plane through first vertex, orthogonal to `plane_axis` / auto-detected axis.
-pub(super) fn solid_polygon_fixed_plane(vertices: &[[i32; 3]], plane_axis: PlaneAxis) -> Option<(usize, i32)> {
+pub(super) fn solid_polygon_fixed_plane(
+    vertices: &[[i32; 3]],
+    plane_axis: PlaneAxis,
+) -> Option<(usize, i32)> {
     if vertices.is_empty() {
         return None;
     }
@@ -622,7 +627,10 @@ pub(super) fn solid_polygon_fixed_plane(vertices: &[[i32; 3]], plane_axis: Plane
     }
 }
 
-pub(super) fn project_vertices_to_plane_2d(vertices: &[[i32; 3]], fixed_axis: usize) -> Vec<(i32, i32)> {
+pub(super) fn project_vertices_to_plane_2d(
+    vertices: &[[i32; 3]],
+    fixed_axis: usize,
+) -> Vec<(i32, i32)> {
     vertices
         .iter()
         .map(|v| match fixed_axis {
@@ -676,7 +684,11 @@ pub(super) fn fill_solid_polygon_hull_projected(
 
 /// Extrude a flat set of base voxel positions along `fixed_axis` by `depth` layers.
 /// Positive depth extrudes in the +axis direction, negative in −axis. Depth 0 returns base unchanged.
-pub(super) fn extrude_base_positions(base: Vec<VoxelCoord>, fixed_axis: usize, depth: i32) -> Vec<VoxelCoord> {
+pub(super) fn extrude_base_positions(
+    base: Vec<VoxelCoord>,
+    fixed_axis: usize,
+    depth: i32,
+) -> Vec<VoxelCoord> {
     if depth == 0 {
         return base;
     }

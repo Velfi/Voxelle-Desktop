@@ -230,7 +230,11 @@ pub(crate) fn commit_voxel_edits(
     )?;
     let stroke_on = *state.file.stroke_active.lock();
     if stroke_on {
-        state.file.stroke_buffer.lock().extend(deltas.iter().copied());
+        state
+            .file
+            .stroke_buffer
+            .lock()
+            .extend(deltas.iter().copied());
         return Ok(true);
     }
     let cm = Arc::clone(&state.collab);
@@ -267,7 +271,8 @@ pub(crate) fn voxel_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(
     state.file.stroke_preview_union.lock().clear();
     *state.file.stroke_preview_last_args.lock() = None;
     state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .store(false, Ordering::Relaxed);
     state.file.sculpt_stroke_replay.lock().clear();
     // Clear spray constraint plane so it gets re-established on the first anchor of this stroke.
@@ -290,7 +295,8 @@ pub(crate) fn voxel_stroke_preview_reset(
     state.file.stroke_preview_union.lock().clear();
     *state.file.stroke_preview_last_args.lock() = None;
     state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .store(false, Ordering::Relaxed);
     state.file.sculpt_stroke_replay.lock().clear();
     *state.file.wall_stroke_face_snapped.lock() = None;
@@ -539,9 +545,8 @@ pub(crate) fn build_raw_voxel_upload(
         let dx = (cx - min[0]) as u32;
         let dy = (cy - min[1]) as u32;
         let dz = (cz - min[2]) as u32;
-        packed_voxels.push(
-            dx | (dy << 9) | (dz << 18) | (obj_idx << 27) | ((is_ghost as u32) << 31),
-        );
+        packed_voxels
+            .push(dx | (dy << 9) | (dz << 18) | (obj_idx << 27) | ((is_ghost as u32) << 31));
     }
 
     // Compute colours (same as CPU path).
@@ -854,14 +859,16 @@ pub(crate) fn voxel_stroke_preview_at_screen(
         if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
-                .file.stroke_preview_suppresses_hover
+                .file
+                .stroke_preview_suppresses_hover
                 .store(false, Ordering::Relaxed);
         } else {
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = None;
             *state.gpu.preview_overlay_cache_key.lock() = None;
             state
-                .file.stroke_preview_suppresses_hover
+                .file
+                .stroke_preview_suppresses_hover
                 .store(true, Ordering::Relaxed);
         }
     }
@@ -948,7 +955,8 @@ pub(crate) fn voxel_stroke_end(
     state.file.terrain_accum.lock().clear();
     *state.gizmos.extrude_gizmo_base_depth.lock() = 0;
     let had_stroke_preview = state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .swap(false, Ordering::Relaxed);
     let union = std::mem::take(&mut *state.file.stroke_preview_union.lock());
     let last_args = state.file.stroke_preview_last_args.lock().take();
@@ -1167,7 +1175,10 @@ pub(crate) struct VoxelFillAtScreen {
 
 #[tauri::command]
 pub(crate) fn voxel_fill_cancel(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
-    state.file.fill_operation_cancel.store(true, Ordering::Relaxed);
+    state
+        .file
+        .fill_operation_cancel
+        .store(true, Ordering::Relaxed);
     Ok(())
 }
 
@@ -1414,7 +1425,10 @@ pub(crate) async fn voxel_fill_at_screen(
         (w as f32, h as f32)
     };
     let material = voxelle::MaterialId::from_str_id(&args.material);
-    state.file.fill_operation_cancel.store(false, Ordering::Relaxed);
+    state
+        .file
+        .fill_operation_cancel
+        .store(false, Ordering::Relaxed);
     emit_work_progress(&app, 0.08, "Fill…");
     tokio::task::yield_now().await;
     let state_cl = Arc::clone(state.inner());
@@ -1720,7 +1734,10 @@ pub(crate) async fn voxel_edit_at_screen(
 
     let (deltas, apply_edit_ms) = if matches!(args.stroke_mode, stroke_modes::DrawStrokeMode::Fill)
     {
-        state.file.fill_operation_cancel.store(false, Ordering::Relaxed);
+        state
+            .file
+            .fill_operation_cancel
+            .store(false, Ordering::Relaxed);
         emit_work_progress(&app, 0.08, "Fill���");
         tokio::task::yield_now().await;
         let state_cl = Arc::clone(state.inner());
@@ -1840,7 +1857,11 @@ pub(crate) async fn voxel_edit_at_screen(
 
     let stroke_on = *state.file.stroke_active.lock();
     if stroke_on {
-        state.file.stroke_buffer.lock().extend(deltas.iter().copied());
+        state
+            .file
+            .stroke_buffer
+            .lock()
+            .extend(deltas.iter().copied());
         return Ok(true);
     }
 
@@ -1912,7 +1933,8 @@ pub(crate) fn perform_solo_voxel_undo(
                 VoxelGpuRefreshReason::Undo,
             )?;
             state
-                .file.solo_redo
+                .file
+                .solo_redo
                 .lock()
                 .push(SoloRedoEntry::VoxelDeltas(original));
             Ok(true)
@@ -1926,7 +1948,8 @@ pub(crate) fn perform_solo_voxel_undo(
             };
             emit_selection_updated(app, state);
             state
-                .file.solo_redo
+                .file
+                .solo_redo
                 .lock()
                 .push(SoloRedoEntry::SelectionAfter(cur));
             Ok(true)
@@ -1964,7 +1987,8 @@ pub(crate) fn perform_solo_voxel_undo(
             };
             emit_selection_updated(app, state);
             state
-                .file.solo_redo
+                .file
+                .solo_redo
                 .lock()
                 .push(SoloRedoEntry::SelectionTransform { after, deltas });
             Ok(true)
@@ -2009,7 +2033,8 @@ pub(crate) fn perform_solo_voxel_redo(
                 VoxelGpuRefreshReason::Redo,
             )?;
             state
-                .file.solo_undo
+                .file
+                .solo_undo
                 .lock()
                 .push(SoloUndoEntry::VoxelDeltas(forward_batch));
             Ok(true)
@@ -2023,7 +2048,8 @@ pub(crate) fn perform_solo_voxel_redo(
             };
             emit_selection_updated(app, state);
             state
-                .file.solo_undo
+                .file
+                .solo_undo
                 .lock()
                 .push(SoloUndoEntry::SelectionBefore(cur));
             Ok(true)
@@ -2058,7 +2084,8 @@ pub(crate) fn perform_solo_voxel_redo(
             };
             emit_selection_updated(app, state);
             state
-                .file.solo_undo
+                .file
+                .solo_undo
                 .lock()
                 .push(SoloUndoEntry::SelectionTransform { before, deltas });
             Ok(true)

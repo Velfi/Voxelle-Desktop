@@ -152,11 +152,7 @@ pub fn resolve_extrude_direction(
 
 /// Generate a straight-line path of voxel coordinates from `origin` along `direction`.
 /// Matches web `getRayDirectionPath`.
-pub fn get_ray_direction_path(
-    origin: VoxelCoord,
-    direction: Vec3,
-    length: u32,
-) -> Vec<VoxelCoord> {
+pub fn get_ray_direction_path(origin: VoxelCoord, direction: Vec3, length: u32) -> Vec<VoxelCoord> {
     if length == 0 {
         return vec![origin];
     }
@@ -712,9 +708,7 @@ pub(super) fn sculpt_edit_tool(mode: super::SculptStrokeMode) -> super::EditTool
         super::SculptStrokeMode::Extrude
         | super::SculptStrokeMode::Wall
         | super::SculptStrokeMode::Terrain => super::EditTool::Add,
-        super::SculptStrokeMode::Smooth | super::SculptStrokeMode::Gouge => {
-            super::EditTool::Remove
-        }
+        super::SculptStrokeMode::Smooth | super::SculptStrokeMode::Gouge => super::EditTool::Remove,
     }
 }
 

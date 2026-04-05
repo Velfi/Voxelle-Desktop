@@ -93,3 +93,13 @@ harness = false
 [[bench]]
 name = "collab_encoding"
 harness = false
+
+[[bench]]
+name = "smooth_mesh"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

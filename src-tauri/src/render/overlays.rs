@@ -145,7 +145,9 @@ impl WgpuViewer {
             &self.preview_compute_wire_instance_buf,
             &self.preview_compute_indirect_buf,
         ) {
-            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => (a, b, c, d, e, f, g),
+            (Some(a), Some(b), Some(c), Some(d), Some(e), Some(f), Some(g)) => {
+                (a, b, c, d, e, f, g)
+            }
             _ => return,
         };
         if self.preview_compute_voxel_count == 0 {

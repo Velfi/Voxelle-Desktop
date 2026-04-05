@@ -11,8 +11,8 @@ use tauri::{AppHandle, Emitter, Runtime};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::{
-    CollabInboxItem, CollabRuntime, HostToClient, RosterEntry, SNAPSHOT_CHUNK_SIZE,
-    SNAPSHOT_CHUNK_THRESHOLD, HOST_PEER_ID, MAX_UNDO_PER_PEER,
+    CollabInboxItem, CollabRuntime, HostToClient, RosterEntry, HOST_PEER_ID, MAX_UNDO_PER_PEER,
+    SNAPSHOT_CHUNK_SIZE, SNAPSHOT_CHUNK_THRESHOLD,
 };
 
 // ── Binary edit framing ─────────────────────────────────────────────────────

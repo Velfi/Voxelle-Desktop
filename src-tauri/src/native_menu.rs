@@ -305,6 +305,13 @@ pub(crate) fn install_app_menu(
         true,
         None::<&str>,
     )?;
+    let debug_pointer_test = MenuItem::with_id(
+        app,
+        "debug_pointer_test",
+        "Pointer capture/lock test…",
+        true,
+        None::<&str>,
+    )?;
     let debug_menu = Submenu::with_items(
         app,
         "Debug",
@@ -316,6 +323,7 @@ pub(crate) fn install_app_menu(
             &debug_raytrace_bench,
             &debug_clear_autosaves_item,
             &debug_test_crash,
+            &debug_pointer_test,
         ],
     )?;
     let sep = PredefinedMenuItem::separator(app)?;
@@ -365,7 +373,12 @@ pub(crate) fn install_app_menu(
             &view_render_ray,
         ],
     )?;
-    let is_ortho = !app.state::<Arc<ViewerState>>().cam.camera.lock().perspective;
+    let is_ortho = !app
+        .state::<Arc<ViewerState>>()
+        .cam
+        .camera
+        .lock()
+        .perspective;
     let ortho_view_item = CheckMenuItem::with_id(
         app,
         "menu_view_ortho",

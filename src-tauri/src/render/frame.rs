@@ -1077,7 +1077,13 @@ impl WgpuViewer {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         if self.auto_exposure_enabled {
-            self.read_meter_luminance_and_update_auto_exposure();
+            // Collect the *previous* frame's luminance result (non-blocking), then
+            // kick off the async readback for this frame.  The 1-frame lag is
+            // imperceptible for auto-exposure and eliminates the GPU stall.
+            self.try_collect_meter_luminance();
+            self.sync_composite_exposure_ev();
+            self.flush_composite_opts();
+            self.begin_meter_readback();
         }
         frame.present();
         // #region agent log

@@ -744,9 +744,7 @@ impl WgpuViewer {
         }
 
         // Occupancy word count: ceil(bbox_vol / 32).
-        let bbox_vol = raw.bbox_size[0] as u64
-            * raw.bbox_size[1] as u64
-            * raw.bbox_size[2] as u64;
+        let bbox_vol = raw.bbox_size[0] as u64 * raw.bbox_size[1] as u64 * raw.bbox_size[2] as u64;
         let occ_words = ((bbox_vol + 31) / 32) as u32;
 
         // Compute capacity requirements.
@@ -762,8 +760,8 @@ impl WgpuViewer {
         let skip_wire = n_voxels >= greedy_mesh::PREVIEW_NO_WIRE_THRESHOLD;
         let wire_cap = if skip_wire { 1u32 } else { shell_cap };
 
-        let need_raw_realloc = raw_cap > self.preview_compute_capacity
-            || self.preview_compute_raw_buf.is_none();
+        let need_raw_realloc =
+            raw_cap > self.preview_compute_capacity || self.preview_compute_raw_buf.is_none();
         let need_solid_realloc = shell_cap > self.preview_compute_shell_capacity
             || self.preview_compute_solid_instance_buf.is_none();
         let need_wire_realloc = wire_cap > self.preview_compute_wire_capacity
@@ -772,75 +770,82 @@ impl WgpuViewer {
         let need_occ_realloc = occ_words > self.preview_compute_occ_word_count;
 
         if need_raw_realloc {
-            self.preview_compute_raw_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_raw"),
-                size: (raw_cap as u64) * 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_raw_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_raw"),
+                    size: (raw_cap as u64) * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
             self.preview_compute_capacity = raw_cap;
         }
         if need_solid_realloc {
-            self.preview_compute_solid_instance_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_solid_inst"),
-                size: (shell_cap as u64) * 80,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_solid_instance_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_solid_inst"),
+                    size: (shell_cap as u64) * 80,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
+                    mapped_at_creation: false,
+                }));
             self.preview_compute_shell_capacity = shell_cap;
         }
         if need_wire_realloc {
-            self.preview_compute_wire_instance_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_wire_inst"),
-                size: (wire_cap as u64) * 80,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_wire_instance_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_wire_inst"),
+                    size: (wire_cap as u64) * 80,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::VERTEX,
+                    mapped_at_creation: false,
+                }));
             self.preview_compute_wire_capacity = wire_cap;
             self.preview_compute_is_skip_wire = skip_wire;
         }
 
         if need_occ_realloc || self.preview_compute_occupancy_buf.is_none() {
             let cap_words = occ_words.next_power_of_two().max(64);
-            self.preview_compute_occupancy_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_occ"),
-                size: (cap_words as u64) * 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_occupancy_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_occ"),
+                    size: (cap_words as u64) * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
             self.preview_compute_occ_word_count = cap_words;
         }
 
         // Allocate single-frame buffers if missing.
         if self.preview_compute_indirect_buf.is_none() {
             // 2 × DrawIndexedIndirect = 2 × 20 bytes = 40 bytes.
-            self.preview_compute_indirect_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_indirect"),
-                size: 40,
-                usage: wgpu::BufferUsages::INDIRECT
-                    | wgpu::BufferUsages::STORAGE
-                    | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_indirect_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_indirect"),
+                    size: 40,
+                    usage: wgpu::BufferUsages::INDIRECT
+                        | wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
         }
         if self.preview_compute_uniform_buf.is_none() {
-            self.preview_compute_uniform_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_uniform"),
-                size: 128, // PreviewUniforms is ≤ 128 bytes
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_uniform_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_uniform"),
+                    size: 128, // PreviewUniforms is ≤ 128 bytes
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
         }
         // Always reallocate the object-matrix buffer to the right size.
         {
             let n_obj = raw.obj_matrices.len().max(1) as u64;
             let obj_bytes = n_obj * 64; // mat4x4<f32> = 64 bytes
-            self.preview_compute_obj_matrix_buf = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("preview_compute_obj_matrices"),
-                size: obj_bytes,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
+            self.preview_compute_obj_matrix_buf =
+                Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("preview_compute_obj_matrices"),
+                    size: obj_bytes,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
         }
 
         // Build prototype meshes if missing (always unit half=0.5).
@@ -913,7 +918,7 @@ impl WgpuViewer {
             w[4..8].copy_from_slice(&raw.bbox_min[1].to_le_bytes());
             w[8..12].copy_from_slice(&raw.bbox_min[2].to_le_bytes());
             w[12..16].copy_from_slice(&n_voxels.to_le_bytes()); // voxel_count
-            // bbox_size: vec3<u32> at offset 16 (12 bytes) + _pad at 28
+                                                                // bbox_size: vec3<u32> at offset 16 (12 bytes) + _pad at 28
             w[16..20].copy_from_slice(&raw.bbox_size[0].to_le_bytes());
             w[20..24].copy_from_slice(&raw.bbox_size[1].to_le_bytes());
             w[24..28].copy_from_slice(&raw.bbox_size[2].to_le_bytes());
@@ -940,19 +945,24 @@ impl WgpuViewer {
             w[100..104].copy_from_slice(&self.preview_compute_shell_capacity.to_le_bytes());
             // skip_wire: offset 104 – 1 tells shell_emit to skip wireframe emit
             w[104..108].copy_from_slice(&(skip_wire as u32).to_le_bytes());
-            self.queue.write_buffer(
-                self.preview_compute_uniform_buf.as_ref().unwrap(),
-                0,
-                &buf,
-            );
+            self.queue
+                .write_buffer(self.preview_compute_uniform_buf.as_ref().unwrap(), 0, &buf);
         }
 
         // Reset indirect buffer: solid draw at offset 0, wire at offset 20.
         // index_count preloaded; instance_count = 0 (atomicAdd'd by compute shader).
         {
             let indirect_init: [u32; 10] = [
-                self.preview_compute_solid_proto_idx_count, 0, 0, 0, 0, // solid
-                self.preview_compute_wire_proto_idx_count,  0, 0, 0, 0, // wire
+                self.preview_compute_solid_proto_idx_count,
+                0,
+                0,
+                0,
+                0, // solid
+                self.preview_compute_wire_proto_idx_count,
+                0,
+                0,
+                0,
+                0, // wire
             ];
             self.queue.write_buffer(
                 self.preview_compute_indirect_buf.as_ref().unwrap(),
@@ -975,9 +985,18 @@ impl WgpuViewer {
                 label: Some("preview_fill_occ_bg"),
                 layout: &self.preview_compute_fill_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: raw_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: occ_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ub.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: raw_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: occ_buf.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -985,13 +1004,34 @@ impl WgpuViewer {
                 label: Some("preview_shell_emit_bg"),
                 layout: &self.preview_compute_emit_layout,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: ub.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: raw_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: occ_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: obj_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: solid_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: wire_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: ind_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ub.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: raw_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: occ_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: obj_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: solid_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wire_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: ind_buf.as_entire_binding(),
+                    },
                 ],
             });
 

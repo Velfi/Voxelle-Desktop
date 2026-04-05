@@ -991,7 +991,10 @@ mod tests {
     fn signed_dist_center_is_larger_than_corner() {
         let d_center = signed_dist_to_polygon_boundary(0.5, 0.5, &unit_square());
         let d_near_edge = signed_dist_to_polygon_boundary(0.05, 0.5, &unit_square());
-        assert!(d_center > d_near_edge, "center should be farther from boundary than near-edge");
+        assert!(
+            d_center > d_near_edge,
+            "center should be farther from boundary than near-edge"
+        );
     }
 
     // ── convex_hull_2d ─────────────────────────────────────────────────

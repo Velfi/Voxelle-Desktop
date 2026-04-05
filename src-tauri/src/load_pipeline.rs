@@ -457,14 +457,16 @@ pub(crate) fn unload_current_project<R: Runtime>(
     }
     drop(v);
     state
-        .gpu.start_screen_logo_transparent
+        .gpu
+        .start_screen_logo_transparent
         .store(true, Ordering::Release);
 
     *state.gpu.last_scene_bounds.lock() = Some(prepared.bounds);
     *state.gpu.voxel_edit_stats_cache.lock() = None;
     *state.gpu.last_edit_perf.lock() = None;
     state
-        .gpu.mesh_refresh_generation
+        .gpu
+        .mesh_refresh_generation
         .fetch_add(1, Ordering::Release);
 
     state.file.solo_undo.lock().clear();
@@ -481,7 +483,8 @@ pub(crate) fn unload_current_project<R: Runtime>(
     *state.file.stroke_preview_union.lock() = AHashSet::default();
     *state.file.stroke_preview_last_args.lock() = None;
     state
-        .file.stroke_preview_suppresses_hover
+        .file
+        .stroke_preview_suppresses_hover
         .store(false, Ordering::Release);
     *state.file.sculpt_stroke_replay.lock() = Vec::new();
     *state.file.stroke_active.lock() = false;
@@ -558,7 +561,8 @@ pub(crate) fn spawn_new_project(
                 return;
             }
             state
-                .gpu.start_screen_logo_transparent
+                .gpu
+                .start_screen_logo_transparent
                 .store(false, Ordering::Release);
             emit_load_progress(&app, 0.05, "Starting…");
 
@@ -1041,7 +1045,8 @@ pub(crate) fn emit_voxelle_loaded<R: Runtime>(
     state: &ViewerState,
 ) {
     state
-        .gpu.start_screen_logo_transparent
+        .gpu
+        .start_screen_logo_transparent
         .store(false, Ordering::Release);
     let (mood, lighting) = match state.file.current_file.lock().as_ref() {
         Some(f) => (f.mood.clone(), f.lighting.clone()),

@@ -104,6 +104,14 @@ export function PreferencesModal({
     savePreferences(next);
   };
 
+  const onMouselookSensitivity = (raw: number) => {
+    const v = Number.isFinite(raw) ? Math.max(0.1, Math.min(5.0, raw)) : 1.0;
+    const next = { ...prefs, mouselookSensitivity: v };
+    setPrefs(next);
+    savePreferences(next);
+    void invoke("set_mouselook_sensitivity", { value: v }).catch(() => {});
+  };
+
   const onGizmoOnTop = (checked: boolean) => {
     const next = { ...prefs, gizmoOnTop: checked };
     setPrefs(next);
@@ -326,6 +334,18 @@ export function PreferencesModal({
                 onChange={(e) => onGizmoOnTop(e.target.checked)}
               />
               Always render gizmo on top
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Mouselook sensitivity</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={0.1}
+                max={5}
+                step={0.1}
+                value={prefs.mouselookSensitivity}
+                onChange={(e) => onMouselookSensitivity(e.target.valueAsNumber)}
+              />
             </label>
             <label className="prefs-checkbox-label">
               <input

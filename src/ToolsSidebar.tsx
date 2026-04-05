@@ -1,7 +1,7 @@
 // ── Tools sidebar ─────────────────────────────────────────────────────
 // Extracted from App.tsx to reduce file size.
 
-import { useRef } from "react";
+import { memo, useRef } from "react";
 import { useToolState } from "./ToolStateContext";
 import type {
   InteractionMode,
@@ -543,6 +543,11 @@ export interface ToolsSidebarProps {
   setClothPins: (pins: [number, number, number][]) => void;
   clothPinsRef: React.MutableRefObject<[number, number, number][]>;
 
+  // Squishy
+  squishyMode: "add" | "edit" | "delete";
+  setSquishyMode: (m: "add" | "edit" | "delete") => void;
+  squishyBallCount: number;
+
   // Bone
   bonePhase: SidebarPhaseHandle;
   boneMode: "add" | "edit" | "delete";
@@ -561,7 +566,7 @@ export interface ToolsSidebarProps {
 
 // ── Component ─────────────────────────────────────────────────────────
 
-export function ToolsSidebar(props: ToolsSidebarProps) {
+export const ToolsSidebar = memo(function ToolsSidebar(props: ToolsSidebarProps) {
   const {
     showEditorChrome,
     loading,
@@ -585,6 +590,9 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
     setRopeFirstScreen,
     setClothPins,
     clothPinsRef,
+    squishyMode,
+    setSquishyMode,
+    squishyBallCount,
     bonePhase,
     boneMode,
     setBoneMode,
@@ -1378,18 +1386,31 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                   {toolsPane === "squishy" ? (
                     <>
                       <div className="sidebar-section-label">Squishy</div>
-                      <button
-                        type="button"
-                        className={
-                          interactionMode === "squishy"
-                            ? "sidebar-mode-btn is-active"
-                            : "sidebar-mode-btn"
-                        }
-                        disabled={loading || workBusy}
-                        onClick={() => setInteractionMode("squishy")}
-                      >
-                        <span className="sidebar-mode-label">Metaballs</span>
-                      </button>
+                      <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                        {(["add", "edit", "delete"] as const).map((m) => (
+                          <button
+                            key={m}
+                            type="button"
+                            className={
+                              squishyMode === m ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"
+                            }
+                            disabled={loading || workBusy}
+                            onClick={() => setSquishyMode(m)}
+                          >
+                            <span className="sidebar-mode-label">
+                              {m === "edit" ? "Pick" : m[0].toUpperCase() + m.slice(1)}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
+                        Metaballs: {squishyBallCount}
+                        {squishyMode === "add"
+                          ? " — click voxel to place; drag to size"
+                          : squishyMode === "edit"
+                            ? " — click to select"
+                            : " — click to delete"}
+                      </p>
                       <SymmetryColorSidebarSections
                         loading={loading}
                         workBusy={workBusy}
@@ -1408,9 +1429,6 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                         mirrorZ={mirrorZ}
                         setMirrorZ={setMirrorZ}
                       />
-                      <p className="sidebar-pane-hint sidebar-toolpanel-hint">
-                        Add / pick / delete blobs in the viewport; commit in tool options.
-                      </p>
                     </>
                   ) : null}
 
@@ -1688,14 +1706,17 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
                 {toolsPane === "squishy" && (
                   <>
                     <div className="sidebar-collapsed-tool-separator" />
-                    <button
-                      type="button"
-                      className={`sidebar-collapsed-sub-btn${interactionMode === "squishy" ? " is-active" : ""}`}
-                      disabled={loading || workBusy}
-                      onClick={() => setInteractionMode("squishy")}
-                    >
-                      Metaballs
-                    </button>
+                    {(["add", "edit", "delete"] as const).map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        className={`sidebar-collapsed-sub-btn${squishyMode === m ? " is-active" : ""}`}
+                        disabled={loading || workBusy}
+                        onClick={() => setSquishyMode(m)}
+                      >
+                        {m === "edit" ? "Pick" : m[0].toUpperCase() + m.slice(1)}
+                      </button>
+                    ))}
                   </>
                 )}
 
@@ -1732,4 +1753,4 @@ export function ToolsSidebar(props: ToolsSidebarProps) {
       ) : null}
     </>
   );
-}
+});

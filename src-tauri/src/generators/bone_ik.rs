@@ -217,7 +217,11 @@ mod tests {
     fn fabrik_2bone_reachable_target_converges() {
         // Root at origin, joint at (1,0,0), bone lengths [1, 1].
         // Target at (1, 1, 0) — total chain reach = 2, distance to target = sqrt(2) < 2.
-        let mut positions = vec![Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0)];
+        let mut positions = vec![
+            Vec3::ZERO,
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+        ];
         let lengths = vec![1.0_f32, 1.0];
         let target = Vec3::new(1.0, 1.0, 0.0);
         fabrik_solve(&mut positions, &lengths, target, 20);
@@ -242,7 +246,11 @@ mod tests {
     fn fabrik_unreachable_target_chain_aligned_with_target_direction() {
         // Chain of total length 2, target at distance 10.
         // The chain cannot reach the target but should align along the root→target axis.
-        let mut positions = vec![Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 2.0, 0.0)];
+        let mut positions = vec![
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
         let lengths = vec![1.0_f32, 1.0];
         let target = Vec3::new(10.0, 0.0, 0.0);
         fabrik_solve(&mut positions, &lengths, target, 20);
@@ -254,12 +262,20 @@ mod tests {
         assert!((bone0_len - 1.0).abs() < EPS, "bone0 len = {bone0_len}");
         assert!((bone1_len - 1.0).abs() < EPS, "bone1 len = {bone1_len}");
         // Effector should have moved toward target direction (X axis), i.e. x component > 0
-        assert!(positions[2].x > 0.0, "chain should rotate toward target, got {:?}", positions[2]);
+        assert!(
+            positions[2].x > 0.0,
+            "chain should rotate toward target, got {:?}",
+            positions[2]
+        );
     }
 
     #[test]
     fn fabrik_preserves_bone_lengths() {
-        let mut positions = vec![Vec3::ZERO, Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 2.0, 0.0)];
+        let mut positions = vec![
+            Vec3::ZERO,
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
         let lengths = vec![1.0_f32, 1.0];
         fabrik_solve(&mut positions, &lengths, Vec3::new(0.5, 1.5, 0.0), 15);
         let l0 = (positions[1] - positions[0]).length();

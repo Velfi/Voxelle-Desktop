@@ -1,7 +1,7 @@
 // ── Status bar (footer) ──────────────────────────────────────────────
 // Extracted from App.tsx.
 
-import { useEffect, useState } from "react";
+import { memo, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { RosterEntry } from "./types";
@@ -24,7 +24,7 @@ export interface StatusBarProps {
   pingMs: number | null;
 }
 
-export function StatusBar(props: StatusBarProps) {
+export const StatusBar = memo(function StatusBar(props: StatusBarProps) {
   const {
     showStartScreen,
     statusBarMessage,
@@ -136,4 +136,4 @@ export function StatusBar(props: StatusBarProps) {
       ) : null}
     </footer>
   );
-}
+});

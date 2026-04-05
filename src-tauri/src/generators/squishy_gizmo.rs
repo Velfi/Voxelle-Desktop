@@ -1,8 +1,8 @@
-//! Squishy edit gizmo: screen-space handle pick + plane drag (web `squishyGizmo.ts` parity).
+//! Squishy edit gizmo: screen-space handle pick + plane drag.
+//! Hit-testing matches the shared sync_gizmo_gpu layout (move arrows + scale ring).
 
 use crate::camera::OrbitCamera;
 use crate::generators::squishy_session::{Metaball, SquishyMode, SquishySession};
-use crate::greedy_mesh::{self, MeshBuffers};
 use crate::voxel_edit::{screen_to_world_ray, world_to_viewport_pixels};
 use glam::Vec3;
 
@@ -24,23 +24,7 @@ pub struct SquishyGizmoDrag {
     pub start_hit: Vec3,
 }
 
-const HANDLE_BASE_SCALE: f32 = 0.4;
-const SHAFT_LEN: f32 = 1.75;
-const CONE_H: f32 = 0.52;
-const ARROW_LEN: f32 = SHAFT_LEN + CONE_H;
-const AXIS_ARROW_SIZE_MULT: f32 = 5.0;
 const PICK_PX: f32 = 24.0;
-
-fn gizmo_layout(center: Vec3, selected_radius: f32, eye: Vec3) -> (f32, f32) {
-    let dist = center.distance(eye);
-    let handle_scale = (dist * 0.028).clamp(0.22, 0.58);
-    let radius_offset = (selected_radius + 0.9).max(1.2);
-    let s = HANDLE_BASE_SCALE * handle_scale;
-    let arrow_s = s * AXIS_ARROW_SIZE_MULT;
-    let arrow_world_len = ARROW_LEN * arrow_s;
-    let arm_base = (radius_offset - arrow_world_len).max(0.12);
-    (arm_base, arrow_world_len)
-}
 
 fn screen_dist_to_segment(
     camera: &OrbitCamera,
@@ -83,8 +67,11 @@ pub fn pick_squishy_gizmo_handle(
         ball.z as f32 + 0.5,
     );
     let eye = camera.smooth_eye();
-    let (arm_base, arrow_world_len) = gizmo_layout(center, ball.radius, eye);
+    let dist = (eye - center).length().max(1.0);
+    // Arm length matches sync_gizmo_gpu exactly.
+    let arm = (dist * 0.13_f32).clamp(1.5, 20.0);
 
+    // Test move arrows — both directions of each axis, same handle per axis.
     let mut best: Option<(SquishyGizmoHandle, f32)> = None;
     let axes = [
         (SquishyGizmoHandle::MoveX, Vec3::X),
@@ -92,25 +79,30 @@ pub fn pick_squishy_gizmo_handle(
         (SquishyGizmoHandle::MoveZ, Vec3::Z),
     ];
     for (kind, axis) in axes {
-        let a = center + axis * arm_base;
-        let b = center + axis * (arm_base + arrow_world_len);
-        let d = screen_dist_to_segment(camera, w, h, sx, sy, a, b);
-        let replace = best.map(|(_, bd)| d < bd).unwrap_or(true);
-        if replace {
-            best = Some((kind, d));
+        for &dir in &[axis, -axis] {
+            let d = screen_dist_to_segment(camera, w, h, sx, sy, center, center + dir * arm);
+            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((kind, d));
+            }
         }
     }
-    let radius_offset = (ball.radius + 0.9).max(1.2);
-    let sp = radius_offset * 0.82;
-    let scale_center = center + Vec3::new(sp, sp, sp);
-    let scale_len = arrow_world_len * 0.45;
-    let diag = Vec3::new(1.0, 1.0, 1.0).normalize();
-    let sa = scale_center - diag * (scale_len * 0.5);
-    let sb = scale_center + diag * (scale_len * 0.5);
-    let sd = screen_dist_to_segment(camera, w, h, sx, sy, sa, sb);
-    let replace = best.map(|(_, bd)| sd < bd).unwrap_or(true);
-    if replace {
-        best = Some((SquishyGizmoHandle::Scale, sd));
+
+    // Test scale ring — camera-facing circle at ball.radius (matches sync_gizmo_gpu ring).
+    let inv_view = camera.view_matrix().inverse();
+    let cam_right = inv_view.x_axis.truncate().normalize();
+    let cam_up = inv_view.y_axis.truncate().normalize();
+    let r = ball.radius.max(dist * 0.015);
+    const RING_N: usize = 32;
+    let mut ring_d = f32::MAX;
+    for i in 0..RING_N {
+        let a0 = i as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+        let a1 = (i + 1) as f32 * 2.0 * std::f32::consts::PI / RING_N as f32;
+        let p0 = center + (cam_right * a0.cos() + cam_up * a0.sin()) * r;
+        let p1 = center + (cam_right * a1.cos() + cam_up * a1.sin()) * r;
+        ring_d = ring_d.min(screen_dist_to_segment(camera, w, h, sx, sy, p0, p1));
+    }
+    if best.map(|(_, bd)| ring_d < bd).unwrap_or(true) {
+        best = Some((SquishyGizmoHandle::Scale, ring_d));
     }
 
     let (kind, d) = best?;
@@ -184,8 +176,7 @@ pub fn squishy_gizmo_apply_drag(
     };
     let delta = hit - drag.start_hit;
     let start = &drag.start;
-    let view = camera.view_matrix();
-    let inv_view = view.inverse();
+    let inv_view = camera.view_matrix().inverse();
     let camera_right = inv_view.x_axis.truncate().normalize();
 
     match drag.handle {
@@ -202,59 +193,10 @@ pub fn squishy_gizmo_apply_drag(
             session.set_ball_transform(drag.ball_id, start.x, start.y, nz, start.radius);
         }
         SquishyGizmoHandle::Scale => {
+            // Drag right = grow, drag left = shrink.
             let signed = delta.dot(camera_right);
             let nr = (start.radius + signed).clamp(0.5, 64.0);
             session.set_ball_transform(drag.ball_id, start.x, start.y, start.z, nr);
         }
-    }
-}
-
-/// Colored wire stubs along axes + diagonal scale (matches web gizmo readability).
-pub fn append_squishy_gizmo_wire(
-    session: &SquishySession,
-    camera: &OrbitCamera,
-    out: &mut MeshBuffers,
-) {
-    if session.mode != SquishyMode::Edit {
-        return;
-    }
-    let Some(sel_id) = session.selected_id else {
-        return;
-    };
-    let Some(ball) = session.balls.iter().find(|b| b.id == sel_id) else {
-        return;
-    };
-    let center = Vec3::new(
-        ball.x as f32 + 0.5,
-        ball.y as f32 + 0.5,
-        ball.z as f32 + 0.5,
-    );
-    let eye = camera.smooth_eye();
-    let (arm_base, arrow_world_len) = gizmo_layout(center, ball.radius, eye);
-    let colors = [[1.0, 0.36, 0.4], [0.34, 0.84, 0.43], [0.36, 0.63, 1.0]];
-    let axes = [Vec3::X, Vec3::Y, Vec3::Z];
-    for i in 0..3 {
-        let a = center + axes[i] * arm_base;
-        let b = center + axes[i] * (arm_base + arrow_world_len);
-        for k in 0..=12 {
-            let t = k as f32 / 12.0;
-            let p = a.lerp(b, t);
-            let wfm = greedy_mesh::preview_cube_wireframe_mesh(p.x, p.y, p.z, 0.04, colors[i], 2.0);
-            greedy_mesh::append_mesh_buffers(out, wfm);
-        }
-    }
-    let radius_offset = (ball.radius + 0.9).max(1.2);
-    let sp = radius_offset * 0.82;
-    let scale_center = center + Vec3::new(sp, sp, sp);
-    let scale_len = arrow_world_len * 0.45;
-    let diag = Vec3::new(1.0, 1.0, 1.0).normalize();
-    let sa = scale_center - diag * (scale_len * 0.5);
-    let sb = scale_center + diag * (scale_len * 0.5);
-    for k in 0..=10 {
-        let t = k as f32 / 10.0;
-        let p = sa.lerp(sb, t);
-        let wfm =
-            greedy_mesh::preview_cube_wireframe_mesh(p.x, p.y, p.z, 0.035, [1.0, 0.82, 0.4], 2.0);
-        greedy_mesh::append_mesh_buffers(out, wfm);
     }
 }

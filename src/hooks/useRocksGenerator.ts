@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { useLatestRef } from "./useLatestRef";
 
 interface RocksGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
@@ -35,28 +36,12 @@ export function useRocksGenerator(ctx: RocksGeneratorContext): RocksGeneratorSta
   const [rockSinkDirection, setRockSinkDirection] = useState<"none" | "under" | "over">("none");
   const [rockSinkAmount, setRockSinkAmount] = useState(0);
 
-  const rockRoughnessRef = useRef(rockRoughness);
-  const rockCountRef = useRef(rockCount);
-  const rockClusterRadiusRef = useRef(rockClusterRadius);
-  const rockSinkDirectionRef = useRef(rockSinkDirection);
-  const rockSinkAmountRef = useRef(rockSinkAmount);
+  const rockRoughnessRef = useLatestRef(rockRoughness);
+  const rockCountRef = useLatestRef(rockCount);
+  const rockClusterRadiusRef = useLatestRef(rockClusterRadius);
+  const rockSinkDirectionRef = useLatestRef(rockSinkDirection);
+  const rockSinkAmountRef = useLatestRef(rockSinkAmount);
   const rockPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-
-  useEffect(() => {
-    rockRoughnessRef.current = rockRoughness;
-  }, [rockRoughness]);
-  useEffect(() => {
-    rockCountRef.current = rockCount;
-  }, [rockCount]);
-  useEffect(() => {
-    rockClusterRadiusRef.current = rockClusterRadius;
-  }, [rockClusterRadius]);
-  useEffect(() => {
-    rockSinkDirectionRef.current = rockSinkDirection;
-  }, [rockSinkDirection]);
-  useEffect(() => {
-    rockSinkAmountRef.current = rockSinkAmount;
-  }, [rockSinkAmount]);
 
   const rocksPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],

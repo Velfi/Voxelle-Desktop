@@ -1,6 +1,7 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { useLatestRef } from "./useLatestRef";
 
 interface GrassGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
@@ -23,16 +24,9 @@ export function useGrassGenerator(ctx: GrassGeneratorContext): GrassGeneratorSta
   const [grassDensity, setGrassDensity] = useState(0.6);
   const [grassMaxHeight, setGrassMaxHeight] = useState(3);
 
-  const grassDensityRef = useRef(grassDensity);
-  const grassMaxHeightRef = useRef(grassMaxHeight);
+  const grassDensityRef = useLatestRef(grassDensity);
+  const grassMaxHeightRef = useLatestRef(grassMaxHeight);
   const grassPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
-
-  useEffect(() => {
-    grassDensityRef.current = grassDensity;
-  }, [grassDensity]);
-  useEffect(() => {
-    grassMaxHeightRef.current = grassMaxHeight;
-  }, [grassMaxHeight]);
 
   const grassPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
     phases: ["settings"],

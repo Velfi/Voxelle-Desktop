@@ -109,6 +109,8 @@ export type VoxelleDesktopPreferences = {
   collabAvatarName: string;
   /** Silently check for app updates on launch and prompt if one is found. */
   autoCheckUpdates: boolean;
+  /** Fly/walk mouselook rotation speed multiplier (0.1–5.0, default 1.0). */
+  mouselookSensitivity: number;
 };
 
 const DEFAULTS: VoxelleDesktopPreferences = {
@@ -138,6 +140,7 @@ const DEFAULTS: VoxelleDesktopPreferences = {
   newProjectDefaultShape: "circle",
   collabAvatarName: "",
   autoCheckUpdates: true,
+  mouselookSensitivity: 1.0,
 };
 
 const LEGACY_AUTOSAVE_INTERVAL_KEY = "voxelleAutosaveSecs";
@@ -329,6 +332,10 @@ export function loadPreferences(): VoxelleDesktopPreferences {
           : DEFAULTS.collabAvatarName,
       autoCheckUpdates:
         typeof o.autoCheckUpdates === "boolean" ? o.autoCheckUpdates : DEFAULTS.autoCheckUpdates,
+      mouselookSensitivity:
+        typeof o.mouselookSensitivity === "number" && Number.isFinite(o.mouselookSensitivity)
+          ? Math.max(0.1, Math.min(5.0, o.mouselookSensitivity))
+          : DEFAULTS.mouselookSensitivity,
     };
   } catch {
     return { ...DEFAULTS };
@@ -374,6 +381,7 @@ export function savePreferences(prefs: VoxelleDesktopPreferences): void {
     merged.newProjectDefaultSize = prefs.newProjectDefaultSize;
     merged.newProjectDefaultShape = prefs.newProjectDefaultShape;
     merged.autoCheckUpdates = prefs.autoCheckUpdates;
+    merged.mouselookSensitivity = prefs.mouselookSensitivity;
     localStorage.setItem(VOXELLE_PREFERENCES_KEY, JSON.stringify(merged));
     applyAppearanceToDocument(prefs.appearanceTheme);
   } catch {

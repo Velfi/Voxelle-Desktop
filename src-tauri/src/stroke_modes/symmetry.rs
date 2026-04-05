@@ -1,7 +1,7 @@
 //! Mirror / symmetry axis helpers and line axis-align snapping.
 
-use crate::greedy_mesh::VoxelCoord;
 use super::PlaneAxis;
+use crate::greedy_mesh::VoxelCoord;
 
 /// Constrain `b` so the segment from `a` lies on a single axis (X, Y, or Z) through `a`.
 pub(super) fn axis_align_line_endpoints(a: VoxelCoord, b: VoxelCoord) -> (VoxelCoord, VoxelCoord) {

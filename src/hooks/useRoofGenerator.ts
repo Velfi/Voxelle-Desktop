@@ -1,4 +1,5 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
+import { useLatestRef } from "./useLatestRef";
 
 export interface RoofGeneratorState {
   roofStyle: string;
@@ -29,25 +30,13 @@ export function useRoofGenerator(): RoofGeneratorState {
   const [roofAreaShape, setRoofAreaShape] = useState<"polygon" | "square" | "circle">("polygon");
   const [roofFirstClick, setRoofFirstClick] = useState<[number, number, number] | null>(null);
 
-  const roofStyleRef = useRef(roofStyle);
-  const roofHeightRef = useRef(roofHeight);
-  const roofHollowRef = useRef(roofHollow);
+  const roofStyleRef = useLatestRef(roofStyle);
+  const roofHeightRef = useLatestRef(roofHeight);
+  const roofHollowRef = useLatestRef(roofHollow);
+  // roofPins and roofFirstClick are mutated directly in handlers for immediate consistency.
   const roofPinsRef = useRef<[number, number, number][]>([]);
-  const roofAreaShapeRef = useRef<"polygon" | "square" | "circle">("polygon");
+  const roofAreaShapeRef = useLatestRef(roofAreaShape);
   const roofFirstClickRef = useRef<[number, number, number] | null>(null);
-
-  useEffect(() => {
-    roofStyleRef.current = roofStyle;
-  }, [roofStyle]);
-  useEffect(() => {
-    roofHeightRef.current = roofHeight;
-  }, [roofHeight]);
-  useEffect(() => {
-    roofHollowRef.current = roofHollow;
-  }, [roofHollow]);
-  useEffect(() => {
-    roofAreaShapeRef.current = roofAreaShape;
-  }, [roofAreaShape]);
 
   return {
     roofStyle,

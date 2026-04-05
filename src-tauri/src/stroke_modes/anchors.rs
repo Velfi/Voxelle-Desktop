@@ -8,18 +8,21 @@ use glam::Vec3;
 use std::collections::HashSet;
 
 use super::{
-    DrawStrokeMode, PlaneAxis, StrokeAux,
     polygon::{
-        convex_hull_2d, extrude_base_positions,
-        fill_polygon_2d, fill_polygon_axis_aligned, fill_polygon_hull_axis_aligned,
-        fill_solid_polygon_hull_projected, fill_solid_polygon_simple_projected,
-        lift_plane_2d_to_voxels, project_vertices_to_plane_2d, solid_polygon_fixed_plane,
-        stroke_aux_is_solid_family,
+        convex_hull_2d, extrude_base_positions, fill_polygon_2d, fill_polygon_axis_aligned,
+        fill_polygon_hull_axis_aligned, fill_solid_polygon_hull_projected,
+        fill_solid_polygon_simple_projected, lift_plane_2d_to_voxels, project_vertices_to_plane_2d,
+        solid_polygon_fixed_plane, stroke_aux_is_solid_family,
     },
     symmetry::{axis_align_line_endpoints, axis_from_plane_axis, face_normal_axis},
+    DrawStrokeMode, PlaneAxis, StrokeAux,
 };
 
-pub(super) fn disk_in_axis_plane(center: VoxelCoord, plane_axis: usize, radius: i32) -> Vec<VoxelCoord> {
+pub(super) fn disk_in_axis_plane(
+    center: VoxelCoord,
+    plane_axis: usize,
+    radius: i32,
+) -> Vec<VoxelCoord> {
     let r = radius.max(0);
     let mut out = Vec::new();
     let (cx, cy, cz) = center;
@@ -58,7 +61,11 @@ pub(super) fn disk_in_axis_plane(center: VoxelCoord, plane_axis: usize, radius: 
 }
 
 /// Disk with the interior removed: voxels with `inner_r^2 < dist^2 <= outer_r^2` in the plane (Euclidean).
-pub(super) fn annulus_in_axis_plane(center: VoxelCoord, plane_axis: usize, outer_r: i32) -> Vec<VoxelCoord> {
+pub(super) fn annulus_in_axis_plane(
+    center: VoxelCoord,
+    plane_axis: usize,
+    outer_r: i32,
+) -> Vec<VoxelCoord> {
     let outer_r = outer_r.max(0);
     if outer_r == 0 {
         return Vec::new();
@@ -126,7 +133,11 @@ pub(super) fn circle_radius_in_plane(center: [i32; 3], edge: [i32; 3], plane_axi
 }
 
 /// Thick segment: voxels within `radius` of the polyline A–B in 3D (Manhattan tube, axis-aligned only).
-pub(super) fn cylinder_axis_aligned_caps(a: VoxelCoord, b: VoxelCoord, radius: i32) -> Vec<VoxelCoord> {
+pub(super) fn cylinder_axis_aligned_caps(
+    a: VoxelCoord,
+    b: VoxelCoord,
+    radius: i32,
+) -> Vec<VoxelCoord> {
     let line = voxel_line_dda(a, b);
     let mut seen: HashSet<VoxelCoord> = HashSet::new();
     let r = radius.max(0);

@@ -644,7 +644,11 @@ mod tests {
 
     #[test]
     fn polygon_with_fewer_than_3_points_returns_false() {
-        assert!(!cloth_patch_point_in_polygon_2d(0.5, 0.5, &[(0.0, 0.0), (1.0, 1.0)]));
+        assert!(!cloth_patch_point_in_polygon_2d(
+            0.5,
+            0.5,
+            &[(0.0, 0.0), (1.0, 1.0)]
+        ));
     }
 
     #[test]

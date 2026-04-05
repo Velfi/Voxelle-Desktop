@@ -24,7 +24,8 @@ mod preview;
 mod render;
 mod render_constants;
 mod sculpt_mesh_smooth;
-mod smooth_mesh;
+/// Smooth-surface CPU meshing (public for `cargo bench`).
+pub mod smooth_mesh;
 mod state;
 mod stroke_modes;
 pub mod voxel_edit;
@@ -48,6 +49,29 @@ use preview::*;
 use state::*;
 
 use camera::OrbitCamera;
+
+// Raw mouse delta since the last call, independent of cursor position.
+// Works correctly when the cursor is grabbed (CGAssociateMouseAndMouseCursorPosition),
+// which Tauri/winit calls internally via setCursorGrab(true) on macOS.
+// Units: logical pixels (points) on macOS.
+#[cfg(target_os = "macos")]
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGGetLastMouseDelta(deltaX: *mut i32, deltaY: *mut i32);
+    /// Reference-counted cursor suppression — persists through mouse movement
+    /// unlike NSCursor.hide() which the OS overrides on mouseMoved events.
+    fn CGDisplayHideCursor(display: u32);
+    fn CGDisplayShowCursor(display: u32);
+    fn CGMainDisplayID() -> u32;
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn poll_native_mouse_delta() -> (f32, f32) {
+    let mut dx: i32 = 0;
+    let mut dy: i32 = 0;
+    unsafe { CGGetLastMouseDelta(&mut dx, &mut dy) };
+    (dx as f32, dy as f32)
+}
 use gpu_brick::BrickCellWrite;
 use render::{compute_greedy_rebuild_cpu, MoodParams, PreparedGreedyRebuild, WgpuViewer};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
@@ -710,6 +734,8 @@ pub fn run() {
             walk_mode: Mutex::new(false),
             walk_physics: Mutex::new(camera::WalkPhysicsState::default()),
             walk_last_physics: Mutex::new(None),
+            native_look_active: AtomicBool::new(false),
+            mouselook_sensitivity: Mutex::new(1.0),
         },
         file: FileState {
             file_label: Mutex::new(String::new()),
@@ -923,6 +949,12 @@ pub fn run() {
                 let _ = clear_autosaves_and_session(app);
             } else if event.id() == "debug_test_crash" {
                 panic!("Test crash triggered from Debug menu");
+            } else if event.id() == "debug_pointer_test" {
+                let _ = app.emit_to(
+                    EventTarget::webview_window("main"),
+                    "voxelle-debug-pointer-test",
+                    (),
+                );
             } else if event.id() == "view_render_greedy"
                 || event.id() == "view_render_marching"
                 || event.id() == "view_render_dual"
@@ -1268,11 +1300,13 @@ pub fn run() {
             get_scene_lighting,
             set_focal_length_mm,
             get_focal_length_mm,
+            set_mouselook_sensitivity,
             set_fly_mode,
             get_fly_mode,
             set_walk_mode,
             sync_fly_input,
             camera_fly_look,
+            set_native_look,
             selection_toggle_at_screen,
             get_selection_gizmo_projected,
             gizmo_pointer_down,
@@ -1348,6 +1382,7 @@ pub fn run() {
             squishy_gizmo_pointer_down,
             squishy_gizmo_pointer_move,
             squishy_gizmo_pointer_up,
+            squishy_add_drag_resize,
             bone_session_get,
             bone_session_clear,
             bone_session_commit,
@@ -1395,6 +1430,24 @@ pub fn run() {
                 {
                     let mut cam = state.cam.camera.lock();
                     cam.update_damping();
+                }
+                // Native mouse look via CGGetLastMouseDelta (macOS cursor-grab path).
+                // Tauri cursor grab freezes the OS cursor so WKWebView pointermove deltas are 0;
+                // CGGetLastMouseDelta gives the raw hardware delta regardless of cursor position.
+                // Always drain the accumulator every frame — even when mouselook is inactive —
+                // so there is never more than one frame of stale buildup at activation time.
+                #[cfg(target_os = "macos")]
+                {
+                    let (dx, dy) = poll_native_mouse_delta();
+                    if state.cam.native_look_active.load(Ordering::Relaxed) && (dx != 0.0 || dy != 0.0) {
+                        let (vh, sens) = {
+                            let v = state.gpu.viewer.lock();
+                            let h = v.as_ref().map(|viewer| viewer.viewport_size().1 as f32).unwrap_or(1.0);
+                            (h, *state.cam.mouselook_sensitivity.lock())
+                        };
+                        let mut cam = state.cam.camera.lock();
+                        cam.fly_look_rotate_screen(dx, dy, vh.max(1.0), sens);
+                    }
                 }
                 // Fly WASD: integrate here with wall-clock dt between native iterations (not webview RAF).
                 if *state.cam.fly_mode.lock() {
@@ -1715,6 +1768,8 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
             walk_mode: Mutex::new(false),
             walk_physics: Mutex::new(camera::WalkPhysicsState::default()),
             walk_last_physics: Mutex::new(None),
+            native_look_active: AtomicBool::new(false),
+            mouselook_sensitivity: Mutex::new(1.0),
         },
         file: FileState {
             file_label: Mutex::new(String::new()),

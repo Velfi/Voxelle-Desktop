@@ -26,6 +26,12 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
   const planeStrokeDebugEnabledRef = useRef(true);
   const bonePendingJointRef = useRef<number | null>(null);
   const bonePlacingJointRef = useRef<number | null>(null);
+  const squishyAddDragBallIdRef = useRef<number | null>(null);
+  // Track the last (nx, ny, mode) sent to sync_preview_input so we can skip
+  // identical calls when the cursor hasn't moved between RAF frames.
+  const lastSyncPreviewNxRef = useRef<number>(NaN);
+  const lastSyncPreviewNyRef = useRef<number>(NaN);
+  const lastSyncPreviewModeRef = useRef<string>("");
 
   // Destructure App locals from ref bag
   // (refreshed each render; handlers close over the latest snapshot)
@@ -47,7 +53,6 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     eyedropperReturnModeRef,
     floraPreviewSeedRef,
     flyMouseLookActiveRef,
-    generatorSphereRadiusRef,
     gestureRef,
     gizmoHoverRef,
     gizmoRef,
@@ -361,14 +366,6 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     logPlaneStrokeDebug("down:received", e);
     const modeEarly = interactionModeRef.current;
     if ((modeEarly === "fly" || modeEarly === "walk") && (e.button === 0 || e.button === 2)) {
-      console.log(
-        "[walk-debug] pointer-down in",
-        modeEarly,
-        "mode, button=",
-        e.button,
-        "mouseLookActive=",
-        flyMouseLookActiveRef.current,
-      );
       e.preventDefault();
       if (flyMouseLookActiveRef.current) {
         void releaseFlyMouseLook();
@@ -444,6 +441,34 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       !workBusy &&
       e.button === 0 &&
       mode !== "bone";
+
+    // Squishy add-drag: place on voxel hit, resize by dragging; fall through to orbit if no hit.
+    if (
+      mode === "squishy" &&
+      squishyModeRef.current === "add" &&
+      e.button === 0 &&
+      !loading &&
+      !workBusy &&
+      !logoSplashPointer
+    ) {
+      try {
+        await invoke("squishy_session_set_mode", { args: { mode: "add" } });
+        const id = await invoke<number | null>("squishy_metaball_add_at_screen", {
+          args: { nx, ny, radius: 4 },
+        });
+        if (id != null) {
+          if (!squishyPhase.active) squishyPhase.enter("settings", {});
+          await invoke("squishy_metaball_select", { args: { id } });
+          squishyAddDragBallIdRef.current = id;
+          probingRef.current = false;
+          gestureRef.current = { pointerId, mode: "squishyAddDrag" };
+          lastRef.current = { x: e.clientX, y: e.clientY };
+          return;
+        }
+      } catch {
+        /* fall through to camera */
+      }
+    }
 
     if (
       mode === "squishy" &&
@@ -657,6 +682,16 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       pointerId,
       mode: gestureMode,
     };
+    if (gestureMode === "camera") {
+      // Clear preview immediately when orbit starts; invalidate cache so it
+      // recomputes fresh on the first hover move after orbit ends.
+      lastSyncPreviewNxRef.current = NaN;
+      lastSyncPreviewNyRef.current = NaN;
+      lastSyncPreviewModeRef.current = "";
+      void invoke("sync_preview_input", {
+        args: buildSyncPreviewPayload(-1, 0, "navigate"),
+      }).catch(() => {});
+    }
     logPlaneStrokeDebug("down:gesture-assigned", e, {
       hitSolid,
       forceCamera,
@@ -1007,6 +1042,16 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       return;
     }
     if (
+      gestureRef.current?.mode === "squishyAddDrag" &&
+      gestureRef.current.pointerId === e.pointerId &&
+      squishyAddDragBallIdRef.current != null
+    ) {
+      void invoke("squishy_add_drag_resize", {
+        args: { ballId: squishyAddDragBallIdRef.current, nx: px, ny: py },
+      }).catch(() => {});
+      return;
+    }
+    if (
       gestureRef.current?.mode === "selectionGizmo" &&
       gestureRef.current.pointerId === e.pointerId
     ) {
@@ -1068,7 +1113,8 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       shapePhase.active ||
       bonePhase.active;
     if (
-      !overGizmo &&
+      (!overGizmo || interactionModeRef.current === "squishy") &&
+      gestureRef.current?.mode !== "camera" &&
       !probingRef.current &&
       (interactionModeRef.current === "add" ||
         interactionModeRef.current === "remove" ||
@@ -1088,19 +1134,38 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       !anyGenPhaseActive
     ) {
       const m = previewModeForSync(interactionModeRef.current);
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(px, py, m),
-      }).catch(() => {});
-    } else if (overGizmo && !shapePhase.active && !bonePhase.active) {
+      if (
+        px !== lastSyncPreviewNxRef.current ||
+        py !== lastSyncPreviewNyRef.current ||
+        m !== lastSyncPreviewModeRef.current
+      ) {
+        lastSyncPreviewNxRef.current = px;
+        lastSyncPreviewNyRef.current = py;
+        lastSyncPreviewModeRef.current = m;
+        void invoke("sync_preview_input", {
+          args: buildSyncPreviewPayload(px, py, m),
+        }).catch(() => {});
+      }
+    } else if (
+      overGizmo &&
+      !shapePhase.active &&
+      !bonePhase.active &&
+      interactionModeRef.current !== "squishy"
+    ) {
       // Preserve selectExtrude mode when hovering the extrude gizmo so the
       // GPU gizmo continues rendering in extrude style (balls, no rings).
       // Skip when the shape/bone phase is active — the gizmo is part of the
       // workflow, so hovering it should not clear the preview.
       const hoverMode =
         interactionModeRef.current === "selectExtrude" ? "selectExtrude" : "navigate";
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, hoverMode),
-      }).catch(() => {});
+      if (lastSyncPreviewNxRef.current !== -1 || lastSyncPreviewModeRef.current !== hoverMode) {
+        lastSyncPreviewNxRef.current = -1;
+        lastSyncPreviewNyRef.current = 0;
+        lastSyncPreviewModeRef.current = hoverMode;
+        void invoke("sync_preview_input", {
+          args: buildSyncPreviewPayload(-1, 0, hoverMode),
+        }).catch(() => {});
+      }
     }
 
     // Wall brush hover preview: show the full wall footprint under the cursor before any drag.
@@ -1568,6 +1633,18 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     }
 
     if (
+      gestureRef.current?.mode === "squishyAddDrag" &&
+      gestureRef.current.pointerId === e.pointerId
+    ) {
+      squishyAddDragBallIdRef.current = null;
+      void invoke<{ balls: { id: number }[] }>("squishy_session_get")
+        .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
+        .catch(() => {});
+      resetPointerGesture("squishy-add-drag-up", e);
+      return;
+    }
+
+    if (
       gestureRef.current?.mode === "squishyGizmo" &&
       gestureRef.current.pointerId === e.pointerId
     ) {
@@ -1748,34 +1825,23 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
             }
           }
         } else if (m === "squishy") {
-          if (!squishyPhase.active) {
-            squishyPhase.enter("settings", {});
-          }
           const mode = squishyModeRef.current;
-          void invoke("squishy_session_set_mode", { args: { mode } })
-            .then(() => {
-              if (mode === "add") {
-                return invoke("squishy_metaball_add_at_screen", {
-                  args: {
-                    nx,
-                    ny,
-                    radius: Math.max(2, generatorSphereRadiusRef.current),
-                  },
-                });
-              }
-              return invoke<number | null>("squishy_pick_at_screen", {
-                args: { nx, ny },
-              }).then((id) => {
+          // Add is handled on pointer-down (hit voxel → place+drag-resize; miss → orbit).
+          if (mode !== "add") {
+            if (!squishyPhase.active) squishyPhase.enter("settings", {});
+            void invoke("squishy_session_set_mode", { args: { mode } })
+              .then(() => invoke<number | null>("squishy_pick_at_screen", { args: { nx, ny } }))
+              .then((id) => {
                 if (id == null) return;
                 if (mode === "delete") {
                   return invoke("squishy_metaball_remove", { args: { id } });
                 }
                 return invoke("squishy_metaball_select", { args: { id } });
-              });
-            })
-            .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
-            .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
-            .catch(() => {});
+              })
+              .then(() => invoke<{ balls: { id: number }[] }>("squishy_session_get"))
+              .then((s) => setSquishyBallCount(s.balls?.length ?? 0))
+              .catch(() => {});
+          }
         }
       }
       if (m === "eyedropper") {
