@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { mirrorAxesFromRefs } from "../symmetry";
 
 interface BoneSession {
   selected?: { joint?: number; bone?: number } | null;
@@ -11,6 +12,9 @@ interface BoneSession {
 interface BoneGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
+  mirrorXRef: React.MutableRefObject<boolean>;
+  mirrorYRef: React.MutableRefObject<boolean>;
+  mirrorZRef: React.MutableRefObject<boolean>;
 }
 
 export interface BoneGeneratorState {
@@ -60,12 +64,14 @@ export function useBoneGenerator(ctx: BoneGeneratorContext): BoneGeneratorState 
         args: {
           color: ctx.activeColorRef.current,
           material: ctx.activeMaterialRef.current,
+          mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
         },
       })
         .then(() => invoke("bone_session_clear"))
         .then(() => {
           setBoneJointCount(0);
           setBoneBoneCount(0);
+          setBoneMode("add");
         })
         .catch(() => {});
     },

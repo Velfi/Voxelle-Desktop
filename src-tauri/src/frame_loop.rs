@@ -710,6 +710,9 @@ pub(crate) fn sync_collab_peer_avatars(
             (-forward).extend(0.0),
             glam::Vec4::W,
         );
+        // 90° CCW local-space yaw fix: avatar mesh is oriented 90° off.
+        // rot * R_y(π/2) remaps columns to [forward, up, right].
+        let rot_fixed = rot * glam::Mat4::from_rotation_y(std::f32::consts::FRAC_PI_2);
 
         // Look up mesh scale/offset from cache (fall back to default glow dot).
         let (scale, center_offset) = viewer
@@ -720,17 +723,17 @@ pub(crate) fn sync_collab_peer_avatars(
             .unwrap_or((1.5, glam::Vec3::ZERO));
 
         let model = glam::Mat4::from_translation(eye)
-            * rot
+            * rot_fixed
             * glam::Mat4::from_scale(glam::Vec3::splat(scale))
             * glam::Mat4::from_translation(center_offset);
         let mvp = vp * model;
 
         // Extract rotation columns for the normal matrix (std140: each column padded to vec4).
-        // Columns match the rot matrix: [right, up, -forward].
+        // After the 90° fix, columns are [forward, up, right].
         let rot_cols = [
-            [right.x, right.y, right.z, 0.0],
+            [forward.x, forward.y, forward.z, 0.0],
             [up.x, up.y, up.z, 0.0],
-            [-forward.x, -forward.y, -forward.z, 0.0],
+            [right.x, right.y, right.z, 0.0],
         ];
 
         viewer.update_avatar_peer(

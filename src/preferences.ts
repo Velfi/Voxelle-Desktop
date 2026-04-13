@@ -206,6 +206,17 @@ export function normalizeCollabHostPort(raw: unknown): number {
   return DEFAULTS.collabHostPort;
 }
 
+/**
+ * Scan `app_data/avatars`, cache meshes in Rust, then apply {@link VoxelleDesktopPreferences.collabAvatarName}.
+ * Call on launch and when entering collab so custom avatars work without opening Preferences first.
+ */
+export function syncSavedAvatarToBackend(): void {
+  const avatarName = loadPreferences().collabAvatarName;
+  void (invoke("avatar_list_user") as Promise<string[]>)
+    .then(() => invoke("set_local_avatar", { avatarName }))
+    .catch(() => {});
+}
+
 export function loadPreferences(): VoxelleDesktopPreferences {
   if (typeof localStorage === "undefined") return { ...DEFAULTS };
   try {

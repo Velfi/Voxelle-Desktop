@@ -2,6 +2,7 @@
 //! Hit-testing matches the shared sync_gizmo_gpu layout (move arrows + scale ring).
 
 use crate::camera::OrbitCamera;
+use crate::generators::common::axis_drag_scalar_from_ray;
 use crate::generators::squishy_session::{Metaball, SquishyMode, SquishySession};
 use crate::voxel_edit::{screen_to_world_ray, world_to_viewport_pixels};
 use glam::Vec3;
@@ -19,6 +20,9 @@ pub struct SquishyGizmoDrag {
     pub handle: SquishyGizmoHandle,
     pub ball_id: u32,
     pub start: Metaball,
+    pub axis_origin: Vec3,
+    pub axis_dir: Vec3,
+    pub start_axis_scalar: f32,
     pub plane_n: Vec3,
     pub plane_p: Vec3,
     pub start_hit: Vec3,
@@ -113,18 +117,6 @@ pub fn pick_squishy_gizmo_handle(
     }
 }
 
-fn ray_plane_intersect(ro: Vec3, rd: Vec3, plane_n: Vec3, plane_p: Vec3) -> Option<Vec3> {
-    let denom = rd.dot(plane_n);
-    if denom.abs() < 1e-6 {
-        return None;
-    }
-    let t = (plane_p - ro).dot(plane_n) / denom;
-    if t < 0.0 {
-        return None;
-    }
-    Some(ro + rd * t)
-}
-
 pub fn squishy_gizmo_begin_drag(
     session: &SquishySession,
     camera: &OrbitCamera,
@@ -147,12 +139,26 @@ pub fn squishy_gizmo_begin_drag(
     let eye = camera.smooth_eye();
     let plane_n = (center - eye).normalize();
     let plane_p = center;
-    let start_hit = ray_plane_intersect(ro, rd, plane_n, plane_p)?;
+    let start_hit = crate::generators::common::ray_plane_intersect(ro, rd, plane_n, plane_p)?;
+    let axis_dir = match handle {
+        SquishyGizmoHandle::MoveX => Vec3::X,
+        SquishyGizmoHandle::MoveY => Vec3::Y,
+        SquishyGizmoHandle::MoveZ => Vec3::Z,
+        SquishyGizmoHandle::Scale => Vec3::ZERO,
+    };
+    let start_axis_scalar = if axis_dir.length_squared() > 0.0 {
+        axis_drag_scalar_from_ray(center, axis_dir, ro, rd, plane_n, plane_p).unwrap_or(0.0)
+    } else {
+        0.0
+    };
 
     Some(SquishyGizmoDrag {
         handle,
         ball_id: sel_id,
         start: ball,
+        axis_origin: center,
+        axis_dir,
+        start_axis_scalar,
         plane_n,
         plane_p,
         start_hit,
@@ -171,28 +177,60 @@ pub fn squishy_gizmo_apply_drag(
     let (ro, rd) = screen_to_world_ray(camera, w, h, sx, sy);
     let ro = Vec3::new(ro.x, ro.y, ro.z);
     let rd = Vec3::new(rd.x, rd.y, rd.z).normalize();
-    let Some(hit) = ray_plane_intersect(ro, rd, drag.plane_n, drag.plane_p) else {
-        return;
-    };
-    let delta = hit - drag.start_hit;
     let start = &drag.start;
     let inv_view = camera.view_matrix().inverse();
     let camera_right = inv_view.x_axis.truncate().normalize();
 
     match drag.handle {
         SquishyGizmoHandle::MoveX => {
-            let nx = (start.x as f32 + delta.x).round() as i32;
+            let Some(axis_scalar) = axis_drag_scalar_from_ray(
+                drag.axis_origin,
+                drag.axis_dir,
+                ro,
+                rd,
+                drag.plane_n,
+                drag.plane_p,
+            ) else {
+                return;
+            };
+            let nx = (start.x as f32 + (axis_scalar - drag.start_axis_scalar)).round() as i32;
             session.set_ball_transform(drag.ball_id, nx, start.y, start.z, start.radius);
         }
         SquishyGizmoHandle::MoveY => {
-            let ny = (start.y as f32 + delta.y).round() as i32;
+            let Some(axis_scalar) = axis_drag_scalar_from_ray(
+                drag.axis_origin,
+                drag.axis_dir,
+                ro,
+                rd,
+                drag.plane_n,
+                drag.plane_p,
+            ) else {
+                return;
+            };
+            let ny = (start.y as f32 + (axis_scalar - drag.start_axis_scalar)).round() as i32;
             session.set_ball_transform(drag.ball_id, start.x, ny, start.z, start.radius);
         }
         SquishyGizmoHandle::MoveZ => {
-            let nz = (start.z as f32 + delta.z).round() as i32;
+            let Some(axis_scalar) = axis_drag_scalar_from_ray(
+                drag.axis_origin,
+                drag.axis_dir,
+                ro,
+                rd,
+                drag.plane_n,
+                drag.plane_p,
+            ) else {
+                return;
+            };
+            let nz = (start.z as f32 + (axis_scalar - drag.start_axis_scalar)).round() as i32;
             session.set_ball_transform(drag.ball_id, start.x, start.y, nz, start.radius);
         }
         SquishyGizmoHandle::Scale => {
+            let Some(hit) =
+                crate::generators::common::ray_plane_intersect(ro, rd, drag.plane_n, drag.plane_p)
+            else {
+                return;
+            };
+            let delta = hit - drag.start_hit;
             // Drag right = grow, drag left = shrink.
             let signed = delta.dot(camera_right);
             let nr = (start.radius + signed).clamp(0.5, 64.0);

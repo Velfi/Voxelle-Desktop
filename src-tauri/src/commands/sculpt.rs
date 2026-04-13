@@ -420,6 +420,7 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
         }
     }
 
+    let generation = crate::commands::edit::next_stroke_preview_generation(state.inner().as_ref());
     let stroke_line_start_meta = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
         (Some(_), Some(_)) => Some((0.0_f32, 0.0_f32)),
         _ => None,
@@ -532,6 +533,10 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
         }
     };
 
+    if crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation) {
+        return Ok(());
+    }
+
     {
         let mut union = state.file.stroke_preview_union.lock();
         // Sculpt Draw/Gouge/Extrude: always accumulate so the full stroke footprint is
@@ -570,7 +575,7 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        stroke_preview_meshes_for_union(
+        let Some(instanced) = crate::commands::edit::stroke_preview_meshes_for_union_cancellable(
             voxel_edit::EditTool::Add,
             &union,
             vmap,
@@ -578,7 +583,11 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
             false,
             args.color,
             None,
-        )
+            || crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation),
+        ) else {
+            return Ok(());
+        };
+        instanced
     };
 
     {
@@ -586,6 +595,16 @@ pub(crate) fn voxel_sculpt_stroke_preview_at_screen(
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
+        if crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation) {
+            return Ok(());
+        }
+        // Guard: voxel_stroke_end may have already run (fast single-click race on Windows).
+        // If stroke_active is false the stroke is over — uploading here would set
+        // stroke_preview_suppresses_hover=true with nothing left to clear it, freezing
+        // the hover preview at the click position.
+        if !*state.file.stroke_active.lock() {
+            return Ok(());
+        }
         if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
@@ -644,6 +663,58 @@ pub(crate) struct ExtrudeRayPreviewArgs {
     extrude_taper_end: f32,
 }
 
+fn upload_extrude_preview_union(
+    state: &ViewerState,
+    app: &AppHandle,
+    generation: u64,
+    color: u32,
+) -> Result<(), String> {
+    let instanced = {
+        let fg = state.file.current_file.lock();
+        let vm = state.file.voxel_map.lock();
+        let Some(file) = fg.as_ref() else {
+            return Ok(());
+        };
+        let Some(vmap) = vm.as_ref() else {
+            return Ok(());
+        };
+        let union = state.file.stroke_preview_union.lock();
+        let Some(instanced) = crate::commands::edit::stroke_preview_meshes_for_union_cancellable(
+            voxel_edit::EditTool::Add,
+            &union,
+            vmap,
+            file,
+            false,
+            color,
+            None,
+            || crate::commands::edit::is_stroke_preview_stale(state, generation),
+        ) else {
+            return Ok(());
+        };
+        instanced
+    };
+
+    {
+        let mut v = state.gpu.viewer.lock();
+        let Some(viewer) = v.as_mut() else {
+            return Ok(());
+        };
+        if crate::commands::edit::is_stroke_preview_stale(state, generation) {
+            return Ok(());
+        }
+        if instanced.solid_instances.is_empty() {
+            clear_preview_mesh_sync_cache(viewer, state);
+        } else {
+            viewer.upload_preview_mesh_instanced(&instanced);
+            viewer.preview_cache_key = None;
+            *state.gpu.preview_overlay_cache_key.lock() = None;
+        }
+    }
+
+    wake_viewport_loop(app);
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) fn extrude_ray_preview(
     app: AppHandle,
@@ -657,6 +728,7 @@ pub(crate) fn extrude_ray_preview(
         }
     }
 
+    let generation = crate::commands::edit::next_stroke_preview_generation(state.inner().as_ref());
     let (w, h) = {
         let v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_ref() else {
@@ -795,44 +867,7 @@ pub(crate) fn extrude_ray_preview(
         .stroke_preview_suppresses_hover
         .store(true, Ordering::Relaxed);
 
-    // Generate and upload preview mesh.
-    let instanced = {
-        let fg = state.file.current_file.lock();
-        let vm = state.file.voxel_map.lock();
-        let Some(file) = fg.as_ref() else {
-            return Ok(());
-        };
-        let Some(vmap) = vm.as_ref() else {
-            return Ok(());
-        };
-        let union = state.file.stroke_preview_union.lock();
-        stroke_preview_meshes_for_union(
-            voxel_edit::EditTool::Add,
-            &union,
-            vmap,
-            file,
-            false,
-            args.color,
-            None,
-        )
-    };
-
-    {
-        let mut v = state.gpu.viewer.lock();
-        let Some(viewer) = v.as_mut() else {
-            return Ok(());
-        };
-        if instanced.solid_instances.is_empty() {
-            clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
-        } else {
-            viewer.upload_preview_mesh_instanced(&instanced);
-            viewer.preview_cache_key = None;
-            *state.gpu.preview_overlay_cache_key.lock() = None;
-        }
-    }
-
-    wake_viewport_loop(&app);
-    Ok(())
+    upload_extrude_preview_union(state.inner().as_ref(), &app, generation, args.color)
 }
 
 // ── Selection extrude preview ────────────────────────────────────────────────
@@ -860,6 +895,7 @@ pub(crate) fn selection_extrude_preview(
         }
     }
 
+    let generation = crate::commands::edit::next_stroke_preview_generation(state.inner().as_ref());
     let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
         state.selection.selection_cells.lock().clone();
     if selection.is_empty() {
@@ -973,7 +1009,7 @@ pub(crate) fn selection_extrude_preview(
             return Ok(());
         };
         let union = state.file.stroke_preview_union.lock();
-        stroke_preview_meshes_for_union(
+        let Some(instanced) = crate::commands::edit::stroke_preview_meshes_for_union_cancellable(
             voxel_edit::EditTool::Add,
             &union,
             vmap,
@@ -981,7 +1017,11 @@ pub(crate) fn selection_extrude_preview(
             false,
             args.color,
             None,
-        )
+            || crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation),
+        ) else {
+            return Ok(());
+        };
+        instanced
     };
 
     {
@@ -989,6 +1029,9 @@ pub(crate) fn selection_extrude_preview(
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
+        if crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation) {
+            return Ok(());
+        }
         if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
         } else {
@@ -1022,6 +1065,7 @@ pub(crate) fn extrude_recompute_preview(
     state: State<'_, Arc<ViewerState>>,
     args: ExtrudeRecomputeArgs,
 ) -> Result<(), String> {
+    let generation = crate::commands::edit::next_stroke_preview_generation(state.inner().as_ref());
     // Use stored ray spine if available (new ray-based extrude path).
     let spine_opt = state.gizmos.extrude_ray_spine.lock().clone();
     let replay = state.file.sculpt_stroke_replay.lock().clone();
@@ -1146,7 +1190,7 @@ pub(crate) fn extrude_recompute_preview(
         let Some(vmap) = vm.as_ref() else {
             return Ok(());
         };
-        stroke_preview_meshes_for_union(
+        let Some(instanced) = crate::commands::edit::stroke_preview_meshes_for_union_cancellable(
             voxel_edit::EditTool::Add,
             &union,
             vmap,
@@ -1154,7 +1198,11 @@ pub(crate) fn extrude_recompute_preview(
             false,
             color,
             None,
-        )
+            || crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation),
+        ) else {
+            return Ok(());
+        };
+        instanced
     };
 
     {
@@ -1162,6 +1210,9 @@ pub(crate) fn extrude_recompute_preview(
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
+        if crate::commands::edit::is_stroke_preview_stale(state.inner().as_ref(), generation) {
+            return Ok(());
+        }
         if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
         } else {
@@ -1173,4 +1224,99 @@ pub(crate) fn extrude_recompute_preview(
 
     wake_viewport_loop(&app);
     Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExtrudePreviewSetEndpointArgs {
+    endpoint: [i32; 3],
+    color: u32,
+    material: String,
+    extrude_profile: voxel_edit::ExtrudeProfile,
+    extrude_end_cap: voxel_edit::ExtrudeEndCap,
+    #[serde(default)]
+    extrude_taper: bool,
+    #[serde(default)]
+    extrude_taper_start: f32,
+    #[serde(default)]
+    extrude_taper_end: f32,
+}
+
+#[tauri::command]
+pub(crate) fn extrude_sync_endpoint_gizmo_from_preview(
+    state: State<'_, Arc<ViewerState>>,
+) -> Result<(), String> {
+    let spine = state.gizmos.extrude_ray_spine.lock();
+    let Some(endpoint) = spine.as_ref().and_then(|path| path.last()).copied() else {
+        *state.gizmos.generator_gizmo_center.lock() = None;
+        return Ok(());
+    };
+    *state.gizmos.generator_gizmo_center.lock() =
+        Some([endpoint.0 as f32, endpoint.1 as f32, endpoint.2 as f32]);
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) fn extrude_preview_set_endpoint(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: ExtrudePreviewSetEndpointArgs,
+) -> Result<(), String> {
+    let generation = crate::commands::edit::next_stroke_preview_generation(state.inner().as_ref());
+    let replay = state.file.sculpt_stroke_replay.lock().clone();
+    let Some(first) = replay.first() else {
+        return Ok(());
+    };
+    let Some(origin) = state
+        .gizmos
+        .extrude_ray_spine
+        .lock()
+        .as_ref()
+        .and_then(|spine| spine.first().copied())
+    else {
+        return Ok(());
+    };
+
+    let endpoint = (args.endpoint[0], args.endpoint[1], args.endpoint[2]);
+    let spine = voxel_edit::brush::get_line_path_inclusive(origin, endpoint);
+    let footprint = voxel_edit::extrude_ray_footprint(
+        &spine,
+        first.brush_radius,
+        first.brush_shape,
+        first.brush_strength,
+        first.brush_falloff,
+        first.stroke_seed,
+        args.extrude_profile,
+        args.extrude_end_cap,
+        args.extrude_taper,
+        args.extrude_taper_start,
+        args.extrude_taper_end,
+    );
+
+    *state.gizmos.extrude_ray_spine.lock() = Some(spine);
+    {
+        let mut replay = state.file.sculpt_stroke_replay.lock();
+        if let Some(entry) = replay.first_mut() {
+            entry.color = args.color;
+            entry.material = args.material.clone();
+            entry.extrude_profile = args.extrude_profile;
+            entry.extrude_end_cap = args.extrude_end_cap;
+            entry.extrude_taper = args.extrude_taper;
+            entry.extrude_taper_start = args.extrude_taper_start;
+            entry.extrude_taper_end = args.extrude_taper_end;
+        }
+    }
+    {
+        let mut union = state.file.stroke_preview_union.lock();
+        union.clear();
+        for c in &footprint {
+            union.insert(*c);
+        }
+    }
+    state
+        .file
+        .stroke_preview_suppresses_hover
+        .store(true, Ordering::Relaxed);
+
+    upload_extrude_preview_union(state.inner().as_ref(), &app, generation, args.color)
 }

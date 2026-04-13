@@ -2,12 +2,16 @@ import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { mirrorAxesFromRefs } from "../symmetry";
 import type { StartShapeId } from "../types";
 import { useLatestRef } from "./useLatestRef";
 
 interface ShapeGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
+  mirrorXRef: React.MutableRefObject<boolean>;
+  mirrorYRef: React.MutableRefObject<boolean>;
+  mirrorZRef: React.MutableRefObject<boolean>;
 }
 
 export interface ShapeGeneratorState {
@@ -102,6 +106,7 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
           rotZ: shapeRotZRef.current,
           color: ctx.activeColorRef.current,
           material: ctx.activeMaterialRef.current,
+          mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
           overwrite: shapeOverwriteRef.current,
           gizmoCenter: gizmoPos,
         },

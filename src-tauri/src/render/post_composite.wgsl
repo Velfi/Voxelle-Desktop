@@ -96,6 +96,16 @@ struct PostCompositeOpts {
     ss_soft: f32,
     _pad14b: f32,
     _pad14c: f32,
+    // Row 15: tilt shift
+    ts_enabled: f32,
+    ts_center_y: f32,
+    ts_focus_width: f32,
+    ts_blur_strength: f32,
+    // Row 16: tilt shift rotation
+    ts_rotation: f32,
+    _pad16a: f32,
+    _pad16b: f32,
+    _pad16c: f32,
 }
 
 @group(0) @binding(3)
@@ -340,6 +350,103 @@ fn apply_sun_shafts(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return color + shaft_color * illumination * po.ss_strength * radial_falloff;
 }
 
+// ── Tilt shift ──────────────────────────────────────────────────────
+
+fn sat(color: vec3<f32>, amount: f32) -> vec3<f32> {
+    let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+    return mix(vec3<f32>(luma), color, amount);
+}
+
+fn apply_tilt_shift(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
+    if po.ts_enabled < 0.5 { return color; }
+
+    let cos_r = cos(po.ts_rotation);
+    let sin_r = sin(po.ts_rotation);
+    let centered = uv - vec2<f32>(0.5, po.ts_center_y);
+    let rotated = vec2<f32>(
+        cos_r * centered.x + sin_r * centered.y,
+        -sin_r * centered.x + cos_r * centered.y
+    );
+
+    let half_w = max(po.ts_focus_width * 0.5, 0.0);
+    let aspect = g.screen.x / max(g.screen.y, 1.0);
+    let feather = max(0.035, po.ts_focus_width * 0.3 + 0.02);
+    let band_dist = abs(rotated.y) - half_w;
+    let blur_mask = smoothstep(0.0, feather, band_dist);
+    if blur_mask <= 0.0001 { return sat(color, 1.08); }
+
+    // Sample the corresponding point on the focus line and compare camera-space
+    // depth against the current pixel. In ray mode this makes the blur track
+    // real scene geometry instead of acting like a purely screen-space smear.
+    let focus_centered = vec2<f32>(rotated.x, 0.0);
+    let focus_uv = clamp(
+        vec2<f32>(
+            0.5 + cos_r * focus_centered.x - sin_r * focus_centered.y,
+            po.ts_center_y + sin_r * focus_centered.x + cos_r * focus_centered.y
+        ),
+        vec2<f32>(0.0),
+        vec2<f32>(1.0)
+    );
+
+    let wp = world_pos_from_uv(uv);
+    let focus_wp = world_pos_from_uv(focus_uv);
+    let cam_fwd = normalize((g.inv_view * vec4<f32>(0.0, 0.0, -1.0, 0.0)).xyz);
+    let cam_pos = g.cam_pos.xyz;
+
+    var depth_coc = 0.0;
+    if wp.w > 0.5 && focus_wp.w > 0.5 {
+        let focus_depth = max(dot(focus_wp.xyz - cam_pos, cam_fwd), 0.001);
+        let pixel_depth = max(dot(wp.xyz - cam_pos, cam_fwd), 0.001);
+        let bg_delta = max(0.0, pixel_depth - focus_depth) / focus_depth;
+        let fg_delta = max(0.0, focus_depth - pixel_depth) / focus_depth;
+        // Background blur is usually a little more prominent in miniature shots.
+        depth_coc = bg_delta + fg_delta * 0.7;
+    } else if wp.w < 0.5 {
+        // Sky or missing depth still needs to fall out of focus outside the band.
+        depth_coc = 0.65 + blur_mask * 0.35;
+    } else {
+        depth_coc = blur_mask;
+    }
+
+    // Grow blur nonlinearly away from the focus band and from the sampled focal depth.
+    let coc = blur_mask * blur_mask * min(depth_coc * 2.4, 1.35) * po.ts_blur_strength;
+    let blur_r = coc * (0.018 + 0.065 * po.ts_blur_strength);
+    if blur_r < 0.00015 { return mix(color, sat(color, 1.05), blur_mask * 0.35); }
+
+    let axis_x = vec2<f32>(cos_r / aspect, sin_r);
+    let axis_y = vec2<f32>(-sin_r / aspect, cos_r);
+    let jitter_seed = hash12(uv * vec2<f32>(g.screen.xy) + vec2<f32>(17.0, 73.0));
+    let theta_jitter = jitter_seed * 6.2831853;
+
+    var hdr_acc = textureSample(t_hdr, samp_linear, uv).rgb;
+    var weight_acc = 1.0;
+
+    // Concentric disc blur with a slight stretch across the focus band.
+    // That keeps edges from turning into a chunky 8-point star while still
+    // preserving a hint of the Scheimpflug-plane character.
+    let ring_scale_x = 1.0 + coc * 0.35;
+    let ring_scale_y = 1.0 + coc * 0.08;
+
+    for (var ring = 0; ring < 3; ring = ring + 1) {
+        let ring01 = f32(ring + 1) / 3.0;
+        let radius = blur_r * ring01;
+        let ring_weight = mix(0.9, 0.45, ring01);
+
+        for (var tap = 0; tap < 6; tap = tap + 1) {
+            let a = theta_jitter + (f32(tap) + f32(ring) * 0.37) * 2.39996323;
+            let dir = axis_x * (cos(a) * ring_scale_x) + axis_y * (sin(a) * ring_scale_y);
+            let sample_uv = clamp(uv + dir * radius, vec2<f32>(0.0), vec2<f32>(1.0));
+            hdr_acc += textureSample(t_hdr, samp_linear, sample_uv).rgb * ring_weight;
+            weight_acc += ring_weight;
+        }
+    }
+
+    let blurred = apply_tone(po.tone_mode, (hdr_acc / weight_acc) * exp2(po.exposure_ev));
+    let focus_pop = sat(color, 1.0 + (1.0 - blur_mask) * 0.08);
+    let blend = clamp(blur_mask * (0.55 + po.ts_blur_strength * 0.75), 0.0, 1.0);
+    return mix(focus_pop, blurred, blend);
+}
+
 // ── Vignette ────────────────────────────────────────────────────────
 
 fn apply_vignette(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
@@ -376,6 +483,7 @@ fn fs_composite(i: FullscreenOut) -> @location(0) vec4<f32> {
     mapped = apply_grain(mapped, i.uv);
     mapped = apply_sun_shafts(mapped, i.uv);
     mapped = apply_vignette(mapped, i.uv);
+    mapped = apply_tilt_shift(mapped, i.uv);
 
     if po.transparent_bg > 0.5 {
         let a = clamp(pre_energy * 14.0, 0.0, 1.0);

@@ -754,6 +754,11 @@ fn mood_params_to_settings(p: &MoodParams) -> voxelle::MoodSettings {
         ss_samples: p.ss_samples,
         ssr_enabled: p.ssr_enabled,
         ssr_strength: p.ssr_strength,
+        ts_blur_strength: p.ts_blur_strength,
+        ts_center_y: p.ts_center_y,
+        ts_enabled: p.ts_enabled,
+        ts_focus_width: p.ts_focus_width,
+        ts_rotation: p.ts_rotation,
         bloom_strength: p.bloom_strength,
     }
 }

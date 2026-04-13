@@ -23,7 +23,7 @@ mod squishy_session;
 pub use ashlar_gen::{generator_ashlar_at_screen, preview_ashlar_at_screen};
 pub use bone_gizmo::{
     append_bone_skeleton_wire, bone_gizmo_apply_drag, bone_gizmo_begin_drag,
-    pick_bone_gizmo_handle, BoneGizmoDrag,
+    pick_bone_gizmo_handle, BoneGizmoDrag, BoneGizmoHandle,
 };
 pub use bone_ik::{ik_drag_begin, ik_drag_update, IkDrag};
 pub use bone_session::{

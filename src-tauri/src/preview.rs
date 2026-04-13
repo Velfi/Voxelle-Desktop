@@ -78,6 +78,7 @@ pub(crate) fn hash_squishy_preview(
     add_anchor: Option<(i32, i32, i32)>,
     gizmo_drag: bool,
     delete_hover_id: Option<u32>,
+    mirror_axes: u8,
     debug_overlay: bool,
     palette_color: u32,
 ) -> u64 {
@@ -89,6 +90,7 @@ pub(crate) fn hash_squishy_preview(
     sy.to_bits().hash(&mut h);
     gizmo_drag.hash(&mut h);
     delete_hover_id.hash(&mut h);
+    mirror_axes.hash(&mut h);
     (session.mode as u8).hash(&mut h);
     session.hollow.hash(&mut h);
     session.wall_thickness.hash(&mut h);
@@ -116,6 +118,7 @@ fn hash_bone_preview(
     sx: f32,
     sy: f32,
     gizmo_drag: bool,
+    mirror_axes: u8,
     debug_overlay: bool,
     palette_color: u32,
 ) -> u64 {
@@ -127,6 +130,7 @@ fn hash_bone_preview(
     sx.to_bits().hash(&mut h);
     sy.to_bits().hash(&mut h);
     gizmo_drag.hash(&mut h);
+    mirror_axes.hash(&mut h);
     for j in &session.joints {
         j.id.hash(&mut h);
         j.x.to_bits().hash(&mut h);
@@ -1563,7 +1567,15 @@ pub(crate) fn prepare_preview_mesh(
         let (csx, csy) = cursor
             .map(|(nx, ny)| viewport_texels_from_norm(nx, ny, viewport_w as f32, viewport_h as f32))
             .unwrap_or((-1.0, -1.0));
-        let key = hash_bone_preview(&session_snap, csx, csy, gizmo_drag, dbg, hover.color);
+        let key = hash_bone_preview(
+            &session_snap,
+            csx,
+            csy,
+            gizmo_drag,
+            hover.mirror_axes,
+            dbg,
+            hover.color,
+        );
         if preview_overlay_cache_key_get(state) == Some(key) {
             return PreviewMeshPrepared::Noop;
         }
@@ -1574,11 +1586,12 @@ pub(crate) fn prepare_preview_mesh(
         let map_guard = state.file.voxel_map.lock();
         let cam = state.cam.camera.lock();
         if let (Some(file), Some(vmap)) = (file_guard.as_ref(), map_guard.as_ref()) {
-            let coords = generators::bone_voxel_coords_for_session(
+            let mut coords = generators::bone_voxel_coords_for_session(
                 &session_snap,
                 file.grid_size.max(1),
                 max_v,
             );
+            voxel_edit::extend_with_mirror_targets(&mut coords, hover.mirror_axes);
             let set: AHashSet<_> = coords.iter().copied().collect();
             let mut instanced = stroke_preview_meshes_for_union(
                 voxel_edit::EditTool::Add,
@@ -1645,6 +1658,7 @@ pub(crate) fn prepare_preview_mesh(
             add_anchor,
             gizmo_drag,
             delete_hover_id,
+            hover.mirror_axes,
             dbg,
             hover.color,
         );
@@ -1660,6 +1674,7 @@ pub(crate) fn prepare_preview_mesh(
             file.grid_size.max(1),
             usize::MAX,
         );
+        voxel_edit::extend_with_mirror_targets(&mut coords, hover.mirror_axes);
 
         // In add mode show a single cursor voxel instead of a full metaball blob.
         if session_snap.mode == generators::SquishyMode::Add {

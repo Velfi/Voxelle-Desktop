@@ -5,11 +5,15 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { mirrorAxesFromRefs } from "../symmetry";
 import { useLatestRef } from "./useLatestRef";
 
 export interface SquishyToolContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
+  mirrorXRef: React.MutableRefObject<boolean>;
+  mirrorYRef: React.MutableRefObject<boolean>;
+  mirrorZRef: React.MutableRefObject<boolean>;
 }
 
 export interface SquishyToolState {
@@ -48,6 +52,7 @@ export function useSquishyToolState(ctx: SquishyToolContext): SquishyToolState {
         args: {
           color: activeColorRef.current,
           material: activeMaterialRef.current,
+          mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
         },
       })
         .then(() => invoke("squishy_session_clear"))

@@ -1475,6 +1475,33 @@ export const ToolsSidebar = memo(function ToolsSidebar(props: ToolsSidebarProps)
                           onChange={(e) => setBoneDefaultRadius(Number(e.target.value))}
                         />
                       </div>
+                      <div className="sidebar-section-label">Symmetry</div>
+                      <div className="sidebar-mode-grid sidebar-mode-grid-3">
+                        <button
+                          type="button"
+                          className={mirrorX ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          onClick={() => setMirrorX(!mirrorX)}
+                          title="Mirror across X axis"
+                        >
+                          <span className="sidebar-mode-label">X</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={mirrorY ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          onClick={() => setMirrorY(!mirrorY)}
+                          title="Mirror across Y axis"
+                        >
+                          <span className="sidebar-mode-label">Y</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={mirrorZ ? "sidebar-mode-btn is-active" : "sidebar-mode-btn"}
+                          onClick={() => setMirrorZ(!mirrorZ)}
+                          title="Mirror across Z axis"
+                        >
+                          <span className="sidebar-mode-label">Z</span>
+                        </button>
+                      </div>
                       {bonePhase.snapshot?.phase === "pose" && (
                         <div className="sidebar-row">
                           <label className="sidebar-label-sm">
@@ -1489,6 +1516,9 @@ export const ToolsSidebar = memo(function ToolsSidebar(props: ToolsSidebarProps)
                       )}
                       <p className="sidebar-pane-hint sidebar-toolpanel-hint">
                         Joints: {boneJointCount} &middot; Bones: {boneBoneCount}
+                        {boneMode === "add" && bonePhase.snapshot?.phase !== "pose"
+                          ? " — click voxel to place; drag to size"
+                          : ""}
                       </p>
                     </>
                   ) : null}

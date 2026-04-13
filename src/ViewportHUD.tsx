@@ -1,6 +1,7 @@
 import { type MutableRefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { StrokePhaseHandle } from "./useStrokePhase";
+import { mirrorAxesFromFlags } from "./symmetry";
 import type { DepthPhaseData } from "./types";
 
 /** Minimal phase-handle interface for components that only need active/cancel/commit/advance/retreat. */
@@ -67,6 +68,9 @@ interface Props {
   roofHollow: boolean;
   activeColor: number;
   activeMaterialRef: MutableRefObject<string>;
+  mirrorX: boolean;
+  mirrorY: boolean;
+  mirrorZ: boolean;
   loading: boolean;
   workBusy: boolean;
 
@@ -150,6 +154,9 @@ export function ViewportHUD({
   roofHollow,
   activeColor,
   activeMaterialRef,
+  mirrorX,
+  mirrorY,
+  mirrorZ,
   loading,
   workBusy,
   clothPins,
@@ -402,6 +409,7 @@ export function ViewportHUD({
                     hollow: roofHollow,
                     color: activeColor,
                     material: activeMaterialRef.current,
+                    mirrorAxes: mirrorAxesFromFlags(mirrorX, mirrorY, mirrorZ),
                   },
                 })
                   .then(() => {

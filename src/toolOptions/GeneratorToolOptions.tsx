@@ -19,6 +19,8 @@ export interface GeneratorToolOptionsProps {
   // Rocks
   generatorSphereRadius: number;
   setGeneratorSphereRadius: (n: number) => void;
+  rocksAutoCommitOnMouseUp: boolean;
+  setRocksAutoCommitOnMouseUp: (v: boolean) => void;
   rockRoughness: number;
   setRockRoughness: (n: number) => void;
   rockCount: number;
@@ -35,6 +37,8 @@ export interface GeneratorToolOptionsProps {
   setGrassDensity: (n: number) => void;
   grassMaxHeight: number;
   setGrassMaxHeight: (n: number) => void;
+  grassAutoCommitOnMouseUp: boolean;
+  setGrassAutoCommitOnMouseUp: (v: boolean) => void;
 
   // Rope & Cloth shared
   clothGravityDirection: ClothGravityDirectionId;
@@ -55,10 +59,14 @@ export interface GeneratorToolOptionsProps {
   setClothSimConstraintPasses: (n: number) => void;
 
   // Ashlar
+  ashlarAutoCommitOnMouseUp: boolean;
+  setAshlarAutoCommitOnMouseUp: (v: boolean) => void;
   ashlarThickness: number;
   setAshlarThickness: (n: number) => void;
 
   // Flora
+  floraAutoCommitOnMouseUp: boolean;
+  setFloraAutoCommitOnMouseUp: (v: boolean) => void;
   floraPreset: string;
   setFloraPreset: (p: string) => void;
   floraHeight: number;
@@ -121,6 +129,8 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
     generatorKind,
     generatorSphereRadius,
     setGeneratorSphereRadius,
+    rocksAutoCommitOnMouseUp,
+    setRocksAutoCommitOnMouseUp,
     rockRoughness,
     setRockRoughness,
     rockCount,
@@ -135,6 +145,8 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
     setGrassDensity,
     grassMaxHeight,
     setGrassMaxHeight,
+    grassAutoCommitOnMouseUp,
+    setGrassAutoCommitOnMouseUp,
     clothGravityDirection,
     setClothGravityDirection,
     ropeBrushShapeUi,
@@ -149,8 +161,12 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
     setClothSimIterations,
     clothSimConstraintPasses,
     setClothSimConstraintPasses,
+    ashlarAutoCommitOnMouseUp,
+    setAshlarAutoCommitOnMouseUp,
     ashlarThickness,
     setAshlarThickness,
+    floraAutoCommitOnMouseUp,
+    setFloraAutoCommitOnMouseUp,
     floraPreset,
     setFloraPreset,
     floraHeight,
@@ -291,6 +307,15 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               />
             </label>
           ) : null}
+          <label className="tool-options-checkbox-row">
+            <input
+              type="checkbox"
+              checked={rocksAutoCommitOnMouseUp}
+              onChange={(ev) => setRocksAutoCommitOnMouseUp(ev.target.checked)}
+              disabled={disabled}
+            />
+            <span>Auto-commit on mouseup</span>
+          </label>
         </>
       ) : null}
       {generatorKind === "grass" ? (
@@ -329,6 +354,15 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               onChange={(ev) => setGrassMaxHeight(Number(ev.target.value))}
               disabled={disabled}
             />
+          </label>
+          <label className="tool-options-checkbox-row">
+            <input
+              type="checkbox"
+              checked={grassAutoCommitOnMouseUp}
+              onChange={(ev) => setGrassAutoCommitOnMouseUp(ev.target.checked)}
+              disabled={disabled}
+            />
+            <span>Auto-commit on mouseup</span>
           </label>
         </>
       ) : null}
@@ -565,10 +599,30 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               disabled={disabled}
             />
           </label>
+          <label className="tool-options-checkbox-row">
+            <input
+              type="checkbox"
+              checked={ashlarAutoCommitOnMouseUp}
+              onChange={(ev) => setAshlarAutoCommitOnMouseUp(ev.target.checked)}
+              disabled={disabled}
+            />
+            <span>Auto-commit on mouseup</span>
+          </label>
         </>
       ) : null}
       {generatorKind === "flora" ? (
         <div className="gen-wide-grid">
+          <div className="gen-card gen-card-full">
+            <label className="tool-options-checkbox-row">
+              <input
+                type="checkbox"
+                checked={floraAutoCommitOnMouseUp}
+                onChange={(ev) => setFloraAutoCommitOnMouseUp(ev.target.checked)}
+                disabled={disabled}
+              />
+              <span>Auto-commit on mouseup</span>
+            </label>
+          </div>
           <div className="gen-card gen-card-full">
             <div className="gen-card-title">Preset</div>
             <select

@@ -46,6 +46,10 @@ fn default_fill_respects_color() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PaintSelectionArgs {
@@ -57,6 +61,10 @@ pub(crate) struct PaintSelectionArgs {
     #[serde(default)]
     stroke_seed: u32,
     material: String,
+    #[serde(default = "default_true")]
+    update_color: bool,
+    #[serde(default = "default_true")]
+    update_material: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -414,6 +422,27 @@ fn push_selection_transform_undo(
     macos_undo::register_solo_edit_completed(app, state);
 }
 
+fn selection_transform_target(
+    state: &Arc<ViewerState>,
+) -> Result<(AHashSet<greedy_mesh::VoxelCoord>, bool), String> {
+    let selection = state.selection.selection_cells.lock().clone();
+    if !selection.is_empty() {
+        return Ok((selection, true));
+    }
+
+    let fg = state.file.current_file.lock();
+    let Some(file) = fg.as_ref() else {
+        return Err("no model loaded".into());
+    };
+    Ok((
+        file.voxels
+            .iter()
+            .map(|v| (v.x, v.y, v.z))
+            .collect::<AHashSet<greedy_mesh::VoxelCoord>>(),
+        false,
+    ))
+}
+
 fn selection_translate_inner(
     state: &Arc<ViewerState>,
     app: &AppHandle,
@@ -474,10 +503,12 @@ fn selection_rotate_inner(
     }
     let t_total = Instant::now();
     let before_sel = state.selection.selection_cells.lock().clone();
-    if before_sel.is_empty() {
+    let (target, updates_selection) = selection_transform_target(state)?;
+    if target.is_empty() {
         return Ok(false);
     }
-    let new_sel = voxel_edit::rotate_selection_coords(&before_sel, axis, quarters);
+    let new_sel =
+        updates_selection.then(|| voxel_edit::rotate_selection_coords(&target, axis, quarters));
     let deltas = {
         let mut fg = state.file.current_file.lock();
         let mut vm = state.file.voxel_map.lock();
@@ -487,9 +518,11 @@ fn selection_rotate_inner(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        voxel_edit::rotate_selected_voxels(file, vmap, &before_sel, axis, quarters)
+        voxel_edit::rotate_selected_voxels(file, vmap, &target, axis, quarters)
     };
-    *state.selection.selection_cells.lock() = new_sel;
+    if let Some(new_sel) = new_sel {
+        *state.selection.selection_cells.lock() = new_sel;
+    }
     if !deltas.is_empty() {
         finish_voxel_edit_gpu_deltas(
             state,
@@ -646,6 +679,7 @@ fn extrude_gizmo_preview_inner(
     color: u32,
     material: &str,
 ) -> Result<(), String> {
+    let generation = crate::commands::edit::next_stroke_preview_generation(state.as_ref());
     let selection: ahash::AHashSet<greedy_mesh::VoxelCoord> =
         state.selection.selection_cells.lock().clone();
     if selection.is_empty() {
@@ -741,7 +775,7 @@ fn extrude_gizmo_preview_inner(
             return Ok(());
         };
         let union = state.file.stroke_preview_union.lock();
-        stroke_preview_meshes_for_union(
+        let Some(instanced) = crate::commands::edit::stroke_preview_meshes_for_union_cancellable(
             voxel_edit::EditTool::Add,
             &union,
             vmap,
@@ -749,13 +783,20 @@ fn extrude_gizmo_preview_inner(
             false,
             color,
             None,
-        )
+            || crate::commands::edit::is_stroke_preview_stale(state.as_ref(), generation),
+        ) else {
+            return Ok(());
+        };
+        instanced
     };
     {
         let mut v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
+        if crate::commands::edit::is_stroke_preview_stale(state.as_ref(), generation) {
+            return Ok(());
+        }
         if instanced.solid_instances.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.as_ref());
         } else {
@@ -1151,6 +1192,16 @@ pub(crate) fn gizmo_pointer_move(
                 // invalidate the preview overlay cache so the shape preview mesh
                 // rebuilds at the new offset, and wake the frame loop.
                 if state.gizmos.generator_gizmo_center.lock().is_some() {
+                    if let Some([gx, gy, gz]) = *state.gizmos.generator_gizmo_center.lock() {
+                        let _ = app.emit(
+                            "generator-gizmo-preview-moved",
+                            [
+                                gx + pending_dx as f32,
+                                gy + pending_dy as f32,
+                                gz + pending_dz as f32,
+                            ],
+                        );
+                    }
                     *state.gpu.preview_overlay_cache_key.lock() = None;
                     crate::edit_pipeline::wake_viewport_loop(&app);
                 }
@@ -1471,10 +1522,11 @@ pub(crate) fn selection_mirror(
 ) -> Result<bool, String> {
     let t_total = Instant::now();
     let before_sel = state.selection.selection_cells.lock().clone();
-    if before_sel.is_empty() {
+    let (target, updates_selection) = selection_transform_target(state.inner())?;
+    if target.is_empty() {
         return Ok(false);
     }
-    let new_sel = voxel_edit::mirror_selection_coords(&before_sel, axis);
+    let new_sel = updates_selection.then(|| voxel_edit::mirror_selection_coords(&target, axis));
     let deltas = {
         let mut fg = state.file.current_file.lock();
         let mut vm = state.file.voxel_map.lock();
@@ -1484,9 +1536,11 @@ pub(crate) fn selection_mirror(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        voxel_edit::mirror_selected_voxels(file, vmap, &before_sel, axis)
+        voxel_edit::mirror_selected_voxels(file, vmap, &target, axis)
     };
-    *state.selection.selection_cells.lock() = new_sel;
+    if let Some(new_sel) = new_sel {
+        *state.selection.selection_cells.lock() = new_sel;
+    }
     if !deltas.is_empty() {
         finish_voxel_edit_gpu_deltas(
             &state,
@@ -1534,10 +1588,11 @@ pub(crate) fn selection_scale(
     }
     let t_total = Instant::now();
     let before_sel = state.selection.selection_cells.lock().clone();
-    if before_sel.is_empty() {
+    let (target, updates_selection) = selection_transform_target(state.inner())?;
+    if target.is_empty() {
         return Ok(false);
     }
-    let new_sel = voxel_edit::scale_selection_coords(&before_sel, factor);
+    let new_sel = updates_selection.then(|| voxel_edit::scale_selection_coords(&target, factor));
     let deltas = {
         let mut fg = state.file.current_file.lock();
         let mut vm = state.file.voxel_map.lock();
@@ -1547,9 +1602,11 @@ pub(crate) fn selection_scale(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        voxel_edit::scale_selected_voxels(file, vmap, &before_sel, factor)
+        voxel_edit::scale_selected_voxels(file, vmap, &target, factor)
     };
-    *state.selection.selection_cells.lock() = new_sel;
+    if let Some(new_sel) = new_sel {
+        *state.selection.selection_cells.lock() = new_sel;
+    }
     if !deltas.is_empty() {
         finish_voxel_edit_gpu_deltas(
             &state,
@@ -1688,14 +1745,45 @@ pub(crate) fn paint_selection(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        voxel_edit::apply_edits_to_coords(
-            file,
-            vmap,
-            voxel_edit::EditTool::Paint,
-            color_resolver,
-            material,
-            &coords,
-        )
+        if args.update_color && args.update_material {
+            voxel_edit::apply_edits_to_coords(
+                file,
+                vmap,
+                voxel_edit::EditTool::Paint,
+                color_resolver,
+                material,
+                &coords,
+            )
+        } else {
+            let mut out: Vec<voxel_edit::VoxelEditDelta> = Vec::new();
+            for &(x, y, z) in &coords {
+                let Some(&idx) = vmap.get(&(x, y, z)) else {
+                    continue;
+                };
+                let before = file.voxels[idx];
+                let new_color = if args.update_color {
+                    color_resolver(x, y, z)
+                } else {
+                    before.color
+                };
+                let new_material = if args.update_material {
+                    material
+                } else {
+                    before.material
+                };
+                if before.color == new_color && before.material == new_material {
+                    continue;
+                }
+                let after = voxelle::Voxel {
+                    color: new_color,
+                    material: new_material,
+                    ..before
+                };
+                file.voxels[idx] = after;
+                out.push(voxel_edit::VoxelEditDelta::Painted { before, after });
+            }
+            out
+        }
     };
     let apply_edit_ms = t_apply_start.elapsed().as_secs_f64() * 1000.0;
     if deltas.is_empty() {
@@ -1722,7 +1810,7 @@ pub(crate) fn paint_selection(
             viewer.selection_overlay_cache_key = None;
         }
     }
-    push_solo_undo_step(state.inner(), &app, deltas.clone())?;
+    coalesce_or_push_paint_undo_step(state.inner(), &app, deltas.clone())?;
     Ok(deltas.len() as u32)
 }
 

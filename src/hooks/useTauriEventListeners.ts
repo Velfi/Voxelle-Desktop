@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
-import { loadPreferences } from "../preferences";
+import { loadPreferences, syncSavedAvatarToBackend } from "../preferences";
 import { rememberJoinedUrl } from "../joinRecent";
 import { defaultMoodState, moodWith } from "../types";
 import type {
@@ -391,9 +391,8 @@ export function useTauriEventListeners(params: UseTauriEventListenersParams): vo
           pendingJoinUrlRef.current = null;
         }
         setJoinModalOpen(false);
-        // Announce our avatar choice so other peers see the right model immediately.
-        const avatarName = loadPreferences().collabAvatarName;
-        void invoke("set_local_avatar", { avatarName }).catch(() => {});
+        // Load custom avatar bytes from disk, then announce our choice so peers see the right model.
+        syncSavedAvatarToBackend();
       }),
       listen<number>("collab-local-peer", (e) => {
         setLocalPeerId(typeof e.payload === "number" ? e.payload : 0);

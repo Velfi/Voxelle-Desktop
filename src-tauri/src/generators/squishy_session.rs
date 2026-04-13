@@ -401,3 +401,41 @@ pub fn squishy_commit_session(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voxelle::{empty_collab_placeholder, MaterialId};
+
+    #[test]
+    fn squishy_commit_session_returns_unmirrored_base_deltas() {
+        let mut session = SquishySession::new();
+        session.balls.push(Metaball {
+            id: 1,
+            x: 2,
+            y: 0,
+            z: 0,
+            radius: 1.0,
+        });
+        let mut file = empty_collab_placeholder();
+        let mut voxel_map = AHashMap::new();
+
+        let deltas = squishy_commit_session(
+            &session,
+            &mut file,
+            &mut voxel_map,
+            0xabcdef,
+            MaterialId::Plastic,
+        )
+        .expect("squishy commit should succeed");
+
+        assert!(
+            deltas.iter().any(|delta| delta.coord().0 > 0),
+            "expected base squishy voxels on the authored side"
+        );
+        assert!(
+            deltas.iter().all(|delta| delta.coord().0 >= 0),
+            "squishy commit helper should leave symmetry expansion to the shared generator pipeline"
+        );
+    }
+}

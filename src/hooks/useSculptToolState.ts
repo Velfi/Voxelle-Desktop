@@ -50,6 +50,8 @@ export interface SculptToolState {
   setExtrudeTaperStart: React.Dispatch<React.SetStateAction<number>>;
   extrudeTaperEnd: number;
   setExtrudeTaperEnd: React.Dispatch<React.SetStateAction<number>>;
+  sculptExtrudeAutoCommitOnMouseUp: boolean;
+  setSculptExtrudeAutoCommitOnMouseUp: React.Dispatch<React.SetStateAction<boolean>>;
   wallAreaShape: WallAreaShapeApi;
   setWallAreaShape: React.Dispatch<React.SetStateAction<WallAreaShapeApi>>;
   sprayDirection: SprayDirectionApi;
@@ -81,6 +83,7 @@ export interface SculptToolState {
   extrudeTaperRef: React.MutableRefObject<boolean>;
   extrudeTaperStartRef: React.MutableRefObject<number>;
   extrudeTaperEndRef: React.MutableRefObject<number>;
+  sculptExtrudeAutoCommitOnMouseUpRef: React.MutableRefObject<boolean>;
   terrainSculptOpRef: React.MutableRefObject<TerrainSculptOpApi>;
   terrainBaseYRef: React.MutableRefObject<number>;
   terrainSmoothRadiusRef: React.MutableRefObject<number>;
@@ -127,6 +130,7 @@ export function useSculptToolState(): SculptToolState {
   const [extrudeTaper, setExtrudeTaper] = useState(false);
   const [extrudeTaperStart, setExtrudeTaperStart] = useState(3);
   const [extrudeTaperEnd, setExtrudeTaperEnd] = useState(0);
+  const [sculptExtrudeAutoCommitOnMouseUp, setSculptExtrudeAutoCommitOnMouseUp] = useState(true);
   const [wallAreaShape, setWallAreaShape] = useState<WallAreaShapeApi>("brush");
   const [sprayDirection, setSprayDirection] = useState<SprayDirectionApi>("auto");
   const [wallWidthIndex, setWallWidthIndex] = useState(0);
@@ -149,6 +153,7 @@ export function useSculptToolState(): SculptToolState {
   const extrudeTaperRef = useLatestRef(extrudeTaper);
   const extrudeTaperStartRef = useLatestRef(extrudeTaperStart);
   const extrudeTaperEndRef = useLatestRef(extrudeTaperEnd);
+  const sculptExtrudeAutoCommitOnMouseUpRef = useLatestRef(sculptExtrudeAutoCommitOnMouseUp);
   const terrainSculptOpRef = useLatestRef(terrainSculptOp);
   const terrainBaseYRef = useLatestRef(terrainBaseY);
   const terrainSmoothRadiusRef = useLatestRef(terrainSmoothRadius);
@@ -210,6 +215,8 @@ export function useSculptToolState(): SculptToolState {
     setExtrudeTaperStart,
     extrudeTaperEnd,
     setExtrudeTaperEnd,
+    sculptExtrudeAutoCommitOnMouseUp,
+    setSculptExtrudeAutoCommitOnMouseUp,
     wallAreaShape,
     setWallAreaShape,
     sprayDirection,
@@ -240,6 +247,7 @@ export function useSculptToolState(): SculptToolState {
     extrudeTaperRef,
     extrudeTaperStartRef,
     extrudeTaperEndRef,
+    sculptExtrudeAutoCommitOnMouseUpRef,
     terrainSculptOpRef,
     terrainBaseYRef,
     terrainSmoothRadiusRef,

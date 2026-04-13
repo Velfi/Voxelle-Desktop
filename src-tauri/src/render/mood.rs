@@ -98,6 +98,17 @@ pub struct MoodParams {
     // bloom
     #[serde(default = "default_bloom_strength")]
     pub bloom_strength: f32,
+    // tilt shift
+    #[serde(default)]
+    pub ts_enabled: bool,
+    #[serde(default = "default_ts_center_y")]
+    pub ts_center_y: f32,
+    #[serde(default = "default_ts_focus_width")]
+    pub ts_focus_width: f32,
+    #[serde(default = "default_ts_blur_strength")]
+    pub ts_blur_strength: f32,
+    #[serde(default)]
+    pub ts_rotation: f32,
 }
 
 fn default_true() -> bool {
@@ -169,6 +180,15 @@ fn default_ssr_strength() -> f32 {
 fn default_bloom_strength() -> f32 {
     0.1
 }
+fn default_ts_center_y() -> f32 {
+    0.5
+}
+fn default_ts_focus_width() -> f32 {
+    0.3
+}
+fn default_ts_blur_strength() -> f32 {
+    0.4
+}
 
 impl Default for MoodParams {
     fn default() -> Self {
@@ -211,6 +231,11 @@ impl Default for MoodParams {
             ssr_enabled: false,
             ssr_strength: default_ssr_strength(),
             bloom_strength: default_bloom_strength(),
+            ts_enabled: false,
+            ts_center_y: default_ts_center_y(),
+            ts_focus_width: default_ts_focus_width(),
+            ts_blur_strength: default_ts_blur_strength(),
+            ts_rotation: 0.0,
         }
     }
 }

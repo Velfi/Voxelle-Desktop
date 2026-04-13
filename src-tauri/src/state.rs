@@ -601,6 +601,8 @@ pub struct FileState {
     pub stroke_buffer: Mutex<Vec<voxel_edit::VoxelEditDelta>>,
     /// Accumulated stroke preview cells (add/remove/paint drag; committed on pointer up).
     pub stroke_preview_union: Mutex<AHashSet<greedy_mesh::VoxelCoord>>,
+    /// Bumps for each stroke-preview build/reset so stale async preview work can bail out.
+    pub stroke_preview_generation: AtomicU64,
     pub(crate) stroke_preview_last_args: Mutex<Option<crate::VoxelEditAtScreen>>,
     /// When set, hover preview must not overwrite the stroke preview mesh each frame.
     pub stroke_preview_suppresses_hover: AtomicBool,

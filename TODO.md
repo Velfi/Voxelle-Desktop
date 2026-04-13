@@ -1,1 +1,10 @@
 - Optional: apply `useLatestRef` to ~90 ref-sync triads in App.tsx
+- Make a debug option to force a total rebuild
+- We need to fix weird problems with conflicting remove and undo when online
+- When I leave a session, sometimes the host has to restart before I can join them again. Otherwise I get an error about a bad message.
+- selection preview z-fighting
+- preferences avatar preview
+- click dragging out of modals accidentally
+- MacOS resize animation on double click title bar
+  - How does it work event-wise? Can we resize while it's happening or only after it's done.
+  - Metal should be darker.

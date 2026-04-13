@@ -333,7 +333,7 @@ export function PreferencesModal({
                 checked={prefs.gizmoOnTop}
                 onChange={(e) => onGizmoOnTop(e.target.checked)}
               />
-              Always render gizmo on top
+              Always render gizmos on top
             </label>
             <label className="prefs-select-label">
               <span className="prefs-select-label-text">Mouselook sensitivity</span>

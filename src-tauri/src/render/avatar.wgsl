@@ -35,6 +35,7 @@ struct VertexOut {
     @location(1)       world_normal:  vec3<f32>,
     @location(2)       vertex_ao:     f32,
     @location(3)       emission_tint: vec3<f32>,
+    @location(4)       mat_kind:      f32,
 }
 
 @vertex
@@ -45,6 +46,7 @@ fn vs_avatar(v: VertexInput) -> VertexOut {
     o.world_normal  = normalize(u.normal_mat * v.normal);
     o.vertex_ao     = v.vertex_ao;
     o.emission_tint = v.emission_tint * u.color_tint.xyz;
+    o.mat_kind      = v.mat_kind;
     return o;
 }
 
@@ -64,10 +66,21 @@ fn fs_avatar(i: VertexOut) -> AvatarOut {
     let sky_col    = vec3<f32>(0.722, 0.831, 0.910);
     let ground_col = vec3<f32>(0.290, 0.333, 0.408);
     let hemi = mix(ground_col, sky_col, n.y * 0.5 + 0.5);
-    let diffuse = i.color * (hemi * u.ambient * ao + u.sun * n_dot_l);
-    let rgb = clamp(diffuse + i.emission_tint, vec3<f32>(0.0), vec3<f32>(1.5));
+    let is_glow = i.mat_kind > 0.75 && i.mat_kind < 1.25;
+    var glow_mask = 0.0;
+    var rgb: vec3<f32>;
+    if is_glow {
+        // Self-illuminated: emissive base + subtle shape contribution for readability.
+        let emissive = i.color * 4.0;
+        let shape    = i.color * (hemi * 0.15 * ao + 0.18 * n_dot_l * u.sun);
+        rgb       = emissive + shape;
+        glow_mask = 1.0;
+    } else {
+        let diffuse = i.color * (hemi * u.ambient * ao + u.sun * n_dot_l);
+        rgb = clamp(diffuse + i.emission_tint, vec3<f32>(0.0), vec3<f32>(1.5));
+    }
     var out: AvatarOut;
-    out.color  = vec4<f32>(rgb, 1.0);
+    out.color  = vec4<f32>(rgb, glow_mask);
     out.gbuf_n = vec4<f32>(n * 0.5 + 0.5, 0.0);
     return out;
 }

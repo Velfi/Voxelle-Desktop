@@ -150,6 +150,10 @@ const MAT_HOLOGRAPHIC: u32 = 8u;
 
 fn is_transmissive(mat: u32) -> bool { return mat == MAT_GLASS || mat == MAT_WATER; }
 
+fn holographic_base_tint(base_color: vec3<f32>) -> vec3<f32> {
+    return mix(vec3<f32>(1.0), base_color, 0.72);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Random / hash
 // ─────────────────────────────────────────────────────────────────────────────
@@ -605,14 +609,20 @@ fn shade_secondary(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
         // Terminal-bounce holographic: iridescent reflection to sky, no further DDA.
         let holo_cos  = abs(dot(-dir, h.normal));
         let holo_spec = thin_film_iridescence(holo_cos, color);
+        let holo_tint = holographic_base_tint(color);
         let refl_dir2 = reflect(dir, h.normal);
         let refl_sky  = sky_color(refl_dir2);
         let shadow2   = soft_shadow(wp, h.normal, seed ^ 0xA0A0u);
         let sun_dir2  = normalize(g.light_dir.xyz);
         let spec_d2   = max(dot(normalize(sun_dir2 - dir), h.normal), 0.0);
         let spec_hi2  = g.sun_color.xyz * pow(spec_d2, 64.0) * g.light_params.y * shadow2 * 1.0;
-        let ambient2  = hemisphere_ambient(h.normal) * g.light_params.x * 0.06;
-        return refl_sky * holo_spec + spec_hi2 * holo_spec + color * ambient2 * holo_spec;
+        let ndl2      = max(dot(h.normal, sun_dir2), 0.0);
+        let ambient2  = hemisphere_ambient(h.normal) * g.light_params.x * 0.10;
+        let direct2   = color * holo_spec * g.sun_color.xyz * ndl2 * shadow2 * g.light_params.y * 0.18;
+        return refl_sky * holo_spec * holo_tint
+             + spec_hi2 * holo_spec
+             + color * ambient2 * mix(vec3<f32>(1.0), holo_spec, 0.7)
+             + direct2;
     }
 
     // Plastic / rubber
@@ -668,9 +678,10 @@ fn thin_film_iridescence(cos_i: f32, base_color: vec3<f32>) -> vec3<f32> {
     );
 
     // Tint by base color and blend with metallic Fresnel.
-    let f0      = base_color * 0.75 + vec3<f32>(0.04);
-    let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_i, 5.0);
-    return mix(fresnel, irid, 0.85);
+    let f0          = base_color * 0.75 + vec3<f32>(0.04);
+    let fresnel     = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - cos_i, 5.0);
+    let tinted_irid = irid * holographic_base_tint(base_color);
+    return mix(fresnel, tinted_irid, 0.85);
 }
 
 /// Shade a holographic surface (primary bounce).  Thin-film diffraction grating
@@ -706,7 +717,7 @@ fn shade_holographic(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
         0.5 + 0.5 * cos(opd_g / 530.0 * 6.28318530),
         0.5 + 0.5 * cos(opd_g / 460.0 * 6.28318530),
     );
-    let spectral = mix(holo_fresnel, grating_col, 0.4);
+    let spectral = mix(holo_fresnel, grating_col * holographic_base_tint(color), 0.4);
 
     // ── Reflected environment (secondary bounce) ────────────────────────────
     let refl_dir = reflect(incident, n);
@@ -718,8 +729,13 @@ fn shade_holographic(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
     let spec_hi  = sc * pow(spec_d, 64.0) * sun_lvl * shadow * 1.2;
 
     // ── Combine: iridescent reflection + specular + ambient ─────────────────
-    let ambient = hemisphere_ambient(n) * g.light_params.x * 0.06;
-    return refl_col * spectral + spec_hi * spectral + color * ambient * spectral;
+    let ndl     = max(dot(n, sun_dir), 0.0);
+    let ambient = hemisphere_ambient(n) * g.light_params.x * 0.10;
+    let direct  = color * spectral * sc * ndl * shadow * sun_lvl * 0.18;
+    return refl_col * spectral
+         + spec_hi * spectral
+         + color * ambient * mix(vec3<f32>(1.0), spectral, 0.7)
+         + direct;
 }
 
 /// Christensen-Burley normalized diffusion profile (two-exponential fit).

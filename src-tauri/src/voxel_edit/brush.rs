@@ -175,6 +175,18 @@ pub fn get_ray_direction_path(origin: VoxelCoord, direction: Vec3, length: u32) 
     positions
 }
 
+/// Generate a straight voxel path between two coordinates, including both endpoints.
+pub fn get_line_path_inclusive(origin: VoxelCoord, end: VoxelCoord) -> Vec<VoxelCoord> {
+    let dx = end.0 - origin.0;
+    let dy = end.1 - origin.1;
+    let dz = end.2 - origin.2;
+    let steps = dx.abs().max(dy.abs()).max(dz.abs()) as u32;
+    if steps == 0 {
+        return vec![origin];
+    }
+    get_ray_direction_path(origin, Vec3::new(dx as f32, dy as f32, dz as f32), steps)
+}
+
 /// Compute the extrude footprint for a selection: copies all selected coords forward
 /// by `direction` (unit vector) for each depth step 1..=length.
 pub fn extrude_selection_footprint(

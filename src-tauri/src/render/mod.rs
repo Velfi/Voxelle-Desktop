@@ -1999,6 +1999,12 @@ impl WgpuViewer {
         o.ss_samples = p.ss_samples.clamp(20.0, 56.0);
         // sun_uv computed per-frame from light direction
         o.bloom_strength = p.bloom_strength.clamp(0.0, 3.0);
+        // Tilt shift
+        o.ts_enabled = if p.ts_enabled { 1.0 } else { 0.0 };
+        o.ts_center_y = p.ts_center_y.clamp(0.0, 1.0);
+        o.ts_focus_width = p.ts_focus_width.clamp(0.0, 1.0);
+        o.ts_blur_strength = p.ts_blur_strength.clamp(0.0, 1.0);
+        o.ts_rotation = p.ts_rotation;
         self.flush_composite_opts();
         // Screen-space reflections
         self.ssr_opts.enabled = if p.ssr_enabled { 1.0 } else { 0.0 };

@@ -162,6 +162,112 @@ pub(crate) fn push_solo_undo_step(
     Ok(())
 }
 
+/// Like `push_solo_undo_step` but merges with the top entry when it is a
+/// pure-paint operation on exactly the same voxel coordinates.  This collapses
+/// rapid successive repaints of the same selection (e.g. while dragging a
+/// colour slider) into a single undoable step.
+pub(crate) fn coalesce_or_push_paint_undo_step(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    new_deltas: Vec<voxel_edit::VoxelEditDelta>,
+) -> Result<(), String> {
+    if new_deltas.is_empty() {
+        return Ok(());
+    }
+
+    // All new deltas must be Painted (they always are from paint_selection).
+    if !new_deltas
+        .iter()
+        .all(|d| matches!(d, voxel_edit::VoxelEditDelta::Painted { .. }))
+    {
+        return push_solo_undo_step(state, app, new_deltas);
+    }
+
+    let mut stack = state.file.solo_undo.lock();
+
+    let coalesced: Option<Vec<voxel_edit::VoxelEditDelta>> =
+        if let Some(SoloUndoEntry::VoxelDeltas(top)) = stack.last() {
+            // Top entry must also be a pure-paint entry of the same size.
+            if top.len() == new_deltas.len()
+                && top
+                    .iter()
+                    .all(|d| matches!(d, voxel_edit::VoxelEditDelta::Painted { .. }))
+            {
+                // Build coord → new after-voxel lookup.
+                let new_after: AHashMap<(i32, i32, i32), voxelle::Voxel> = new_deltas
+                    .iter()
+                    .filter_map(|d| {
+                        if let voxel_edit::VoxelEditDelta::Painted { after, .. } = d {
+                            Some(((after.x, after.y, after.z), *after))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // All coords must match before we coalesce.
+                let all_match = top.iter().all(|d| {
+                    if let voxel_edit::VoxelEditDelta::Painted { before, .. } = d {
+                        new_after.contains_key(&(before.x, before.y, before.z))
+                    } else {
+                        false
+                    }
+                });
+
+                if all_match {
+                    let merged: Vec<voxel_edit::VoxelEditDelta> = top
+                        .iter()
+                        .filter_map(|d| {
+                            if let voxel_edit::VoxelEditDelta::Painted { before, .. } = d {
+                                let new_aft = new_after[&(before.x, before.y, before.z)];
+                                // Drop if colour + material didn't change from original.
+                                if before.color != new_aft.color
+                                    || before.material != new_aft.material
+                                {
+                                    Some(voxel_edit::VoxelEditDelta::Painted {
+                                        before: *before,
+                                        after: new_aft,
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    Some(merged)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+    match coalesced {
+        Some(merged) if merged.is_empty() => {
+            // User painted back to the original — remove the undo entry entirely.
+            stack.pop();
+        }
+        Some(merged) => {
+            *stack.last_mut().unwrap() = SoloUndoEntry::VoxelDeltas(merged);
+        }
+        None => {
+            stack.push(SoloUndoEntry::VoxelDeltas(new_deltas));
+            enforce_solo_undo_cap(&mut stack);
+        }
+    }
+
+    drop(stack);
+    state.file.solo_redo.lock().clear();
+    #[cfg(target_os = "macos")]
+    macos_undo::register_solo_edit_completed(app, state);
+    Ok(())
+}
+
 pub(crate) fn push_solo_selection_undo_step(
     state: &Arc<ViewerState>,
     app: &AppHandle,
@@ -180,12 +286,10 @@ pub(crate) fn push_solo_selection_undo_step(
 /// Like `commit_voxel_edits` but reads `mirror_axes` from `PreviewHoverContext`
 /// and expands deltas with mirrored copies.  Used by generators so they all
 /// respect the active symmetry axes automatically.
-pub(crate) fn commit_generator_edits(
-    state: &Arc<ViewerState>,
-    app: &AppHandle,
-    mut deltas: Vec<voxel_edit::VoxelEditDelta>,
-) -> Result<bool, String> {
-    let mirror_axes = state.preview.preview_hover.lock().mirror_axes;
+pub(crate) fn extend_generator_deltas_with_mirror_axes(
+    deltas: &mut Vec<voxel_edit::VoxelEditDelta>,
+    mirror_axes: u8,
+) {
     if mirror_axes != 0 && !deltas.is_empty() {
         let base: Vec<_> = deltas.clone();
         let mut seen: std::collections::HashSet<(i32, i32, i32)> = base
@@ -208,7 +312,60 @@ pub(crate) fn commit_generator_edits(
             }
         }
     }
+}
+
+pub(crate) fn commit_generator_edits_with_mirror_axes(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    mut deltas: Vec<voxel_edit::VoxelEditDelta>,
+    mirror_axes: u8,
+) -> Result<bool, String> {
+    let base_len = deltas.len();
+    extend_generator_deltas_with_mirror_axes(&mut deltas, mirror_axes);
+    if deltas.len() > base_len {
+        let mut fg = state.file.current_file.lock();
+        let mut vm = state.file.voxel_map.lock();
+        let file = fg.as_mut().ok_or("no model loaded")?;
+        let vmap = vm.as_mut().ok_or("voxel index not ready")?;
+        for d in &deltas[base_len..] {
+            voxel_edit::apply_forward_delta(file, vmap, d)?;
+        }
+    }
     commit_voxel_edits(state, app, deltas)
+}
+
+pub(crate) fn commit_generator_edits(
+    state: &Arc<ViewerState>,
+    app: &AppHandle,
+    deltas: Vec<voxel_edit::VoxelEditDelta>,
+) -> Result<bool, String> {
+    let mirror_axes = state.preview.preview_hover.lock().mirror_axes;
+    commit_generator_edits_with_mirror_axes(state, app, deltas, mirror_axes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extend_generator_deltas_with_mirror_axes;
+    use crate::voxel_edit::VoxelEditDelta;
+    use crate::voxelle::{MaterialId, Voxel};
+
+    #[test]
+    fn extend_generator_deltas_with_mirror_axes_adds_mirrored_copy() {
+        let mut deltas = vec![VoxelEditDelta::Added(Voxel {
+            x: 2,
+            y: 1,
+            z: -3,
+            color: 0xabcdef,
+            material: MaterialId::Plastic,
+            object_id: 7,
+        })];
+
+        extend_generator_deltas_with_mirror_axes(&mut deltas, 1);
+
+        let coords: std::collections::HashSet<_> = deltas.iter().map(|d| d.coord()).collect();
+        assert!(coords.contains(&(2, 1, -3)));
+        assert!(coords.contains(&(-2, 1, -3)));
+    }
 }
 
 pub(crate) fn commit_voxel_edits(
@@ -264,8 +421,27 @@ pub(crate) fn commit_voxel_edits(
 
 // ── Stroke begin / end / preview ────────────────────────────────────────────
 
+const STROKE_PREVIEW_CANCEL_CHECK_INTERVAL: usize = 512;
+
+pub(crate) fn next_stroke_preview_generation(state: &ViewerState) -> u64 {
+    state
+        .file
+        .stroke_preview_generation
+        .fetch_add(1, Ordering::SeqCst)
+        + 1
+}
+
+pub(crate) fn is_stroke_preview_stale(state: &ViewerState, generation: u64) -> bool {
+    state.file.stroke_preview_generation.load(Ordering::SeqCst) != generation
+}
+
+pub(crate) fn cancel_stroke_preview_builds(state: &ViewerState) {
+    let _ = next_stroke_preview_generation(state);
+}
+
 #[tauri::command]
 pub(crate) fn voxel_stroke_begin(state: State<'_, Arc<ViewerState>>) -> Result<(), String> {
+    cancel_stroke_preview_builds(state.inner().as_ref());
     *state.file.stroke_active.lock() = true;
     state.file.stroke_buffer.lock().clear();
     state.file.stroke_preview_union.lock().clear();
@@ -290,6 +466,7 @@ pub(crate) fn voxel_stroke_preview_reset(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    cancel_stroke_preview_builds(state.inner().as_ref());
     *state.file.stroke_active.lock() = false;
     state.file.stroke_buffer.lock().clear();
     state.file.stroke_preview_union.lock().clear();
@@ -360,23 +537,56 @@ pub(crate) fn stroke_preview_meshes_for_union(
     palette_rgb: u32,
     color_resolver: Option<&dyn Fn(i32, i32, i32) -> u32>,
 ) -> greedy_mesh::PreviewInstancedResult {
+    stroke_preview_meshes_for_union_cancellable(
+        tool,
+        union,
+        voxel_map,
+        file,
+        debug_pick_highlight,
+        palette_rgb,
+        color_resolver,
+        || false,
+    )
+    .unwrap_or_else(greedy_mesh::PreviewInstancedResult::empty)
+}
+
+pub(crate) fn stroke_preview_meshes_for_union_cancellable<C: Fn() -> bool>(
+    tool: voxel_edit::EditTool,
+    union: &AHashSet<greedy_mesh::VoxelCoord>,
+    voxel_map: &AHashMap<greedy_mesh::VoxelCoord, usize>,
+    file: &voxelle::VoxelleFile,
+    debug_pick_highlight: bool,
+    palette_rgb: u32,
+    color_resolver: Option<&dyn Fn(i32, i32, i32) -> u32>,
+    is_stale: C,
+) -> Option<greedy_mesh::PreviewInstancedResult> {
     // Occupied cells: shell only (large solid previews stay cheap). Empty footprint cells: always
     // included (full brush volume in air). Stroke commit still uses the full union in
     // [`voxel_stroke_end`].
     let mut occupied = AHashSet::with_capacity(union.len().min(65_536));
     let mut empty_only = AHashSet::with_capacity(union.len().min(65_536));
-    for &c in union.iter() {
+    for (idx, &c) in union.iter().enumerate() {
+        if idx.is_multiple_of(STROKE_PREVIEW_CANCEL_CHECK_INTERVAL) && is_stale() {
+            return None;
+        }
         if voxel_map.contains_key(&c) {
             occupied.insert(c);
         } else {
             empty_only.insert(c);
         }
     }
-    let shell_occ = greedy_mesh::filter_voxel_set_to_shell(&occupied);
-    let mut sorted: Vec<greedy_mesh::VoxelCoord> =
-        shell_occ.into_iter().chain(empty_only).collect();
+    let shell_occ = greedy_mesh::filter_voxel_set_to_shell_cancellable(&occupied, &is_stale)?;
+    // For large brushes in empty space the full interior would exceed STROKE_PREVIEW_MAX_CELLS and
+    // get truncated by coordinate order, creating a visible planar cutoff.  Filter to the shell so
+    // the full outline of the brush is always visible regardless of size.
+    let empty_set = if empty_only.len() + shell_occ.len() > STROKE_PREVIEW_MAX_CELLS {
+        greedy_mesh::filter_voxel_set_to_shell_cancellable(&empty_only, &is_stale)?
+    } else {
+        empty_only
+    };
+    let mut sorted: Vec<greedy_mesh::VoxelCoord> = shell_occ.into_iter().chain(empty_set).collect();
     if sorted.is_empty() {
-        return greedy_mesh::PreviewInstancedResult::empty();
+        return Some(greedy_mesh::PreviewInstancedResult::empty());
     }
     sorted.sort_unstable_by_key(|&c| {
         let ghost = !voxel_map.contains_key(&c);
@@ -392,7 +602,14 @@ pub(crate) fn stroke_preview_meshes_for_union(
     let n = sorted.len().min(STROKE_PREVIEW_MAX_CELLS);
     let mut solid_instances: Vec<greedy_mesh::PreviewInstance> = Vec::with_capacity(n);
     let mut wire_instances: Vec<greedy_mesh::PreviewInstance> = Vec::with_capacity(n);
-    for (cx, cy, cz) in sorted.into_iter().take(STROKE_PREVIEW_MAX_CELLS) {
+    for (idx, (cx, cy, cz)) in sorted
+        .into_iter()
+        .take(STROKE_PREVIEW_MAX_CELLS)
+        .enumerate()
+    {
+        if idx.is_multiple_of(STROKE_PREVIEW_CANCEL_CHECK_INTERVAL) && is_stale() {
+            return None;
+        }
         let ghost = !voxel_map.contains_key(&(cx, cy, cz));
         let (base_sr, base_sg, base_sb, base_wr, base_wg, base_wb) = if use_per_voxel_color {
             if let Some(resolver) = color_resolver {
@@ -461,13 +678,16 @@ pub(crate) fn stroke_preview_meshes_for_union(
             mat_kind: wire_mat_k,
         });
     }
-    greedy_mesh::PreviewInstancedResult {
+    if is_stale() {
+        return None;
+    }
+    Some(greedy_mesh::PreviewInstancedResult {
         solid_instances,
         wire_instances,
         cube_half: size,
         extra_solid: greedy_mesh::MeshBuffers::default(),
         extra_wire: greedy_mesh::MeshBuffers::default(),
-    }
+    })
 }
 
 /// Builds the compact raw-voxel upload needed for the GPU compute shell-filter preview path.
@@ -711,6 +931,7 @@ pub(crate) fn voxel_stroke_preview_at_screen(
         }
     }
 
+    let generation = next_stroke_preview_generation(state.inner().as_ref());
     let material = voxelle::MaterialId::from_str_id(&args.material);
     let stroke_line_start_meta = match (args.stroke_line_start_nx, args.stroke_line_start_ny) {
         (Some(_), Some(_)) => Some((0.0_f32, 0.0_f32)),
@@ -782,6 +1003,10 @@ pub(crate) fn voxel_stroke_preview_at_screen(
         targets
     };
 
+    if is_stroke_preview_stale(state.inner().as_ref(), generation) {
+        return Ok(());
+    }
+
     {
         let mut union = state.file.stroke_preview_union.lock();
         let accumulate = voxel_edit::stroke_preview_accumulates_samples(
@@ -825,7 +1050,7 @@ pub(crate) fn voxel_stroke_preview_at_screen(
         let preview_resolver_ref: Option<&dyn Fn(i32, i32, i32) -> u32> = preview_resolver_owned
             .as_ref()
             .map(|f| f as &dyn Fn(i32, i32, i32) -> u32);
-        let mut result = stroke_preview_meshes_for_union(
+        let Some(mut result) = stroke_preview_meshes_for_union_cancellable(
             args.tool,
             &union,
             vmap,
@@ -833,7 +1058,10 @@ pub(crate) fn voxel_stroke_preview_at_screen(
             false,
             args.color,
             preview_resolver_ref,
-        );
+            || is_stroke_preview_stale(state.inner().as_ref(), generation),
+        ) else {
+            return Ok(());
+        };
         if matches!(
             args.stroke_mode,
             stroke_modes::DrawStrokeMode::Polygon | stroke_modes::DrawStrokeMode::PolygonHull
@@ -851,11 +1079,18 @@ pub(crate) fn voxel_stroke_preview_at_screen(
         result
     };
 
+    if is_stroke_preview_stale(state.inner().as_ref(), generation) {
+        return Ok(());
+    }
+
     {
         let mut v = state.gpu.viewer.lock();
         let Some(viewer) = v.as_mut() else {
             return Ok(());
         };
+        if is_stroke_preview_stale(state.inner().as_ref(), generation) {
+            return Ok(());
+        }
         if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
             state
@@ -949,6 +1184,7 @@ pub(crate) fn voxel_stroke_end(
     state: State<'_, Arc<ViewerState>>,
     app: AppHandle,
 ) -> Result<(), String> {
+    cancel_stroke_preview_builds(state.inner().as_ref());
     *state.file.stroke_active.lock() = false;
     *state.gizmos.extrude_ray_spine.lock() = None;
     *state.file.wall_stroke_face_snapped.lock() = None;
@@ -968,6 +1204,7 @@ pub(crate) fn voxel_stroke_end(
         if let Some(viewer) = v.as_mut() {
             clear_preview_mesh_sync_cache(viewer, state.inner().as_ref());
         }
+        wake_viewport_loop(&app);
     }
 
     if !sculpt_replay.is_empty() {

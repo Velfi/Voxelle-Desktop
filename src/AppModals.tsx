@@ -131,6 +131,8 @@ export function AppModals({
   pointerTestOpen,
   setPointerTestOpen,
 }: Props) {
+  const transformScopeLabel = selectionCount > 0 ? "selection" : "project";
+
   return (
     <>
       {leaveConfirmOpen && (
@@ -243,7 +245,7 @@ export function AppModals({
           onKeyDown={(e) => e.key === "Escape" && setRotateDialogOpen(false)}
         >
           <div className="modal">
-            <h3>Rotate selection</h3>
+            <h3>Rotate {transformScopeLabel}</h3>
             <label className="modal-field">
               Axis
               <select
@@ -278,7 +280,7 @@ export function AppModals({
                   setRotateDialogOpen(false);
                 }}
               >
-                Rotate
+                Rotate {transformScopeLabel}
               </button>
               <button type="button" onClick={() => setRotateDialogOpen(false)}>
                 Cancel
@@ -297,7 +299,7 @@ export function AppModals({
           onKeyDown={(e) => e.key === "Escape" && setScaleDialogOpen(false)}
         >
           <div className="modal">
-            <h3>Scale selection</h3>
+            <h3>Scale {transformScopeLabel}</h3>
             <label className="modal-field">
               Factor
               <input
@@ -321,7 +323,7 @@ export function AppModals({
                   setScaleDialogOpen(false);
                 }}
               >
-                Scale
+                Scale {transformScopeLabel}
               </button>
               <button type="button" onClick={() => setScaleDialogOpen(false)}>
                 Cancel

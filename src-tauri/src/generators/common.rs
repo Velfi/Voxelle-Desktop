@@ -7,6 +7,8 @@
 // suppress dead_code warnings until all generators are migrated.
 #![allow(dead_code)]
 
+use glam::Vec3;
+
 // ---------------------------------------------------------------------------
 // V3 type and vector helpers
 // ---------------------------------------------------------------------------
@@ -102,6 +104,55 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 #[inline(always)]
 pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
     a + (b - a) * t
+}
+
+#[inline(always)]
+pub fn ray_plane_intersect(ro: Vec3, rd: Vec3, plane_n: Vec3, plane_p: Vec3) -> Option<Vec3> {
+    let denom = rd.dot(plane_n);
+    if denom.abs() < 1e-6 {
+        return None;
+    }
+    let t = (plane_p - ro).dot(plane_n) / denom;
+    if t < 0.0 {
+        return None;
+    }
+    Some(ro + rd * t)
+}
+
+/// Returns the scalar `t` on the infinite line `axis_origin + axis_dir * t`
+/// that best matches the cursor ray. Falls back to projecting the cursor hit
+/// on a camera-facing plane onto the axis when the ray and axis are nearly
+/// parallel.
+#[inline(always)]
+pub fn axis_drag_scalar_from_ray(
+    axis_origin: Vec3,
+    axis_dir: Vec3,
+    ray_origin: Vec3,
+    ray_dir: Vec3,
+    fallback_plane_n: Vec3,
+    fallback_plane_p: Vec3,
+) -> Option<f32> {
+    let axis_dir = axis_dir.normalize_or_zero();
+    let ray_dir = ray_dir.normalize_or_zero();
+    if axis_dir.length_squared() <= 1e-12 || ray_dir.length_squared() <= 1e-12 {
+        return None;
+    }
+
+    let w0 = axis_origin - ray_origin;
+    let b = axis_dir.dot(ray_dir);
+    let d = axis_dir.dot(w0);
+    let e = ray_dir.dot(w0);
+    let denom = 1.0 - b * b;
+
+    if denom.abs() > 1e-5 {
+        let ray_t = (e - b * d) / denom;
+        if ray_t >= 0.0 {
+            return Some((b * e - d) / denom);
+        }
+    }
+
+    let hit = ray_plane_intersect(ray_origin, ray_dir, fallback_plane_n, fallback_plane_p)?;
+    Some((hit - axis_origin).dot(axis_dir))
 }
 
 /// Golden angle in radians: PI * (3 − √5).  Used for evenly-distributed

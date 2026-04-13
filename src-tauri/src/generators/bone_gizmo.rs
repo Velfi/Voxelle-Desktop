@@ -3,6 +3,7 @@
 
 use crate::camera::OrbitCamera;
 use crate::generators::bone_session::{BoneSelection, BoneSession, Joint};
+use crate::generators::common::axis_drag_scalar_from_ray;
 use crate::greedy_mesh::MeshBuffers;
 use crate::voxel_edit::{screen_to_world_ray, world_to_viewport_pixels};
 use glam::Vec3;
@@ -22,6 +23,9 @@ pub struct BoneGizmoDrag {
     pub handle: BoneGizmoHandle,
     pub joint_id: u32,
     pub start: Joint,
+    pub axis_origin: Vec3,
+    pub axis_dir: Vec3,
+    pub start_axis_scalar: f32,
     pub plane_n: Vec3,
     pub plane_p: Vec3,
     pub start_hit: Vec3,
@@ -162,8 +166,6 @@ fn pick_joint_gizmo(
 
 // ── Drag ─────────────────────────────────────────────────────────────
 
-use super::bone_session::ray_plane_intersect;
-
 pub fn bone_gizmo_begin_drag(
     session: &BoneSession,
     camera: &OrbitCamera,
@@ -182,12 +184,26 @@ pub fn bone_gizmo_begin_drag(
     let eye = camera.smooth_eye();
     let plane_n = (center - eye).normalize();
     let plane_p = center;
-    let start_hit = ray_plane_intersect(ro, rd, plane_n, plane_p)?;
+    let start_hit = crate::generators::common::ray_plane_intersect(ro, rd, plane_n, plane_p)?;
+    let axis_dir = match handle {
+        BoneGizmoHandle::MoveX => Vec3::X,
+        BoneGizmoHandle::MoveY => Vec3::Y,
+        BoneGizmoHandle::MoveZ => Vec3::Z,
+        BoneGizmoHandle::Scale => Vec3::ZERO,
+    };
+    let start_axis_scalar = if axis_dir.length_squared() > 0.0 {
+        axis_drag_scalar_from_ray(center, axis_dir, ro, rd, plane_n, plane_p).unwrap_or(0.0)
+    } else {
+        0.0
+    };
 
     Some(BoneGizmoDrag {
         handle,
         joint_id,
         start: joint,
+        axis_origin: center,
+        axis_dir,
+        start_axis_scalar,
         plane_n,
         plane_p,
         start_hit,
@@ -206,10 +222,6 @@ pub fn bone_gizmo_apply_drag(
     let (ro, rd) = screen_to_world_ray(camera, w, h, sx, sy);
     let ro = Vec3::new(ro.x, ro.y, ro.z);
     let rd = Vec3::new(rd.x, rd.y, rd.z).normalize();
-    let Some(hit) = ray_plane_intersect(ro, rd, drag.plane_n, drag.plane_p) else {
-        return;
-    };
-    let delta = hit - drag.start_hit;
     let start = &drag.start;
     let view = camera.view_matrix();
     let inv_view = view.inverse();
@@ -217,18 +229,54 @@ pub fn bone_gizmo_apply_drag(
 
     match drag.handle {
         BoneGizmoHandle::MoveX => {
-            let nx = start.x + delta.x;
+            let Some(axis_scalar) = axis_drag_scalar_from_ray(
+                drag.axis_origin,
+                drag.axis_dir,
+                ro,
+                rd,
+                drag.plane_n,
+                drag.plane_p,
+            ) else {
+                return;
+            };
+            let nx = start.x + (axis_scalar - drag.start_axis_scalar);
             session.set_joint_position(drag.joint_id, nx, start.y, start.z);
         }
         BoneGizmoHandle::MoveY => {
-            let ny = start.y + delta.y;
+            let Some(axis_scalar) = axis_drag_scalar_from_ray(
+                drag.axis_origin,
+                drag.axis_dir,
+                ro,
+                rd,
+                drag.plane_n,
+                drag.plane_p,
+            ) else {
+                return;
+            };
+            let ny = start.y + (axis_scalar - drag.start_axis_scalar);
             session.set_joint_position(drag.joint_id, start.x, ny, start.z);
         }
         BoneGizmoHandle::MoveZ => {
-            let nz = start.z + delta.z;
+            let Some(axis_scalar) = axis_drag_scalar_from_ray(
+                drag.axis_origin,
+                drag.axis_dir,
+                ro,
+                rd,
+                drag.plane_n,
+                drag.plane_p,
+            ) else {
+                return;
+            };
+            let nz = start.z + (axis_scalar - drag.start_axis_scalar);
             session.set_joint_position(drag.joint_id, start.x, start.y, nz);
         }
         BoneGizmoHandle::Scale => {
+            let Some(hit) =
+                crate::generators::common::ray_plane_intersect(ro, rd, drag.plane_n, drag.plane_p)
+            else {
+                return;
+            };
+            let delta = hit - drag.start_hit;
             let signed = delta.dot(camera_right);
             let nr = (start.radius + signed).clamp(0.5, 64.0);
             session.set_joint_radius(drag.joint_id, nr);

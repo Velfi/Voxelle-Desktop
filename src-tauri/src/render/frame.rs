@@ -751,7 +751,7 @@ impl WgpuViewer {
             pass.draw(0..3, 0..1);
         }
 
-        if self.auto_exposure_enabled {
+        if self.auto_exposure_enabled && self.meter_pending_rx.is_none() {
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("meter_lum"),

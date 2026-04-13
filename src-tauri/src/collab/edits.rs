@@ -188,9 +188,13 @@ pub fn process_inbox_item<R: Runtime>(
                     return;
                 }
                 c.host_redo.entry(peer_id).or_default().push(original);
+                c.next_seq += 1;
                 c.next_seq
             };
-            broadcast_edit_binary(collab_mtx, seq, peer_id, &mesh_refresh);
+            // Broadcast as HOST_PEER_ID so the requesting client's self-skip doesn't
+            // swallow the result (clients skip broadcasts that carry their own peer_id
+            // because they apply edits optimistically, but undo is not optimistic).
+            broadcast_edit_binary(collab_mtx, seq, HOST_PEER_ID, &mesh_refresh);
         }
         CollabInboxItem::Redo { peer_id } => {
             // Pop from the redo stack (brief lock).
@@ -240,9 +244,10 @@ pub fn process_inbox_item<R: Runtime>(
                     .entry(peer_id)
                     .or_default()
                     .push(forward.clone());
+                c.next_seq += 1;
                 c.next_seq
             };
-            broadcast_edit_binary(collab_mtx, seq, peer_id, &forward);
+            broadcast_edit_binary(collab_mtx, seq, HOST_PEER_ID, &forward);
         }
     }
 }

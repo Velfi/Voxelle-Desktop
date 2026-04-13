@@ -65,6 +65,12 @@ export interface MoodState {
   ssrStrength: number;
   // bloom
   bloomStrength: number;
+  // tilt shift
+  tsEnabled: boolean;
+  tsCenterY: number;
+  tsFocusWidth: number;
+  tsBlurStrength: number;
+  tsRotation: number;
 }
 
 export function defaultMoodState(): MoodState {
@@ -107,6 +113,11 @@ export function defaultMoodState(): MoodState {
     ssrEnabled: false,
     ssrStrength: 0.8,
     bloomStrength: 0.1,
+    tsEnabled: false,
+    tsCenterY: 0.5,
+    tsFocusWidth: 0.3,
+    tsBlurStrength: 0.4,
+    tsRotation: 0,
   };
 }
 

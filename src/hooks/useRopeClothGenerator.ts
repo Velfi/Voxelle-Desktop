@@ -3,12 +3,16 @@ import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
 import type { ClothGravityDirectionId } from "../types";
 import { sculptBrushShapeToRust } from "../constants";
+import { mirrorAxesFromRefs } from "../symmetry";
 import { useLatestRef } from "./useLatestRef";
 
 interface RopeClothGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
   selectionStrokeSnapToSurfaceRef: React.MutableRefObject<boolean>;
+  mirrorXRef: React.MutableRefObject<boolean>;
+  mirrorYRef: React.MutableRefObject<boolean>;
+  mirrorZRef: React.MutableRefObject<boolean>;
 }
 
 export interface RopeClothGeneratorState {
@@ -125,6 +129,7 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
           brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
           color: ctx.activeColorRef.current,
           material: ctx.activeMaterialRef.current,
+          mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
         },
       }).catch(() => {});
       setRopeFirstScreen(null);
@@ -152,6 +157,7 @@ export function useRopeClothGenerator(ctx: RopeClothGeneratorContext): RopeCloth
           brushShape: sculptBrushShapeToRust(ropeBrushShapeUiRef.current),
           color: ctx.activeColorRef.current,
           material: ctx.activeMaterialRef.current,
+          mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
           gravityScale: clothSimGravityPctRef.current / 100,
           stiffnessScale: clothSimStiffnessPctRef.current / 100,
           clothIterations: clothSimIterationsRef.current,

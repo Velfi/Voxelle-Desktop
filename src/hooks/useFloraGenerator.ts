@@ -1,13 +1,21 @@
 import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStrokePhase, type StrokePhaseHandle } from "../useStrokePhase";
+import { mirrorAxesFromRefs } from "../symmetry";
+import { useLatestRef } from "./useLatestRef";
 
 interface FloraGeneratorContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
+  mirrorXRef: React.MutableRefObject<boolean>;
+  mirrorYRef: React.MutableRefObject<boolean>;
+  mirrorZRef: React.MutableRefObject<boolean>;
 }
 
 export interface FloraGeneratorState {
+  floraAutoCommitOnMouseUp: boolean;
+  setFloraAutoCommitOnMouseUp: React.Dispatch<React.SetStateAction<boolean>>;
+  floraAutoCommitOnMouseUpRef: React.MutableRefObject<boolean>;
   floraPreset: string;
   setFloraPreset: React.Dispatch<React.SetStateAction<string>>;
   floraHeight: number;
@@ -37,10 +45,12 @@ export interface FloraGeneratorState {
   floraCanopy: number;
   setFloraCanopy: React.Dispatch<React.SetStateAction<number>>;
   floraPreviewSeedRef: React.MutableRefObject<number>;
+  placeFloraAtScreen: (nx: number, ny: number, seed?: number) => void;
   floraPhase: StrokePhaseHandle<{ nx: number; ny: number; seed: number }>;
 }
 
 export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorState {
+  const [floraAutoCommitOnMouseUp, setFloraAutoCommitOnMouseUp] = useState(true);
   const [floraPreset, setFloraPreset] = useState<string>("stalk");
   const [floraHeight, setFloraHeight] = useState(14);
   const [floraGirth, setFloraGirth] = useState(0);
@@ -56,7 +66,36 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
   const [floraBraidTwist, setFloraBraidTwist] = useState(0.35);
   const [floraCanopy, setFloraCanopy] = useState(0.18);
 
+  const floraAutoCommitOnMouseUpRef = useLatestRef(floraAutoCommitOnMouseUp);
   const floraPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
+
+  function placeFloraAtScreen(nx: number, ny: number, seed = floraPreviewSeedRef.current) {
+    void invoke("unlock_generator_preview_camera").catch(() => {});
+    void invoke("generator_flora_at_screen", {
+      args: {
+        nx,
+        ny,
+        seed,
+        height: floraHeight,
+        girth: floraGirth,
+        wobble: floraWobble,
+        taper: floraTaper,
+        stemCount: floraStemCount,
+        clusterRadius: floraClusterRadius,
+        branchCount: floraBranchCount,
+        branchDepth: floraBranchDepth,
+        branchStart: floraBranchStart,
+        branchSpread: floraBranchSpread,
+        braidStrands: floraBraidStrands,
+        braidTwist: floraBraidTwist,
+        canopy: floraCanopy,
+        color: ctx.activeColorRef.current,
+        material: ctx.activeMaterialRef.current,
+        mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
+      },
+    }).catch(() => {});
+    floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
+  }
 
   // Flora uses state values directly in onCommit (not refs), matching the original code.
   const floraPhase = useStrokePhase<{ nx: number; ny: number; seed: number }>({
@@ -66,35 +105,15 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny, seed } = snap.data;
-      void invoke("generator_flora_at_screen", {
-        args: {
-          nx,
-          ny,
-          seed,
-          height: floraHeight,
-          girth: floraGirth,
-          wobble: floraWobble,
-          taper: floraTaper,
-          stemCount: floraStemCount,
-          clusterRadius: floraClusterRadius,
-          branchCount: floraBranchCount,
-          branchDepth: floraBranchDepth,
-          branchStart: floraBranchStart,
-          branchSpread: floraBranchSpread,
-          braidStrands: floraBraidStrands,
-          braidTwist: floraBraidTwist,
-          canopy: floraCanopy,
-          color: ctx.activeColorRef.current,
-          material: ctx.activeMaterialRef.current,
-        },
-      }).catch(() => {});
-      floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
+      placeFloraAtScreen(nx, ny, seed);
     },
   });
 
   return {
+    floraAutoCommitOnMouseUp,
+    setFloraAutoCommitOnMouseUp,
+    floraAutoCommitOnMouseUpRef,
     floraPreset,
     setFloraPreset,
     floraHeight,
@@ -124,6 +143,7 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
     floraCanopy,
     setFloraCanopy,
     floraPreviewSeedRef,
+    placeFloraAtScreen,
     floraPhase,
   };
 }

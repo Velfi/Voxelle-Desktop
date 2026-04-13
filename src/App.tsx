@@ -22,6 +22,7 @@ import {
   applyAppearanceToDocument,
   autosaveSettingsInvokeArgs,
   loadPreferences,
+  syncSavedAvatarToBackend,
   normalizeCollabAccentColor,
   normalizeCollabDisplayName,
   normalizeCollabHostPort,
@@ -129,6 +130,7 @@ function App() {
     mode:
       | "camera"
       | "voxel"
+      | "boneAddDrag"
       | "squishyGizmo"
       | "squishyAddDrag"
       | "selectionGizmo"
@@ -235,7 +237,13 @@ function App() {
   const selectionStrokeAxisAlignRef = useLatestRef(selectionStrokeAxisAlign);
 
   const sculpt = useSculptToolState();
-  const squishyTool = useSquishyToolState({ activeColorRef, activeMaterialRef });
+  const squishyTool = useSquishyToolState({
+    activeColorRef,
+    activeMaterialRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+  });
   const {
     squishyMode,
     setSquishyMode,
@@ -255,6 +263,9 @@ function App() {
     activeColorRef,
     activeMaterialRef,
     selectionStrokeSnapToSurfaceRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
   });
   const {
     generatorKind,
@@ -263,9 +274,17 @@ function App() {
     generatorSphereRadius,
     generatorSphereRadiusRef,
     generatorToolOptionsModel,
+    rocksAutoCommitOnMouseUpRef,
+    placeRocksAtScreen,
     rocksPhase,
+    grassAutoCommitOnMouseUpRef,
+    placeGrassAtScreen,
     grassPhase,
+    ashlarAutoCommitOnMouseUpRef,
+    placeAshlarAtScreen,
     ashlarPhase,
+    floraAutoCommitOnMouseUpRef,
+    placeFloraAtScreen,
     floraPhase,
     ropePhase,
     clothPhase,
@@ -402,6 +421,8 @@ function App() {
     setExtrudeTaperStart,
     extrudeTaperEnd,
     setExtrudeTaperEnd,
+    sculptExtrudeAutoCommitOnMouseUp,
+    setSculptExtrudeAutoCommitOnMouseUp,
     wallAreaShape,
     setWallAreaShape,
     sprayDirection,
@@ -432,6 +453,7 @@ function App() {
     extrudeTaperRef,
     extrudeTaperStartRef,
     extrudeTaperEndRef,
+    sculptExtrudeAutoCommitOnMouseUpRef,
     terrainSculptOpRef,
     terrainBaseYRef,
     terrainSmoothRadiusRef,
@@ -457,7 +479,13 @@ function App() {
     wallSculptPolygonVertsRef,
   } = sculpt;
 
-  const bone = useBoneGenerator({ activeColorRef, activeMaterialRef });
+  const bone = useBoneGenerator({
+    activeColorRef,
+    activeMaterialRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+  });
   const {
     bonePhase,
     boneMode,
@@ -546,11 +574,13 @@ function App() {
     phases: ["settings"],
     onCancel: () => {
       extrudeStartNormRef.current = null;
+      void invoke("clear_generator_gizmo_center").catch(() => {});
       void invoke("voxel_stroke_end").catch(() => {});
       void invoke("voxel_stroke_preview_reset").catch(() => {});
     },
     onCommit: () => {
       extrudeStartNormRef.current = null;
+      void invoke("clear_generator_gizmo_center").catch(() => {});
       void invoke("voxel_stroke_end").catch(() => {});
     },
   });
@@ -872,6 +902,7 @@ function App() {
 
   useEffect(() => {
     const p = loadPreferences();
+    syncSavedAvatarToBackend();
     void invoke("set_emission_lighting", {
       enabled: p.enableEmissionLighting,
     }).catch(() => {});
@@ -1260,6 +1291,7 @@ function App() {
           color: activeColor,
           strokeSeed: Math.floor(Math.random() * 0xffffffff),
           material: activeMaterialRef.current,
+          updateMaterial: false,
         },
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
@@ -1273,6 +1305,7 @@ function App() {
           paintColorDistrib: paintColorDistribRef.current,
           strokeSeed: Math.floor(Math.random() * 0xffffffff),
           material: activeMaterialRef.current,
+          updateMaterial: false,
         },
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
@@ -1292,6 +1325,7 @@ function App() {
           ...(multiColor ? { palette, paintColorDistrib: paintColorDistribRef.current } : {}),
           strokeSeed: Math.floor(Math.random() * 0xffffffff),
           material: activeMaterial,
+          updateColor: false,
         },
       }).catch((e) => console.error("[voxelle] paint_selection error", e));
     }
@@ -1481,6 +1515,53 @@ function App() {
     extrudeTaperStart,
     extrudeTaperEnd,
   ]);
+
+  useEffect(() => {
+    const sculptExtrudePhaseActive =
+      extrudePhase.active && interactionMode === "sculpt" && sculptStrokeMode === "extrude";
+    if (!sculptExtrudePhaseActive) {
+      void invoke("clear_generator_gizmo_center").catch(() => {});
+      return;
+    }
+    void invoke("extrude_sync_endpoint_gizmo_from_preview").catch(() => {});
+  }, [extrudePhase.active, interactionMode, sculptStrokeMode]);
+
+  useEffect(() => {
+    if (sculptStrokeMode !== "extrude" && extrudePhase.active && interactionMode === "sculpt") {
+      extrudePhase.cancel();
+    }
+  }, [sculptStrokeMode, extrudePhase.active, interactionMode]);
+
+  useEffect(() => {
+    const applyEndpoint = (endpoint: [number, number, number]) => {
+      if (!extrudePhase.active || interactionMode !== "sculpt" || sculptStrokeMode !== "extrude") {
+        return;
+      }
+      void invoke("extrude_preview_set_endpoint", {
+        args: {
+          endpoint,
+          color: activeColorRef.current,
+          material: activeMaterialRef.current,
+          extrudeProfile: extrudeProfileRef.current,
+          extrudeEndCap: extrudeEndCapRef.current,
+          extrudeTaper: extrudeTaperRef.current,
+          extrudeTaperStart: extrudeTaperRef.current ? extrudeTaperStartRef.current : 0,
+          extrudeTaperEnd: extrudeTaperRef.current ? extrudeTaperEndRef.current : 0,
+        },
+      }).catch(() => {});
+    };
+
+    const moved = listen<[number, number, number]>("generator-gizmo-moved", (ev) => {
+      applyEndpoint(ev.payload);
+    });
+    const previewMoved = listen<[number, number, number]>("generator-gizmo-preview-moved", (ev) => {
+      applyEndpoint(ev.payload);
+    });
+    return () => {
+      void moved.then((u) => u());
+      void previewMoved.then((u) => u());
+    };
+  }, [extrudePhase.active, interactionMode, sculptStrokeMode]);
 
   // Cancel cuboid/cylinder depth phase if interaction mode becomes incompatible.
   useEffect(() => {
@@ -2390,10 +2471,15 @@ function App() {
     extrudeTaperEndRef,
     extrudeTaperRef,
     extrudeTaperStartRef,
+    sculptExtrudeAutoCommitOnMouseUpRef,
     eyedropperReturnModeRef,
     floraPreviewSeedRef,
     flyMouseLookActiveRef,
     generatorSphereRadiusRef,
+    rocksAutoCommitOnMouseUpRef,
+    grassAutoCommitOnMouseUpRef,
+    ashlarAutoCommitOnMouseUpRef,
+    floraAutoCommitOnMouseUpRef,
     gestureRef,
     gizmoHoverRef,
     gizmoRef,
@@ -2502,6 +2588,10 @@ function App() {
     mergedStrokeAux,
     buildSyncPreviewPayload,
     previewModeForSync,
+    placeRocksAtScreen,
+    placeGrassAtScreen,
+    placeAshlarAtScreen,
+    placeFloraAtScreen,
     runStrokeAtScreen,
     clearPreview,
     handleClothPinClick,
@@ -3403,6 +3493,9 @@ function App() {
                     roofHollow={roofHollow}
                     activeColor={activeColor}
                     activeMaterialRef={activeMaterialRef}
+                    mirrorX={mirrorX}
+                    mirrorY={mirrorY}
+                    mirrorZ={mirrorZ}
                     loading={loading}
                     workBusy={workBusy}
                     clothPins={clothPins}
@@ -3440,8 +3533,13 @@ function App() {
                   loadingOrBusy={loading || workBusy}
                   stampOrPunch={interactionMode === "stamp" || interactionMode === "punch"}
                   viewportEl={viewportRef.current}
+                  viewportPhysRef={viewportPhysRef}
                 />
-                <ExtrudeGizmo ref={extrudeGizmoRef} viewportEl={viewportRef.current} />
+                <ExtrudeGizmo
+                  ref={extrudeGizmoRef}
+                  viewportEl={viewportRef.current}
+                  viewportPhysRef={viewportPhysRef}
+                />
               </div>
               {showEditorChrome ? (
                 <ViewportCameraHud
@@ -3906,6 +4004,20 @@ function App() {
                                   disabled={loading || workBusy}
                                 />
                                 <span>Taper</span>
+                              </label>
+                              <label
+                                className="tool-options-checkbox-row"
+                                style={{ marginTop: "0.35rem" }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={sculptExtrudeAutoCommitOnMouseUp}
+                                  onChange={(ev) =>
+                                    setSculptExtrudeAutoCommitOnMouseUp(ev.target.checked)
+                                  }
+                                  disabled={loading || workBusy}
+                                />
+                                <span>Auto-commit on mouseup</span>
                               </label>
                               {extrudeTaper ? (
                                 <>
@@ -4588,6 +4700,93 @@ function App() {
                           disabled={loading || workBusy}
                         />
                       </label>
+
+                      {/* ── Tilt Shift ────────────────────────── */}
+                      <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>
+                        Tilt Shift
+                      </div>
+                      <label
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: "0.5rem",
+                          marginBottom: "0.25rem",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mood.tsEnabled}
+                          onChange={(ev) =>
+                            setMood((p) => moodWith(p, { tsEnabled: ev.target.checked }))
+                          }
+                          disabled={loading || workBusy}
+                        />
+                        <span>Enabled</span>
+                      </label>
+                      {mood.tsEnabled && (
+                        <>
+                          <label className="tool-options-range-label">
+                            <span>Focus Center</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={mood.tsCenterY}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { tsCenterY: Number(ev.target.value) }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Focus Width</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={mood.tsFocusWidth}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, { tsFocusWidth: Number(ev.target.value) }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Blur Strength</span>
+                            <input
+                              type="range"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={mood.tsBlurStrength}
+                              onChange={(ev) =>
+                                setMood((p) =>
+                                  moodWith(p, { tsBlurStrength: Number(ev.target.value) }),
+                                )
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                          <label className="tool-options-range-label">
+                            <span>Rotation</span>
+                            <input
+                              type="range"
+                              min={-0.5}
+                              max={0.5}
+                              step={0.01}
+                              value={mood.tsRotation}
+                              onChange={(ev) =>
+                                setMood((p) => moodWith(p, { tsRotation: Number(ev.target.value) }))
+                              }
+                              disabled={loading || workBusy}
+                            />
+                          </label>
+                        </>
+                      )}
 
                       {/* ── Atmosphere ────────────────────────── */}
                       <div className="tool-options-heading" style={{ marginTop: "0.75rem" }}>

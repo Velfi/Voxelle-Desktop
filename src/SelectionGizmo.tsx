@@ -7,7 +7,7 @@
  * reports whether the cursor is over a handle.
  */
 import { invoke } from "@tauri-apps/api/core";
-import { forwardRef, useCallback, useImperativeHandle, useRef } from "react";
+import { forwardRef, useCallback, useImperativeHandle, useRef, type MutableRefObject } from "react";
 
 export type SelectionGizmoRef = {
   /** Call on pointer-down. Returns true and starts a drag if a handle was hit. */
@@ -28,8 +28,9 @@ export const SelectionGizmo = forwardRef<
     loadingOrBusy: boolean;
     stampOrPunch: boolean;
     viewportEl: HTMLElement | null;
+    viewportPhysRef: MutableRefObject<{ w: number; h: number }>;
   }
->(({ viewportEl }, ref) => {
+>(({ viewportEl, viewportPhysRef }, ref) => {
   const dprRef = useRef(window.devicePixelRatio || 1);
 
   /** Convert clientX/Y to physical pixel coords matching Rust projections. */
@@ -37,11 +38,19 @@ export const SelectionGizmo = forwardRef<
     (clientX: number, clientY: number): [number, number] => {
       if (!viewportEl) return [0, 0];
       const rect = viewportEl.getBoundingClientRect();
-      const dpr = window.devicePixelRatio || 1;
-      dprRef.current = dpr;
-      return [(clientX - rect.left) * dpr, (clientY - rect.top) * dpr];
+      const rw = rect.width;
+      const rh = rect.height;
+      if (rw <= 0 || rh <= 0) return [0, 0];
+      const phys = viewportPhysRef.current;
+      const scaleX = phys.w > 0 ? phys.w / rw : window.devicePixelRatio || 1;
+      const scaleY = phys.h > 0 ? phys.h / rh : window.devicePixelRatio || 1;
+      dprRef.current = (scaleX + scaleY) * 0.5;
+      return [
+        ((clientX - rect.left) / rw) * (phys.w || rw * scaleX),
+        ((clientY - rect.top) / rh) * (phys.h || rh * scaleY),
+      ];
     },
-    [viewportEl],
+    [viewportEl, viewportPhysRef],
   );
 
   useImperativeHandle(
@@ -53,9 +62,14 @@ export const SelectionGizmo = forwardRef<
       },
 
       pointerMove(clientX, clientY, prevClientX, prevClientY) {
-        const dpr = window.devicePixelRatio || 1;
-        const dcx = (clientX - prevClientX) * dpr;
-        const dcy = (clientY - prevClientY) * dpr;
+        const rect = viewportEl?.getBoundingClientRect();
+        const rw = rect?.width ?? 0;
+        const rh = rect?.height ?? 0;
+        const phys = viewportPhysRef.current;
+        const scaleX = rw > 0 ? (phys.w > 0 ? phys.w / rw : window.devicePixelRatio || 1) : 1;
+        const scaleY = rh > 0 ? (phys.h > 0 ? phys.h / rh : window.devicePixelRatio || 1) : 1;
+        const dcx = (clientX - prevClientX) * scaleX;
+        const dcy = (clientY - prevClientY) * scaleY;
         void invoke("gizmo_pointer_move", { dcx, dcy }).catch(() => {});
       },
 
@@ -68,7 +82,7 @@ export const SelectionGizmo = forwardRef<
         return invoke<boolean>("gizmo_hit_test", { sx, sy, dpr: dprRef.current });
       },
     }),
-    [toPhysical],
+    [toPhysical, viewportEl, viewportPhysRef],
   );
 
   // No DOM output — rendering is done by the wgpu pipeline.

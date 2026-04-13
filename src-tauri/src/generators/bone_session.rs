@@ -579,3 +579,35 @@ pub fn bone_commit_session(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::voxelle::{empty_collab_placeholder, MaterialId};
+
+    #[test]
+    fn bone_commit_session_returns_unmirrored_base_deltas() {
+        let mut session = BoneSession::new();
+        session.add_joint(2.0, 0.0, 0.0, 0.5);
+        let mut file = empty_collab_placeholder();
+        let mut voxel_map = AHashMap::new();
+
+        let deltas = bone_commit_session(
+            &session,
+            &mut file,
+            &mut voxel_map,
+            0xabcdef,
+            MaterialId::Plastic,
+        )
+        .expect("bone commit should succeed");
+
+        assert!(
+            deltas.iter().any(|delta| delta.coord().0 > 0),
+            "expected base bone voxels on the authored side"
+        );
+        assert!(
+            deltas.iter().all(|delta| delta.coord().0 >= 0),
+            "bone commit helper should leave symmetry expansion to the shared generator pipeline"
+        );
+    }
+}

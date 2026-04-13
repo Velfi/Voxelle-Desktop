@@ -257,6 +257,11 @@ pub struct MoodSettings {
     pub ssr_enabled: bool,
     #[serde(default = "default_08")]
     pub ssr_strength: f32,
+    pub ts_blur_strength: f32,
+    pub ts_center_y: f32,
+    pub ts_enabled: bool,
+    pub ts_focus_width: f32,
+    pub ts_rotation: f32,
     // bloom
     #[serde(default = "default_09")]
     pub bloom_strength: f32,
@@ -360,6 +365,11 @@ impl Default for MoodSettings {
             ss_samples: 32.0,
             ssr_enabled: false,
             ssr_strength: 0.8,
+            ts_blur_strength: 0.0,
+            ts_center_y: 0.0,
+            ts_enabled: false,
+            ts_focus_width: 0.0,
+            ts_rotation: 0.0,
             bloom_strength: 0.1,
         }
     }

@@ -131,6 +131,16 @@ pub(crate) struct PostCompositeOpts {
     pub ss_soft: f32,
     pub _pad14b: f32,
     pub _pad14c: f32,
+    // --- Row 15: tilt shift ---
+    pub ts_enabled: f32,
+    pub ts_center_y: f32,
+    pub ts_focus_width: f32,
+    pub ts_blur_strength: f32,
+    // --- Row 16: tilt shift rotation ---
+    pub ts_rotation: f32,
+    pub _pad16a: f32,
+    pub _pad16b: f32,
+    pub _pad16c: f32,
 }
 
 /// Matches `mascot.wgsl` `MascotUniforms`.

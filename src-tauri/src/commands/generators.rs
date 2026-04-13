@@ -3,6 +3,10 @@ use crate::preview::default_true;
 use crate::state::viewport_texels_from_norm;
 use crate::*;
 
+fn resolve_generator_mirror_axes(state: &ViewerState, explicit: Option<u8>) -> u8 {
+    explicit.unwrap_or_else(|| state.preview.preview_hover.lock().mirror_axes)
+}
+
 // ── Generator arg structs & defaults ─────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -26,6 +30,8 @@ pub(crate) struct GeneratorRocksArgs {
     sink_direction: i32,
     #[serde(default)]
     sink_amount: i32,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 pub(crate) fn default_rock_size() -> i32 {
@@ -89,7 +95,8 @@ pub(crate) fn generator_rocks_at_screen(
             args.sink_amount,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 #[derive(serde::Deserialize)]
@@ -107,6 +114,8 @@ pub(crate) struct GeneratorGrassArgs {
     max_height: i32,
     color: u32,
     material: String,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 pub(crate) fn default_grass_radius() -> i32 {
@@ -163,7 +172,8 @@ pub(crate) fn generator_grass_at_screen(
             material,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 #[derive(serde::Deserialize)]
@@ -186,6 +196,8 @@ pub(crate) struct GeneratorRopeArgs {
     /// Web `ropeGravityDirection`: down | up | left | right | forward | back.
     #[serde(default = "default_cloth_gravity_direction")]
     gravity_direction: String,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 pub(crate) fn default_rope_sag() -> f32 {
@@ -245,7 +257,8 @@ pub(crate) fn generator_rope_at_screen(
             &args.gravity_direction,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 #[derive(serde::Deserialize)]
@@ -275,6 +288,8 @@ pub(crate) struct GeneratorClothArgs {
     cloth_iterations: u32,
     #[serde(default = "default_cloth_constraint_passes")]
     cloth_constraint_passes: u32,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 fn default_cloth_gravity_direction() -> String {
@@ -331,7 +346,8 @@ pub(crate) fn generator_cloth_from_pins_cmd(
             sim,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 #[derive(serde::Deserialize)]
@@ -410,6 +426,8 @@ pub(crate) struct GeneratorAshlarArgs {
     thickness: Option<i32>,
     #[serde(default)]
     thickness_axis: Option<i32>,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 #[tauri::command]
@@ -455,7 +473,8 @@ pub(crate) fn generator_ashlar_at_screen(
             args.thickness_axis,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 // ── Flora generator ───────────────────────────────────────────────────────────
@@ -495,6 +514,8 @@ pub(crate) struct GeneratorFloraArgs {
     canopy: f32,
     color: u32,
     material: String,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 pub(crate) fn default_flora_height() -> i32 {
@@ -571,7 +592,8 @@ pub(crate) fn generator_flora_at_screen(
             material,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 // ── Roof generator ────────────────────────────────────────────────────────────
@@ -602,6 +624,8 @@ pub(crate) struct GeneratorRoofArgs {
     hollow: bool,
     color: u32,
     material: String,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 pub(crate) fn default_roof_style() -> String {
@@ -657,7 +681,8 @@ pub(crate) fn generator_roof_from_pins_cmd(
             material,
         )
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 // ── Piscina (fish) generator ──────────────────────────────────────────────────
@@ -1379,6 +1404,8 @@ pub(crate) fn squishy_session_clear(state: State<'_, Arc<ViewerState>>) -> Resul
 pub(crate) struct SquishyCommitArgs {
     color: u32,
     material: String,
+    #[serde(default)]
+    mirror_axes: u8,
 }
 
 #[tauri::command]
@@ -1403,7 +1430,7 @@ pub(crate) fn squishy_session_commit(
     if deltas.is_empty() {
         return Ok(false);
     }
-    commit_voxel_edits(&state, &app, deltas)?;
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, args.mirror_axes)?;
     let mut g = state.gizmos.squishy_session.lock();
     g.clear();
     drop(g);
@@ -1598,11 +1625,41 @@ pub(crate) fn bone_session_clear(state: State<'_, Arc<ViewerState>>) -> Result<(
     Ok(())
 }
 
+fn sync_bone_selection_gizmo(state: &Arc<ViewerState>, session: &generators::BoneSession) {
+    let (center, ring_radius) = match session.selected {
+        Some(generators::BoneSelection::Joint(id)) => {
+            let joint = session.find_joint(id);
+            (joint.map(|j| [j.x, j.y, j.z]), joint.map(|j| j.radius))
+        }
+        Some(generators::BoneSelection::Bone(bone_id)) => {
+            let center = session
+                .bones
+                .iter()
+                .find(|b| b.id == bone_id)
+                .and_then(|bone| {
+                    let ja = session.find_joint(bone.joint_a)?;
+                    let jb = session.find_joint(bone.joint_b)?;
+                    Some([
+                        (ja.x + jb.x) * 0.5,
+                        (ja.y + jb.y) * 0.5,
+                        (ja.z + jb.z) * 0.5,
+                    ])
+                });
+            (center, None)
+        }
+        None => (None, None),
+    };
+    *state.gizmos.generator_gizmo_center.lock() = center;
+    *state.gizmos.generator_gizmo_ring_radius.lock() = ring_radius;
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BoneCommitArgs {
     color: u32,
     material: String,
+    #[serde(default)]
+    mirror_axes: u8,
 }
 
 #[tauri::command]
@@ -1627,10 +1684,12 @@ pub(crate) fn bone_session_commit(
     if deltas.is_empty() {
         return Ok(false);
     }
-    commit_voxel_edits(&state, &app, deltas)?;
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, args.mirror_axes)?;
     state.gizmos.bone_session.lock().clear();
     *state.gizmos.bone_gizmo_drag.lock() = None;
     *state.gizmos.bone_ik_drag.lock() = None;
+    *state.gizmos.generator_gizmo_center.lock() = None;
+    *state.gizmos.generator_gizmo_ring_radius.lock() = None;
     Ok(true)
 }
 
@@ -1723,6 +1782,61 @@ pub(crate) fn bone_move_joint_to_screen(
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct BoneAddDragResizeArgs {
+    joint_id: u32,
+    nx: f32,
+    ny: f32,
+}
+
+#[tauri::command]
+pub(crate) fn bone_add_drag_resize(
+    app: AppHandle,
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneAddDragResizeArgs,
+) -> Result<(), String> {
+    let (w, h) = {
+        let v = state.gpu.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Ok(());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let cam = state.cam.camera.lock();
+    let mut bs = state.gizmos.bone_session.lock();
+    let Some(joint) = bs.find_joint(args.joint_id) else {
+        return Ok(());
+    };
+    let center = glam::Vec3::new(joint.x, joint.y, joint.z);
+    // Match squishy add-drag sizing: project onto the camera-facing plane
+    // through the joint center and use cursor distance as the live radius.
+    let eye = cam.smooth_eye();
+    let plane_n = (center - eye).normalize();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let (ro, rd) = voxel_edit::screen_to_world_ray(&cam, w, h, sx, sy);
+    let ro = glam::Vec3::new(ro.x, ro.y, ro.z);
+    let rd = glam::Vec3::new(rd.x, rd.y, rd.z).normalize();
+    let denom = rd.dot(plane_n);
+    if denom.abs() < 1e-6 {
+        return Ok(());
+    }
+    let t = (center - ro).dot(plane_n) / denom;
+    if t <= 0.0 {
+        return Ok(());
+    }
+    let world_cursor = ro + rd * t;
+    let radius = (world_cursor - center).length().clamp(0.5, 64.0);
+    if bs.set_joint_radius(args.joint_id, radius) {
+        sync_bone_selection_gizmo(state.inner(), &bs);
+        drop(bs);
+        drop(cam);
+        wake_viewport_loop(&app);
+    }
+    Ok(())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct BoneConnectArgs {
     joint_a: u32,
     joint_b: u32,
@@ -1776,29 +1890,7 @@ pub(crate) fn bone_select(
 ) -> Result<(), String> {
     let mut bs = state.gizmos.bone_session.lock();
     bs.selected = args.selection;
-    // Show the shared move gizmo at the selected joint's position.
-    let (center, ring_radius) = match args.selection {
-        Some(generators::BoneSelection::Joint(id)) => {
-            let j = bs.find_joint(id);
-            (j.map(|j| [j.x, j.y, j.z]), j.map(|j| j.radius))
-        }
-        Some(generators::BoneSelection::Bone(bone_id)) => {
-            let c = bs.bones.iter().find(|b| b.id == bone_id).and_then(|bone| {
-                let ja = bs.find_joint(bone.joint_a)?;
-                let jb = bs.find_joint(bone.joint_b)?;
-                Some([
-                    (ja.x + jb.x) * 0.5,
-                    (ja.y + jb.y) * 0.5,
-                    (ja.z + jb.z) * 0.5,
-                ])
-            });
-            (c, None) // no radius ring for bone selection
-        }
-        None => (None, None),
-    };
-    drop(bs);
-    *state.gizmos.generator_gizmo_center.lock() = center;
-    *state.gizmos.generator_gizmo_ring_radius.lock() = ring_radius;
+    sync_bone_selection_gizmo(state.inner(), &bs);
     Ok(())
 }
 
@@ -1839,7 +1931,7 @@ pub(crate) fn bone_remove(
         }
     };
     if ok {
-        *state.gizmos.generator_gizmo_center.lock() = None;
+        sync_bone_selection_gizmo(state.inner(), &bs);
     }
     Ok(ok)
 }
@@ -1857,7 +1949,11 @@ pub(crate) fn bone_set_joint_radius(
     args: BoneSetJointRadiusArgs,
 ) -> Result<bool, String> {
     let mut bs = state.gizmos.bone_session.lock();
-    Ok(bs.set_joint_radius(args.id, args.radius))
+    let ok = bs.set_joint_radius(args.id, args.radius);
+    if ok {
+        sync_bone_selection_gizmo(state.inner(), &bs);
+    }
+    Ok(ok)
 }
 
 #[derive(serde::Deserialize)]
@@ -1877,8 +1973,7 @@ pub(crate) fn bone_set_joint_position(
     let mut bs = state.gizmos.bone_session.lock();
     let ok = bs.set_joint_position(args.id, args.x, args.y, args.z);
     if ok {
-        // Keep the shared gizmo centered on the joint as it moves.
-        *state.gizmos.generator_gizmo_center.lock() = Some([args.x, args.y, args.z]);
+        sync_bone_selection_gizmo(state.inner(), &bs);
     }
     Ok(ok)
 }
@@ -1923,6 +2018,36 @@ pub(crate) fn bone_gizmo_pointer_down(
 }
 
 #[tauri::command]
+pub(crate) fn bone_gizmo_hit_test(
+    state: State<'_, Arc<ViewerState>>,
+    args: BoneGizmoPointerArgs,
+) -> Result<bool, String> {
+    let (w, h) = {
+        let v = state.gpu.viewer.lock();
+        let Some(viewer) = v.as_ref() else {
+            return Err("viewer not ready".into());
+        };
+        let (w, h) = viewer.viewport_size();
+        (w as f32, h as f32)
+    };
+    let cam = state.cam.camera.lock();
+    let bs = state.gizmos.bone_session.lock();
+    let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
+    let hit = generators::pick_bone_gizmo_handle(&bs, &cam, w, h, sx, sy);
+    let axis = match hit.map(|(handle, _)| handle) {
+        Some(generators::BoneGizmoHandle::MoveX) => 0,
+        Some(generators::BoneGizmoHandle::MoveY) => 1,
+        Some(generators::BoneGizmoHandle::MoveZ) => 2,
+        Some(generators::BoneGizmoHandle::Scale) | None => 255,
+    };
+    state
+        .gizmos
+        .hovered_gizmo_axis
+        .store(axis, std::sync::atomic::Ordering::Relaxed);
+    Ok(hit.is_some())
+}
+
+#[tauri::command]
 pub(crate) fn bone_gizmo_pointer_move(
     app: AppHandle,
     state: State<'_, Arc<ViewerState>>,
@@ -1942,6 +2067,7 @@ pub(crate) fn bone_gizmo_pointer_move(
         let mut bs = state.gizmos.bone_session.lock();
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         generators::bone_gizmo_apply_drag(&mut bs, &cam, w, h, sx, sy, &drag);
+        sync_bone_selection_gizmo(state.inner(), &bs);
         wake_viewport_loop(&app);
         return Ok(());
     }
@@ -2028,6 +2154,8 @@ pub(crate) struct GeneratorShapeArgs {
     /// Explicit gizmo center passed from the frontend to avoid race conditions.
     #[serde(default)]
     gizmo_center: Option<[f32; 3]>,
+    #[serde(default)]
+    mirror_axes: Option<u8>,
 }
 
 fn default_shape_kind() -> String {
@@ -2126,7 +2254,8 @@ pub(crate) fn generator_shape_at_screen(
             args.overwrite,
         )?
     };
-    commit_generator_edits(&state, &app, deltas)
+    let mirror_axes = resolve_generator_mirror_axes(state.inner().as_ref(), args.mirror_axes);
+    commit_generator_edits_with_mirror_axes(&state, &app, deltas, mirror_axes)
 }
 
 // ── Generator gizmo override ────────────────────────────────────────────

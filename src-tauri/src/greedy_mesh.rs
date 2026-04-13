@@ -2546,12 +2546,22 @@ const FACE_NEIGHBOR_OFFSETS: [(i32, i32, i32); 6] = [
 /// Used for preview and selection overlay meshing so large solid regions only pay for a surface shell.
 /// Single-cell sets are returned unchanged.
 pub fn filter_voxel_set_to_shell(set: &AHashSet<VoxelCoord>) -> AHashSet<VoxelCoord> {
+    filter_voxel_set_to_shell_cancellable(set, || false).unwrap_or_else(|| set.clone())
+}
+
+pub fn filter_voxel_set_to_shell_cancellable<C: Fn() -> bool>(
+    set: &AHashSet<VoxelCoord>,
+    is_stale: C,
+) -> Option<AHashSet<VoxelCoord>> {
     let n = set.len();
     if n <= 1 {
-        return set.clone();
+        return Some(set.clone());
     }
     let mut out = AHashSet::with_capacity(n.min(65_536));
-    for &c in set.iter() {
+    for (idx, &c) in set.iter().enumerate() {
+        if idx.is_multiple_of(512) && is_stale() {
+            return None;
+        }
         let mut has_outside = false;
         for &(dx, dy, dz) in &FACE_NEIGHBOR_OFFSETS {
             let nb = (c.0 + dx, c.1 + dy, c.2 + dz);
@@ -2564,7 +2574,11 @@ pub fn filter_voxel_set_to_shell(set: &AHashSet<VoxelCoord>) -> AHashSet<VoxelCo
             out.insert(c);
         }
     }
-    out
+    if is_stale() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 pub fn selection_bounds(sel: &AHashSet<VoxelCoord>) -> Option<(i32, i32, i32, i32, i32, i32)> {

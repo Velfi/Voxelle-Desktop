@@ -18,20 +18,40 @@ export interface GeneratorToolContext {
   activeColorRef: React.MutableRefObject<number>;
   activeMaterialRef: React.MutableRefObject<string>;
   selectionStrokeSnapToSurfaceRef: React.MutableRefObject<boolean>;
+  mirrorXRef: React.MutableRefObject<boolean>;
+  mirrorYRef: React.MutableRefObject<boolean>;
+  mirrorZRef: React.MutableRefObject<boolean>;
 }
 
 /** Return type: generator hooks output + tool-options model + kind/radius. */
 export function useGeneratorToolState(ctx: GeneratorToolContext) {
-  const { activeColorRef, activeMaterialRef, selectionStrokeSnapToSurfaceRef } = ctx;
+  const {
+    activeColorRef,
+    activeMaterialRef,
+    selectionStrokeSnapToSurfaceRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+  } = ctx;
 
   const [generatorSphereRadius, setGeneratorSphereRadius] = useState(4);
   const [generatorKind, setGeneratorKind] = useState<GeneratorKindId>("rocks");
   const generatorSphereRadiusRef = useLatestRef(generatorSphereRadius);
   const generatorKindRef = useLatestRef(generatorKind);
 
-  const _genCtx = { activeColorRef, activeMaterialRef, generatorSphereRadiusRef };
+  const _genCtx = {
+    activeColorRef,
+    activeMaterialRef,
+    generatorSphereRadiusRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+  };
   const rocks = useRocksGenerator(_genCtx);
   const {
+    rocksAutoCommitOnMouseUp,
+    setRocksAutoCommitOnMouseUp,
+    rocksAutoCommitOnMouseUpRef,
     rockRoughness,
     setRockRoughness,
     rockRoughnessRef,
@@ -48,11 +68,15 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setRockSinkAmount,
     rockSinkAmountRef,
     rockPreviewSeedRef,
+    placeRocksAtScreen,
     rocksPhase,
   } = rocks;
 
   const grass = useGrassGenerator(_genCtx);
   const {
+    grassAutoCommitOnMouseUp,
+    setGrassAutoCommitOnMouseUp,
+    grassAutoCommitOnMouseUpRef,
     grassDensity,
     setGrassDensity,
     grassDensityRef,
@@ -60,20 +84,34 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setGrassMaxHeight,
     grassMaxHeightRef,
     grassPreviewSeedRef,
+    placeGrassAtScreen,
     grassPhase,
   } = grass;
 
   const ashlar = useAshlarGenerator({ ..._genCtx, rockRoughnessRef });
   const {
+    ashlarAutoCommitOnMouseUp,
+    setAshlarAutoCommitOnMouseUp,
+    ashlarAutoCommitOnMouseUpRef,
     ashlarThickness,
     setAshlarThickness,
     ashlarThicknessRef,
     ashlarPreviewSeedRef,
+    placeAshlarAtScreen,
     ashlarPhase,
   } = ashlar;
 
-  const flora = useFloraGenerator({ activeColorRef, activeMaterialRef });
+  const flora = useFloraGenerator({
+    activeColorRef,
+    activeMaterialRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+  });
   const {
+    floraAutoCommitOnMouseUp,
+    setFloraAutoCommitOnMouseUp,
+    floraAutoCommitOnMouseUpRef,
     floraPreset,
     setFloraPreset,
     floraHeight,
@@ -103,6 +141,7 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     floraCanopy,
     setFloraCanopy,
     floraPreviewSeedRef,
+    placeFloraAtScreen,
     floraPhase,
   } = flora;
 
@@ -110,6 +149,9 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     activeColorRef,
     activeMaterialRef,
     selectionStrokeSnapToSurfaceRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
   });
   const {
     clothGravityDirection,
@@ -174,7 +216,13 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     roofFirstClickRef,
   } = roof;
 
-  const shape = useShapeGenerator({ activeColorRef, activeMaterialRef });
+  const shape = useShapeGenerator({
+    activeColorRef,
+    activeMaterialRef,
+    mirrorXRef,
+    mirrorYRef,
+    mirrorZRef,
+  });
   const {
     shapeKind,
     setShapeKind,
@@ -202,6 +250,8 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     generatorKind,
     generatorSphereRadius,
     setGeneratorSphereRadius,
+    rocksAutoCommitOnMouseUp,
+    setRocksAutoCommitOnMouseUp,
     rockRoughness,
     setRockRoughness,
     rockCount,
@@ -216,6 +266,8 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setGrassDensity,
     grassMaxHeight,
     setGrassMaxHeight,
+    grassAutoCommitOnMouseUp,
+    setGrassAutoCommitOnMouseUp,
     clothGravityDirection,
     setClothGravityDirection,
     ropeBrushShapeUi,
@@ -232,8 +284,12 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setClothSimConstraintPasses,
     ashlarThickness,
     setAshlarThickness,
+    ashlarAutoCommitOnMouseUp,
+    setAshlarAutoCommitOnMouseUp,
     floraPreset,
     setFloraPreset,
+    floraAutoCommitOnMouseUp,
+    setFloraAutoCommitOnMouseUp,
     floraHeight,
     setFloraHeight,
     floraGirth,
@@ -289,6 +345,9 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setGeneratorSphereRadius,
     generatorSphereRadiusRef,
     generatorToolOptionsModel,
+    rocksAutoCommitOnMouseUp,
+    setRocksAutoCommitOnMouseUp,
+    rocksAutoCommitOnMouseUpRef,
     rockRoughness,
     setRockRoughness,
     rockRoughnessRef,
@@ -305,7 +364,11 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setRockSinkAmount,
     rockSinkAmountRef,
     rockPreviewSeedRef,
+    placeRocksAtScreen,
     rocksPhase,
+    grassAutoCommitOnMouseUp,
+    setGrassAutoCommitOnMouseUp,
+    grassAutoCommitOnMouseUpRef,
     grassDensity,
     setGrassDensity,
     grassDensityRef,
@@ -313,12 +376,20 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     setGrassMaxHeight,
     grassMaxHeightRef,
     grassPreviewSeedRef,
+    placeGrassAtScreen,
     grassPhase,
+    ashlarAutoCommitOnMouseUp,
+    setAshlarAutoCommitOnMouseUp,
+    ashlarAutoCommitOnMouseUpRef,
     ashlarThickness,
     setAshlarThickness,
     ashlarThicknessRef,
     ashlarPreviewSeedRef,
+    placeAshlarAtScreen,
     ashlarPhase,
+    floraAutoCommitOnMouseUp,
+    setFloraAutoCommitOnMouseUp,
+    floraAutoCommitOnMouseUpRef,
     floraPreset,
     setFloraPreset,
     floraHeight,
@@ -348,6 +419,7 @@ export function useGeneratorToolState(ctx: GeneratorToolContext) {
     floraCanopy,
     setFloraCanopy,
     floraPreviewSeedRef,
+    placeFloraAtScreen,
     floraPhase,
     clothGravityDirection,
     setClothGravityDirection,

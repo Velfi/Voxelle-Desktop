@@ -29,7 +29,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
   // Stable ref owned by the hook
   const planeStrokeDebugEnabledRef = useRef(true);
   const bonePendingJointRef = useRef<number | null>(null);
-  const bonePlacingJointRef = useRef<number | null>(null);
+  const boneAddDragJointRef = useRef<number | null>(null);
   const squishyAddDragBallIdRef = useRef<number | null>(null);
   // Track the last (nx, ny, mode) sent to sync_preview_input so we can skip
   // identical calls when the cursor hasn't moved between RAF frames.
@@ -54,10 +54,12 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     extrudeTaperEndRef,
     extrudeTaperRef,
     extrudeTaperStartRef,
+    sculptExtrudeAutoCommitOnMouseUpRef,
     eyedropperReturnModeRef,
     floraPreviewSeedRef,
     flyMouseLookActiveRef,
     gestureRef,
+    grassAutoCommitOnMouseUpRef,
     gizmoHoverRef,
     gizmoRef,
     grassPreviewSeedRef,
@@ -75,6 +77,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     pointerStartRef,
     probingRef,
     rockPreviewSeedRef,
+    rocksAutoCommitOnMouseUpRef,
     roofAreaShapeRef,
     roofFirstClickRef,
     roofPinsRef,
@@ -140,6 +143,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     setViewportCursorDebugScreen,
     setWallSculptPolygonVerts,
     ashlarPhase,
+    ashlarAutoCommitOnMouseUpRef,
     clothPhase,
     cuboidPhase,
     cylinderPhase,
@@ -151,6 +155,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     shapePhase,
     shapeGizmoPosRef,
     squishyPhase,
+    floraAutoCommitOnMouseUpRef,
     bonePhase,
     boneModeRef,
     boneDefaultRadiusRef,
@@ -164,6 +169,10 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     ropeFirstScreen,
     mergedStrokeAux,
     buildSyncPreviewPayload,
+    placeAshlarAtScreen,
+    placeFloraAtScreen,
+    placeGrassAtScreen,
+    placeRocksAtScreen,
     previewModeForSync,
     runStrokeAtScreen,
     clearPreview,
@@ -256,6 +265,22 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     pointerStartRef.current = null;
     maxPointerMoveRef.current = 0;
     pendingPointerUpRef.current = null;
+  }
+
+  function restoreBonePosePreviewAtEvent(e: React.PointerEvent) {
+    if (interactionModeRef.current !== "bone" || bonePhase.ref.current?.phase !== "pose") {
+      return;
+    }
+    const { nx, ny } = clientToViewportNormalized(e);
+    const mode = previewModeForSync(interactionModeRef.current);
+    // Invalidate the hover-sync cache first so later move events are not
+    // blocked if this immediate restore races with capture/leave handling.
+    lastSyncPreviewNxRef.current = NaN;
+    lastSyncPreviewNyRef.current = NaN;
+    lastSyncPreviewModeRef.current = "";
+    void invoke("sync_preview_input", {
+      args: buildSyncPreviewPayload(nx, ny, mode),
+    }).catch(() => {});
   }
 
   // ---- Private helper: strokeViewportLineStartNorm ----
@@ -543,18 +568,20 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
   }
 
   /** Pipeline A gesture moves: returns true if this event was handled here. */
-  function dispatchPipelineAPointerMove(
-    e: React.PointerEvent,
-    px: number,
-    py: number,
-  ): boolean {
+  function dispatchPipelineAPointerMove(e: React.PointerEvent, px: number, py: number): boolean {
+    if (gestureRef.current?.mode === "boneGizmo" && gestureRef.current.pointerId === e.pointerId) {
+      void invoke("bone_gizmo_pointer_move", {
+        args: { nx: px, ny: py },
+      }).catch(() => {});
+      return true;
+    }
     if (
-      gestureRef.current?.mode === "bonePlacing" &&
+      gestureRef.current?.mode === "boneAddDrag" &&
       gestureRef.current.pointerId === e.pointerId &&
-      bonePlacingJointRef.current != null
+      boneAddDragJointRef.current != null
     ) {
-      void invoke("bone_move_joint_to_screen", {
-        args: { id: bonePlacingJointRef.current, nx: px, ny: py },
+      void invoke("bone_add_drag_resize", {
+        args: { jointId: boneAddDragJointRef.current, nx: px, ny: py },
       }).catch(() => {});
       return true;
     }
@@ -612,12 +639,18 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
 
   /** Pipeline A pointer-up handlers that run before the main voxel/up path. Returns true if handled. */
   function dispatchPipelineAPointerUpEarly(e: React.PointerEvent): boolean {
+    if (gestureRef.current?.mode === "boneGizmo" && gestureRef.current.pointerId === e.pointerId) {
+      void invoke("bone_gizmo_pointer_up").catch(() => {});
+      resetPointerGesture("bone-gizmo-up", e);
+      return true;
+    }
+
     if (
-      gestureRef.current?.mode === "bonePlacing" &&
+      gestureRef.current?.mode === "boneAddDrag" &&
       gestureRef.current.pointerId === e.pointerId
     ) {
-      const placedId = bonePlacingJointRef.current;
-      bonePlacingJointRef.current = null;
+      const placedId = boneAddDragJointRef.current;
+      boneAddDragJointRef.current = null;
       if (placedId != null) {
         const prev = bonePendingJointRef.current;
         if (prev != null) {
@@ -633,7 +666,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
           })
           .catch(() => {});
       }
-      resetPointerGesture("bone-placing-up", e);
+      resetPointerGesture("bone-add-drag-up", e);
       return true;
     }
 
@@ -718,23 +751,23 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     probingRef.current = true;
     gestureRef.current = null;
 
-    // Extrude settings phase: re-drag to reposition endpoint instead of cancelling.
+    // Selection extrude settings phase: re-drag repositions the endpoint.
     if (
       extrudePhase.ref.current &&
-      interactionModeRef.current === "sculpt" &&
-      sculptStrokeModeRef.current === "extrude" &&
+      interactionModeRef.current === "selectExtrude" &&
       e.button === 0
     ) {
       extrudeRedragRef.current = true;
       probingRef.current = false;
       return;
     }
-    // Cancel extrude phase on left-click — but NOT for selectExtrude, where
-    // we defer to the gizmo hit-test below so re-clicking a handle doesn't commit.
+    // Keep sculpt/select extrude settings alive on click so the gizmo can be used
+    // and drag-orbit doesn't discard the current endpoint.
     if (
       extrudePhase.ref.current &&
       e.button === 0 &&
-      interactionModeRef.current !== "selectExtrude"
+      interactionModeRef.current !== "selectExtrude" &&
+      !(interactionModeRef.current === "sculpt" && sculptStrokeModeRef.current === "extrude")
     ) {
       extrudePhase.cancel();
     }
@@ -772,9 +805,19 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     if (await pipelineASquishyAddPointerDown(e, nx, ny, pointerId, logoSplashPointer)) return;
     if (await pipelineASquishyEditGizmoPointerDown(e, nx, ny, pointerId, logoSplashPointer)) return;
     if (await pipelineABoneGizmoPointerDown(e, nx, ny, pointerId, logoSplashPointer)) return;
-    if (await pipelineAExtrudeGizmoPointerDown(e, pointerId, logoSplashPointer, navigate, forceCamera))
+    if (
+      await pipelineAExtrudeGizmoPointerDown(e, pointerId, logoSplashPointer, navigate, forceCamera)
+    )
       return;
-    if (await pipelineASelectionGizmoPointerDown(e, pointerId, logoSplashPointer, navigate, forceCamera))
+    if (
+      await pipelineASelectionGizmoPointerDown(
+        e,
+        pointerId,
+        logoSplashPointer,
+        navigate,
+        forceCamera,
+      )
+    )
       return;
 
     // Stamp/punch right-click is handled in onContextMenu (fires reliably on all platforms).
@@ -857,12 +900,20 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     ) {
       gestureMode = "camera";
     }
+    if (
+      mode === "sculpt" &&
+      sculptStrokeModeRef.current === "extrude" &&
+      extrudePhase.ref.current
+    ) {
+      gestureMode = "camera";
+    }
 
-    // Bone build+add: place joint immediately on pointer-down and start drag gesture.
+    // Bone build+add: place joint immediately on pointer-down and drag to size it.
     if (
       mode === "bone" &&
       boneModeRef.current === "add" &&
       (!bonePhase.ref.current || bonePhase.ref.current.phase === "build") &&
+      hitSolid &&
       e.button === 0 &&
       !forceCamera &&
       !navigate &&
@@ -877,8 +928,8 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
           args: { nx, ny, radius: boneDefaultRadiusRef.current },
         });
         if (newId != null) {
-          gestureMode = "bonePlacing";
-          bonePlacingJointRef.current = newId;
+          gestureMode = "boneAddDrag";
+          boneAddDragJointRef.current = newId;
         }
       } catch {
         /* fall through to camera */
@@ -890,14 +941,26 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       mode: gestureMode,
     };
     if (gestureMode === "camera") {
-      // Clear preview immediately when orbit starts; invalidate cache so it
-      // recomputes fresh on the first hover move after orbit ends.
-      lastSyncPreviewNxRef.current = NaN;
-      lastSyncPreviewNyRef.current = NaN;
-      lastSyncPreviewModeRef.current = "";
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, "navigate"),
-      }).catch(() => {});
+      // Bone pose and squishy modes keep their session previews visible during orbit.
+      const bonePoseOrbit =
+        interactionModeRef.current === "bone" && bonePhase.ref.current?.phase === "pose";
+      const squishyOrbit = interactionModeRef.current === "squishy";
+      if (bonePoseOrbit || squishyOrbit) {
+        // Just invalidate the cache so it recomputes fresh on the first hover
+        // move after orbit ends, but don't send "navigate" to clear the preview.
+        lastSyncPreviewNxRef.current = NaN;
+        lastSyncPreviewNyRef.current = NaN;
+        lastSyncPreviewModeRef.current = "";
+      } else {
+        // Clear preview immediately when orbit starts; invalidate cache so it
+        // recomputes fresh on the first hover move after orbit ends.
+        lastSyncPreviewNxRef.current = NaN;
+        lastSyncPreviewNyRef.current = NaN;
+        lastSyncPreviewModeRef.current = "";
+        void invoke("sync_preview_input", {
+          args: buildSyncPreviewPayload(-1, 0, "navigate"),
+        }).catch(() => {});
+      }
     }
     logPlaneStrokeDebug("down:gesture-assigned", e, {
       hitSolid,
@@ -1231,7 +1294,21 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     }
     if (dispatchPipelineAPointerMove(e, px, py)) return;
     if (!gestureRef.current) {
-      if (interactionModeRef.current === "selectExtrude") {
+      if (
+        interactionModeRef.current === "bone" &&
+        boneModeRef.current === "edit" &&
+        bonePhase.ref.current?.phase === "pose"
+      ) {
+        void invoke<boolean>("bone_gizmo_hit_test", {
+          args: { nx: px, ny: py },
+        })
+          .then((h) => {
+            gizmoHoverRef.current = h ?? false;
+          })
+          .catch(() => {
+            gizmoHoverRef.current = false;
+          });
+      } else if (interactionModeRef.current === "selectExtrude") {
         extrudeGizmoRef.current
           ?.updateHover(e.clientX, e.clientY)
           .then((h: any) => {
@@ -1260,7 +1337,8 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       ashlarPhase.active ||
       floraPhase.active ||
       shapePhase.active ||
-      bonePhase.active;
+      bonePhase.active ||
+      extrudePhase.active;
     const sceneBehavior = getViewportSceneBehavior(interactionModeRef.current);
     if (
       (!overGizmo || interactionModeRef.current === "squishy") &&
@@ -1287,6 +1365,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       overGizmo &&
       !shapePhase.active &&
       !bonePhase.active &&
+      !extrudePhase.active &&
       interactionModeRef.current !== "squishy"
     ) {
       // Preserve selectExtrude mode when hovering the extrude gizmo so the
@@ -1800,13 +1879,21 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
           const gk = generatorKindRef.current;
           if (gk === "rocks") {
             if (!rocksPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              rocksPhase.enter("settings", { nx, ny, seed: rockPreviewSeedRef.current });
+              if (rocksAutoCommitOnMouseUpRef.current) {
+                placeRocksAtScreen(nx, ny, rockPreviewSeedRef.current);
+              } else {
+                void invoke("lock_generator_preview_camera").catch(() => {});
+                rocksPhase.enter("settings", { nx, ny, seed: rockPreviewSeedRef.current });
+              }
             }
           } else if (gk === "grass") {
             if (!grassPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              grassPhase.enter("settings", { nx, ny, seed: grassPreviewSeedRef.current });
+              if (grassAutoCommitOnMouseUpRef.current) {
+                placeGrassAtScreen(nx, ny, grassPreviewSeedRef.current);
+              } else {
+                void invoke("lock_generator_preview_camera").catch(() => {});
+                grassPhase.enter("settings", { nx, ny, seed: grassPreviewSeedRef.current });
+              }
             }
           } else if (gk === "cloth") {
             if (!clothPhase.active) {
@@ -1836,13 +1923,21 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
             }
           } else if (gk === "ashlar") {
             if (!ashlarPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              ashlarPhase.enter("settings", { nx, ny, seed: ashlarPreviewSeedRef.current });
+              if (ashlarAutoCommitOnMouseUpRef.current) {
+                placeAshlarAtScreen(nx, ny, ashlarPreviewSeedRef.current);
+              } else {
+                void invoke("lock_generator_preview_camera").catch(() => {});
+                ashlarPhase.enter("settings", { nx, ny, seed: ashlarPreviewSeedRef.current });
+              }
             }
           } else if (gk === "flora") {
             if (!floraPhase.active) {
-              void invoke("lock_generator_preview_camera").catch(() => {});
-              floraPhase.enter("settings", { nx, ny, seed: floraPreviewSeedRef.current });
+              if (floraAutoCommitOnMouseUpRef.current) {
+                placeFloraAtScreen(nx, ny, floraPreviewSeedRef.current);
+              } else {
+                void invoke("lock_generator_preview_camera").catch(() => {});
+                floraPhase.enter("settings", { nx, ny, seed: floraPreviewSeedRef.current });
+              }
             }
           } else if (gk === "shape") {
             if (!shapePhase.active) {
@@ -2058,21 +2153,28 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       } else if (m === "sculpt") {
         const sm = sculptStrokeModeRef.current;
         if (sm === "extrude" && (dragDidEditRef.current || moved >= 5)) {
-          // Extrude phased tool: enter settings phase instead of committing.
-          // The preview union is already accumulated from the drag. Keep it visible.
-          extrudePhase.enter("settings", {} as Record<string, never>);
+          if (sculptExtrudeAutoCommitOnMouseUpRef.current) {
+            extrudeStartNormRef.current = null;
+            void invoke("voxel_stroke_end").catch(() => {});
+          } else {
+            // Extrude phased tool: enter settings phase instead of committing.
+            // The preview union is already accumulated from the drag. Keep it visible.
+            extrudePhase.enter("settings", {} as Record<string, never>);
+          }
           lastStrokeNormRef.current = null;
-          // Do NOT call voxel_stroke_end — preview must stay.
         } else {
           if (!dragDidEditRef.current && moved < 5) {
             const wa = wallAreaShapeRef.current;
             if (sm === "wall" && wa === "polygon") {
               void handleWallSculptPolygonClick(nx, ny);
-            } else {
-              void invoke("voxel_sculpt_stroke_at_screen", {
-                args: buildSculptStrokeInvokeArgs(nx, ny),
-              }).catch(() => {});
             }
+            // For non-polygon sculpt clicks: the pointer-down preview already pushed to
+            // sculpt_stroke_replay and stroke_preview_union. voxel_stroke_end commits
+            // from that data. Calling voxel_sculpt_stroke_at_screen here pre-applies
+            // voxels, leaving empty deltas at voxel_stroke_end and breaking undo.
+          }
+          if (sm === "extrude") {
+            extrudeStartNormRef.current = null;
           }
           void invoke("voxel_stroke_end").catch(() => {});
           lastStrokeNormRef.current = null;
@@ -2153,6 +2255,15 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       if (capturedPointerIdRef.current === e.pointerId) {
         capturedPointerIdRef.current = null;
       }
+      // Bone pose mode: restore the skeleton preview immediately after a camera
+      // orbit ends rather than waiting for the next pointer-move event.
+      if (
+        g?.mode === "camera" &&
+        interactionModeRef.current === "bone" &&
+        bonePhase.ref.current?.phase === "pose"
+      ) {
+        restoreBonePosePreviewAtEvent(e);
+      }
     }
   };
   onPointerUpRef.current = onPointerUp;
@@ -2203,6 +2314,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
 
   const onLostPointerCapture = (e: React.PointerEvent) => {
     logPlaneStrokeDebug("capture:lost", e);
+    restoreBonePosePreviewAtEvent(e);
   };
 
   const onWheel = (e: React.WheelEvent) => {

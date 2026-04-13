@@ -479,6 +479,7 @@ pub(crate) fn unload_current_project<R: Runtime>(
     *state.selection.selection_stroke_accum.lock() = None;
     *state.selection.selection_combine_mode.lock() = SelectionCombineMode::default();
     *state.selection.stamp_clipboard.lock() = None;
+    crate::commands::edit::cancel_stroke_preview_builds(state);
     *state.file.stroke_buffer.lock() = Vec::new();
     *state.file.stroke_preview_union.lock() = AHashSet::default();
     *state.file.stroke_preview_last_args.lock() = None;
