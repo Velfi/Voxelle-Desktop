@@ -714,6 +714,7 @@ pub fn run() {
                 last_fps: 0,
             }),
             last_edit_perf: Mutex::new(None),
+            last_preview_perf: Mutex::new(None),
             last_scene_bounds: Mutex::new(None),
             mesh_refresh_generation: AtomicU64::new(0),
             load_generation: AtomicU64::new(0),
@@ -789,6 +790,7 @@ pub fn run() {
             preview_cursor: Mutex::new(None),
             preview_mode: Mutex::new(PreviewMode::Navigate),
             preview_hover: Mutex::new(PreviewHoverContext::default()),
+            hover_target_cache: Mutex::new(None),
         },
         autosave: AutosaveState {
             autosave_interval_secs: Mutex::new(120),
@@ -1753,6 +1755,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
                 last_fps: 0,
             }),
             last_edit_perf: Mutex::new(None),
+            last_preview_perf: Mutex::new(None),
             last_scene_bounds: Mutex::new(None),
             mesh_refresh_generation: AtomicU64::new(0),
             load_generation: AtomicU64::new(0),
@@ -1828,6 +1831,7 @@ pub(crate) fn minimal_viewer_state_for_collab_tests() -> Arc<ViewerState> {
             preview_cursor: Mutex::new(None),
             preview_mode: Mutex::new(PreviewMode::Navigate),
             preview_hover: Mutex::new(PreviewHoverContext::default()),
+            hover_target_cache: Mutex::new(None),
         },
         autosave: AutosaveState {
             autosave_interval_secs: Mutex::new(120),

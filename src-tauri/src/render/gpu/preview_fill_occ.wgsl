@@ -4,12 +4,14 @@
 // flat occupancy bitfield.  The bitfield is a dense u32 array covering the
 // stroke bounding box:  index = dx * (bbox_size.y * bbox_size.z) + dy * bbox_size.z + dz
 //
-// Packed voxel layout (u32):
-//   bits  0– 8  dx   (relative x in [0, bbox_size.x-1])
-//   bits  9–17  dy
-//   bits 18–26  dz
-//   bits 27–30  object index  (unused in this pass)
-//   bit    31   is_ghost      (unused in this pass)
+// Packed voxel layout (vec4<u32>):
+//   word 0 bits  0– 9  dx   (relative x in [0, bbox_size.x-1])
+//   word 0 bits 10–19  dy
+//   word 0 bits 20–29  dz
+//   word 0 bit     30  is_ghost (unused in this pass)
+//   word 1              object index (unused in this pass)
+//   word 2              solid preview color (unused in this pass)
+//   word 3              wire preview color (unused in this pass)
 
 struct PreviewUniforms {
     bbox_min:          vec3<i32>,
@@ -27,7 +29,7 @@ struct PreviewUniforms {
 }
 
 @group(0) @binding(0) var<uniform>              uniforms:   PreviewUniforms;
-@group(0) @binding(1) var<storage, read>        raw_voxels: array<u32>;
+@group(0) @binding(1) var<storage, read>        raw_voxels: array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read_write>  occupancy:  array<atomic<u32>>;
 
 @compute @workgroup_size(64)
@@ -35,10 +37,10 @@ fn fill_occ(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= uniforms.voxel_count { return; }
 
-    let packed = raw_voxels[idx];
-    let dx = (packed      ) & 0x1FFu;
-    let dy = (packed >>  9) & 0x1FFu;
-    let dz = (packed >> 18) & 0x1FFu;
+    let packed = raw_voxels[idx].x;
+    let dx = (packed      ) & 0x3FFu;
+    let dy = (packed >> 10) & 0x3FFu;
+    let dz = (packed >> 20) & 0x3FFu;
 
     let flat = dx * uniforms.bbox_size.y * uniforms.bbox_size.z
              + dy * uniforms.bbox_size.z

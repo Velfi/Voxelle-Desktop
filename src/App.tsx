@@ -1742,6 +1742,15 @@ function App() {
     };
   }
 
+  const lastSyncPreviewPayloadKeyRef = useRef<string>("");
+  function syncPreviewInput(nx: number, ny: number, modeStr: string, force = false) {
+    const args = buildSyncPreviewPayload(nx, ny, modeStr);
+    const key = JSON.stringify(args);
+    if (!force && key === lastSyncPreviewPayloadKeyRef.current) return;
+    lastSyncPreviewPayloadKeyRef.current = key;
+    void invoke("sync_preview_input", { args }).catch(() => {});
+  }
+
   /**
    * Unified stroke dispatch: calls `voxel_edit_at_screen` for edits or
    * `selection_stroke_at_screen` for selection, building shared args once.
@@ -2224,16 +2233,12 @@ function App() {
   });
 
   const clearPreview = useCallback(() => {
-    void invoke("sync_preview_input", {
-      args: buildSyncPreviewPayload(-1, 0, "navigate"),
-    }).catch(() => {});
+    syncPreviewInput(-1, 0, "navigate");
     void invoke("squishy_gizmo_pointer_up").catch(() => {});
   }, []);
 
   useEffect(() => {
-    void invoke("sync_preview_input", {
-      args: buildSyncPreviewPayload(-1, 0, previewModeForSync(interactionMode)),
-    }).catch(() => {});
+    syncPreviewInput(-1, 0, previewModeForSync(interactionMode));
   }, [interactionMode]);
 
   /** Re-push brush/stroke params so hover preview updates when sliders change without moving the pointer. */
@@ -2254,9 +2259,7 @@ function App() {
     if (interactionBlockedRef.current) return;
     const p = lastViewportPickNormRef.current;
     if (p == null) return;
-    void invoke("sync_preview_input", {
-      args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(im)),
-    }).catch(() => {});
+    syncPreviewInput(p.nx, p.ny, previewModeForSync(im));
   }, [
     brushRadius,
     brushShape,
@@ -2283,9 +2286,7 @@ function App() {
     if (interactionBlockedRef.current) return;
     const p = lastViewportPickNormRef.current;
     if (p == null) return;
-    void invoke("sync_preview_input", {
-      args: buildSyncPreviewPayload(p.nx, p.ny, "squishy"),
-    }).catch(() => {});
+    syncPreviewInput(p.nx, p.ny, "squishy");
   }, [
     squishyMode,
     generatorSphereRadius,
@@ -2303,9 +2304,7 @@ function App() {
     // the stored second endpoint, so even a dummy (0,0) works.  For cloth the
     // preview is pin-based and doesn't use hover coords.
     const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
-    void invoke("sync_preview_input", {
-      args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(im)),
-    }).catch(() => {});
+    syncPreviewInput(p.nx, p.ny, previewModeForSync(im));
   }, [
     generatorKind,
     ropeFirstScreen,
@@ -2586,7 +2585,7 @@ function App() {
     viewportCursorDebugEnabled,
     ropeFirstScreen,
     mergedStrokeAux,
-    buildSyncPreviewPayload,
+    syncPreviewInput,
     previewModeForSync,
     placeRocksAtScreen,
     placeGrassAtScreen,

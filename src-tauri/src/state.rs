@@ -188,6 +188,27 @@ pub struct EditPerfBreakdown {
     pub preview_clear_ms: f64,
 }
 
+/// Timings for the last preview preparation/upload pass.
+#[derive(Clone, Debug, Default)]
+pub struct PreviewPerfBreakdown {
+    /// Time spent resolving hover/preview targets before meshing.
+    pub target_collect_ms: f64,
+    /// Time spent preparing preview geometry or raw voxel payloads.
+    pub mesh_ms: f64,
+    /// Time spent uploading or clearing preview GPU resources.
+    pub upload_ms: f64,
+    /// Preview path used: `instanced`, `generator`, `raw_voxel_compute`, `clear`, `noop`, etc.
+    pub path: String,
+    /// True when the frame reused the existing preview overlay via cache.
+    pub cache_hit: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct HoverTargetCache {
+    pub request_key: u64,
+    pub targets: Vec<greedy_mesh::VoxelCoord>,
+}
+
 /// Cached global voxel AABB min and single-object id (see [`resolve_voxel_edit_stats`]).
 #[derive(Clone, Copy)]
 pub(crate) struct VoxelEditStatsCache {
@@ -528,6 +549,8 @@ pub struct GpuState {
     pub(crate) fps: Mutex<FpsCounter>,
     /// Last successful edit timings (updated each time `voxel_edit_at_screen` applies a change).
     pub last_edit_perf: Mutex<Option<EditPerfBreakdown>>,
+    /// Last preview timings (updated from the frame loop preview prepare/upload path).
+    pub last_preview_perf: Mutex<Option<PreviewPerfBreakdown>>,
     /// Last scene AABB used for lighting/brick; drives incremental bounds on edit when possible.
     pub last_scene_bounds: Mutex<Option<greedy_mesh::MeshBounds>>,
     /// Bumps when a background opaque-mesh refresh is scheduled; stale applies are skipped.
@@ -687,6 +710,8 @@ pub struct PreviewState {
     pub(crate) preview_mode: Mutex<PreviewMode>,
     /// Brush / stroke params for hover preview (updated from [`sync_preview_input`]).
     pub(crate) preview_hover: Mutex<crate::PreviewHoverContext>,
+    /// Cached resolved targets for discrete brush-hover inputs.
+    pub(crate) hover_target_cache: Mutex<Option<HoverTargetCache>>,
 }
 
 /// Autosave state: interval, enabled flag, slot tracking, last save time.

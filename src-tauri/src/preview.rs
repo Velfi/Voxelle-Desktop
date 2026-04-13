@@ -7,6 +7,8 @@ use crate::generators;
 use crate::greedy_mesh;
 use crate::paint_color_distrib;
 use crate::render::WgpuViewer;
+use crate::state::HoverTargetCache;
+use crate::state::PreviewPerfBreakdown;
 use crate::stroke_modes;
 use crate::voxel_edit;
 use crate::voxelle;
@@ -177,6 +179,64 @@ pub(crate) fn hash_brush_hover_targets(
         s.hash(&mut h);
     }
     h.finish()
+}
+
+fn hash_brush_hover_request(
+    mode: PreviewMode,
+    tool: voxel_edit::EditTool,
+    ctx: &PreviewHoverContext,
+    debug_overlay: bool,
+    mesh_gen: u64,
+    discrete_anchor: Option<(greedy_mesh::VoxelCoord, u32)>,
+    sx: f32,
+    sy: f32,
+) -> u64 {
+    let mut h = AHasher::default();
+    mode.hash(&mut h);
+    (tool as u8).hash(&mut h);
+    debug_overlay.hash(&mut h);
+    mesh_gen.hash(&mut h);
+    ctx.use_brush_preview.hash(&mut h);
+    ctx.brush_radius.hash(&mut h);
+    (ctx.brush_shape as u8).hash(&mut h);
+    ctx.spray_density.to_bits().hash(&mut h);
+    (ctx.stroke_mode as u8).hash(&mut h);
+    (ctx.plane_axis as u8).hash(&mut h);
+    ctx.color.hash(&mut h);
+    ctx.material.hash(&mut h);
+    ctx.match_material.hash(&mut h);
+    ctx.mirror_axes.hash(&mut h);
+    if let Some((cell, oid)) = discrete_anchor {
+        cell.hash(&mut h);
+        oid.hash(&mut h);
+    } else {
+        sx.floor().to_bits().hash(&mut h);
+        sy.floor().to_bits().hash(&mut h);
+    }
+    if let Ok(s) = serde_json::to_string(&ctx.stroke_aux) {
+        s.hash(&mut h);
+    }
+    h.finish()
+}
+
+fn cached_collect_stroke_preview_targets(
+    state: &ViewerState,
+    request_key: u64,
+    build: impl FnOnce() -> Vec<greedy_mesh::VoxelCoord>,
+) -> (Vec<greedy_mesh::VoxelCoord>, bool, f64) {
+    if let Some(cached) = state.preview.hover_target_cache.lock().as_ref() {
+        if cached.request_key == request_key {
+            return (cached.targets.clone(), true, 0.0);
+        }
+    }
+    let t_collect = std::time::Instant::now();
+    let targets = build();
+    let collect_ms = t_collect.elapsed().as_secs_f64() * 1000.0;
+    *state.preview.hover_target_cache.lock() = Some(HoverTargetCache {
+        request_key,
+        targets: targets.clone(),
+    });
+    (targets, false, collect_ms)
 }
 
 pub(crate) fn default_true() -> bool {
@@ -836,6 +896,46 @@ pub(crate) enum PreviewMeshPrepared {
 #[inline]
 pub(crate) fn preview_overlay_cache_key_get(state: &ViewerState) -> Option<u64> {
     *state.gpu.preview_overlay_cache_key.lock()
+}
+
+fn record_preview_prepare_perf(
+    state: &ViewerState,
+    target_collect_ms: f64,
+    mesh_ms: f64,
+    path: &str,
+    cache_hit: bool,
+) {
+    let upload_ms = state
+        .gpu
+        .last_preview_perf
+        .lock()
+        .as_ref()
+        .map(|p| p.upload_ms)
+        .unwrap_or(0.0);
+    *state.gpu.last_preview_perf.lock() = Some(PreviewPerfBreakdown {
+        target_collect_ms,
+        mesh_ms,
+        upload_ms,
+        path: path.to_string(),
+        cache_hit,
+    });
+}
+
+fn record_preview_upload_perf(state: &ViewerState, upload_ms: f64, path: &str, cache_hit: bool) {
+    let (target_collect_ms, mesh_ms) = state
+        .gpu
+        .last_preview_perf
+        .lock()
+        .as_ref()
+        .map(|p| (p.target_collect_ms, p.mesh_ms))
+        .unwrap_or((0.0, 0.0));
+    *state.gpu.last_preview_perf.lock() = Some(PreviewPerfBreakdown {
+        target_collect_ms,
+        mesh_ms,
+        upload_ms,
+        path: path.to_string(),
+        cache_hit,
+    });
 }
 
 pub(crate) fn brush_shape_tag(s: voxel_edit::BrushShape) -> u8 {
@@ -2856,29 +2956,43 @@ pub(crate) fn prepare_preview_mesh(
 
     let material = voxelle::MaterialId::from_str_id(&ctx.material);
     let spray_cp = *state.file.spray_constraint_plane.lock();
-    let targets = voxel_edit::collect_stroke_preview_targets(
-        file,
-        vmap,
-        cam,
-        w,
-        h,
-        sx,
-        sy,
-        tool,
-        ctx.color,
-        material,
-        ctx.brush_radius,
-        ctx.brush_shape,
-        ctx.spray_density,
-        None,
-        None,
-        ctx.stroke_mode,
-        ctx.plane_axis,
-        &ctx.stroke_aux,
-        spray_cp,
-    );
+    let mesh_gen = state.gpu.mesh_refresh_generation.load(Ordering::Relaxed);
+    let discrete_anchor = match mode {
+        PreviewMode::Add => voxel_edit::preview_add_cell(file, vmap, cam, w, h, sx, sy),
+        PreviewMode::Remove | PreviewMode::Paint | PreviewMode::Select => {
+            voxel_edit::preview_remove_cell(file, vmap, cam, w, h, sx, sy)
+        }
+        _ => None,
+    };
+    let request_key =
+        hash_brush_hover_request(mode, tool, ctx, dbg, mesh_gen, discrete_anchor, sx, sy);
+    let (targets, _target_cache_hit, target_collect_ms) =
+        cached_collect_stroke_preview_targets(state, request_key, || {
+            voxel_edit::collect_stroke_preview_targets(
+                file,
+                vmap,
+                cam,
+                w,
+                h,
+                sx,
+                sy,
+                tool,
+                ctx.color,
+                material,
+                ctx.brush_radius,
+                ctx.brush_shape,
+                ctx.spray_density,
+                None,
+                None,
+                ctx.stroke_mode,
+                ctx.plane_axis,
+                &ctx.stroke_aux,
+                spray_cp,
+            )
+        });
     let key = hash_brush_hover_targets(mode, ctx, &targets, vmap, dbg);
     if preview_overlay_cache_key_get(state) == Some(key) {
+        record_preview_prepare_perf(state, target_collect_ms, 0.0, "instanced", true);
         return PreviewMeshPrepared::Noop;
     }
     let poly_corners = matches!(
@@ -2886,6 +3000,7 @@ pub(crate) fn prepare_preview_mesh(
         stroke_modes::DrawStrokeMode::Polygon | stroke_modes::DrawStrokeMode::PolygonHull
     ) && !ctx.stroke_aux.polygon_vertices.is_empty();
     if targets.is_empty() && !poly_corners {
+        record_preview_prepare_perf(state, target_collect_ms, 0.0, "clear", false);
         return PreviewMeshPrepared::Clear;
     }
     let set: AHashSet<_> = targets.iter().copied().collect();
@@ -2905,7 +3020,15 @@ pub(crate) fn prepare_preview_mesh(
     // For large uniform-colour strokes with no polygon-corner extras, use the
     // GPU compute shell-filter path.  Falls back to CPU instanced otherwise.
     if !targets.is_empty() && !poly_corners && hover_resolver_ref.is_none() {
+        let t_mesh = std::time::Instant::now();
         if let Some(raw) = build_raw_voxel_upload(tool, &set, vmap, file, dbg, ctx.color, None) {
+            record_preview_prepare_perf(
+                state,
+                target_collect_ms,
+                t_mesh.elapsed().as_secs_f64() * 1000.0,
+                "raw_voxel_compute",
+                false,
+            );
             return PreviewMeshPrepared::RawVoxelUpload {
                 cache_key: key,
                 raw,
@@ -2913,6 +3036,7 @@ pub(crate) fn prepare_preview_mesh(
         }
     }
 
+    let t_mesh = std::time::Instant::now();
     let mut instanced = if targets.is_empty() {
         greedy_mesh::PreviewInstancedResult::empty()
     } else {
@@ -2928,9 +3052,12 @@ pub(crate) fn prepare_preview_mesh(
             dbg,
         );
     }
+    let mesh_ms = t_mesh.elapsed().as_secs_f64() * 1000.0;
     if instanced.solid_instances.is_empty() && instanced.extra_solid.positions.is_empty() {
+        record_preview_prepare_perf(state, target_collect_ms, mesh_ms, "clear", false);
         PreviewMeshPrepared::Clear
     } else {
+        record_preview_prepare_perf(state, target_collect_ms, mesh_ms, "instanced", false);
         PreviewMeshPrepared::Upload {
             cache_key: key,
             instanced,
@@ -2948,10 +3075,19 @@ pub(crate) fn apply_preview_mesh(
     state: &ViewerState,
     prep: PreviewMeshPrepared,
 ) {
+    let t_upload = std::time::Instant::now();
     match prep {
-        PreviewMeshPrepared::Noop => {}
+        PreviewMeshPrepared::Noop => {
+            record_preview_upload_perf(state, 0.0, "noop", true);
+        }
         PreviewMeshPrepared::Clear => {
             clear_preview_mesh_sync_cache(viewer, state);
+            record_preview_upload_perf(
+                state,
+                t_upload.elapsed().as_secs_f64() * 1000.0,
+                "clear",
+                false,
+            );
         }
         PreviewMeshPrepared::Upload {
             cache_key,
@@ -2960,6 +3096,12 @@ pub(crate) fn apply_preview_mesh(
             viewer.upload_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = Some(cache_key);
             *state.gpu.preview_overlay_cache_key.lock() = Some(cache_key);
+            record_preview_upload_perf(
+                state,
+                t_upload.elapsed().as_secs_f64() * 1000.0,
+                "instanced",
+                false,
+            );
         }
         PreviewMeshPrepared::GenUpload {
             cache_key,
@@ -2968,11 +3110,23 @@ pub(crate) fn apply_preview_mesh(
             viewer.upload_gen_preview_mesh_instanced(&instanced);
             viewer.preview_cache_key = Some(cache_key);
             *state.gpu.preview_overlay_cache_key.lock() = Some(cache_key);
+            record_preview_upload_perf(
+                state,
+                t_upload.elapsed().as_secs_f64() * 1000.0,
+                "generator",
+                false,
+            );
         }
         PreviewMeshPrepared::RawVoxelUpload { cache_key, raw } => {
             viewer.upload_preview_raw_voxels(&raw);
             viewer.preview_cache_key = Some(cache_key);
             *state.gpu.preview_overlay_cache_key.lock() = Some(cache_key);
+            record_preview_upload_perf(
+                state,
+                t_upload.elapsed().as_secs_f64() * 1000.0,
+                "raw_voxel_compute",
+                false,
+            );
         }
     }
 }

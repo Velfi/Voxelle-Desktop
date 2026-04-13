@@ -4,82 +4,93 @@ Technical reference for developers working on this codebase.
 
 ## Tech stack
 
-- **Frontend**: React + TypeScript, bundled with Vite
-- **Backend**: Rust via [Tauri](https://tauri.app/), GPU rendering with wgpu
-- **IPC**: Tauri commands (Rust ↔ webview) and events (Rust → webview)
+- Frontend: React 18 + TypeScript + Vite 6
+- Native shell: Tauri 2
+- Renderer: Rust + `wgpu`
+- IPC: Tauri commands plus Rust-emitted events consumed from the webview
 
 ## Dev setup
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable)
 - Node.js 18+
-- Tauri CLI: `npm install` installs it as a dev dependency
+- Rust toolchain from `rustup`
+- Tauri CLI is installed through `npm install`
 
-### Run in development
+### Common commands
 
 ```sh
 npm install
 npm run tauri dev
 ```
 
-### Build a release binary
+```sh
+npm run lint
+npm run typecheck
+npm run build
+npm run tauri build
+```
+
+Rust-side benchmarks live in `src-tauri/benches/`:
 
 ```sh
-npm run tauri build
+cd src-tauri
+cargo bench --bench greedy_mesh
+cargo bench --bench smooth_mesh
+cargo bench --bench preview_generation
+cargo bench --bench collab_encoding
 ```
 
 ## Project layout
 
-```
-src/                        React/TypeScript frontend
-  App.tsx                   Root component
-  ToolsSidebar.tsx          Tool panel (draw, sculpt, select, etc.)
-  hooks/                    useFlyMode, useWalkMode, useKeyboardShortcuts, …
+```text
+src/                         React frontend
+  App.tsx                    Root shell and high-level app state
+  ToolsSidebar.tsx           Left tools/sidebar UI
+  InspectorSidebar.tsx       Right inspector/session sidebar
+  StatusBar.tsx              Bottom status bar
+  ViewportHUD.tsx            Floating viewport HUDs for phased tools and work progress
+  hooks/                     Input, generators, collab listeners, fly/walk, tool state
+  toolOptions/               Tool-specific option panes
 src-tauri/
   src/
-    lib.rs                  App entry point — invoke_handler! registration
-    state.rs                ViewerState and shared enums
-    commands/               Tauri IPC command handlers (one file per domain)
-    camera.rs               Fly/walk camera logic
-    render/                 wgpu renderer — pipelines, frame loop, overlays
-    native_menu.rs          macOS/Windows native menu
-    frame_loop.rs           Per-frame update loop
+    lib.rs                   App bootstrap, invoke registration, menu/event wiring
+    commands/                Tauri command handlers by domain
+    collab/                  Host/client networking, roster, snapshots, presence
+    load_pipeline.rs         Load/open/new-project pipeline and progress events
+    edit_pipeline.rs         Native edit application and menu sync helpers
+    frame_loop.rs            Work-progress emits and viewport loop helpers
+    render/                  Native renderer and GPU pipelines
+    voxelle/                 File format, scene/object helpers, decode/encode
+    state.rs                 Shared app/viewer state
   permissions/
-    voxelle.toml            IPC allowlist — must be updated for new commands
+    voxelle.toml             IPC allowlist for webview `invoke`
 docs/
-  VOXELLE_FORMAT_V4.md      Canonical .voxelle file format specification
-  HEADLESS_SERVER.md        Headless/integration-test mode
-  agents/                   Focused reference docs (viewport, events, etc.)
-AGENTS.md                   Index of agent/contributor reference docs
+  agents/                    Focused engineering notes for recurring repo pitfalls
+  HEADLESS_SERVER.md         Headless readiness server for integration tests
+  VOXELLE_FORMAT_V4.md       Container and wire-format notes, including current VX5 saves
+AGENTS.md                    Short index into the focused docs above
 ```
 
 ## Adding a Tauri command
 
-Every new `#[tauri::command]` function must be registered in **two places**:
+Every new `#[tauri::command]` must be wired in two places:
 
-1. `invoke_handler!` macro in `src-tauri/src/lib.rs`
-2. `src-tauri/permissions/voxelle.toml` — IPC allowlist
+1. `invoke_handler!` in [src-tauri/src/lib.rs](/Users/zelda/Documents/Voxelle Desktop/src-tauri/src/lib.rs)
+2. `commands.allow` in [src-tauri/permissions/voxelle.toml](/Users/zelda/Documents/Voxelle Desktop/src-tauri/permissions/voxelle.toml)
 
-Skipping either step will cause a silent permission denial at runtime.
+If one side is missing, the webview call will be denied at runtime.
+
+## Current persistence behavior
+
+- Normal file saves use `encode_payload_v5`
+- Collaboration snapshots still use `encode_payload_v4`
+- Autosaves, recent files, and last-session state are stored under the app data directory via [src-tauri/src/commands/file_io.rs](/Users/zelda/Documents/Voxelle Desktop/src-tauri/src/commands/file_io.rs)
 
 ## Agent / contributor docs
 
-The [AGENTS.md](AGENTS.md) file indexes focused reference documents covering:
-
-- [Main UI layout](docs/agents/ui-layout.md)
-- [Viewport & picking](docs/agents/viewport-picking.md)
-- [Performance metrics](docs/agents/performance.md)
-- [Code change hints](docs/agents/code-change-hints.md) (mutex ordering, mesh paths, undo)
-- [Rust → webview events](docs/agents/tauri-events.md)
-- [Phased viewport tools](docs/agents/phased-tools.md)
-- [.voxelle file format](docs/agents/file-format.md)
-- [Bundled resources](docs/agents/bundled-resources.md)
+The focused docs in [AGENTS.md](/Users/zelda/Documents/Voxelle Desktop/AGENTS.md) cover the project-specific things that most often trip people up: viewport coordinate mapping, long-running progress UX, phased tool state, file format details, event propagation, and native resource/loading behavior.
 
 ## Headless / integration testing
 
-The app can run without a visible window and expose a local HTTP health endpoint for test harnesses. See [docs/HEADLESS_SERVER.md](docs/HEADLESS_SERVER.md).
-
-## Recommended IDE
-
-VS Code with the [Tauri extension](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) and [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer).
+The app can start with the main window hidden and expose a localhost health endpoint for test harnesses. See [docs/HEADLESS_SERVER.md](/Users/zelda/Documents/Voxelle Desktop/docs/HEADLESS_SERVER.md).

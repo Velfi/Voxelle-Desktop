@@ -422,6 +422,21 @@ pub(crate) fn commit_voxel_edits(
 // ── Stroke begin / end / preview ────────────────────────────────────────────
 
 const STROKE_PREVIEW_CANCEL_CHECK_INTERVAL: usize = 512;
+fn sample_preview_coords_for_display(
+    sorted: Vec<greedy_mesh::VoxelCoord>,
+    max_cells: usize,
+) -> Vec<greedy_mesh::VoxelCoord> {
+    if sorted.len() <= max_cells {
+        return sorted;
+    }
+    let len = sorted.len();
+    let mut sampled = Vec::with_capacity(max_cells);
+    for i in 0..max_cells {
+        let idx = i * len / max_cells;
+        sampled.push(sorted[idx]);
+    }
+    sampled
+}
 
 pub(crate) fn next_stroke_preview_generation(state: &ViewerState) -> u64 {
     state
@@ -528,6 +543,50 @@ pub(crate) fn preview_tool_colors(
     }
 }
 
+fn linear_channel_to_srgb8(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let srgb = if c <= 0.003_130_8 {
+        12.92 * c
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (srgb.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn linear_rgb3_to_rgb24_u32(rgb: [f32; 3]) -> u32 {
+    let r = linear_channel_to_srgb8(rgb[0]) as u32;
+    let g = linear_channel_to_srgb8(rgb[1]) as u32;
+    let b = linear_channel_to_srgb8(rgb[2]) as u32;
+    r | (g << 8) | (b << 16)
+}
+
+fn preview_packed_colors_for_voxel(
+    tool: voxel_edit::EditTool,
+    debug_pick_highlight: bool,
+    palette_rgb: u32,
+    resolved_rgb: Option<u32>,
+) -> (u32, u32) {
+    if matches!(
+        tool,
+        voxel_edit::EditTool::Add | voxel_edit::EditTool::Paint
+    ) {
+        let solid_rgb = resolved_rgb.unwrap_or(palette_rgb);
+        let [r, g, b] = voxelle::rgb24_u32_to_linear_rgb3(solid_rgb);
+        let wire_rgb = linear_rgb3_to_rgb24_u32([
+            (r * 0.22).max(0.02),
+            (g * 0.22).max(0.02),
+            (b * 0.22).max(0.02),
+        ]);
+        return (solid_rgb, wire_rgb);
+    }
+    let (sr, sg, sb, wr, wg, wb, _, _) =
+        preview_tool_colors(tool, debug_pick_highlight, palette_rgb);
+    (
+        linear_rgb3_to_rgb24_u32([sr, sg, sb]),
+        linear_rgb3_to_rgb24_u32([wr, wg, wb]),
+    )
+}
+
 pub(crate) fn stroke_preview_meshes_for_union(
     tool: voxel_edit::EditTool,
     union: &AHashSet<greedy_mesh::VoxelCoord>,
@@ -592,6 +651,7 @@ pub(crate) fn stroke_preview_meshes_for_union_cancellable<C: Fn() -> bool>(
         let ghost = !voxel_map.contains_key(&c);
         (ghost, c.0, c.1, c.2)
     });
+    let sampled = sample_preview_coords_for_display(sorted, STROKE_PREVIEW_MAX_CELLS);
     let (sr, sg, sb, wr, wg, wb, size, wem) =
         preview_tool_colors(tool, debug_pick_highlight, palette_rgb);
     let use_per_voxel_color = color_resolver.is_some()
@@ -599,14 +659,10 @@ pub(crate) fn stroke_preview_meshes_for_union_cancellable<C: Fn() -> bool>(
             tool,
             voxel_edit::EditTool::Add | voxel_edit::EditTool::Paint
         );
-    let n = sorted.len().min(STROKE_PREVIEW_MAX_CELLS);
+    let n = sampled.len();
     let mut solid_instances: Vec<greedy_mesh::PreviewInstance> = Vec::with_capacity(n);
     let mut wire_instances: Vec<greedy_mesh::PreviewInstance> = Vec::with_capacity(n);
-    for (idx, (cx, cy, cz)) in sorted
-        .into_iter()
-        .take(STROKE_PREVIEW_MAX_CELLS)
-        .enumerate()
-    {
+    for (idx, (cx, cy, cz)) in sampled.into_iter().enumerate() {
         if idx.is_multiple_of(STROKE_PREVIEW_CANCEL_CHECK_INTERVAL) && is_stale() {
             return None;
         }
@@ -706,9 +762,6 @@ pub(crate) fn build_raw_voxel_upload(
     palette_rgb: u32,
     color_resolver: Option<&dyn Fn(i32, i32, i32) -> u32>,
 ) -> Option<greedy_mesh::RawVoxelUpload> {
-    if color_resolver.is_some() {
-        return None;
-    }
     if union.len() <= greedy_mesh::PREVIEW_COMPUTE_THRESHOLD {
         return None;
     }
@@ -736,15 +789,12 @@ pub(crate) fn build_raw_voxel_upload(
         return None;
     }
 
-    // Build per-object matrix table (max 16 objects).
+    // Build per-object matrix table.
     let mut obj_id_to_idx: AHashMap<u32, u32> = AHashMap::default();
     let mut obj_matrices: Vec<[[f32; 4]; 4]> = Vec::new();
     let mut get_obj_idx = |oid: u32| -> Option<u32> {
         if let Some(&idx) = obj_id_to_idx.get(&oid) {
             return Some(idx);
-        }
-        if obj_matrices.len() >= 16 {
-            return None;
         }
         let idx = obj_matrices.len() as u32;
         let m = object_world_matrix(&file.objects, oid);
@@ -753,8 +803,8 @@ pub(crate) fn build_raw_voxel_upload(
         Some(idx)
     };
 
-    // Pack each voxel into a u32.
-    let mut packed_voxels: Vec<u32> = Vec::with_capacity(union.len());
+    // Pack each voxel into four u32s: xyz+ghost, object index, solid rgb, wire rgb.
+    let mut packed_voxels: Vec<[u32; 4]> = Vec::with_capacity(union.len());
     for &(cx, cy, cz) in union.iter() {
         let is_ghost = !voxel_map.contains_key(&(cx, cy, cz));
         let oid = voxel_map
@@ -765,8 +815,15 @@ pub(crate) fn build_raw_voxel_upload(
         let dx = (cx - min[0]) as u32;
         let dy = (cy - min[1]) as u32;
         let dz = (cz - min[2]) as u32;
-        packed_voxels
-            .push(dx | (dy << 9) | (dz << 18) | (obj_idx << 27) | ((is_ghost as u32) << 31));
+        let resolved_rgb = color_resolver.map(|resolver| resolver(cx, cy, cz));
+        let (solid_rgb, wire_rgb) =
+            preview_packed_colors_for_voxel(tool, debug_pick_highlight, palette_rgb, resolved_rgb);
+        packed_voxels.push([
+            dx | (dy << 10) | (dz << 20) | ((is_ghost as u32) << 30),
+            obj_idx,
+            solid_rgb,
+            wire_rgb,
+        ]);
     }
 
     // Compute colours (same as CPU path).

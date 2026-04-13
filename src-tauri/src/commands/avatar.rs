@@ -241,6 +241,27 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
             )
         })
         .unwrap_or_else(|| "\nLast voxel edit (ms): (none yet this session)\n".to_string());
+    let preview_block = state
+        .gpu
+        .last_preview_perf
+        .lock()
+        .clone()
+        .map(|p| {
+            format!(
+                "\nLast preview (ms):\n\
+                 \tcollect targets: {:.2}\n\
+                 \tmesh prepare: {:.2}\n\
+                 \tupload: {:.2}\n\
+                 \tpath: {}\n\
+                 \tcache hit: {}\n",
+                p.target_collect_ms,
+                p.mesh_ms,
+                p.upload_ms,
+                p.path,
+                if p.cache_hit { "yes" } else { "no" },
+            )
+        })
+        .unwrap_or_else(|| "\nLast preview (ms): (none yet this session)\n".to_string());
     format!(
         "Voxelle Desktop — performance snapshot\n\
          \n\
@@ -250,7 +271,7 @@ pub(crate) fn performance_report_text(state: &ViewerState) -> String {
          Opaque mesh: index count = {idx_count}, vertex buffer slots ≈ {vtx_buf_verts}\n\
          Scene: voxel count = {voxel_n}, grid_size = {grid_size}\n\
          File label: {file_label}\n\
-         Platform: {} / {}{edit_block}",
+         Platform: {} / {}{edit_block}{preview_block}",
         std::env::consts::OS,
         std::env::consts::ARCH,
     )

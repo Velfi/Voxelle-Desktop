@@ -168,7 +168,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     viewportCursorDebugEnabled,
     ropeFirstScreen,
     mergedStrokeAux,
-    buildSyncPreviewPayload,
+    syncPreviewInput,
     placeAshlarAtScreen,
     placeFloraAtScreen,
     placeGrassAtScreen,
@@ -278,9 +278,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     lastSyncPreviewNxRef.current = NaN;
     lastSyncPreviewNyRef.current = NaN;
     lastSyncPreviewModeRef.current = "";
-    void invoke("sync_preview_input", {
-      args: buildSyncPreviewPayload(nx, ny, mode),
-    }).catch(() => {});
+    syncPreviewInput(nx, ny, mode, true);
   }
 
   // ---- Private helper: strokeViewportLineStartNorm ----
@@ -349,9 +347,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       });
       strokePolygonLastScreenRef.current = { nx, ny };
       queueMicrotask(() => {
-        void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(nx, ny, previewModeForSync(interactionModeRef.current)),
-        }).catch(() => {});
+        syncPreviewInput(nx, ny, previewModeForSync(interactionModeRef.current));
       });
       return;
     }
@@ -704,9 +700,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       gestureRef.current.pointerId === e.pointerId
     ) {
       extrudeGizmoRef.current?.pointerUp();
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(-1, 0, "selectExtrude"),
-      }).catch(() => {});
+      syncPreviewInput(-1, 0, "selectExtrude");
       if (dragDidEditRef.current) {
         extrudePhase.enter("settings", {} as Record<string, never>);
         lastStrokeNormRef.current = null;
@@ -837,9 +831,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
       // Trigger a preview sync so the new seed is sent to Rust
       const p = lastViewportPickNormRef.current ?? { nx: 0, ny: 0 };
-      void invoke("sync_preview_input", {
-        args: buildSyncPreviewPayload(p.nx, p.ny, previewModeForSync(mode)),
-      }).catch(() => {});
+      syncPreviewInput(p.nx, p.ny, previewModeForSync(mode));
       probingRef.current = false;
       resetPointerGesture("generator-reseed", e);
       return;
@@ -957,9 +949,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
         lastSyncPreviewNxRef.current = NaN;
         lastSyncPreviewNyRef.current = NaN;
         lastSyncPreviewModeRef.current = "";
-        void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(-1, 0, "navigate"),
-        }).catch(() => {});
+        syncPreviewInput(-1, 0, "navigate");
       }
     }
     logPlaneStrokeDebug("down:gesture-assigned", e, {
@@ -1357,9 +1347,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
         lastSyncPreviewNxRef.current = px;
         lastSyncPreviewNyRef.current = py;
         lastSyncPreviewModeRef.current = m;
-        void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(px, py, m),
-        }).catch(() => {});
+        syncPreviewInput(px, py, m);
       }
     } else if (
       overGizmo &&
@@ -1378,9 +1366,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
         lastSyncPreviewNxRef.current = -1;
         lastSyncPreviewNyRef.current = 0;
         lastSyncPreviewModeRef.current = hoverMode;
-        void invoke("sync_preview_input", {
-          args: buildSyncPreviewPayload(-1, 0, hoverMode),
-        }).catch(() => {});
+        syncPreviewInput(-1, 0, hoverMode);
       }
     }
 
@@ -1743,13 +1729,7 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
                 }
                 setRoofPins(pins);
                 roofPinsRef.current = pins;
-                void invoke("sync_preview_input", {
-                  args: buildSyncPreviewPayload(
-                    px,
-                    py,
-                    previewModeForSync(interactionModeRef.current),
-                  ),
-                }).catch(() => {});
+                syncPreviewInput(px, py, previewModeForSync(interactionModeRef.current));
               })
               .catch(() => {});
           }

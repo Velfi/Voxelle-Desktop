@@ -512,6 +512,108 @@ impl WgpuViewer {
         self.preview_wire_index_count = wire.indices.len() as u32;
     }
 
+    fn ensure_preview_prototypes(&mut self, cube_half: f32, generator: bool) {
+        let cached_half = if generator {
+            &mut self.gen_preview_proto_cube_half
+        } else {
+            &mut self.preview_proto_cube_half
+        };
+        if cached_half.is_some_and(|half| (half - cube_half).abs() <= f32::EPSILON) {
+            return;
+        }
+
+        let solid_proto = greedy_mesh::preview_cube_prototype(cube_half);
+        let solid_v = Self::interleaved_from_prototype(&solid_proto);
+        let wire_proto = greedy_mesh::preview_wireframe_prototype(cube_half);
+        let wire_v = Self::interleaved_from_prototype(&wire_proto);
+
+        let solid_proto_vb = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(if generator {
+                    "gen_preview_inst_solid_proto_vb"
+                } else {
+                    "preview_inst_solid_proto_vb"
+                }),
+                contents: bytemuck::cast_slice(&solid_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let solid_proto_ib = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(if generator {
+                    "gen_preview_inst_solid_proto_ib"
+                } else {
+                    "preview_inst_solid_proto_ib"
+                }),
+                contents: bytemuck::cast_slice(&solid_proto.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let wire_proto_vb = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(if generator {
+                    "gen_preview_inst_wire_proto_vb"
+                } else {
+                    "preview_inst_wire_proto_vb"
+                }),
+                contents: bytemuck::cast_slice(&wire_v),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let wire_proto_ib = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(if generator {
+                    "gen_preview_inst_wire_proto_ib"
+                } else {
+                    "preview_inst_wire_proto_ib"
+                }),
+                contents: bytemuck::cast_slice(&wire_proto.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        if generator {
+            self.gen_preview_solid_proto_vb = Some(solid_proto_vb);
+            self.gen_preview_solid_proto_ib = Some(solid_proto_ib);
+            self.gen_preview_solid_proto_idx_count = solid_proto.indices.len() as u32;
+            self.gen_preview_wire_proto_vb = Some(wire_proto_vb);
+            self.gen_preview_wire_proto_ib = Some(wire_proto_ib);
+            self.gen_preview_wire_proto_idx_count = wire_proto.indices.len() as u32;
+        } else {
+            self.preview_solid_proto_vb = Some(solid_proto_vb);
+            self.preview_solid_proto_ib = Some(solid_proto_ib);
+            self.preview_solid_proto_idx_count = solid_proto.indices.len() as u32;
+            self.preview_wire_proto_vb = Some(wire_proto_vb);
+            self.preview_wire_proto_ib = Some(wire_proto_ib);
+            self.preview_wire_proto_idx_count = wire_proto.indices.len() as u32;
+        }
+        *cached_half = Some(cube_half);
+    }
+
+    fn ensure_preview_instance_buffer<T: bytemuck::Pod>(
+        device: &wgpu::Device,
+        buffer: &mut Option<wgpu::Buffer>,
+        capacity: &mut u32,
+        needed: usize,
+        label: &'static str,
+    ) {
+        let needed = needed as u32;
+        if needed == 0 {
+            return;
+        }
+        if buffer.is_some() && *capacity >= needed {
+            return;
+        }
+        let new_capacity = needed.next_power_of_two().max(64);
+        *buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: (new_capacity as u64) * std::mem::size_of::<T>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        *capacity = new_capacity;
+    }
+
     /// Interleave a [`PreviewPrototype`] into a flat `[pos.x, pos.y, pos.z, nx, ny, nz, …]` buffer.
     pub(crate) fn interleaved_from_prototype(proto: &greedy_mesh::PreviewPrototype) -> Vec<f32> {
         let n = proto.positions.len() / 3;
@@ -530,69 +632,33 @@ impl WgpuViewer {
     pub fn upload_preview_mesh_instanced(&mut self, data: &greedy_mesh::PreviewInstancedResult) {
         // Upload instanced data for bulk voxels
         if !data.solid_instances.is_empty() {
-            let solid_proto = greedy_mesh::preview_cube_prototype(data.cube_half);
-            let solid_v = Self::interleaved_from_prototype(&solid_proto);
-            self.preview_solid_proto_vb = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("preview_inst_solid_proto_vb"),
-                    contents: bytemuck::cast_slice(&solid_v),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
-            self.preview_solid_proto_ib = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("preview_inst_solid_proto_ib"),
-                    contents: bytemuck::cast_slice(&solid_proto.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                },
-            ));
-            self.preview_solid_proto_idx_count = solid_proto.indices.len() as u32;
-
-            self.preview_solid_instance_buf = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("preview_inst_solid_instances"),
-                    contents: bytemuck::cast_slice(&data.solid_instances),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
+            self.ensure_preview_prototypes(data.cube_half, false);
+            Self::ensure_preview_instance_buffer::<greedy_mesh::PreviewInstance>(
+                &self.device,
+                &mut self.preview_solid_instance_buf,
+                &mut self.preview_solid_instance_capacity,
+                data.solid_instances.len(),
+                "preview_inst_solid_instances",
+            );
+            Self::ensure_preview_instance_buffer::<greedy_mesh::PreviewInstance>(
+                &self.device,
+                &mut self.preview_wire_instance_buf,
+                &mut self.preview_wire_instance_capacity,
+                data.wire_instances.len(),
+                "preview_inst_wire_instances",
+            );
+            if let Some(buf) = self.preview_solid_instance_buf.as_ref() {
+                self.queue
+                    .write_buffer(buf, 0, bytemuck::cast_slice(&data.solid_instances));
+            }
             self.preview_solid_instance_count = data.solid_instances.len() as u32;
-
-            let wire_proto = greedy_mesh::preview_wireframe_prototype(data.cube_half);
-            let wire_v = Self::interleaved_from_prototype(&wire_proto);
-            self.preview_wire_proto_vb = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("preview_inst_wire_proto_vb"),
-                    contents: bytemuck::cast_slice(&wire_v),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
-            self.preview_wire_proto_ib = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("preview_inst_wire_proto_ib"),
-                    contents: bytemuck::cast_slice(&wire_proto.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                },
-            ));
-            self.preview_wire_proto_idx_count = wire_proto.indices.len() as u32;
-
-            self.preview_wire_instance_buf = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("preview_inst_wire_instances"),
-                    contents: bytemuck::cast_slice(&data.wire_instances),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
+            if let Some(buf) = self.preview_wire_instance_buf.as_ref() {
+                self.queue
+                    .write_buffer(buf, 0, bytemuck::cast_slice(&data.wire_instances));
+            }
             self.preview_wire_instance_count = data.wire_instances.len() as u32;
         } else {
-            self.preview_solid_proto_vb = None;
-            self.preview_solid_proto_ib = None;
-            self.preview_solid_proto_idx_count = 0;
-            self.preview_wire_proto_vb = None;
-            self.preview_wire_proto_ib = None;
-            self.preview_wire_proto_idx_count = 0;
-            self.preview_solid_instance_buf = None;
             self.preview_solid_instance_count = 0;
-            self.preview_wire_instance_buf = None;
             self.preview_wire_instance_count = 0;
         }
         // Upload non-instanced extras (gizmos, polygon markers)
@@ -613,121 +679,46 @@ impl WgpuViewer {
         data: &greedy_mesh::PreviewInstancedResult,
     ) {
         if !data.solid_instances.is_empty() {
-            let solid_proto = greedy_mesh::preview_cube_prototype(data.cube_half);
-            let solid_v = Self::interleaved_from_prototype(&solid_proto);
-            self.gen_preview_solid_proto_vb = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("gen_preview_inst_solid_proto_vb"),
-                    contents: bytemuck::cast_slice(&solid_v),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
-            self.gen_preview_solid_proto_ib = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("gen_preview_inst_solid_proto_ib"),
-                    contents: bytemuck::cast_slice(&solid_proto.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                },
-            ));
-            self.gen_preview_solid_proto_idx_count = solid_proto.indices.len() as u32;
-
-            self.gen_preview_solid_instance_buf = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("gen_preview_inst_solid_instances"),
-                    contents: bytemuck::cast_slice(&data.solid_instances),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
+            self.ensure_preview_prototypes(data.cube_half, true);
+            Self::ensure_preview_instance_buffer::<greedy_mesh::PreviewInstance>(
+                &self.device,
+                &mut self.gen_preview_solid_instance_buf,
+                &mut self.gen_preview_solid_instance_capacity,
+                data.solid_instances.len(),
+                "gen_preview_inst_solid_instances",
+            );
+            Self::ensure_preview_instance_buffer::<greedy_mesh::PreviewInstance>(
+                &self.device,
+                &mut self.gen_preview_wire_instance_buf,
+                &mut self.gen_preview_wire_instance_capacity,
+                data.wire_instances.len(),
+                "gen_preview_inst_wire_instances",
+            );
+            if let Some(buf) = self.gen_preview_solid_instance_buf.as_ref() {
+                self.queue
+                    .write_buffer(buf, 0, bytemuck::cast_slice(&data.solid_instances));
+            }
             self.gen_preview_solid_instance_count = data.solid_instances.len() as u32;
-
-            let wire_proto = greedy_mesh::preview_wireframe_prototype(data.cube_half);
-            let wire_v = Self::interleaved_from_prototype(&wire_proto);
-            self.gen_preview_wire_proto_vb = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("gen_preview_inst_wire_proto_vb"),
-                    contents: bytemuck::cast_slice(&wire_v),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
-            self.gen_preview_wire_proto_ib = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("gen_preview_inst_wire_proto_ib"),
-                    contents: bytemuck::cast_slice(&wire_proto.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                },
-            ));
-            self.gen_preview_wire_proto_idx_count = wire_proto.indices.len() as u32;
-
-            self.gen_preview_wire_instance_buf = Some(self.device.create_buffer_init(
-                &wgpu::util::BufferInitDescriptor {
-                    label: Some("gen_preview_inst_wire_instances"),
-                    contents: bytemuck::cast_slice(&data.wire_instances),
-                    usage: wgpu::BufferUsages::VERTEX,
-                },
-            ));
+            if let Some(buf) = self.gen_preview_wire_instance_buf.as_ref() {
+                self.queue
+                    .write_buffer(buf, 0, bytemuck::cast_slice(&data.wire_instances));
+            }
             self.gen_preview_wire_instance_count = data.wire_instances.len() as u32;
         } else {
-            self.gen_preview_solid_proto_vb = None;
-            self.gen_preview_solid_proto_ib = None;
-            self.gen_preview_solid_proto_idx_count = 0;
-            self.gen_preview_wire_proto_vb = None;
-            self.gen_preview_wire_proto_ib = None;
-            self.gen_preview_wire_proto_idx_count = 0;
-            self.gen_preview_solid_instance_buf = None;
             self.gen_preview_solid_instance_count = 0;
-            self.gen_preview_wire_instance_buf = None;
             self.gen_preview_wire_instance_count = 0;
         }
     }
 
     pub fn clear_preview_mesh(&mut self) {
-        self.preview_vertex_buffer = None;
-        self.preview_index_buffer = None;
         self.preview_index_count = 0;
-        self.preview_wire_vertex_buffer = None;
-        self.preview_wire_index_buffer = None;
         self.preview_wire_index_count = 0;
-        self.preview_solid_proto_vb = None;
-        self.preview_solid_proto_ib = None;
-        self.preview_solid_proto_idx_count = 0;
-        self.preview_wire_proto_vb = None;
-        self.preview_wire_proto_ib = None;
-        self.preview_wire_proto_idx_count = 0;
-        self.preview_solid_instance_buf = None;
         self.preview_solid_instance_count = 0;
-        self.preview_wire_instance_buf = None;
         self.preview_wire_instance_count = 0;
-        self.gen_preview_solid_proto_vb = None;
-        self.gen_preview_solid_proto_ib = None;
-        self.gen_preview_solid_proto_idx_count = 0;
-        self.gen_preview_wire_proto_vb = None;
-        self.gen_preview_wire_proto_ib = None;
-        self.gen_preview_wire_proto_idx_count = 0;
-        self.gen_preview_solid_instance_buf = None;
         self.gen_preview_solid_instance_count = 0;
-        self.gen_preview_wire_instance_buf = None;
         self.gen_preview_wire_instance_count = 0;
         // Also clear the GPU compute path.
-        self.preview_compute_raw_buf = None;
-        self.preview_compute_obj_matrix_buf = None;
-        self.preview_compute_occupancy_buf = None;
-        self.preview_compute_solid_instance_buf = None;
-        self.preview_compute_wire_instance_buf = None;
-        self.preview_compute_indirect_buf = None;
-        self.preview_compute_uniform_buf = None;
-        self.preview_compute_bgs = None;
-        self.preview_compute_solid_proto_vb = None;
-        self.preview_compute_solid_proto_ib = None;
-        self.preview_compute_solid_proto_idx_count = 0;
-        self.preview_compute_wire_proto_vb = None;
-        self.preview_compute_wire_proto_ib = None;
-        self.preview_compute_wire_proto_idx_count = 0;
         self.preview_compute_voxel_count = 0;
-        self.preview_compute_capacity = 0;
-        self.preview_compute_shell_capacity = 0;
-        self.preview_compute_wire_capacity = 0;
-        self.preview_compute_is_skip_wire = false;
-        self.preview_compute_occ_word_count = 0;
         self.preview_needs_compute = false;
         self.preview_cache_key = None;
     }
@@ -773,7 +764,7 @@ impl WgpuViewer {
             self.preview_compute_raw_buf =
                 Some(self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("preview_compute_raw"),
-                    size: (raw_cap as u64) * 4,
+                    size: (raw_cap as u64) * 16,
                     usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 }));

@@ -1959,7 +1959,7 @@ impl PreviewInstancedResult {
 pub const PREVIEW_COMPUTE_THRESHOLD: usize = 10_000;
 /// Maximum bounding-box extent per axis for the GPU compute path.
 /// If any dimension exceeds this value, falls back to the CPU instanced path.
-pub const PREVIEW_COMPUTE_MAX_BBOX: u32 = 512;
+pub const PREVIEW_COMPUTE_MAX_BBOX: u32 = 1024;
 /// Maximum number of shell instances the GPU output buffers can hold (solid and
 /// wire each).  Caps VRAM at `MAX_PREVIEW_SHELL_INSTANCES × 80 B` per buffer.
 /// A sphere of radius ≈ 200 has ~500 K shell voxels; compact shapes are much
@@ -1971,12 +1971,14 @@ pub const PREVIEW_NO_WIRE_THRESHOLD: u32 = 100_000;
 
 /// Raw voxel upload for the GPU compute shell-filter path.
 ///
-/// Each packed voxel u32 encodes:
-/// - bits  0– 8: dx = (cx – bbox_min[0]) in [0, 511]
-/// - bits  9–17: dy = (cy – bbox_min[1]) in [0, 511]
-/// - bits 18–26: dz = (cz – bbox_min[2]) in [0, 511]
-/// - bits 27–30: object index into `obj_matrices` (0–15)
-/// - bit    31:  is_ghost (voxel is air; cursor is painting into empty space)
+/// Each packed voxel uses four u32 words:
+/// - word 0 bits  0– 9: dx = (cx – bbox_min[0]) in [0, 1023]
+/// - word 0 bits 10–19: dy = (cy – bbox_min[1]) in [0, 1023]
+/// - word 0 bits 20–29: dz = (cz – bbox_min[2]) in [0, 1023]
+/// - word 0 bit     30: is_ghost (voxel is air; cursor is painting into empty space)
+/// - word 1: object index into `obj_matrices`
+/// - word 2: packed solid preview color `0xRRGGBB`
+/// - word 3: packed wire preview color `0xRRGGBB`
 ///
 /// Colors are pre-multiplied by ghost dimming on the CPU and stored as
 /// `[r, g, b, mat_kind]` vecs.  The compute shader picks the colour based
@@ -1984,8 +1986,8 @@ pub const PREVIEW_NO_WIRE_THRESHOLD: u32 = 100_000;
 #[derive(Clone)]
 pub struct RawVoxelUpload {
     /// Packed voxel descriptors (see bit layout above).
-    pub packed_voxels: Vec<u32>,
-    /// Column-major 4×4 matrices for each unique object in the stroke (max 16).
+    pub packed_voxels: Vec<[u32; 4]>,
+    /// Column-major 4×4 matrices for each unique object in the stroke.
     /// Stored as `[[col0_xyzw], [col1_xyzw], [col2_xyzw], [col3_xyzw]]`.
     pub obj_matrices: Vec<[[f32; 4]; 4]>,
     /// Absolute voxel-grid coordinate of the bbox minimum corner.

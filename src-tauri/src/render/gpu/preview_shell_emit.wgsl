@@ -5,6 +5,15 @@
 // the output storage buffers if the voxel is on the surface shell (≥1
 // neighbour absent from the set).
 //
+// Packed voxel layout (vec4<u32>):
+//   word 0 bits  0– 9  dx   (relative x in [0, bbox_size.x-1])
+//   word 0 bits 10–19  dy
+//   word 0 bits 20–29  dz
+//   word 0 bit     30  is_ghost
+//   word 1              object index into `obj_matrices`
+//   word 2              solid preview color `0xRRGGBB`
+//   word 3              wire preview color `0xRRGGBB`
+//
 // The output instance count is written via atomicAdd into the DrawIndexedIndirect
 // buffer:  indirect[1]  = solid instance count  (byte offset  4)
 //          indirect[6]  = wire  instance count  (byte offset 24)
@@ -57,7 +66,7 @@ struct PreviewInstance {
 }
 
 @group(0) @binding(0) var<uniform>             uniforms:        PreviewUniforms;
-@group(0) @binding(1) var<storage, read>       raw_voxels:      array<u32>;
+@group(0) @binding(1) var<storage, read>       raw_voxels:      array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read>       occupancy:       array<u32>;
 @group(0) @binding(3) var<storage, read>       obj_matrices:    array<mat4x4<f32>>;
 @group(0) @binding(4) var<storage, read_write> solid_instances: array<PreviewInstance>;
@@ -79,17 +88,30 @@ fn occ_contains(dx: u32, dy: u32, dz: u32) -> bool {
     return (occupancy[word] >> bit & 1u) != 0u;
 }
 
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) { return c / 12.92; }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn unpack_rgb(packed: u32) -> vec3<f32> {
+    let r = f32( packed        & 0xFFu) / 255.0;
+    let g = f32((packed >> 8u) & 0xFFu) / 255.0;
+    let b = f32((packed >>16u) & 0xFFu) / 255.0;
+    return vec3<f32>(srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b));
+}
+
 @compute @workgroup_size(64)
 fn shell_emit(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= uniforms.voxel_count { return; }
 
     let packed   = raw_voxels[idx];
-    let dx       = (packed      ) & 0x1FFu;
-    let dy       = (packed >>  9) & 0x1FFu;
-    let dz       = (packed >> 18) & 0x1FFu;
-    let obj_idx  = (packed >> 27) & 0xFu;
-    let is_ghost = (packed >> 31) & 1u;
+    let word0    = packed.x;
+    let dx       = (word0      ) & 0x3FFu;
+    let dy       = (word0 >> 10) & 0x3FFu;
+    let dz       = (word0 >> 20) & 0x3FFu;
+    let obj_idx  = packed.y;
+    let is_ghost = (word0 >> 30) & 1u;
 
     // Shell test: keep only voxels with at least one absent face neighbour.
     // Unsigned subtraction wraps to large values → occ_contains bounds-check catches them.
@@ -118,9 +140,26 @@ fn shell_emit(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c2 = m[2];
     let c3 = m * vec4<f32>(abs_x, abs_y, abs_z, 1.0);
 
-    // Choose colour based on ghost flag.
-    let sc = select(uniforms.solid_color,       uniforms.solid_ghost_color, is_ghost != 0u);
-    let wc = select(uniforms.wire_color,        uniforms.wire_ghost_color,  is_ghost != 0u);
+    let solid_base = unpack_rgb(packed.z);
+    let wire_base = unpack_rgb(packed.w);
+    let solid_rgb = select(
+        solid_base,
+        solid_base * vec3<f32>(0.55, 0.55, 0.55),
+        is_ghost != 0u,
+    );
+    let wire_rgb = select(
+        wire_base,
+        wire_base * vec3<f32>(0.62, 0.62, 0.62),
+        is_ghost != 0u,
+    );
+    let sc = vec4<f32>(
+        solid_rgb,
+        select(uniforms.solid_color.w, uniforms.solid_ghost_color.w, is_ghost != 0u),
+    );
+    let wc = vec4<f32>(
+        wire_rgb,
+        select(uniforms.wire_color.w, uniforms.wire_ghost_color.w, is_ghost != 0u),
+    );
 
     // Allocate a slot in the solid instance buffer.
     // atomicAdd returns the old value, so if it reaches max_instances the slot
