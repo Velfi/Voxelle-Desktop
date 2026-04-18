@@ -1,3 +1,19 @@
+## 0.2.10 — 2026-04-18
+
+### Added
+- The Preferences modal now shows a preview of your selected avatar next to the picker in the Collaboration section.
+- Added a Debug menu option to force a total mesh rebuild, which re-meshes every chunk from scratch. Useful for recovering from stale geometry.
+
+### Changed
+- The avatar hint in Preferences now notes that custom avatars must fit within a 15×15×15 cube.
+- Reorganized the Preferences window into clearer sections: input and gizmo options are grouped under Controls, HUD toggles under Overlays, and display look and sun location now live with the other Graphics settings.
+
+### Fixed
+- Metals no longer appear too bright. Their reflections now track the live sky (including day/night, sun position, and background colour changes) instead of a baked-in ambient term, and screen-space reflections and environment light no longer double up on the same surface.
+- Rotating a selection whose bounding box has an even width, height, or depth no longer splits or drops voxels. Rotation now uses a consistent lattice-snapping rule in doubled-integer arithmetic, so a quarter turn lands every voxel on exactly one destination cell and the selection stays contiguous, even when rotating an even-sized axis onto an odd-sized one.
+- Modals no longer close when a click starts inside the modal and drags onto the backdrop (for example, when selecting text in an input). Both the press and the release must land outside the modal to dismiss it.
+- Glass and water now cast correctly coloured shadows and render in their true colour. In both the rasterizer and the path tracer, shadow rays were treating transparent media as either fully solid or fully invisible — so a red glass pane cast either a black shadow or no shadow at all, and its refraction whitened out the material colour. Shadow attenuation is now per-channel Beer-Lambert against each voxel's RGB (red glass transmits red, absorbs green and blue), and refraction uses the same physics, so red glass looks red instead of picking up the sky reflection.
+
 ## 0.2.9 — 2026-04-13
 
 No notable changes.
