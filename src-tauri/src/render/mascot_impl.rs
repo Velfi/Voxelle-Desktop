@@ -617,3 +617,319 @@ impl WgpuViewer {
             .is_some_and(|l| l.visible && l.vertex_buffer.is_some())
     }
 }
+
+/// Offscreen rotating avatar preview rendered for the Preferences modal.
+///
+/// Draws into a dedicated [`Self::tex`] (sdr format, 256×256), then stages to [`Self::staging`]
+/// for async readback. The frontend displays the decoded RGBA bytes in a `<canvas>`.
+///
+/// This avoids the swapchain-overlay approach because the modal's opaque DOM would
+/// cover anything rendered to the main surface.
+pub struct AvatarPreview {
+    pub vertex_buffer: Option<wgpu::Buffer>,
+    pub index_buffer: Option<wgpu::Buffer>,
+    pub index_count: u32,
+    pub(crate) uniforms_buffer: wgpu::Buffer,
+    pub(crate) bind_group: wgpu::BindGroup,
+    pub bounds: Option<MeshBounds>,
+    pub(crate) tex: wgpu::Texture,
+    pub(crate) tex_view: wgpu::TextureView,
+    pub(crate) depth_view: wgpu::TextureView,
+    pub(crate) staging: wgpu::Buffer,
+    /// Row stride in bytes (256-aligned).
+    pub(crate) bytes_per_row: u32,
+    /// True while an async readback copy is in-flight.
+    pub(crate) readback_in_flight: bool,
+}
+
+impl AvatarPreview {
+    pub const SIZE: u32 = 256;
+}
+
+impl WgpuViewer {
+    /// Ensure the offscreen preview resources exist (idempotent).
+    pub(crate) fn ensure_avatar_preview_resources(&mut self) {
+        if self.avatar_preview.is_some() {
+            return;
+        }
+        let size = AvatarPreview::SIZE;
+        // Row stride rounded up to COPY_BYTES_PER_ROW_ALIGNMENT (256).
+        let bytes_per_row = ((size * 4) + 255) & !255;
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("avatar_preview_tex"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.sdr_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let tex_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("avatar_preview_depth"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+        let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("avatar_preview_staging"),
+            size: (bytes_per_row * size) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let uniforms_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("avatar_preview_uniforms"),
+            size: std::mem::size_of::<MascotUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("avatar_preview_bg"),
+            layout: &self.mascot_bind_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms_buffer.as_entire_binding(),
+            }],
+        });
+        self.avatar_preview = Some(AvatarPreview {
+            vertex_buffer: None,
+            index_buffer: None,
+            index_count: 0,
+            uniforms_buffer,
+            bind_group,
+            bounds: None,
+            tex,
+            tex_view,
+            depth_view,
+            staging,
+            bytes_per_row,
+            readback_in_flight: false,
+        });
+    }
+
+    /// Load (or replace) the voxel mesh for the avatar preview.
+    pub fn load_avatar_preview_mesh(&mut self, mesh: &MeshBuffers, bounds: MeshBounds) {
+        self.ensure_avatar_preview_resources();
+        let interleaved = Self::interleaved_for_mascot(mesh);
+        let vertex_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("avatar_preview_vtx"),
+                contents: bytemuck::cast_slice(&interleaved),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let index_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("avatar_preview_idx"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+        let index_count = mesh.indices.len() as u32;
+        if let Some(p) = &mut self.avatar_preview {
+            p.vertex_buffer = Some(vertex_buffer);
+            p.index_buffer = Some(index_buffer);
+            p.index_count = index_count;
+            p.bounds = Some(bounds);
+        }
+    }
+
+    pub fn clear_avatar_preview_mesh(&mut self) {
+        if let Some(p) = self.avatar_preview.as_mut() {
+            p.vertex_buffer = None;
+            p.index_buffer = None;
+            p.index_count = 0;
+            p.bounds = None;
+        }
+    }
+
+    fn avatar_preview_uniforms(&self) -> MascotUniforms {
+        let p = self.avatar_preview.as_ref().unwrap();
+        if let Some(bounds) = &p.bounds {
+            let center = bounds.center();
+            let extent = (bounds.max - bounds.min).max_element().max(0.001);
+            // Fixed 3/4 view: slight downward tilt, rotated ~30° around Y so we see
+            // the front and one side of the avatar.
+            let tilt = 12.0_f32.to_radians();
+            let yaw = 30.0_f32.to_radians();
+            let cam_dist = 2.8;
+            let eye = Vec3::new(
+                cam_dist * tilt.cos() * yaw.sin(),
+                cam_dist * tilt.sin(),
+                cam_dist * tilt.cos() * yaw.cos(),
+            );
+            let model =
+                Mat4::from_scale(Vec3::splat(1.2 / extent)) * Mat4::from_translation(-center);
+            let view = Mat4::look_at_rh(eye, Vec3::ZERO, Vec3::Y);
+            let proj = Mat4::perspective_rh(0.5, 1.0, 0.1, 50.0);
+            MascotUniforms {
+                mvp: (proj * view * model).to_cols_array_2d(),
+                light_dir: [0.6, 0.8, 0.5, 0.0],
+                ambient: 0.70,
+                sun: 1.6,
+                explode_radius: 0.0,
+                explode_strength: 0.0,
+                mouse_ndc: [99.0, 99.0],
+                mouse_active: 0.0,
+                time_seconds: 0.0,
+            }
+        } else {
+            MascotUniforms {
+                mvp: Mat4::IDENTITY.to_cols_array_2d(),
+                light_dir: [0.6, 0.8, 0.5, 0.0],
+                ambient: 0.70,
+                sun: 1.6,
+                explode_radius: 0.0,
+                explode_strength: 0.0,
+                mouse_ndc: [99.0, 99.0],
+                mouse_active: 0.0,
+                time_seconds: 0.0,
+            }
+        }
+    }
+
+    /// Record + submit + readback in one shot. Returns `(width, height, tight RGBA bytes)`.
+    pub fn snapshot_avatar_preview(&mut self) -> Option<(u32, u32, Vec<u8>)> {
+        if self.avatar_preview.as_ref()?.vertex_buffer.is_none() {
+            return None;
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("avatar_preview_snapshot_cmd"),
+            });
+        self.render_avatar_preview_snapshot(&mut encoder);
+        self.queue.submit(std::iter::once(encoder.finish()));
+        let bytes = self.drain_avatar_preview_snapshot()?;
+        Some((AvatarPreview::SIZE, AvatarPreview::SIZE, bytes))
+    }
+
+    /// Record a render pass that draws the avatar into the offscreen texture, then
+    /// copies the result into the MAP_READ staging buffer.
+    pub(crate) fn render_avatar_preview_snapshot(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.avatar_preview.is_none() {
+            return;
+        }
+        let uniforms = self.avatar_preview_uniforms();
+        let p = self.avatar_preview.as_ref().unwrap();
+        self.queue
+            .write_buffer(&p.uniforms_buffer, 0, bytemuck::bytes_of(&uniforms));
+        let size = AvatarPreview::SIZE;
+        let index_count = p.index_count;
+        let vb = p.vertex_buffer.as_ref().unwrap();
+        let ib = p.index_buffer.as_ref().unwrap();
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("avatar_preview_snapshot"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &p.tex_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Transparent background so the HTML canvas composites over the modal.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &p.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Discard,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.mascot_pipeline);
+            pass.set_bind_group(0, &p.bind_group, &[]);
+            pass.set_vertex_buffer(0, vb.slice(..));
+            pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..index_count, 0, 0..1);
+        }
+
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &p.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &p.staging,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(p.bytes_per_row),
+                    rows_per_image: Some(size),
+                },
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        if let Some(p) = self.avatar_preview.as_mut() {
+            p.readback_in_flight = true;
+        }
+    }
+
+    /// Try to map the staging buffer asynchronously; on success, extract tight RGBA bytes
+    /// and return them for frontend delivery. Returns `None` if nothing is pending.
+    pub(crate) fn drain_avatar_preview_snapshot(&mut self) -> Option<Vec<u8>> {
+        let p = self.avatar_preview.as_ref()?;
+        if !p.readback_in_flight {
+            return None;
+        }
+        let size = AvatarPreview::SIZE as usize;
+        let bpr = p.bytes_per_row as usize;
+        // Map blocking on the caller's thread; the submit must already be complete.
+        let slice = p.staging.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        self.device.poll(wgpu::Maintain::Wait);
+        let map_result = rx.recv().ok()?;
+        if map_result.is_err() {
+            return None;
+        }
+        let mapped = slice.get_mapped_range();
+        let mut out = Vec::with_capacity(size * size * 4);
+        for row in 0..size {
+            let start = row * bpr;
+            out.extend_from_slice(&mapped[start..start + size * 4]);
+        }
+        drop(mapped);
+        p.staging.unmap();
+        if let Some(p) = self.avatar_preview.as_mut() {
+            p.readback_in_flight = false;
+        }
+        // The sdr_format is typically Bgra8UnormSrgb; swap BGRA→RGBA so the frontend
+        // canvas ImageData displays correct colors.
+        if self.sdr_format == wgpu::TextureFormat::Bgra8UnormSrgb
+            || self.sdr_format == wgpu::TextureFormat::Bgra8Unorm
+        {
+            for chunk in out.chunks_exact_mut(4) {
+                chunk.swap(0, 2);
+            }
+        }
+        Some(out)
+    }
+}

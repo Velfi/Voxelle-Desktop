@@ -36,7 +36,6 @@ export function useAshlarGenerator(ctx: AshlarGeneratorContext): AshlarGenerator
   const ashlarPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
   function placeAshlarAtScreen(nx: number, ny: number, seed = ashlarPreviewSeedRef.current) {
-    void invoke("unlock_generator_preview_camera").catch(() => {});
     void invoke("generator_ashlar_at_screen", {
       args: {
         nx,
@@ -49,9 +48,13 @@ export function useAshlarGenerator(ctx: AshlarGeneratorContext): AshlarGenerator
         mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
         thickness: ashlarThicknessRef.current,
       },
-    }).catch((err: unknown) => {
-      console.error("[ashlar] placement failed:", err);
-    });
+    })
+      .catch((err: unknown) => {
+        console.error("[ashlar] placement failed:", err);
+      })
+      .finally(() => {
+        void invoke("unlock_generator_preview_camera").catch(() => {});
+      });
     ashlarPreviewSeedRef.current = (Math.random() * 1e9) | 0;
   }
 

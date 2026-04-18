@@ -371,6 +371,8 @@ pub(crate) struct SyncPreviewInput {
     generator_flora_branch_spread: f32,
     #[serde(default)]
     generator_flora_braid_strands: i32,
+    #[serde(default = "default_one_f32")]
+    generator_flora_braid_spacing: f32,
     #[serde(default = "default_flora_braid_twist")]
     generator_flora_braid_twist: f32,
     #[serde(default = "default_flora_canopy")]
@@ -737,6 +739,7 @@ pub(crate) fn sync_preview_input(
         ph.generator_flora_branch_start = args.generator_flora_branch_start;
         ph.generator_flora_branch_spread = args.generator_flora_branch_spread;
         ph.generator_flora_braid_strands = args.generator_flora_braid_strands;
+        ph.generator_flora_braid_spacing = args.generator_flora_braid_spacing;
         ph.generator_flora_braid_twist = args.generator_flora_braid_twist;
         ph.generator_flora_canopy = args.generator_flora_canopy;
         // Insecta
@@ -1137,6 +1140,7 @@ pub(crate) fn hash_generator_flora_hover(
     branch_start: f32,
     branch_spread: f32,
     braid_strands: i32,
+    braid_spacing: f32,
     braid_twist: f32,
     canopy: f32,
     color: u32,
@@ -1159,6 +1163,7 @@ pub(crate) fn hash_generator_flora_hover(
     branch_start.to_bits().hash(&mut h);
     branch_spread.to_bits().hash(&mut h);
     braid_strands.hash(&mut h);
+    braid_spacing.to_bits().hash(&mut h);
     braid_twist.to_bits().hash(&mut h);
     canopy.to_bits().hash(&mut h);
     color.hash(&mut h);
@@ -1817,6 +1822,12 @@ pub(crate) fn prepare_preview_mesh(
 
     let hover = state.preview.preview_hover.lock();
     let ctx = &*hover;
+    let locked_generator_camera = state.gizmos.generator_preview_locked_camera.lock().clone();
+    let preview_cam = if ctx.generator_kind.is_some() {
+        locked_generator_camera.as_ref().unwrap_or(cam)
+    } else {
+        cam
+    };
 
     if matches!(mode, PreviewMode::Add) {
         if let Some(ref gk) = ctx.generator_kind {
@@ -1828,7 +1839,7 @@ pub(crate) fn prepare_preview_mesh(
                         let mut cells = crate::generators::preview_rope_voxels_between_screens(
                             file,
                             vmap,
-                            cam,
+                            preview_cam,
                             w,
                             h,
                             h1,
@@ -1933,7 +1944,7 @@ pub(crate) fn prepare_preview_mesh(
                     let mut cells = crate::generators::preview_rock_at_screen(
                         file,
                         vmap,
-                        cam,
+                        preview_cam,
                         w,
                         h,
                         sx,
@@ -2001,7 +2012,7 @@ pub(crate) fn prepare_preview_mesh(
                     let mut cells = crate::generators::preview_grass_at_screen(
                         file,
                         vmap,
-                        cam,
+                        preview_cam,
                         w,
                         h,
                         sx,
@@ -2063,7 +2074,7 @@ pub(crate) fn prepare_preview_mesh(
                     let mut cells = crate::generators::preview_ashlar_at_screen(
                         file,
                         vmap,
-                        cam,
+                        preview_cam,
                         w,
                         h,
                         sx,
@@ -2126,7 +2137,7 @@ pub(crate) fn prepare_preview_mesh(
                     let mut cells = crate::generators::preview_flora_at_screen(
                         file,
                         vmap,
-                        cam,
+                        preview_cam,
                         w,
                         h,
                         sx,
@@ -2143,6 +2154,7 @@ pub(crate) fn prepare_preview_mesh(
                         ctx.generator_flora_branch_start,
                         ctx.generator_flora_branch_spread,
                         ctx.generator_flora_braid_strands,
+                        ctx.generator_flora_braid_spacing,
                         ctx.generator_flora_braid_twist,
                         ctx.generator_flora_canopy,
                         ctx.color,
@@ -2165,6 +2177,7 @@ pub(crate) fn prepare_preview_mesh(
                             ctx.generator_flora_branch_start,
                             ctx.generator_flora_branch_spread,
                             ctx.generator_flora_braid_strands,
+                            ctx.generator_flora_braid_spacing,
                             ctx.generator_flora_braid_twist,
                             ctx.generator_flora_canopy,
                             ctx.color,

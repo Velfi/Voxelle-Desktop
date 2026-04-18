@@ -7,6 +7,15 @@ fn resolve_generator_mirror_axes(state: &ViewerState, explicit: Option<u8>) -> u
     explicit.unwrap_or_else(|| state.preview.preview_hover.lock().mirror_axes)
 }
 
+fn generator_placement_camera(state: &ViewerState) -> crate::camera::OrbitCamera {
+    state
+        .gizmos
+        .generator_preview_locked_camera
+        .lock()
+        .clone()
+        .unwrap_or_else(|| state.cam.camera.lock().clone())
+}
+
 // ── Generator arg structs & defaults ─────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -74,7 +83,7 @@ pub(crate) fn generator_rocks_at_screen(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.cam.camera.lock();
+        let cam = generator_placement_camera(state.inner().as_ref());
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_rocks_at_screen(
             file,
@@ -154,7 +163,7 @@ pub(crate) fn generator_grass_at_screen(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.cam.camera.lock();
+        let cam = generator_placement_camera(state.inner().as_ref());
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_grass_at_screen(
             file,
@@ -454,7 +463,7 @@ pub(crate) fn generator_ashlar_at_screen(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.cam.camera.lock();
+        let cam = generator_placement_camera(state.inner().as_ref());
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_ashlar_at_screen(
             file,
@@ -508,6 +517,8 @@ pub(crate) struct GeneratorFloraArgs {
     branch_spread: f32,
     #[serde(default = "default_one_i32")]
     braid_strands: i32,
+    #[serde(default = "default_one_f32_flora")]
+    braid_spacing: f32,
     #[serde(default = "default_flora_braid_twist")]
     braid_twist: f32,
     #[serde(default)]
@@ -564,7 +575,7 @@ pub(crate) fn generator_flora_at_screen(
         let Some(vmap) = vm.as_mut() else {
             return Err("voxel index not ready".into());
         };
-        let cam = state.cam.camera.lock();
+        let cam = generator_placement_camera(state.inner().as_ref());
         let (sx, sy) = viewport_texels_from_norm(args.nx, args.ny, w, h);
         crate::generators::generator_flora_at_screen(
             file,
@@ -586,6 +597,7 @@ pub(crate) fn generator_flora_at_screen(
             args.branch_start,
             args.branch_spread,
             args.braid_strands,
+            args.braid_spacing,
             args.braid_twist,
             args.canopy,
             args.color,

@@ -207,6 +207,7 @@ pub(crate) struct PreviewHoverContext {
     generator_flora_branch_start: f32,
     generator_flora_branch_spread: f32,
     generator_flora_braid_strands: i32,
+    generator_flora_braid_spacing: f32,
     generator_flora_braid_twist: f32,
     generator_flora_canopy: f32,
     // Insecta
@@ -370,6 +371,7 @@ impl Default for PreviewHoverContext {
             generator_flora_branch_start: 0.3,
             generator_flora_branch_spread: 0.5,
             generator_flora_braid_strands: 0,
+            generator_flora_braid_spacing: 1.0,
             generator_flora_braid_twist: 0.5,
             generator_flora_canopy: 2.0,
             // Insecta
@@ -963,6 +965,18 @@ pub fn run() {
                     "voxelle-debug-pointer-test",
                     (),
                 );
+            } else if event.id() == "debug_force_rebuild" {
+                let state = app.state::<Arc<ViewerState>>();
+                if let Some(viewer) = state.gpu.viewer.lock().as_mut() {
+                    viewer.invalidate_spatial_mesh_cache();
+                }
+                let rm = *state.gpu.rendering_mode.lock();
+                if rm.uses_smooth_surface() {
+                    schedule_opaque_mesh_refresh(state.inner(), app);
+                } else {
+                    let _ = refresh_opaque_mesh(state.inner(), Some(app));
+                }
+                wake_viewport_loop(app);
             } else if event.id() == "view_render_greedy"
                 || event.id() == "view_render_marching"
                 || event.id() == "view_render_dual"
@@ -1428,6 +1442,7 @@ pub fn run() {
             avatar_open_user_folder,
             set_local_avatar,
             avatar_load_file,
+            avatar_preview_snapshot,
             speech_bubble_show,
             speech_bubble_click,
             speech_bubble_dismiss,

@@ -137,6 +137,18 @@ fn unpack_mat(packed: u32) -> u32 {
     return (packed >> 24u) & 0xFu;
 }
 
+fn srgb_to_linear(c: f32) -> f32 {
+    if (c <= 0.04045) { return c / 12.92; }
+    return pow((c + 0.055) / 1.055, 2.4);
+}
+
+fn unpack_rgb(packed: u32) -> vec3<f32> {
+    let r = f32( packed        & 0xFFu) / 255.0;
+    let gv= f32((packed >> 8u) & 0xFFu) / 255.0;
+    let b = f32((packed >>16u) & 0xFFu) / 255.0;
+    return vec3<f32>(srgb_to_linear(r), srgb_to_linear(gv), srgb_to_linear(b));
+}
+
 fn brick_fetch(ix: vec3<i32>) -> u32 {
     let o = vec3<i32>(i32(g.brick_origin.x), i32(g.brick_origin.y), i32(g.brick_origin.z));
     let rel = ix - o;
@@ -182,6 +194,78 @@ fn march_thickness_toward(world: vec3<f32>, dir: vec3<f32>, max_steps: i32) -> f
         acc += 1.0;
     }
     return acc;
+}
+
+/// March from a lit fragment toward the sun, accumulating tinted transmittance
+/// from any glass/water voxels the ray passes through. Returns RGB sunlight multiplier
+/// (1,1,1 = clear sky; colored < 1 = tinted shadow).
+///
+/// Uses a simple cell-step march in `dir`; each glass/water voxel multiplies the
+/// running transmittance by its own tinted transmission. A non-transmissive occupied
+/// cell would already be covered by the opaque shadow map, so we only track glass here.
+const GLASS_SUN_MARCH_STEPS: i32 = 32;
+const MAT_GLASS_RASTER: u32 = 3u;
+const MAT_WATER_RASTER: u32 = 4u;
+fn glass_tint_to_sun(world: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    let l = normalize(g.light_dir.xyz);
+    // DDA through voxel cells centered on integer coords (cell occupies [i-0.5, i+0.5]).
+    // Start just outside the fragment's own cell along the surface normal so we don't
+    // self-sample, then step cell-by-cell toward the sun picking up every glass voxel
+    // the ray actually crosses (the previous fixed unit-l step skipped adjacent cells).
+    let start = world + n * 0.01;
+    var ix = vec3<i32>(floor(start + vec3<f32>(0.5)));
+    // Per-axis parametric distance to the next cell boundary and per-axis step.
+    let inv_l = vec3<f32>(
+        select(1.0 / l.x, 1e30, abs(l.x) < 1e-6),
+        select(1.0 / l.y, 1e30, abs(l.y) < 1e-6),
+        select(1.0 / l.z, 1e30, abs(l.z) < 1e-6),
+    );
+    let step_i = vec3<i32>(
+        select(-1, 1, l.x >= 0.0),
+        select(-1, 1, l.y >= 0.0),
+        select(-1, 1, l.z >= 0.0),
+    );
+    let step_f = vec3<f32>(f32(step_i.x), f32(step_i.y), f32(step_i.z));
+    // Distance from `start` to the next +/- 0.5 cell boundary along each axis.
+    let cell_center = vec3<f32>(f32(ix.x), f32(ix.y), f32(ix.z));
+    let boundary = cell_center + step_f * 0.5;
+    var t_max = abs((boundary - start) * inv_l);
+    let t_delta = abs(inv_l);
+    var tint = vec3<f32>(1.0);
+    // Skip the starting cell itself (the fragment's own voxel).
+    let own_cell = ix;
+    for (var i = 0; i < GLASS_SUN_MARCH_STEPS; i++) {
+        // Advance to the next cell along whichever axis boundary is closest.
+        if (t_max.x < t_max.y && t_max.x < t_max.z) {
+            ix.x += step_i.x;
+            t_max.x += t_delta.x;
+        } else if (t_max.y < t_max.z) {
+            ix.y += step_i.y;
+            t_max.y += t_delta.y;
+        } else {
+            ix.z += step_i.z;
+            t_max.z += t_delta.z;
+        }
+        if (all(ix == own_cell)) { continue; }
+        let cell = brick_fetch(ix);
+        if (!is_occupied(cell)) { continue; }
+        let mat = unpack_mat(cell);
+        if (mat == MAT_GLASS_RASTER || mat == MAT_WATER_RASTER) {
+            let c = unpack_rgb(cell);
+            let is_water = (mat == MAT_WATER_RASTER);
+            // Transmittance per voxel: colored channels pass through, saturated
+            // channels absorb. Water is nearly clear, glass takes more color.
+            let absorb = select(vec3<f32>(0.55), vec3<f32>(0.15), is_water);
+            let t = mix(vec3<f32>(1.0) - absorb, vec3<f32>(1.0), c);
+            tint *= t;
+            if (max(tint.x, max(tint.y, tint.z)) < 0.02) { break; }
+        } else {
+            // Hit an opaque voxel — sun is fully occluded. The opaque shadow map
+            // already handles this case, so just return black tint.
+            return vec3<f32>(0.0);
+        }
+    }
+    return tint;
 }
 
 /// World-space shadow bias (in voxel units). Converted to NDC using the light frustum depth range
@@ -408,9 +492,15 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
     let h = normalize(l + v);
     let ndl = max(dot(n, l), 0.0);
     let sh = shadow_visibility(in.world_pos, n, in.clip_pos.xy);
+    // Tint sun transmittance by any glass/water voxels between this surface and the sun.
+    // Only worth computing when the fragment is otherwise lit; when fully in opaque shadow
+    // (sh ≈ 0) the tint multiplies zero so we can skip the march.
+    let glass_tint = select(vec3<f32>(1.0), glass_tint_to_sun(in.world_pos, n), sh > 0.001);
     let hemi = mix(HEMI_GROUND, HEMI_SKY, n.y * 0.5 + 0.5);
     let amb = g.light_params.x;
-    let sun = g.light_params.y;
+    // `sun` carries the tint so all direct-sun contributions — including untinted
+    // specular terms (metal, plastic) — pick up glass-colored attenuation automatically.
+    let sun = vec3<f32>(g.light_params.y) * glass_tint;
     let sc = g.sun_color.xyz;
     let ao_h = pow(max(in.vertex_ao, 0.001), VERTEX_AO_GAMMA);
     let ndh = max(dot(n, h), 0.0);
@@ -465,14 +555,18 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         rgb = surface + subsurface * (1.0 - wax_fres);
     } else if (is_metal) {
         // Metallic PBR: tinted specular from base color, sharp highlight, strong Fresnel.
+        // The Fresnel-weighted environment reflection is contributed by the SSR pass
+        // (post_ssr.wgsl), which falls back to a hemisphere probe when the ray misses.
+        // Baking a second env term here would double-count reflected energy.
         let f0 = base * 0.96 + vec3<f32>(0.04);
         let fresnel = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - ndv, 5.0);
         let spec_power = pow(ndh, 96.0);
         let spec = fresnel * spec_power * 1.8 * sh * sun;
-        // Metallic diffuse is minimal (energy absorbed); ambient reflections via hemi.
-        let ambient_refl = base * hemi * 0.88 * ao_h * amb;
+        // A tiny non-Fresnel base term keeps deep-shadow metals from clipping to pure
+        // black (real metals show a faint color from multiple scattering / diffraction).
+        let floor_tint = base * hemi * 0.08 * ao_h * amb;
         let direct = base * 0.15 * ndl * sh * sun * sc;
-        rgb = ambient_refl + direct + spec * sc;
+        rgb = floor_tint + direct + spec * sc;
     } else if (is_glow) {
         // Self-illuminated: emissive color + subtle ambient for shape readability.
         let emissive = base * 4.0;
@@ -575,10 +669,12 @@ fn fs_opaque_mrt(in: VertexOut) -> OpaqueOut {
         let spec = holo_fresnel * spec_power * 2.0 * sh * sun;
 
         // ── Ambient + diffuse ───────────────────────────────────────────────
-        let ambient_refl = spectral * base * hemi * 0.68 * ao_h * amb;
+        // Matched pair to the metal branch: env reflection is contributed by SSR.
+        // Keep a faint spectral floor so deep-shadow holo still reads as iridescent.
+        let floor_tint = spectral * base * hemi * 0.10 * ao_h * amb;
         let direct = base * spectral * 0.20 * ndl * sh * sun * sc;
 
-        rgb = ambient_refl + direct + spec * sc;
+        rgb = floor_tint + direct + spec * sc;
     } else {
         // Plastic / rubber.
         let spec_blinn = pow(ndh, 32.0) * 0.12 * sh * sun;

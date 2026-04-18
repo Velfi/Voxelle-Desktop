@@ -92,7 +92,6 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
       clearGizmo();
     },
     onCommit: (snap) => {
-      void invoke("unlock_generator_preview_camera").catch(() => {});
       const { nx, ny } = snap.data;
       const gizmoPos = shapeGizmoPosRef.current;
       void invoke("generator_shape_at_screen", {
@@ -110,7 +109,10 @@ export function useShapeGenerator(ctx: ShapeGeneratorContext): ShapeGeneratorSta
           overwrite: shapeOverwriteRef.current,
           gizmoCenter: gizmoPos,
         },
-      }).finally(() => clearGizmo());
+      }).finally(() => {
+        void invoke("unlock_generator_preview_camera").catch(() => {});
+        clearGizmo();
+      });
     },
   });
 

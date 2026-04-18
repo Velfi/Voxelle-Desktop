@@ -15,6 +15,7 @@ export const FLORA_PRESETS: Record<
     branchStart: number;
     branchSpread: number;
     braidStrands: number;
+    braidSpacing: number;
     braidTwist: number;
     canopy: number;
   }
@@ -31,6 +32,7 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.5,
     branchSpread: 1,
     braidStrands: 1,
+    braidSpacing: 1,
     braidTwist: 0.35,
     canopy: 0.18,
   },
@@ -46,6 +48,7 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.5,
     branchSpread: 1,
     braidStrands: 1,
+    braidSpacing: 1,
     braidTwist: 0.35,
     canopy: 0.06,
   },
@@ -61,6 +64,7 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.5,
     branchSpread: 2,
     braidStrands: 1,
+    braidSpacing: 1,
     braidTwist: 0.45,
     canopy: 0.12,
   },
@@ -76,6 +80,7 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.5,
     branchSpread: 2,
     braidStrands: 1,
+    braidSpacing: 1,
     braidTwist: 0.35,
     canopy: 0.22,
   },
@@ -91,8 +96,25 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.48,
     branchSpread: 2,
     braidStrands: 1,
+    braidSpacing: 1,
     braidTwist: 0.35,
     canopy: 0.38,
+  },
+  tree: {
+    height: 28,
+    girth: 4,
+    wobble: 0.08,
+    taper: 0.58,
+    stemCount: 1,
+    clusterRadius: 0,
+    branchCount: 8,
+    branchDepth: 3,
+    branchStart: 0.32,
+    branchSpread: 1.7,
+    braidStrands: 1,
+    braidSpacing: 1,
+    braidTwist: 0.3,
+    canopy: 0,
   },
   braided: {
     height: 16,
@@ -106,6 +128,7 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.5,
     branchSpread: 1,
     braidStrands: 3,
+    braidSpacing: 2.2,
     braidTwist: 0.52,
     canopy: 0.1,
   },
@@ -121,6 +144,7 @@ export const FLORA_PRESETS: Record<
     branchStart: 0.5,
     branchSpread: 1,
     braidStrands: 1,
+    braidSpacing: 1,
     braidTwist: 0.35,
     canopy: 0.52,
   },

@@ -2133,6 +2133,50 @@ pub fn sculpt_stroke_effective_footprint(
         );
     }
 
+    if mode == SculptStrokeMode::Extrude
+        && extrude_profile == ExtrudeProfile::Cube
+        && (extrude_taper || extrude_end_cap != ExtrudeEndCap::Flat)
+    {
+        let spine = brush::stroke_anchor_centers_sculpt(
+            mode,
+            file,
+            voxel_map,
+            camera,
+            width,
+            height,
+            sx,
+            sy,
+            stroke_line_start,
+            stroke_segment_prev,
+        );
+        if spine.is_empty() {
+            return Vec::new();
+        }
+        let footprint = brush::extrude_shaped_brush_footprint(
+            &spine,
+            brush_shape,
+            if extrude_taper {
+                extrude_taper_start.max(0.0)
+            } else {
+                brush_radius as f32
+            },
+            if extrude_taper {
+                extrude_taper_end.max(0.0)
+            } else {
+                brush_radius as f32
+            },
+            extrude_end_cap,
+        );
+        return brush::filter_sculpt_footprint_stochastic(
+            footprint,
+            &spine,
+            brush_radius,
+            brush_falloff,
+            brush_strength,
+            stroke_seed,
+        );
+    }
+
     let footprint = collect_sculpt_stroke_footprint(
         file,
         voxel_map,
@@ -2890,9 +2934,9 @@ pub fn apply_sculpt_stroke(
 
 // ── Selection transform ───────────────────────────────────────────────────────
 
-/// Quarter-turn rotation of `(rx, ry, rz)` around the given axis.
+/// Quarter-turn rotation of an integer vector around the given axis.
 /// `quarters` must be in `[1, 3]` (caller normalises with `rem_euclid(4)`).
-fn rotate_rel_quarter(rx: f32, ry: f32, rz: f32, axis: u8, quarters: i32) -> (f32, f32, f32) {
+fn rotate_rel_quarter_i(rx: i32, ry: i32, rz: i32, axis: u8, quarters: i32) -> (i32, i32, i32) {
     match (axis, quarters) {
         (0, 1) => (rx, -rz, ry),
         (0, 2) => (rx, -ry, -rz),
@@ -2987,7 +3031,7 @@ pub fn rotate_selected_voxels(
         return Vec::new();
     }
 
-    let pivot = selection_pivot(selection);
+    let pivot2 = selection_pivot_doubled(selection);
 
     let to_move: Vec<(VoxelCoord, Voxel)> = selection
         .iter()
@@ -3001,7 +3045,7 @@ pub fn rotate_selected_voxels(
     let rotated: Vec<(VoxelCoord, Voxel)> = to_move
         .iter()
         .map(|&(src, mut voxel)| {
-            let dest = rotate_coord(src, pivot, axis, q);
+            let dest = rotate_coord(src, pivot2, axis, q);
             voxel.x = dest.0;
             voxel.y = dest.1;
             voxel.z = dest.2;
@@ -3052,10 +3096,10 @@ pub fn rotate_selection_coords(
     if q == 0 {
         return selection.clone();
     }
-    let pivot = selection_pivot(selection);
+    let pivot2 = selection_pivot_doubled(selection);
     selection
         .iter()
-        .map(|&c| rotate_coord(c, pivot, axis, q))
+        .map(|&c| rotate_coord(c, pivot2, axis, q))
         .collect()
 }
 
@@ -3081,15 +3125,45 @@ fn selection_pivot(selection: &AHashSet<VoxelCoord>) -> (f32, f32, f32) {
     )
 }
 
-fn rotate_coord(coord: VoxelCoord, pivot: (f32, f32, f32), axis: u8, quarters: i32) -> VoxelCoord {
-    let rx = coord.0 as f32 - pivot.0;
-    let ry = coord.1 as f32 - pivot.1;
-    let rz = coord.2 as f32 - pivot.2;
-    let (nx, ny, nz) = rotate_rel_quarter(rx, ry, rz, axis, quarters);
+/// Doubled pivot `(min+max)` for each axis of the selection AABB. Using the
+/// doubled value keeps all rotation arithmetic on the integer lattice even
+/// when the true center lies on a half-integer (even-sized selections).
+fn selection_pivot_doubled(selection: &AHashSet<VoxelCoord>) -> (i32, i32, i32) {
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    let mut min_z = i32::MAX;
+    let mut max_z = i32::MIN;
+    for &(x, y, z) in selection {
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+        min_z = min_z.min(z);
+        max_z = max_z.max(z);
+    }
+    (min_x + max_x, min_y + max_y, min_z + max_z)
+}
+
+fn rotate_coord(coord: VoxelCoord, pivot2: (i32, i32, i32), axis: u8, quarters: i32) -> VoxelCoord {
+    // Compute the rotated position in doubled coordinates:
+    //   2*dest = pivot2 + R(2*coord - pivot2)
+    //         = pivot2 + R(2*coord) - R(pivot2)
+    // When a rotation swaps an even-sized axis with an odd-sized one, this
+    // sum is odd for that axis (the true center lies at a half-integer on
+    // one axis and an integer on the other — the lattice genuinely can't be
+    // preserved). Use floored division for a consistent rule across every
+    // voxel so the selection stays contiguous; the whole selection just
+    // shifts by half a cell on those axes, rather than some voxels rounding
+    // up and others down and splitting the mesh.
+    let (c2x, c2y, c2z) = (2 * coord.0, 2 * coord.1, 2 * coord.2);
+    let (rc2x, rc2y, rc2z) = rotate_rel_quarter_i(c2x, c2y, c2z, axis, quarters);
+    let (rp2x, rp2y, rp2z) = rotate_rel_quarter_i(pivot2.0, pivot2.1, pivot2.2, axis, quarters);
     (
-        (nx + pivot.0).round() as i32,
-        (ny + pivot.1).round() as i32,
-        (nz + pivot.2).round() as i32,
+        (rc2x - rp2x + pivot2.0).div_euclid(2),
+        (rc2y - rp2y + pivot2.1).div_euclid(2),
+        (rc2z - rp2z + pivot2.2).div_euclid(2),
     )
 }
 
@@ -3880,5 +3954,161 @@ mod tests {
             n >= 1,
             "expected at least one empty cell filled in front of solid"
         );
+    }
+
+    mod rotation_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        // Build a minimal VoxelleFile + voxel_map containing `solids`. Grid is
+        // sized generously so rotation can't spill past grid_valid_range and
+        // get clamped (which would confound the "no voxels dropped" check).
+        fn make_scene(solids: &[VoxelCoord]) -> (VoxelleFile, AHashMap<VoxelCoord, usize>) {
+            let mut file = VoxelleFile {
+                version: 4,
+                grid_size: 128,
+                scene: crate::voxelle::Scene::default(),
+                scene_extra: None,
+                mood: None,
+                lighting: None,
+                voxels: Vec::with_capacity(solids.len()),
+                objects: crate::voxelle::default_scene_objects(),
+                active_object_id: 0,
+            };
+            let mut vm: AHashMap<VoxelCoord, usize> = AHashMap::new();
+            for &(x, y, z) in solids {
+                let idx = file.voxels.len();
+                file.voxels.push(Voxel {
+                    x,
+                    y,
+                    z,
+                    color: 0xff8800,
+                    material: MaterialId::Plastic,
+                    object_id: 0,
+                });
+                vm.insert((x, y, z), idx);
+            }
+            (file, vm)
+        }
+
+        // Strategy: a non-empty axis-aligned filled box of integer extents.
+        // Mixing even/odd dimensions is the interesting case — that's where
+        // the pivot lies on a half-integer for one axis and an integer for
+        // another, which is what used to split/drop voxels.
+        fn box_selection() -> impl Strategy<Value = AHashSet<VoxelCoord>> {
+            (
+                -4i32..=4,
+                -4i32..=4,
+                -4i32..=4,
+                1i32..=5,
+                1i32..=5,
+                1i32..=5,
+            )
+                .prop_map(|(ox, oy, oz, sx, sy, sz)| {
+                    let mut set = AHashSet::new();
+                    for z in oz..oz + sz {
+                        for y in oy..oy + sy {
+                            for x in ox..ox + sx {
+                                set.insert((x, y, z));
+                            }
+                        }
+                    }
+                    set
+                })
+        }
+
+        proptest! {
+            // A quarter-turn rotation must preserve the voxel count: every
+            // source voxel has to land on exactly one destination cell, with
+            // no two sources collapsing onto the same cell. If the rotation
+            // rounds different voxels inconsistently, collisions occur and
+            // voxels are silently dropped — this test catches that.
+            #[test]
+            fn rotate_preserves_voxel_count(
+                sel in box_selection(),
+                axis in 0u8..=2,
+                quarters in 1i32..=3,
+            ) {
+                let solids: Vec<VoxelCoord> = sel.iter().copied().collect();
+                let before = solids.len();
+                let (mut file, mut vm) = make_scene(&solids);
+
+                rotate_selected_voxels(&mut file, &mut vm, &sel, axis, quarters);
+
+                let after = file.voxels.len();
+                prop_assert_eq!(
+                    before, after,
+                    "rotation dropped voxels (axis={}, quarters={}, extent={:?})",
+                    axis, quarters, aabb_extent(&sel)
+                );
+
+                // The selection-coords helper must agree: its output set
+                // must have the same cardinality as the input (else the
+                // post-rotation selection would highlight fewer cells than
+                // were actually moved).
+                let new_sel = rotate_selection_coords(&sel, axis, quarters);
+                prop_assert_eq!(
+                    sel.len(), new_sel.len(),
+                    "rotate_selection_coords collapsed cells (axis={}, quarters={})",
+                    axis, quarters
+                );
+            }
+
+            // Four quarter-turns must preserve the voxel count (no cumulative
+            // drops). For uniform-parity selections (all AABB dimensions even,
+            // or all odd) the rotation lattice is exact, so we additionally
+            // require the final occupied set to match the start. Mixed-parity
+            // selections are excluded from the strict round-trip because the
+            // center lies on a half-integer for one axis and an integer for
+            // another — a genuinely ambiguous case that snaps consistently on
+            // each turn but accumulates a half-cell bias over four.
+            #[test]
+            fn four_quarter_turns_preserve_count_and_round_trip_when_uniform(
+                sel in box_selection(),
+                axis in 0u8..=2,
+            ) {
+                let (ex, ey, ez) = aabb_extent(&sel);
+                let uniform_parity = (ex % 2 == ey % 2) && (ey % 2 == ez % 2);
+
+                let solids: Vec<VoxelCoord> = sel.iter().copied().collect();
+                let original: AHashSet<VoxelCoord> = solids.iter().copied().collect();
+                let start_count = original.len();
+                let (mut file, mut vm) = make_scene(&solids);
+                let mut current = sel.clone();
+
+                for _ in 0..4 {
+                    rotate_selected_voxels(&mut file, &mut vm, &current, axis, 1);
+                    current = rotate_selection_coords(&current, axis, 1);
+                }
+
+                prop_assert_eq!(
+                    start_count, file.voxels.len(),
+                    "four 90° rotations dropped voxels (axis={}, extent={:?})",
+                    axis, (ex, ey, ez)
+                );
+
+                if uniform_parity {
+                    let final_cells: AHashSet<VoxelCoord> =
+                        file.voxels.iter().map(|v| (v.x, v.y, v.z)).collect();
+                    prop_assert_eq!(
+                        original, final_cells,
+                        "uniform-parity selection did not round-trip under 4 quarter turns (axis={}, extent={:?})",
+                        axis, (ex, ey, ez)
+                    );
+                }
+            }
+        }
+
+        fn aabb_extent(sel: &AHashSet<VoxelCoord>) -> (i32, i32, i32) {
+            let (mut mnx, mut mxx) = (i32::MAX, i32::MIN);
+            let (mut mny, mut mxy) = (i32::MAX, i32::MIN);
+            let (mut mnz, mut mxz) = (i32::MAX, i32::MIN);
+            for &(x, y, z) in sel {
+                mnx = mnx.min(x); mxx = mxx.max(x);
+                mny = mny.min(y); mxy = mxy.max(y);
+                mnz = mnz.min(z); mxz = mxz.max(z);
+            }
+            (mxx - mnx + 1, mxy - mny + 1, mxz - mnz + 1)
+        }
     }
 }

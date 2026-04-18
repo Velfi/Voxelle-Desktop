@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow, LogicalPosition } from "@tauri-apps/api/window";
+import { useOverlayDismiss } from "./hooks/useOverlayDismiss";
 
 interface Props {
   open: boolean;
@@ -206,6 +207,7 @@ export function PointerTestModal({ open, onClose }: Props) {
     }
   }, [open, releaseTauriGrab]);
 
+  const dismiss = useOverlayDismiss(onClose);
   if (!open) return null;
 
   const lockColor =
@@ -221,12 +223,7 @@ export function PointerTestModal({ open, onClose }: Props) {
     tauriGrabStatus === "active" ? "#4caf50" : tauriGrabStatus === "failed" ? "#f44336" : "#888";
 
   return (
-    <div
-      className="modal-overlay"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
+    <div className="modal-overlay" {...dismiss}>
       <div
         className="modal"
         role="dialog"

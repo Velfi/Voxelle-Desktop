@@ -244,18 +244,21 @@ pub fn extrude_ray_footprint(
             stroke_seed,
         )
     } else {
-        // Cube profile: use generic brush offsets applied to each spine point
-        let offsets = brush_offset_cells(brush_shape, brush_radius, None, None);
-        let mut out = Vec::new();
-        let mut seen = ahash::AHashSet::new();
-        for &(cx, cy, cz) in spine {
-            for &(ox, oy, oz) in &offsets {
-                let c = (cx + ox, cy + oy, cz + oz);
-                if seen.insert(c) {
-                    out.push(c);
-                }
-            }
-        }
+        let out = extrude_shaped_brush_footprint(
+            spine,
+            brush_shape,
+            if extrude_taper {
+                extrude_taper_start.max(0.0)
+            } else {
+                brush_radius as f32
+            },
+            if extrude_taper {
+                extrude_taper_end.max(0.0)
+            } else {
+                brush_radius as f32
+            },
+            extrude_end_cap,
+        );
         filter_sculpt_footprint_stochastic(
             out,
             spine,
@@ -265,6 +268,141 @@ pub fn extrude_ray_footprint(
             stroke_seed,
         )
     }
+}
+
+fn add_brush_shape_cap(
+    seen: &mut HashSet<VoxelCoord>,
+    out: &mut Vec<VoxelCoord>,
+    origin: VoxelCoord,
+    dir: [f32; 3],
+    base_radius: f32,
+    brush_shape: BrushShape,
+    rounded: bool,
+) {
+    if base_radius <= 0.0 {
+        return;
+    }
+    let Some(t) = normalize3_opt(dir) else {
+        return;
+    };
+    let k_max = base_radius.ceil().max(1.0) as i32;
+    let mut cached_radius: Option<u32> = None;
+    let mut cached_offsets: Vec<VoxelCoord> = Vec::new();
+    for k in 1..=k_max {
+        let frac = k as f32 / (k_max as f32 + 1.0);
+        let radius = if rounded {
+            base_radius * (1.0 - frac * frac).sqrt()
+        } else {
+            base_radius * (1.0 - frac)
+        };
+        let radius = radius.round().max(0.0) as u32;
+        let center = (
+            origin.0 + (k as f32 * t[0]).round() as i32,
+            origin.1 + (k as f32 * t[1]).round() as i32,
+            origin.2 + (k as f32 * t[2]).round() as i32,
+        );
+        if cached_radius != Some(radius) {
+            cached_offsets = brush_offset_cells(brush_shape, radius, None, None);
+            cached_radius = Some(radius);
+        }
+        for &(ox, oy, oz) in &cached_offsets {
+            let c = (center.0 + ox, center.1 + oy, center.2 + oz);
+            if seen.insert(c) {
+                out.push(c);
+            }
+        }
+    }
+}
+
+/// Brush-shaped extrude footprint with optional taper and end caps.
+pub fn extrude_shaped_brush_footprint(
+    spine: &[VoxelCoord],
+    brush_shape: BrushShape,
+    start_radius: f32,
+    end_radius: f32,
+    cap: ExtrudeEndCap,
+) -> Vec<VoxelCoord> {
+    if spine.is_empty() {
+        return Vec::new();
+    }
+    let n = spine.len();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cached_radius: Option<u32> = None;
+    let mut cached_offsets: Vec<VoxelCoord> = Vec::new();
+
+    for (i, &(cx, cy, cz)) in spine.iter().enumerate() {
+        let t = if n == 1 {
+            0.0
+        } else {
+            i as f32 / (n as f32 - 1.0)
+        };
+        let radius = (start_radius + t * (end_radius - start_radius))
+            .round()
+            .max(0.0) as u32;
+        if cached_radius != Some(radius) {
+            cached_offsets = brush_offset_cells(brush_shape, radius, None, None);
+            cached_radius = Some(radius);
+        }
+        for &(ox, oy, oz) in &cached_offsets {
+            let c = (cx + ox, cy + oy, cz + oz);
+            if seen.insert(c) {
+                out.push(c);
+            }
+        }
+    }
+
+    if cap == ExtrudeEndCap::Rounded {
+        if let Some(t0) = extrude_tangent_at(spine, 0) {
+            add_brush_shape_cap(
+                &mut seen,
+                &mut out,
+                spine[0],
+                [-t0[0], -t0[1], -t0[2]],
+                start_radius,
+                brush_shape,
+                true,
+            );
+        }
+        if let Some(t1) = extrude_tangent_at(spine, n - 1) {
+            add_brush_shape_cap(
+                &mut seen,
+                &mut out,
+                spine[n - 1],
+                t1,
+                end_radius,
+                brush_shape,
+                true,
+            );
+        }
+    }
+
+    if cap == ExtrudeEndCap::Pointed {
+        if let Some(t0) = extrude_tangent_at(spine, 0) {
+            add_brush_shape_cap(
+                &mut seen,
+                &mut out,
+                spine[0],
+                [-t0[0], -t0[1], -t0[2]],
+                start_radius,
+                brush_shape,
+                false,
+            );
+        }
+        if let Some(t1) = extrude_tangent_at(spine, n - 1) {
+            add_brush_shape_cap(
+                &mut seen,
+                &mut out,
+                spine[n - 1],
+                t1,
+                end_radius,
+                brush_shape,
+                false,
+            );
+        }
+    }
+
+    out
 }
 
 #[inline]

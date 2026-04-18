@@ -22,6 +22,10 @@ fn v3_add(a: V3, b: V3) -> V3 {
     (a.0 + b.0, a.1 + b.1, a.2 + b.2)
 }
 
+fn v3_sub(a: V3, b: V3) -> V3 {
+    (a.0 - b.0, a.1 - b.1, a.2 - b.2)
+}
+
 fn v3_scale(a: V3, s: f64) -> V3 {
     (a.0 * s, a.1 * s, a.2 * s)
 }
@@ -67,6 +71,31 @@ fn tangent_vectors(nx: i32, ny: i32, nz: i32) -> (V3, V3) {
     (t1, t2)
 }
 
+fn tangent_frame_from_dir(dir: V3) -> (V3, V3) {
+    let dir = v3_normalize(dir);
+    let arbitrary = if dir.1.abs() < 0.9 {
+        (0.0, 1.0, 0.0)
+    } else {
+        (1.0, 0.0, 0.0)
+    };
+    let t1 = v3_normalize(v3_cross(dir, arbitrary));
+    let t2 = v3_normalize(v3_cross(dir, t1));
+    (t1, t2)
+}
+
+fn spine_direction(spine: &[V3], index: usize, fallback: V3) -> V3 {
+    if spine.len() <= 1 {
+        return fallback;
+    }
+    if index == 0 {
+        return v3_normalize(v3_sub(spine[1], spine[0]));
+    }
+    if index + 1 >= spine.len() {
+        return v3_normalize(v3_sub(spine[index], spine[index - 1]));
+    }
+    v3_normalize(v3_sub(spine[index + 1], spine[index - 1]))
+}
+
 // ---------------------------------------------------------------------------
 // Mean backbone with wobble
 // ---------------------------------------------------------------------------
@@ -103,6 +132,7 @@ fn braid_offsets(
     strand_index: usize,
     strand_count: usize,
     step: usize,
+    spacing: f64,
     twist: f64,
     t1: V3,
     t2: V3,
@@ -110,7 +140,7 @@ fn braid_offsets(
     if strand_count <= 1 {
         return (0.0, 0.0, 0.0);
     }
-    let r = 1.0 + (twist * 2.2).floor();
+    let r = spacing.max(0.0);
     let base_angle = (strand_index as f64 / strand_count as f64) * std::f64::consts::TAU;
     let angle = base_angle + step as f64 * (0.35 + twist * 0.95);
     let ou = r * angle.cos();
@@ -204,15 +234,13 @@ fn bresenham_3d(a: (i32, i32, i32), b: (i32, i32, i32)) -> Vec<(i32, i32, i32)> 
 
 fn generate_branches(
     spine: &[V3],
-    normal: V3,
-    t1: V3,
-    t2: V3,
+    parent_dir: V3,
     branch_count: i32,
     branch_depth: i32,
     branch_start: f64,
     branch_spread: f64,
     girth: f64,
-    _taper: f64,
+    taper: f64,
     canopy: f64,
     rng: &mut Rng,
     coords: &mut HashSet<VoxelCoord>,
@@ -240,16 +268,29 @@ fn generate_branches(
         let spine_idx = start_idx + (frac * (usable - 1) as f64).round() as usize;
         let spine_idx = spine_idx.min(total - 1);
 
-        // Direction: outward in tangent plane using golden angle spiral
-        let angle = bi as f64 * (GOLDEN_ANGLE_RAD as f64);
-        let out_dir = v3_normalize(v3_add(v3_scale(t1, angle.cos()), v3_scale(t2, angle.sin())));
-        // Mix in some upward (normal) bias
+        let trunk_dir = spine_direction(spine, spine_idx, parent_dir);
+        let (ring_t1, ring_t2) = tangent_frame_from_dir(trunk_dir);
+
+        // Distribute branches around the trunk, with slight random twist so repeated clicks
+        // still feel organic without requiring species-specific presets.
+        let angle = bi as f64 * (GOLDEN_ANGLE_RAD as f64) + rng.next_signed_f64() * 0.35;
+        let radial = v3_normalize(v3_add(
+            v3_scale(ring_t1, angle.cos()),
+            v3_scale(ring_t2, angle.sin()),
+        ));
+        let height_frac = spine_idx as f64 / (total - 1).max(1) as f64;
+        let spread_frac = (branch_spread / 3.0).clamp(0.0, 1.0);
+        let upward_bias = (0.95 - spread_frac * 0.9 - (1.0 - height_frac) * 0.45
+            + rng.next_signed_f64() * 0.1)
+            .clamp(-0.55, 0.95);
         let branch_dir = v3_normalize(v3_add(
-            v3_scale(out_dir, branch_spread.max(0.3)),
-            v3_scale(normal, 0.5),
+            v3_scale(radial, 0.7 + branch_spread * 0.5),
+            v3_scale(trunk_dir, upward_bias),
         ));
 
-        let branch_len = ((total as f64 * 0.4 * branch_spread).max(2.0)) as i32;
+        let len_factor =
+            (0.35 + (1.0 - height_frac).powf(0.7) * (0.55 + spread_frac * 0.55)).clamp(0.25, 1.0);
+        let branch_len = ((total as f64 * len_factor * (0.45 + spread_frac * 0.8)).max(2.0)) as i32;
         let origin = spine[spine_idx];
         let tip = v3_add(origin, v3_scale(branch_dir, branch_len as f64));
 
@@ -259,41 +300,46 @@ fn generate_branches(
 
         // Walk the branch path with tapering disk
         let path_len = path.len();
+        let (branch_t1, branch_t2) = tangent_frame_from_dir(branch_dir);
+        let trunk_radius_at_origin =
+            effective_girth_at(girth, taper, spine_idx, total).max(0.0);
+        let base_radius = (trunk_radius_at_origin * (0.7 - height_frac * 0.15)).max(0.0);
         for (pi, &(px, py, pz)) in path.iter().enumerate() {
             if coords.len() >= VOXEL_CAP {
                 break;
             }
             let branch_frac = pi as f64 / path_len.max(1) as f64;
-            let r = effective_girth_at(girth * 0.5, 0.8, pi, path_len).max(0.0);
+            let r = effective_girth_at(base_radius, 0.65 + taper * 0.25, pi, path_len).max(0.0);
             let center = (px as f64, py as f64, pz as f64);
-            place_disk(center, r, t1, t2, coords);
+            place_disk(center, r, branch_t1, branch_t2, coords);
 
             // Canopy at branch tip
             if canopy > 0.01 && branch_frac > 0.7 {
                 let canopy_r = girth * canopy * (1.0 - (branch_frac - 0.7) / 0.3).max(0.0) * 1.5;
-                place_canopy_at(center, canopy_r, t1, t2, normal, rng, coords);
+                place_canopy_at(
+                    center, canopy_r, branch_t1, branch_t2, branch_dir, rng, coords,
+                );
             }
         }
 
-        // Recursive sub-branches (depth 2)
-        if branch_depth >= 2 && path.len() > 2 {
-            let sub_count = (branch_count / 2).clamp(1, 3);
+        // Recursive sub-branches taper aggressively so a bare-tree silhouette still reads cleanly.
+        if branch_depth >= 2 && path.len() > 3 {
+            let sub_count =
+                ((branch_count as f64 * (0.4 + spread_frac * 0.35)).round() as i32).clamp(1, 4);
             let sub_spine: Vec<V3> = path
                 .iter()
                 .map(|&(x, y, z)| (x as f64, y as f64, z as f64))
                 .collect();
             generate_branches(
                 &sub_spine,
-                normal,
-                t1,
-                t2,
+                branch_dir,
                 sub_count,
-                1, // no further recursion
-                0.3,
-                branch_spread * 0.6,
-                girth * 0.4,
-                _taper,
-                canopy * 0.5,
+                branch_depth - 1,
+                0.35 + rng.next_f64() * 0.25,
+                (branch_spread * 0.7).max(0.45),
+                base_radius * 0.6,
+                taper,
+                canopy * 0.6,
                 rng,
                 coords,
             );
@@ -368,6 +414,7 @@ pub fn generate_flora_deltas(
     branch_start: f32,
     branch_spread: f32,
     braid_strands: i32,
+    braid_spacing: f32,
     braid_twist: f32,
     canopy: f32,
     color: u32,
@@ -380,11 +427,12 @@ pub fn generate_flora_deltas(
     let taper = (taper as f64).clamp(0.0, 1.0);
     let stem_count = stem_count.clamp(1, 8);
     let cluster_radius = cluster_radius.clamp(0, 4);
-    let branch_count = branch_count.clamp(0, 6);
-    let branch_depth = branch_depth.clamp(1, 2);
+    let branch_count = branch_count.clamp(0, 12);
+    let branch_depth = branch_depth.clamp(1, 3);
     let branch_start = (branch_start as f64).clamp(0.0, 0.9);
     let branch_spread = (branch_spread as f64).clamp(0.0, 3.0);
     let braid_strands = braid_strands.clamp(1, 5);
+    let braid_spacing = (braid_spacing as f64).clamp(0.0, 8.0);
     let braid_twist = (braid_twist as f64).clamp(0.0, 1.0);
     let canopy = (canopy as f64).clamp(0.0, 1.0);
     let girth_f = girth as f64;
@@ -440,6 +488,7 @@ pub fn generate_flora_deltas(
                     strand as usize,
                     braid_strands as usize,
                     k,
+                    braid_spacing,
                     braid_twist,
                     t1,
                     t2,
@@ -462,8 +511,6 @@ pub fn generate_flora_deltas(
             generate_branches(
                 &spine,
                 normal,
-                t1,
-                t2,
                 branch_count,
                 branch_depth,
                 branch_start,
@@ -524,6 +571,7 @@ pub fn generator_flora_at_screen(
     branch_start: f32,
     branch_spread: f32,
     braid_strands: i32,
+    braid_spacing: f32,
     braid_twist: f32,
     canopy: f32,
     color: u32,
@@ -554,6 +602,7 @@ pub fn generator_flora_at_screen(
         branch_start,
         branch_spread,
         braid_strands,
+        braid_spacing,
         braid_twist,
         canopy,
         color,
@@ -584,6 +633,7 @@ pub fn preview_flora_at_screen(
     branch_start: f32,
     branch_spread: f32,
     braid_strands: i32,
+    braid_spacing: f32,
     braid_twist: f32,
     canopy: f32,
     color: u32,
@@ -626,6 +676,7 @@ pub fn preview_flora_at_screen(
         branch_start,
         branch_spread,
         braid_strands,
+        braid_spacing,
         braid_twist,
         canopy,
         color,

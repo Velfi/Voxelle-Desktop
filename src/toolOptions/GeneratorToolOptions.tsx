@@ -91,6 +91,8 @@ export interface GeneratorToolOptionsProps {
   setFloraBranchSpread: (n: number) => void;
   floraBraidStrands: number;
   setFloraBraidStrands: (n: number) => void;
+  floraBraidSpacing: number;
+  setFloraBraidSpacing: (n: number) => void;
   floraBraidTwist: number;
   setFloraBraidTwist: (n: number) => void;
   floraCanopy: number;
@@ -191,6 +193,8 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
     setFloraBranchSpread,
     floraBraidStrands,
     setFloraBraidStrands,
+    floraBraidSpacing,
+    setFloraBraidSpacing,
     floraBraidTwist,
     setFloraBraidTwist,
     floraCanopy,
@@ -643,6 +647,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                   setFloraBranchStart(p.branchStart);
                   setFloraBranchSpread(p.branchSpread);
                   setFloraBraidStrands(p.braidStrands);
+                  setFloraBraidSpacing(p.braidSpacing);
                   setFloraBraidTwist(p.braidTwist);
                   setFloraCanopy(p.canopy);
                 }
@@ -654,6 +659,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               <option value="contorted">Contorted</option>
               <option value="multi_stem">Multi-stem</option>
               <option value="branched">Branched</option>
+              <option value="tree">Tree</option>
               <option value="braided">Braided</option>
               <option value="tuft">Tuft</option>
               <option value="custom">Custom</option>
@@ -758,7 +764,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               <input
                 type="range"
                 min={0}
-                max={6}
+                max={12}
                 value={floraBranchCount}
                 onChange={(ev) => {
                   setFloraPreset("custom");
@@ -772,7 +778,7 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
               <input
                 type="range"
                 min={1}
-                max={2}
+                max={3}
                 value={floraBranchDepth}
                 onChange={(ev) => {
                   setFloraPreset("custom");
@@ -839,6 +845,21 @@ export function GeneratorToolOptions(props: GeneratorToolOptionsProps) {
                 onChange={(ev) => {
                   setFloraPreset("custom");
                   setFloraBraidTwist(Number(ev.target.value));
+                }}
+                disabled={disabled}
+              />
+            </label>
+            <label className="tool-options-range-label tool-options-range-with-value">
+              <span>Spacing</span>
+              <input
+                type="range"
+                min={0}
+                max={8}
+                step={0.1}
+                value={floraBraidSpacing}
+                onChange={(ev) => {
+                  setFloraPreset("custom");
+                  setFloraBraidSpacing(Number(ev.target.value));
                 }}
                 disabled={disabled}
               />

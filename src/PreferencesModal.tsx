@@ -14,9 +14,12 @@ import {
   type ToneMappingPreference,
   type VoxelleDesktopPreferences,
 } from "./preferences";
+import { useOverlayDismiss } from "./hooks/useOverlayDismiss";
 
 const SECTIONS = [
   { id: "prefs-general", label: "General" },
+  { id: "prefs-controls", label: "Controls" },
+  { id: "prefs-overlays", label: "Overlays" },
   { id: "prefs-collab", label: "Collaboration" },
   { id: "prefs-autosave", label: "Autosave" },
   { id: "prefs-graphics", label: "Graphics" },
@@ -280,6 +283,7 @@ export function PreferencesModal({
     pushAutosaveToRust(next);
   };
 
+  const dismiss = useOverlayDismiss(onClose);
   if (!open) return null;
 
   return (
@@ -289,7 +293,7 @@ export function PreferencesModal({
       aria-modal="true"
       aria-labelledby="preferences-title"
       tabIndex={-1}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
+      {...dismiss}
       onKeyDown={(e) => e.key === "Escape" && onClose()}
     >
       <div className="modal modal--preferences">
@@ -311,49 +315,22 @@ export function PreferencesModal({
           </nav>
           <div className="modal--preferences-scroll" ref={scrollRef} onScroll={onPrefsScroll}>
             <div id="prefs-general" className="prefs-section-anchor" />
-            <label className="prefs-checkbox-label">
-              <input
-                type="checkbox"
-                checked={prefs.showMovementDeltaHint}
-                onChange={(e) => onMovementDelta(e.target.checked)}
-              />
-              Movement hints while drawing
-            </label>
-            <label className="prefs-checkbox-label">
-              <input
-                type="checkbox"
-                checked={prefs.showDragDeltaHint}
-                onChange={(e) => onDragDelta(e.target.checked)}
-              />
-              Selection move hints
-            </label>
-            <label className="prefs-checkbox-label">
-              <input
-                type="checkbox"
-                checked={prefs.gizmoOnTop}
-                onChange={(e) => onGizmoOnTop(e.target.checked)}
-              />
-              Always render gizmos on top
-            </label>
             <label className="prefs-select-label">
-              <span className="prefs-select-label-text">Mouselook sensitivity</span>
-              <input
-                type="number"
-                className="prefs-number-input"
-                min={0.1}
-                max={5}
-                step={0.1}
-                value={prefs.mouselookSensitivity}
-                onChange={(e) => onMouselookSensitivity(e.target.valueAsNumber)}
-              />
-            </label>
-            <label className="prefs-checkbox-label">
-              <input
-                type="checkbox"
-                checked={prefs.showFpsCounter}
-                onChange={(e) => onFps(e.target.checked)}
-              />
-              FPS overlay
+              <span className="prefs-select-label-text">Appearance</span>
+              <select
+                className="prefs-tone-select"
+                value={prefs.appearanceTheme}
+                onChange={(e) => onAppearanceTheme(e.target.value as AppearanceTheme)}
+              >
+                {APPEARANCE_THEME_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+              <span className="prefs-field-hint">
+                Light uses an unbleached paper tone. Auto follows this device.
+              </span>
             </label>
             <label className="prefs-checkbox-label">
               <input
@@ -402,61 +379,65 @@ export function PreferencesModal({
                 <option value="empty">Empty</option>
               </select>
             </label>
+            <hr className="prefs-section-divider" />
+            <h4 id="prefs-controls" className="prefs-section-title">
+              Controls
+            </h4>
             <label className="prefs-select-label">
-              <span className="prefs-select-label-text">Appearance</span>
-              <select
-                className="prefs-tone-select"
-                value={prefs.appearanceTheme}
-                onChange={(e) => onAppearanceTheme(e.target.value as AppearanceTheme)}
-              >
-                {APPEARANCE_THEME_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-              <span className="prefs-field-hint">
-                Light uses an unbleached paper tone. Auto follows this device.
-              </span>
-            </label>
-            <p className="prefs-field-hint prefs-section-hint">
-              Coordinates for the real-time sun position button in the lighting panel.
-            </p>
-            <label className="prefs-select-label">
-              <span className="prefs-select-label-text">Latitude</span>
+              <span className="prefs-select-label-text">Mouselook sensitivity</span>
               <input
                 type="number"
                 className="prefs-number-input"
-                min={-90}
-                max={90}
+                min={0.1}
+                max={5}
                 step={0.1}
-                value={prefs.sunLocationLat}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (!Number.isFinite(v)) return;
-                  const next = { ...prefs, sunLocationLat: Math.max(-90, Math.min(90, v)) };
-                  setPrefs(next);
-                  savePreferences(next);
-                }}
+                value={prefs.mouselookSensitivity}
+                onChange={(e) => onMouselookSensitivity(e.target.valueAsNumber)}
               />
             </label>
-            <label className="prefs-select-label">
-              <span className="prefs-select-label-text">Longitude</span>
+            <label className="prefs-checkbox-label">
               <input
-                type="number"
-                className="prefs-number-input"
-                min={-180}
-                max={180}
-                step={0.1}
-                value={prefs.sunLocationLon}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  if (!Number.isFinite(v)) return;
-                  const next = { ...prefs, sunLocationLon: Math.max(-180, Math.min(180, v)) };
-                  setPrefs(next);
-                  savePreferences(next);
-                }}
+                type="checkbox"
+                checked={prefs.showMovementDeltaHint}
+                onChange={(e) => onMovementDelta(e.target.checked)}
               />
+              Movement hints while drawing
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showDragDeltaHint}
+                onChange={(e) => onDragDelta(e.target.checked)}
+              />
+              Selection move hints
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.gizmoOnTop}
+                onChange={(e) => onGizmoOnTop(e.target.checked)}
+              />
+              Always render gizmos on top
+            </label>
+            <hr className="prefs-section-divider" />
+            <h4 id="prefs-overlays" className="prefs-section-title">
+              Overlays
+            </h4>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showFpsCounter}
+                onChange={(e) => onFps(e.target.checked)}
+              />
+              FPS overlay
+            </label>
+            <label className="prefs-checkbox-label">
+              <input
+                type="checkbox"
+                checked={prefs.showPingLatency}
+                onChange={(e) => onPingLatency(e.target.checked)}
+              />
+              Ping latency overlay
             </label>
             <hr className="prefs-section-divider" />
             <h4 id="prefs-collab" className="prefs-section-title">
@@ -510,6 +491,10 @@ export function PreferencesModal({
             </label>
             <div className="prefs-select-label">
               <span className="prefs-select-label-text" />
+              <AvatarPreview open={open} avatarName={prefs.collabAvatarName} />
+            </div>
+            <div className="prefs-select-label">
+              <span className="prefs-select-label-text" />
               <button
                 className="prefs-action-button"
                 onClick={() => void invoke("avatar_open_user_folder").catch(() => {})}
@@ -518,10 +503,10 @@ export function PreferencesModal({
               </button>
             </div>
             <p className="prefs-field-hint">
-              To create an avatar: build your character in Voxelle, then use{" "}
-              <strong>File › Save As</strong> to save it as a <code>.voxelle</code> file. Drop that
-              file into the avatars folder and reopen Preferences to see it here. Files must be
-              under 64 KB.
+              To create an avatar: build your character in Voxelle (no bigger than a 15×15×15
+              cube), then use <strong>File › Save As</strong> to save it as a{" "}
+              <code>.voxelle</code> file. Drop that file into the avatars folder and reopen
+              Preferences to see it here.
             </p>
             {collabHosting ? (
               <p className="prefs-field-hint prefs-section-hint">
@@ -554,14 +539,6 @@ export function PreferencesModal({
                 onChange={(e) => onEnableUpnp(e.target.checked)}
               />
               Internet guests (UPnP)
-            </label>
-            <label className="prefs-checkbox-label">
-              <input
-                type="checkbox"
-                checked={prefs.showPingLatency}
-                onChange={(e) => onPingLatency(e.target.checked)}
-              />
-              Ping latency overlay
             </label>
             <hr className="prefs-section-divider" />
             <h4 id="prefs-autosave" className="prefs-section-title">
@@ -604,6 +581,13 @@ export function PreferencesModal({
               />
               <span className="prefs-field-hint">Per project; oldest drops first.</span>
             </label>
+            <hr className="prefs-section-divider" />
+            <h4 id="prefs-graphics" className="prefs-section-title">
+              Graphics
+            </h4>
+            <p className="prefs-field-hint prefs-section-hint">
+              Changing these settings rebuilds the scene mesh.
+            </p>
             <label className="prefs-select-label">
               <span className="prefs-select-label-text">Display look</span>
               <select
@@ -618,13 +602,6 @@ export function PreferencesModal({
                 ))}
               </select>
             </label>
-            <hr className="prefs-section-divider" />
-            <h4 id="prefs-graphics" className="prefs-section-title">
-              Graphics
-            </h4>
-            <p className="prefs-field-hint prefs-section-hint">
-              Changing these settings rebuilds the scene mesh.
-            </p>
             <label className="prefs-checkbox-label">
               <input
                 type="checkbox"
@@ -670,6 +647,45 @@ export function PreferencesModal({
               Extended dynamic range — highlights can exceed SDR white. Requires an HDR-capable
               display.
             </p>
+            <p className="prefs-field-hint prefs-section-hint">
+              Coordinates for the real-time sun position button in the lighting panel.
+            </p>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Latitude</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={-90}
+                max={90}
+                step={0.1}
+                value={prefs.sunLocationLat}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  const next = { ...prefs, sunLocationLat: Math.max(-90, Math.min(90, v)) };
+                  setPrefs(next);
+                  savePreferences(next);
+                }}
+              />
+            </label>
+            <label className="prefs-select-label">
+              <span className="prefs-select-label-text">Longitude</span>
+              <input
+                type="number"
+                className="prefs-number-input"
+                min={-180}
+                max={180}
+                step={0.1}
+                value={prefs.sunLocationLon}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (!Number.isFinite(v)) return;
+                  const next = { ...prefs, sunLocationLon: Math.max(-180, Math.min(180, v)) };
+                  setPrefs(next);
+                  savePreferences(next);
+                }}
+              />
+            </label>
           </div>
         </div>
         <div className="modal-buttons modal--preferences-footer">
@@ -678,6 +694,69 @@ export function PreferencesModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Static 3D snapshot of the selected avatar.
+ *
+ * When the avatar selection changes, the backend renders a one-shot 256×256 RGBA
+ * image (via `avatar_preview_snapshot`) and returns the bytes. We blit them into
+ * a <canvas>. Drawing inside the DOM avoids the opaque-modal compositing problem
+ * a swapchain overlay would have.
+ */
+function AvatarPreview({ open, avatarName }: { open: boolean; avatarName: string }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const canvas = canvasRef.current;
+    if (avatarName === "") {
+      if (canvas) {
+        const ctx = canvas.getContext("2d");
+        ctx?.clearRect(0, 0, canvas.width, canvas.height);
+      }
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = (await invoke("avatar_preview_snapshot", { avatarName })) as [
+          number,
+          number,
+          number[],
+        ];
+        if (cancelled) return;
+        const [w, h, bytes] = result;
+        const c = canvasRef.current;
+        if (!c || w === 0 || h === 0) return;
+        c.width = w;
+        c.height = h;
+        const ctx = c.getContext("2d");
+        if (!ctx) return;
+        const pixels = new Uint8ClampedArray(bytes);
+        const image = new ImageData(pixels, w, h);
+        ctx.clearRect(0, 0, w, h);
+        ctx.putImageData(image, 0, 0);
+      } catch {
+        // Ignore — empty preview on failure.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, avatarName]);
+
+  return (
+    <div className="prefs-avatar-preview" aria-label="Avatar preview">
+      {avatarName === "" ? (
+        <span className="prefs-avatar-preview-empty">Pick an avatar to preview it</span>
+      ) : (
+        <canvas ref={canvasRef} className="prefs-avatar-preview-canvas" />
+      )}
     </div>
   );
 }

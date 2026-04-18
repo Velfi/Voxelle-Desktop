@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -41,8 +41,6 @@ import {
   type StrokeDrawStyle,
   type StrokeFamilyVariant,
 } from "./drawToolModel";
-import { DrawPaneSelectionToolOptions } from "./toolOptions/DrawPaneSelectionToolOptions";
-import { GeneratorToolOptions } from "./toolOptions/GeneratorToolOptions";
 import { StatusBar } from "./StatusBar";
 import { MATERIAL_BUILTIN_PALETTE_HEX } from "./materialBuiltinPalette";
 import { ViewportCameraHud } from "./ViewportCameraHud";
@@ -52,7 +50,6 @@ import { ExtrudeGizmo, type ExtrudeGizmoRef } from "./ExtrudeGizmo";
 import { useGamepad } from "./useGamepad";
 import { toolSliceToMode, type SubOptionChoice } from "./gamepadRadialMenuData";
 import { ToolsSidebar, PaletteSwatches } from "./ToolsSidebar";
-import { AppModals } from "./AppModals";
 import { GameHUD } from "./GameHUD";
 import { InspectorSidebar } from "./InspectorSidebar";
 import { ViewportHUD } from "./ViewportHUD";
@@ -107,6 +104,21 @@ const VOXELLE_DESKTOP_VERSION = packageJson.version;
 
 /** Avoid duplicate `load_start_screen_logo` in React Strict Mode (dev). */
 let startScreenLogoInvokeSent = false;
+
+const DrawPaneSelectionToolOptions = lazy(async () => {
+  const mod = await import("./toolOptions/DrawPaneSelectionToolOptions");
+  return { default: mod.DrawPaneSelectionToolOptions };
+});
+
+const GeneratorToolOptions = lazy(async () => {
+  const mod = await import("./toolOptions/GeneratorToolOptions");
+  return { default: mod.GeneratorToolOptions };
+});
+
+const AppModals = lazy(async () => {
+  const mod = await import("./AppModals");
+  return { default: mod.AppModals };
+});
 
 function App() {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -376,6 +388,7 @@ function App() {
     floraBranchStart,
     floraBranchSpread,
     floraBraidStrands,
+    floraBraidSpacing,
     floraBraidTwist,
     floraCanopy,
     handleClothPinClick,
@@ -1499,6 +1512,12 @@ function App() {
     if (interactionMode === "selectExtrude") return;
     void invoke("extrude_recompute_preview", {
       args: {
+        color: activeColorRef.current,
+        material: activeMaterialRef.current,
+        brushRadius: sculptBrushRadiusRef.current,
+        brushShape: sculptBrushShapeToRust(sculptBrushShapeUiRef.current),
+        brushStrength: sculptBrushStrengthRef.current,
+        brushFalloff: sculptBrushFalloffRef.current,
         extrudeProfile: extrudeProfileRef.current,
         extrudeEndCap: extrudeEndCapRef.current,
         extrudeTaper: extrudeTaperRef.current,
@@ -1509,6 +1528,12 @@ function App() {
   }, [
     extrudePhase.active,
     interactionMode,
+    activeColor,
+    activeMaterial,
+    sculptBrushRadius,
+    sculptBrushShapeUi,
+    sculptBrushStrength,
+    sculptBrushFalloff,
     extrudeProfile,
     extrudeEndCap,
     extrudeTaper,
@@ -1726,6 +1751,7 @@ function App() {
             generatorFloraBranchStart: floraBranchStart,
             generatorFloraBranchSpread: floraBranchSpread,
             generatorFloraBraidStrands: floraBraidStrands,
+            generatorFloraBraidSpacing: floraBraidSpacing,
             generatorFloraBraidTwist: floraBraidTwist,
             generatorFloraCanopy: floraCanopy,
             // Shape
@@ -2329,6 +2355,20 @@ function App() {
     rockSinkAmount,
     grassDensity,
     grassMaxHeight,
+    floraHeight,
+    floraGirth,
+    floraWobble,
+    floraTaper,
+    floraStemCount,
+    floraClusterRadius,
+    floraBranchCount,
+    floraBranchDepth,
+    floraBranchStart,
+    floraBranchSpread,
+    floraBraidStrands,
+    floraBraidSpacing,
+    floraBraidTwist,
+    floraCanopy,
     roofPins,
     roofStyle,
     roofHeight,
@@ -3646,53 +3686,55 @@ function App() {
                   ) : null}
                   {showDrawPaneToolMatrix ? (
                     <>
-                      <DrawPaneSelectionToolOptions
-                        loading={loading}
-                        workBusy={workBusy}
-                        selectionMethod={selectionMethod}
-                        drawStrokeMode={drawStrokeMode}
-                        setDrawStrokeMode={setDrawStrokeMode}
-                        strokeDrawStyle={strokeDrawStyle}
-                        setStrokeDrawStyle={setStrokeDrawStyle}
-                        strokeFamilyVariant={strokeFamilyVariant}
-                        setStrokeFamilyVariant={setStrokeFamilyVariant}
-                        planeAxis={planeAxis}
-                        setPlaneAxis={setPlaneAxis}
-                        fillSelectDiagonals={fillSelectDiagonals}
-                        setFillSelectDiagonals={setFillSelectDiagonals}
-                        fillRespectsColor={fillRespectsColor}
-                        setFillRespectsColor={setFillRespectsColor}
-                        sprayDensity={sprayDensity}
-                        setSprayDensity={setSprayDensity}
-                        brushShape={brushShape}
-                        setBrushShape={setBrushShape}
-                        brushClipBottomHalf={brushClipBottomHalf}
-                        setBrushClipBottomHalf={setBrushClipBottomHalf}
-                        brushRadius={brushRadius}
-                        setBrushRadius={setBrushRadius}
-                        selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
-                        setSelectionStrokeSnapToSurface={setSelectionStrokeSnapToSurface}
-                        selectionStrokeAxisAlign={selectionStrokeAxisAlign}
-                        setSelectionStrokeAxisAlign={setSelectionStrokeAxisAlign}
-                        surfacePlaneHollow={surfacePlaneHollow}
-                        setSurfacePlaneHollow={setSurfacePlaneHollow}
-                        sprayConstrainToPlane={sprayConstrainToPlane}
-                        setSprayConstrainToPlane={setSprayConstrainToPlane}
-                        spraySizeRange={spraySizeRange}
-                        setSpraySizeRange={setSpraySizeRange}
-                        sprayScatter={sprayScatter}
-                        setSprayScatter={setSprayScatter}
-                        sprayRadiusMin={sprayRadiusMin}
-                        setSprayRadiusMin={setSprayRadiusMin}
-                        sprayRadiusMax={sprayRadiusMax}
-                        setSprayRadiusMax={setSprayRadiusMax}
-                        sprayBrushShape={sprayBrushShape}
-                        setSprayBrushShape={setSprayBrushShape}
-                        sprayConstrainToPlaneRef={sprayConstrainToPlaneRef_}
-                        setSprayConstrainToPlaneRef={setSprayConstrainToPlaneRef_}
-                        fillConstrainToPlane={fillConstrainToPlane}
-                        setFillConstrainToPlane={setFillConstrainToPlane}
-                      />
+                      <Suspense fallback={null}>
+                        <DrawPaneSelectionToolOptions
+                          loading={loading}
+                          workBusy={workBusy}
+                          selectionMethod={selectionMethod}
+                          drawStrokeMode={drawStrokeMode}
+                          setDrawStrokeMode={setDrawStrokeMode}
+                          strokeDrawStyle={strokeDrawStyle}
+                          setStrokeDrawStyle={setStrokeDrawStyle}
+                          strokeFamilyVariant={strokeFamilyVariant}
+                          setStrokeFamilyVariant={setStrokeFamilyVariant}
+                          planeAxis={planeAxis}
+                          setPlaneAxis={setPlaneAxis}
+                          fillSelectDiagonals={fillSelectDiagonals}
+                          setFillSelectDiagonals={setFillSelectDiagonals}
+                          fillRespectsColor={fillRespectsColor}
+                          setFillRespectsColor={setFillRespectsColor}
+                          sprayDensity={sprayDensity}
+                          setSprayDensity={setSprayDensity}
+                          brushShape={brushShape}
+                          setBrushShape={setBrushShape}
+                          brushClipBottomHalf={brushClipBottomHalf}
+                          setBrushClipBottomHalf={setBrushClipBottomHalf}
+                          brushRadius={brushRadius}
+                          setBrushRadius={setBrushRadius}
+                          selectionStrokeSnapToSurface={selectionStrokeSnapToSurface}
+                          setSelectionStrokeSnapToSurface={setSelectionStrokeSnapToSurface}
+                          selectionStrokeAxisAlign={selectionStrokeAxisAlign}
+                          setSelectionStrokeAxisAlign={setSelectionStrokeAxisAlign}
+                          surfacePlaneHollow={surfacePlaneHollow}
+                          setSurfacePlaneHollow={setSurfacePlaneHollow}
+                          sprayConstrainToPlane={sprayConstrainToPlane}
+                          setSprayConstrainToPlane={setSprayConstrainToPlane}
+                          spraySizeRange={spraySizeRange}
+                          setSpraySizeRange={setSpraySizeRange}
+                          sprayScatter={sprayScatter}
+                          setSprayScatter={setSprayScatter}
+                          sprayRadiusMin={sprayRadiusMin}
+                          setSprayRadiusMin={setSprayRadiusMin}
+                          sprayRadiusMax={sprayRadiusMax}
+                          setSprayRadiusMax={setSprayRadiusMax}
+                          sprayBrushShape={sprayBrushShape}
+                          setSprayBrushShape={setSprayBrushShape}
+                          sprayConstrainToPlaneRef={sprayConstrainToPlaneRef_}
+                          setSprayConstrainToPlaneRef={setSprayConstrainToPlaneRef_}
+                          fillConstrainToPlane={fillConstrainToPlane}
+                          setFillConstrainToPlane={setFillConstrainToPlane}
+                        />
+                      </Suspense>
                     </>
                   ) : null}
                   {(toolsPane === "draw" || toolsPane === "select") &&
@@ -4503,11 +4545,13 @@ function App() {
                     </div>
                   ) : null}
                   {toolsPane === "generators" ? (
-                    <GeneratorToolOptions
-                      loading={loading}
-                      workBusy={workBusy}
-                      {...generatorToolOptionsModel}
-                    />
+                    <Suspense fallback={null}>
+                      <GeneratorToolOptions
+                        loading={loading}
+                        workBusy={workBusy}
+                        {...generatorToolOptionsModel}
+                      />
+                    </Suspense>
                   ) : null}
                   {toolsPane === "squishy" && interactionMode === "squishy" ? (
                     <div className="tool-options-section">
@@ -5853,57 +5897,59 @@ function App() {
             showPingLatency={showPingLatency}
             pingMs={pingMs}
           />
-          <AppModals
-            leaveConfirmOpen={leaveConfirmOpen}
-            setLeaveConfirmOpen={setLeaveConfirmOpen}
-            hostWsUrl={hostWsUrl}
-            leaveSession={leaveSession}
-            joinModalOpen={joinModalOpen}
-            setJoinModalOpen={setJoinModalOpen}
-            joinUrl={joinUrl}
-            setJoinUrl={setJoinUrl}
-            joinSession={joinSession}
-            collabActive={collabActive}
-            collabJoinPending={collabJoinPending}
-            loading={loading}
-            loadProgress={loadProgress}
-            loadPhase={loadPhase}
-            pathLabel={pathLabel}
-            cancelJoin={cancelJoin}
-            stampBookOpen={stampBookOpen}
-            setStampBookOpen={setStampBookOpen}
-            selectionCount={selectionCount}
-            setStampBookPatternActive={setStampBookPatternActive}
-            setInteractionMode={setInteractionMode}
-            pendingFillConfirm={pendingFillConfirm}
-            preferencesOpen={preferencesOpen}
-            setPreferencesOpen={setPreferencesOpen}
-            setShowFpsCounter={setShowFpsCounter}
-            setShowPingLatency={setShowPingLatency}
-            setPrefsEnableUpnp={setPrefsEnableUpnp}
-            setDisplayName={setDisplayName}
-            setAccentColor={setAccentColor}
-            setHostPort={setHostPort}
-            rotateDialogOpen={rotateDialogOpen}
-            setRotateDialogOpen={setRotateDialogOpen}
-            rotateDialogAxis={rotateDialogAxis}
-            setRotateDialogAxis={setRotateDialogAxis}
-            rotateDialogDegrees={rotateDialogDegrees}
-            setRotateDialogDegrees={setRotateDialogDegrees}
-            scaleDialogOpen={scaleDialogOpen}
-            setScaleDialogOpen={setScaleDialogOpen}
-            scaleDialogFactor={scaleDialogFactor}
-            setScaleDialogFactor={setScaleDialogFactor}
-            newProjectOpen={newProjectOpen}
-            setNewProjectOpen={setNewProjectOpen}
-            newGridSize={newGridSize}
-            setNewGridSize={setNewGridSize}
-            newGridShape={newGridShape}
-            setNewGridShape={setNewGridShape}
-            createNewProject={createNewProject}
-            pointerTestOpen={pointerTestOpen}
-            setPointerTestOpen={setPointerTestOpen}
-          />
+          <Suspense fallback={null}>
+            <AppModals
+              leaveConfirmOpen={leaveConfirmOpen}
+              setLeaveConfirmOpen={setLeaveConfirmOpen}
+              hostWsUrl={hostWsUrl}
+              leaveSession={leaveSession}
+              joinModalOpen={joinModalOpen}
+              setJoinModalOpen={setJoinModalOpen}
+              joinUrl={joinUrl}
+              setJoinUrl={setJoinUrl}
+              joinSession={joinSession}
+              collabActive={collabActive}
+              collabJoinPending={collabJoinPending}
+              loading={loading}
+              loadProgress={loadProgress}
+              loadPhase={loadPhase}
+              pathLabel={pathLabel}
+              cancelJoin={cancelJoin}
+              stampBookOpen={stampBookOpen}
+              setStampBookOpen={setStampBookOpen}
+              selectionCount={selectionCount}
+              setStampBookPatternActive={setStampBookPatternActive}
+              setInteractionMode={setInteractionMode}
+              pendingFillConfirm={pendingFillConfirm}
+              preferencesOpen={preferencesOpen}
+              setPreferencesOpen={setPreferencesOpen}
+              setShowFpsCounter={setShowFpsCounter}
+              setShowPingLatency={setShowPingLatency}
+              setPrefsEnableUpnp={setPrefsEnableUpnp}
+              setDisplayName={setDisplayName}
+              setAccentColor={setAccentColor}
+              setHostPort={setHostPort}
+              rotateDialogOpen={rotateDialogOpen}
+              setRotateDialogOpen={setRotateDialogOpen}
+              rotateDialogAxis={rotateDialogAxis}
+              setRotateDialogAxis={setRotateDialogAxis}
+              rotateDialogDegrees={rotateDialogDegrees}
+              setRotateDialogDegrees={setRotateDialogDegrees}
+              scaleDialogOpen={scaleDialogOpen}
+              setScaleDialogOpen={setScaleDialogOpen}
+              scaleDialogFactor={scaleDialogFactor}
+              setScaleDialogFactor={setScaleDialogFactor}
+              newProjectOpen={newProjectOpen}
+              setNewProjectOpen={setNewProjectOpen}
+              newGridSize={newGridSize}
+              setNewGridSize={setNewGridSize}
+              newGridShape={newGridShape}
+              setNewGridShape={setNewGridShape}
+              createNewProject={createNewProject}
+              pointerTestOpen={pointerTestOpen}
+              setPointerTestOpen={setPointerTestOpen}
+            />
+          </Suspense>
 
           {/* ── Start-screen mascot overlays ─────────────────────────────────────
            Invisible click-detection div positioned over the GPU-rendered seagull. */}

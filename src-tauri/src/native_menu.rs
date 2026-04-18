@@ -312,6 +312,13 @@ pub(crate) fn install_app_menu(
         true,
         None::<&str>,
     )?;
+    let debug_force_rebuild = MenuItem::with_id(
+        app,
+        "debug_force_rebuild",
+        "Force total mesh rebuild",
+        true,
+        None::<&str>,
+    )?;
     let debug_menu = Submenu::with_items(
         app,
         "Debug",
@@ -324,6 +331,7 @@ pub(crate) fn install_app_menu(
             &debug_clear_autosaves_item,
             &debug_test_crash,
             &debug_pointer_test,
+            &debug_force_rebuild,
         ],
     )?;
     let sep = PredefinedMenuItem::separator(app)?;

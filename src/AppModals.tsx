@@ -8,6 +8,7 @@ import type { StampBookEntryTuple } from "./stampBookStorage";
 import type { StartShape } from "./preferences";
 import { MAX_GRID_SIZE } from "./constants";
 import type { InteractionMode } from "./types";
+import { useOverlayDismiss } from "./hooks/useOverlayDismiss";
 
 interface Props {
   // Leave-confirm dialog
@@ -132,11 +133,15 @@ export function AppModals({
   setPointerTestOpen,
 }: Props) {
   const transformScopeLabel = selectionCount > 0 ? "selection" : "project";
+  const leaveConfirmDismiss = useOverlayDismiss(() => setLeaveConfirmOpen(false));
+  const rotateDismiss = useOverlayDismiss(() => setRotateDialogOpen(false));
+  const scaleDismiss = useOverlayDismiss(() => setScaleDialogOpen(false));
+  const newProjectDismiss = useOverlayDismiss(() => setNewProjectOpen(false));
 
   return (
     <>
       {leaveConfirmOpen && (
-        <div className="modal-overlay" onClick={() => setLeaveConfirmOpen(false)}>
+        <div className="modal-overlay" {...leaveConfirmDismiss}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <h3>{hostWsUrl ? "End session?" : "Leave session?"}</h3>
             <p style={{ margin: "0 0 0.75rem", fontSize: "0.875rem" }}>
@@ -241,7 +246,7 @@ export function AppModals({
           role="dialog"
           aria-modal="true"
           tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setRotateDialogOpen(false)}
+          {...rotateDismiss}
           onKeyDown={(e) => e.key === "Escape" && setRotateDialogOpen(false)}
         >
           <div className="modal">
@@ -295,7 +300,7 @@ export function AppModals({
           role="dialog"
           aria-modal="true"
           tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setScaleDialogOpen(false)}
+          {...scaleDismiss}
           onKeyDown={(e) => e.key === "Escape" && setScaleDialogOpen(false)}
         >
           <div className="modal">
@@ -338,7 +343,7 @@ export function AppModals({
           role="dialog"
           aria-modal="true"
           tabIndex={-1}
-          onClick={(e) => e.target === e.currentTarget && setNewProjectOpen(false)}
+          {...newProjectDismiss}
           onKeyDown={(e) => e.key === "Escape" && setNewProjectOpen(false)}
         >
           <div className="modal">

@@ -255,6 +255,18 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
     void gestureRef.current;
   }
 
+  function generatorPreviewPhaseActive() {
+    return (
+      rocksPhase.active ||
+      grassPhase.active ||
+      ropePhase.active ||
+      clothPhase.active ||
+      ashlarPhase.active ||
+      floraPhase.active ||
+      shapePhase.active
+    );
+  }
+
   // ---- Private helper: resetPointerGesture ----
   function resetPointerGesture(reason: string, e?: React.PointerEvent) {
     if (e) {
@@ -933,11 +945,11 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       mode: gestureMode,
     };
     if (gestureMode === "camera") {
-      // Bone pose and squishy modes keep their session previews visible during orbit.
+      // Session-style phased previews keep their locked placement visible during orbit.
       const bonePoseOrbit =
         interactionModeRef.current === "bone" && bonePhase.ref.current?.phase === "pose";
       const squishyOrbit = interactionModeRef.current === "squishy";
-      if (bonePoseOrbit || squishyOrbit) {
+      if (bonePoseOrbit || squishyOrbit || generatorPreviewPhaseActive()) {
         // Just invalidate the cache so it recomputes fresh on the first hover
         // move after orbit ends, but don't send "navigate" to clear the preview.
         lastSyncPreviewNxRef.current = NaN;
@@ -2260,7 +2272,8 @@ export function useViewportPointer(localsRef: React.MutableRefObject<ViewportPoi
       cylinderPhase.ref.current !== null ||
       extrudePhase.ref.current !== null ||
       ropePhase.ref.current !== null ||
-      clothPhase.ref.current !== null;
+      clothPhase.ref.current !== null ||
+      generatorPreviewPhaseActive();
     if (!anyPhaseActive && !getViewportSceneBehavior(im).preservePreviewOnPointerLeave) {
       clearPreview();
     }

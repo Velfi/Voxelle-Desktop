@@ -2,6 +2,10 @@
 
 Guidance for humans and coding agents working in this repo. This app is desktop-only product work.
 
+## Guidelines
+
+- Agents should choose the most robust solution, even if it's more code.
+
 ## Topics
 
 - [Main UI](docs/agents/ui-layout.md) — current sidebar/HUD/status-bar responsibilities and long-wait UX rules

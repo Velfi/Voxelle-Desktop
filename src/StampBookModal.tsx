@@ -13,6 +13,7 @@ import {
   type StampBookEntryTuple,
   type StampBookRecord,
 } from "./stampBookStorage";
+import { useOverlayDismiss } from "./hooks/useOverlayDismiss";
 
 type Tab = "manage" | "save" | "share";
 
@@ -164,6 +165,7 @@ export function StampBookModal({ open, onClose, selectionCount, onUseStamp }: Pr
     }
   }
 
+  const dismiss = useOverlayDismiss(onClose);
   if (!open) return null;
 
   return (
@@ -173,7 +175,7 @@ export function StampBookModal({ open, onClose, selectionCount, onUseStamp }: Pr
       aria-modal="true"
       aria-label="Stamp book"
       tabIndex={-1}
-      onClick={(e) => e.target === e.currentTarget && onClose()}
+      {...dismiss}
       onKeyDown={(e) => e.key === "Escape" && onClose()}
     >
       <div className="modal modal--stamp-book">

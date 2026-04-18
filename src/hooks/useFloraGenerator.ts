@@ -40,6 +40,8 @@ export interface FloraGeneratorState {
   setFloraBranchSpread: React.Dispatch<React.SetStateAction<number>>;
   floraBraidStrands: number;
   setFloraBraidStrands: React.Dispatch<React.SetStateAction<number>>;
+  floraBraidSpacing: number;
+  setFloraBraidSpacing: React.Dispatch<React.SetStateAction<number>>;
   floraBraidTwist: number;
   setFloraBraidTwist: React.Dispatch<React.SetStateAction<number>>;
   floraCanopy: number;
@@ -63,6 +65,7 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
   const [floraBranchStart, setFloraBranchStart] = useState(0.5);
   const [floraBranchSpread, setFloraBranchSpread] = useState(1.0);
   const [floraBraidStrands, setFloraBraidStrands] = useState(1);
+  const [floraBraidSpacing, setFloraBraidSpacing] = useState(1);
   const [floraBraidTwist, setFloraBraidTwist] = useState(0.35);
   const [floraCanopy, setFloraCanopy] = useState(0.18);
 
@@ -70,7 +73,6 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
   const floraPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
   function placeFloraAtScreen(nx: number, ny: number, seed = floraPreviewSeedRef.current) {
-    void invoke("unlock_generator_preview_camera").catch(() => {});
     void invoke("generator_flora_at_screen", {
       args: {
         nx,
@@ -87,13 +89,18 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
         branchStart: floraBranchStart,
         branchSpread: floraBranchSpread,
         braidStrands: floraBraidStrands,
+        braidSpacing: floraBraidSpacing,
         braidTwist: floraBraidTwist,
         canopy: floraCanopy,
         color: ctx.activeColorRef.current,
         material: ctx.activeMaterialRef.current,
         mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
       },
-    }).catch(() => {});
+    })
+      .catch(() => {})
+      .finally(() => {
+        void invoke("unlock_generator_preview_camera").catch(() => {});
+      });
     floraPreviewSeedRef.current = (Math.random() * 1e9) | 0;
   }
 
@@ -138,6 +145,8 @@ export function useFloraGenerator(ctx: FloraGeneratorContext): FloraGeneratorSta
     setFloraBranchSpread,
     floraBraidStrands,
     setFloraBraidStrands,
+    floraBraidSpacing,
+    setFloraBraidSpacing,
     floraBraidTwist,
     setFloraBraidTwist,
     floraCanopy,

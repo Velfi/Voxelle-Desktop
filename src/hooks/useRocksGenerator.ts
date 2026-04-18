@@ -54,7 +54,6 @@ export function useRocksGenerator(ctx: RocksGeneratorContext): RocksGeneratorSta
   const rockPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
   function placeRocksAtScreen(nx: number, ny: number, seed = rockPreviewSeedRef.current) {
-    void invoke("unlock_generator_preview_camera").catch(() => {});
     void invoke("generator_rocks_at_screen", {
       args: {
         nx,
@@ -75,7 +74,11 @@ export function useRocksGenerator(ctx: RocksGeneratorContext): RocksGeneratorSta
               : 0,
         sinkAmount: rockSinkAmountRef.current,
       },
-    }).catch(() => {});
+    })
+      .catch(() => {})
+      .finally(() => {
+        void invoke("unlock_generator_preview_camera").catch(() => {});
+      });
     rockPreviewSeedRef.current = (Math.random() * 1e9) | 0;
   }
 

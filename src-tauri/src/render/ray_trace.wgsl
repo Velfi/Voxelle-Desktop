@@ -425,31 +425,88 @@ fn tangent_basis(n: vec3<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(t, b, n);
 }
 
+/// March a shadow ray toward the sun, returning per-channel transmittance.
+/// Accumulates Beer-Lambert absorption from each glass/water voxel crossed,
+/// using the voxel's RGB colour as per-channel transmittance per unit length
+/// (coloured glass absorbs its complementary channels — e.g. red glass lets
+/// red through and absorbs green/blue). Opaque hit → vec3(0).
+fn shadow_ray_transmittance(origin: vec3<f32>, dir: vec3<f32>, max_dist: f32, max_steps: i32) -> vec3<f32> {
+    let EPS = 1e-7;
+    let dx = select(dir.x, select(-EPS, EPS, dir.x >= 0.0), abs(dir.x) < EPS);
+    let dy = select(dir.y, select(-EPS, EPS, dir.y >= 0.0), abs(dir.y) < EPS);
+    let dz = select(dir.z, select(-EPS, EPS, dir.z >= 0.0), abs(dir.z) < EPS);
+    let step = vec3<i32>(i32(sign(dx)), i32(sign(dy)), i32(sign(dz)));
+    let inv  = vec3<f32>(1.0 / dx, 1.0 / dy, 1.0 / dz);
+    let tD   = abs(inv);
+    var cell = vec3<i32>(i32(floor(origin.x + 0.5)), i32(floor(origin.y + 0.5)), i32(floor(origin.z + 0.5)));
+    var tMax = vec3<f32>(
+        select((f32(cell.x) - 0.5 - origin.x) * inv.x, (f32(cell.x) + 0.5 - origin.x) * inv.x, dx > 0.0),
+        select((f32(cell.y) - 0.5 - origin.y) * inv.y, (f32(cell.y) + 0.5 - origin.y) * inv.y, dy > 0.0),
+        select((f32(cell.z) - 0.5 - origin.z) * inv.z, (f32(cell.z) + 0.5 - origin.z) * inv.z, dz > 0.0),
+    );
+    var t = 0.0;
+    var tint = vec3<f32>(1.0);
+    // Glass/water absorption scale — how many voxels to halve transmittance.
+    // Glass is denser; water barely tints.
+    let k_glass = 0.55;   // optical depth per voxel of glass at full saturation
+    let k_water = 0.06;   // optical depth per voxel of water
+    for (var i = 0; i < max_steps; i++) {
+        if (t >= max_dist) { break; }
+        let t_next = min(tMax.x, min(tMax.y, tMax.z));
+        let packed = brick_fetch(cell);
+        if (is_occupied(packed)) {
+            let mat = unpack_mat(packed);
+            if (mat == MAT_GLASS || mat == MAT_WATER) {
+                let seg = min(t_next, max_dist) - t;
+                let c   = unpack_rgb(packed);
+                let k   = select(k_glass, k_water, mat == MAT_WATER);
+                // Per-channel optical depth: saturated channels absorb, coloured
+                // channels transmit.  depth = (1 - c) * k * distance.
+                let depth = (vec3<f32>(1.0) - c) * k * seg;
+                tint *= exp(-depth);
+                if (max(tint.x, max(tint.y, tint.z)) < 0.003) { return vec3<f32>(0.0); }
+            } else {
+                return vec3<f32>(0.0);  // opaque occluder
+            }
+        }
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) { t = tMax.x; tMax.x += tD.x; cell.x += step.x; }
+            else                 { t = tMax.z; tMax.z += tD.z; cell.z += step.z; }
+        } else {
+            if (tMax.y < tMax.z) { t = tMax.y; tMax.y += tD.y; cell.y += step.y; }
+            else                 { t = tMax.z; tMax.z += tD.z; cell.z += step.z; }
+        }
+    }
+    return tint;
+}
+
 /// Soft-shadow:  Vogel-disk shadow rays toward the sun.
-/// Returns 1.0 (fully lit) down to 0.0 (fully shadowed).
-fn soft_shadow(world_pos: vec3<f32>, n: vec3<f32>, seed: u32) -> f32 {
-    if (g.light_params.z < 0.5) { return 1.0; }  // shadows disabled
+/// Returns per-channel sunlight transmittance — `vec3(1)` fully lit, `vec3(0)`
+/// fully shadowed by an opaque occluder, and a tinted value when only glass
+/// or water lies between the surface and the sun.
+fn soft_shadow(world_pos: vec3<f32>, n: vec3<f32>, seed: u32) -> vec3<f32> {
+    if (g.light_params.z < 0.5) { return vec3<f32>(1.0); }  // shadows disabled
 
     let sun_dir = normalize(g.light_dir.xyz);
     let ndl     = dot(n, sun_dir);
-    if (ndl <= 0.0) { return 0.0; }
+    if (ndl <= 0.0) { return vec3<f32>(0.0); }
 
     // Cone half-angle ≈ 4°.  In fast-preview mode use a single hard shadow ray.
     let TAN_HALF = 0.07;
     let NUM_SAMPLES = select(4u, 1u, rt.fast_preview != 0u);
     let phi = rand_f(seed ^ 0xF1E2D3C4u) * 6.28318;
+    let max_steps = select(512, 128, rt.fast_preview != 0u);
 
     let basis = tangent_basis(sun_dir);
-    var lit   = 0.0;
+    var acc   = vec3<f32>(0.0);
 
     for (var i = 0u; i < NUM_SAMPLES; i++) {
         let d2    = vogel_disk(i, NUM_SAMPLES, phi);
         let jit   = normalize(sun_dir + (basis[0] * d2.x + basis[1] * d2.y) * TAN_HALF);
         let bias  = world_pos + n * 0.06;
-        let hit   = dda(bias, jit, 256.0, true, select(512, 128, rt.fast_preview != 0u));
-        if (!hit.hit) { lit += 1.0; }
+        acc += shadow_ray_transmittance(bias, jit, 256.0, max_steps);
     }
-    return lit / f32(NUM_SAMPLES);
+    return acc / f32(NUM_SAMPLES);
 }
 
 /// Irradiance from nearby glow voxels onto a surface point.
@@ -573,11 +630,11 @@ fn shade_secondary(origin: vec3<f32>, dir: vec3<f32>, seed: u32) -> vec3<f32> {
             } else {
                 refr_col = sky_color(refr_dir);
             }
-            let tint_strength = select(0.25, 0.65, is_water);
-            let absorb        = exp(-hit2.medium_dist_glass / 2.5)
-                              * exp(-hit2.medium_dist_water / 24.0);
-            let tint          = mix(vec3<f32>(1.0), color, tint_strength);
-            refr_col         *= absorb * tint;
+            // Per-channel Beer-Lambert — see shade_transmissive for derivation.
+            let k     = select(0.55, 0.06, is_water);
+            let dist  = select(hit2.medium_dist_glass, hit2.medium_dist_water, is_water);
+            let alpha = (vec3<f32>(1.0) - color) * k;
+            refr_col *= exp(-alpha * dist);
         }
         // Reflection also goes to sky at this terminal level
         let refl_dir = reflect(dir, h.normal);
@@ -1116,12 +1173,14 @@ fn shade_transmissive(world_pos: vec3<f32>, n: vec3<f32>, color: vec3<f32>,
             refr_col = sky_color(refr_dir);
         }
 
-        // Dual Beer-Lambert: each material absorbed at its own rate.
-        let tint_strength = select(0.25, 0.65, is_water);
-        let absorb        = exp(-thr.medium_dist_glass / 2.5)
-                          * exp(-thr.medium_dist_water / 24.0);
-        let tint          = mix(vec3<f32>(1.0), color, tint_strength);
-        refr_col         *= absorb * tint;
+        // Per-channel Beer-Lambert. The voxel's RGB colour IS its transmittance
+        // per unit length — red glass (1,0,0) absorbs green/blue fully and
+        // passes red. Optical depth α = (1 - color) scaled by a density constant;
+        // glass is dense, water barely tints.
+        let k            = select(0.55, 0.06, is_water);
+        let dist         = select(thr.medium_dist_glass, thr.medium_dist_water, is_water);
+        let alpha        = (vec3<f32>(1.0) - color) * k;
+        refr_col        *= exp(-alpha * dist);
     }
 
     // ── Reflected ray ────────────────────────────────────────────────────────

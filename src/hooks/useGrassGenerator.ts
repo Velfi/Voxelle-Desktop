@@ -39,7 +39,6 @@ export function useGrassGenerator(ctx: GrassGeneratorContext): GrassGeneratorSta
   const grassPreviewSeedRef = useRef((Math.random() * 1e9) | 0);
 
   function placeGrassAtScreen(nx: number, ny: number, seed = grassPreviewSeedRef.current) {
-    void invoke("unlock_generator_preview_camera").catch(() => {});
     void invoke("generator_grass_at_screen", {
       args: {
         nx,
@@ -52,7 +51,11 @@ export function useGrassGenerator(ctx: GrassGeneratorContext): GrassGeneratorSta
         material: ctx.activeMaterialRef.current,
         mirrorAxes: mirrorAxesFromRefs(ctx.mirrorXRef, ctx.mirrorYRef, ctx.mirrorZRef),
       },
-    }).catch(() => {});
+    })
+      .catch(() => {})
+      .finally(() => {
+        void invoke("unlock_generator_preview_camera").catch(() => {});
+      });
     grassPreviewSeedRef.current = (Math.random() * 1e9) | 0;
   }
 

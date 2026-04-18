@@ -857,6 +857,43 @@ pub(crate) fn avatar_list_user(state: State<'_, Arc<ViewerState>>, app: AppHandl
     names
 }
 
+/// Render a one-shot still of the named avatar to a 256×256 RGBA image and return the bytes.
+/// The avatar mesh is resolved from embedded assets first, then the user-avatars byte cache.
+/// Returns `(width, height, rgba_bytes)`. An empty `avatar_name` returns an empty byte vec.
+#[tauri::command]
+pub(crate) async fn avatar_preview_snapshot(
+    state: State<'_, Arc<ViewerState>>,
+    avatar_name: String,
+) -> Result<(u32, u32, Vec<u8>), String> {
+    if avatar_name.is_empty() {
+        return Ok((0, 0, Vec::new()));
+    }
+
+    let raw: Vec<u8> = if let Some(b) = embedded_avatar_bytes(&avatar_name) {
+        b.to_vec()
+    } else if let Some(b) = state.local_avatar_data.lock().get(&avatar_name).cloned() {
+        b
+    } else {
+        return Ok((0, 0, Vec::new()));
+    };
+    let file = decode_payload(&raw).map_err(|e| format!("decode {avatar_name}: {e}"))?;
+    let (mesh, bounds) = greedy_mesh::build_greedy_mesh(&file.voxels, &file.objects);
+
+    let state = Arc::clone(&*state);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut v = state.gpu.viewer.lock();
+        let Some(viewer) = v.as_mut() else {
+            return Err::<(u32, u32, Vec<u8>), String>("viewer unavailable".into());
+        };
+        viewer.load_avatar_preview_mesh(&mesh, bounds);
+        viewer
+            .snapshot_avatar_preview()
+            .ok_or_else(|| "snapshot readback failed".to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Open (and create if needed) the user avatars folder in the OS file manager.
 /// Drop `.voxelle` files here to make them appear in the Avatar picker.
 #[tauri::command]

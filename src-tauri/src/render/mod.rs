@@ -101,7 +101,7 @@ mod text;
 pub use text::GpuPeerLabel;
 
 mod mascot_impl;
-pub use mascot_impl::{LogoOverlay, MascotEntry};
+pub use mascot_impl::{AvatarPreview, LogoOverlay, MascotEntry};
 
 use crate::camera::OrbitCamera;
 use crate::gpu_brick::{BrickCellWrite, GpuVoxelBrick};
@@ -541,6 +541,9 @@ pub struct WgpuViewer {
 
     // ── Logo overlay (start-screen logo, rendered as mascot-style overlay) ────
     pub(crate) logo_overlay: Option<LogoOverlay>,
+
+    // ── Avatar preview (Preferences modal rotating preview) ───────────────────
+    pub(crate) avatar_preview: Option<AvatarPreview>,
 
     // ── Mascot (start-screen floating model views) ────────────────────────────
     pub(crate) mascots: Vec<MascotEntry>,
@@ -1682,6 +1685,8 @@ impl WgpuViewer {
             gizmo_delta_label: None,
 
             logo_overlay: None,
+
+            avatar_preview: None,
 
             mascots: Vec::new(),
             mascot_pipeline,

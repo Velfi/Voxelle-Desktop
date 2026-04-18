@@ -1,4 +1,5 @@
 import { loadRecentJoinUrls } from "./joinRecent";
+import { useOverlayDismiss } from "./hooks/useOverlayDismiss";
 
 type Props = {
   open: boolean;
@@ -20,6 +21,9 @@ export function JoinSessionModal({
   collabActive,
   connecting = false,
 }: Props) {
+  const dismiss = useOverlayDismiss(() => {
+    if (!connecting) onClose();
+  });
   if (!open) return null;
 
   const recent = loadRecentJoinUrls();
@@ -31,7 +35,7 @@ export function JoinSessionModal({
       aria-modal="true"
       aria-labelledby="join-session-title"
       tabIndex={-1}
-      onClick={(e) => e.target === e.currentTarget && !connecting && onClose()}
+      {...dismiss}
       onKeyDown={(e) => e.key === "Escape" && !connecting && onClose()}
     >
       <div className="modal modal--join-session">

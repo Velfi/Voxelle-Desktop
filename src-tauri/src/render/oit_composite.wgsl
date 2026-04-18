@@ -25,9 +25,12 @@ fn fs_oit_composite(in: FullscreenOut) -> @location(0) vec4<f32> {
     let revealage = textureSample(t_revealage, samp, in.uv).r;
     var opaque = textureSample(t_opaque, samp, in.uv).rgb;
 
-    // Blend opaque metal SSR reflections.
+    // Add metal environment reflection (SSR hit + sky fallback, pre-weighted
+    // by Fresnel in the SSR pass). The scene shader intentionally omits the
+    // Fresnel-weighted env reflection for metals; this is the single place
+    // where that energy enters, so we add rather than alpha-mix-replace.
     let ssr = textureSample(t_ssr, samp, in.uv);
-    opaque = mix(opaque, ssr.rgb, ssr.a);
+    opaque = opaque + ssr.rgb;
 
     // No transparent fragments accumulated at this pixel.
     if (accum.a < 1e-4) {

@@ -191,6 +191,7 @@ commands.allow = [
   "avatar_open_user_folder",
   "set_local_avatar",
   "avatar_load_file",
+  "avatar_preview_snapshot",
   "speech_bubble_show",
   "speech_bubble_click",
   "speech_bubble_dismiss",

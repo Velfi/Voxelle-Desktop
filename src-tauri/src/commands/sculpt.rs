@@ -1050,6 +1050,15 @@ pub(crate) fn selection_extrude_preview(
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExtrudeRecomputeArgs {
+    color: u32,
+    material: String,
+    brush_radius: u32,
+    #[serde(default)]
+    brush_shape: voxel_edit::BrushShape,
+    #[serde(default = "default_brush_strength_sculpt")]
+    brush_strength: u32,
+    #[serde(default)]
+    brush_falloff: u32,
     extrude_profile: voxel_edit::ExtrudeProfile,
     extrude_end_cap: voxel_edit::ExtrudeEndCap,
     extrude_taper: bool,
@@ -1073,16 +1082,16 @@ pub(crate) fn extrude_recompute_preview(
         return Ok(());
     }
     let first = &replay[0];
-    let color = first.color;
+    let color = args.color;
 
     let union: ahash::AHashSet<greedy_mesh::VoxelCoord> = if let Some(spine) = &spine_opt {
         // Ray-based extrude: recompute footprint from stored spine with new settings.
         let footprint = voxel_edit::extrude_ray_footprint(
             spine,
-            first.brush_radius,
-            first.brush_shape,
-            first.brush_strength,
-            first.brush_falloff,
+            args.brush_radius,
+            args.brush_shape,
+            args.brush_strength,
+            args.brush_falloff,
             first.stroke_seed,
             args.extrude_profile,
             args.extrude_end_cap,
@@ -1137,13 +1146,13 @@ pub(crate) fn extrude_recompute_preview(
                 sx,
                 sy,
                 sample.sculpt_mode,
-                sample.brush_radius,
-                sample.brush_shape,
+                args.brush_radius,
+                args.brush_shape,
                 sample.spray_density,
                 line,
                 seg,
-                sample.brush_strength,
-                sample.brush_falloff,
+                args.brush_strength,
+                args.brush_falloff,
                 sample.stroke_seed,
                 sample.brush_clip_bottom_half,
                 args.extrude_profile,
@@ -1164,6 +1173,12 @@ pub(crate) fn extrude_recompute_preview(
     {
         let mut replay_mut = state.file.sculpt_stroke_replay.lock();
         for sample in replay_mut.iter_mut() {
+            sample.color = args.color;
+            sample.material = args.material.clone();
+            sample.brush_radius = args.brush_radius;
+            sample.brush_shape = args.brush_shape;
+            sample.brush_strength = args.brush_strength;
+            sample.brush_falloff = args.brush_falloff;
             sample.extrude_profile = args.extrude_profile;
             sample.extrude_end_cap = args.extrude_end_cap;
             sample.extrude_taper = args.extrude_taper;
